@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use futures::FutureExt;
+use risingwave_common::row::OwnedRow;
 use risingwave_expr::expr::build_from_prost;
 
 use crate::error::RwError;
@@ -27,24 +29,25 @@ impl ExprRewriter for ConstEvalRewriter {
         if self.error.is_some() {
             return expr;
         }
-        // Never attempt to fold a whole node that contains a UDF which cannot be evaluated
-        // in the frontend (e.g. an external arrow-flight UDF, or one whose runtime fails to
-        // build here). Instead, recurse so that independent constant sub-expressions (such as
-        // `1 / 0`) are still folded — and their errors still surface at planning time — while
-        // the non-evaluable UDF is simply left unchanged.
+        if !expr.is_const() {
+            return default_rewrite_expr(self, expr);
+        }
+        // Never fold a whole constant node that contains a UDF which cannot be evaluated in the
+        // frontend (e.g. an external arrow-flight UDF, or one whose runtime fails to build here).
+        // Instead, recurse so that independent constant sub-expressions (such as `1 / 0`) are
+        // still folded — and their errors still surface at planning time — while the
+        // non-evaluable UDF is simply left unchanged.
         if contains_non_frontend_evaluable_udf(&expr) {
             return default_rewrite_expr(self, expr);
         }
-        if let Some(result) = expr.try_fold_const() {
-            match result {
-                Ok(datum) => Literal::new(datum, expr.return_type()).into(),
-                Err(e) => {
-                    self.error = Some(e);
-                    expr
-                }
+        match expr.try_fold_const() {
+            Some(Ok(datum)) => Literal::new(datum, expr.return_type()).into(),
+            Some(Err(e)) => {
+                self.error = Some(e);
+                expr
             }
-        } else {
-            default_rewrite_expr(self, expr)
+            // Unreachable given `is_const()` above, but recurse to be safe.
+            None => default_rewrite_expr(self, expr),
         }
     }
 }
@@ -90,17 +93,31 @@ fn udf_is_frontend_evaluable(func_call: &UserDefinedFunction) -> bool {
         return false;
     }
 
-    // Probe whether the UDF runtime actually builds in this frontend process. Use NULL
-    // literal arguments of the declared types so we only test the UDF runtime build and do
-    // not recursively build nested (possibly external) UDF arguments.
+    // Probe whether the UDF runtime actually builds *and* evaluates synchronously in this
+    // frontend process. Use NULL literal arguments of the declared types so we only test the
+    // UDF runtime itself and do not recursively build nested (possibly external) UDF arguments.
+    //
+    // The eval readiness check is essential: `try_fold_const` evaluates via
+    // `eval_row(..).now_or_never().expect("constant expression should not be async")`, which
+    // would panic for a runtime whose evaluation is not immediately ready (e.g. one that awaits
+    // I/O). We poll the probe once and only treat the UDF as evaluable if the future is ready.
+    // A `Some(Err(..))` (the UDF erroring on NULL input) still counts as evaluable — that means
+    // the runtime ran synchronously; genuine evaluation errors on real arguments are handled by
+    // `try_fold_const` and propagated at planning time as before.
     let probe_args: Vec<ExprImpl> = catalog
         .arg_types
         .iter()
         .map(|t| Literal::new(None, t.clone()).into())
         .collect();
     let probe = UserDefinedFunction::new(catalog.clone(), probe_args);
-    match probe.try_to_expr_proto() {
-        Ok(node) => build_from_prost(&node).is_ok(),
-        Err(_) => false,
-    }
+    let Ok(node) = probe.try_to_expr_proto() else {
+        return false;
+    };
+    let Ok(backend_expr) = build_from_prost(&node) else {
+        return false;
+    };
+    backend_expr
+        .eval_row(&OwnedRow::empty())
+        .now_or_never()
+        .is_some()
 }
