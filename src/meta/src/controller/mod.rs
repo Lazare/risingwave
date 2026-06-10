@@ -28,9 +28,9 @@ use risingwave_meta_model_migration::{MigrationStatus, Migrator, MigratorTrait};
 use risingwave_pb::catalog::connection::PbInfo as PbConnectionInfo;
 use risingwave_pb::catalog::table::{CdcTableType as PbCdcTableType, PbEngine, PbTableType};
 use risingwave_pb::catalog::{
-    PbConnection, PbCreateType, PbDatabase, PbFunction, PbHandleConflictBehavior, PbIndex,
-    PbSchema, PbSecret, PbSink, PbSinkType, PbSource, PbStreamJobStatus, PbSubscription, PbTable,
-    PbView,
+    PbConnection, PbCreateType, PbDatabase, PbFunction, PbFunctionVolatility,
+    PbHandleConflictBehavior, PbIndex, PbSchema, PbSecret, PbSink, PbSinkType, PbSource,
+    PbStreamJobStatus, PbSubscription, PbTable, PbView,
 };
 use sea_orm::{ConnectOptions, DatabaseConnection, DbBackend, ModelTrait};
 
@@ -522,6 +522,13 @@ impl From<ObjectModel<function::Model>> for PbFunction {
                 .options
                 .as_ref()
                 .and_then(|o| o.0.get("batch").map(|v| v == "true")),
+            volatility: value
+                .0
+                .options
+                .as_ref()
+                .and_then(|o| o.0.get("volatility"))
+                .and_then(|v| PbFunctionVolatility::from_str_name(v))
+                .unwrap_or(PbFunctionVolatility::Volatile) as i32,
             created_at_epoch: Some(
                 Epoch::from_unix_millis(datetime_to_timestamp_millis(value.1.created_at) as _).0,
             ),

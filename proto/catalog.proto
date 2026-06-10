@@ -337,6 +337,16 @@ message IndexColumnProperties {
   bool nulls_first = 2;
 }
 
+// Volatility of a function, following PostgreSQL's `IMMUTABLE | STABLE | VOLATILE`.
+// Only `IMMUTABLE` is treated as deterministic (pure). `UNSPECIFIED` (the proto3
+// default for pre-existing functions) is treated the same as `VOLATILE`.
+enum FunctionVolatility {
+  FUNCTION_VOLATILITY_UNSPECIFIED = 0;
+  FUNCTION_VOLATILITY_VOLATILE = 1;
+  FUNCTION_VOLATILITY_STABLE = 2;
+  FUNCTION_VOLATILITY_IMMUTABLE = 3;
+}
+
 message Function {
   uint32 id = 1;
   uint32 schema_id = 2;
@@ -366,6 +376,11 @@ message Function {
   optional uint64 created_at_epoch = 22;
   // Cluster version (tracked by git commit) when created
   optional string created_at_cluster_version = 23;
+
+  // Determinism of the function (`IMMUTABLE | STABLE | VOLATILE`). Defaults to
+  // `VOLATILE` semantics when unset. An `IMMUTABLE` function is treated as a pure
+  // (deterministic) expression, which allows it in join conditions on retract streams.
+  FunctionVolatility volatility = 24;
 
   oneof kind {
     ScalarFunction scalar = 11;

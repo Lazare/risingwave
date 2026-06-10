@@ -15,6 +15,7 @@
 use std::collections::BTreeMap;
 
 use risingwave_pb::catalog::PbFunction;
+use risingwave_pb::catalog::PbFunctionVolatility;
 use risingwave_pb::catalog::function::Kind;
 use sea_orm::ActiveValue::Set;
 use sea_orm::entity::prelude::*;
@@ -103,6 +104,18 @@ impl From<PbFunction> for ActiveModel {
         }
         if let Some(b) = function.is_async {
             options.insert("async".to_string(), b.to_string());
+        }
+        // `UNSPECIFIED`/`VOLATILE` is the default and is not persisted to keep
+        // backward compatibility with functions created before this field existed.
+        let volatility = function.volatility();
+        if !matches!(
+            volatility,
+            PbFunctionVolatility::Unspecified | PbFunctionVolatility::Volatile
+        ) {
+            options.insert(
+                "volatility".to_string(),
+                volatility.as_str_name().to_string(),
+            );
         }
         Self {
             function_id: Set(function.id),

@@ -63,6 +63,10 @@ impl UserDefinedFunction {
             always_retry_on_network_error: udf.always_retry_on_network_error,
             is_batched: udf.is_batched,
             is_async: udf.is_async,
+            // Volatility is not carried in the expr proto (it is only consulted during
+            // frontend planning on the catalog built from `PbFunction`). Default to the
+            // conservative `Volatile` here, as this path is used for execution.
+            volatility: risingwave_pb::catalog::PbFunctionVolatility::Volatile,
             created_at_epoch: None,
             created_at_cluster_version: None,
         };

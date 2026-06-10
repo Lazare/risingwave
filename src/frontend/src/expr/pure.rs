@@ -44,6 +44,12 @@ impl ImpureAnalyzer {
 
 impl ExprVisitor for ImpureAnalyzer {
     fn visit_user_defined_function(&mut self, func_call: &super::UserDefinedFunction) {
+        // A function declared `IMMUTABLE` is deterministic, hence pure. We still inspect its
+        // arguments, since an impure argument (e.g. `random()`) makes the whole call impure.
+        if func_call.catalog.is_deterministic() {
+            func_call.args.iter().for_each(|expr| self.visit_expr(expr));
+            return;
+        }
         let name = &func_call.catalog.name;
         self.impure = Some(format!("user-defined function `{name}`").into());
     }

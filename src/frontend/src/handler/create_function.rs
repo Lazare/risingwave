@@ -17,11 +17,21 @@ use either::Either;
 use risingwave_common::catalog::FunctionId;
 use risingwave_common::types::StructType;
 use risingwave_expr::sig::{CreateOptions, UdfKind};
-use risingwave_pb::catalog::PbFunction;
 use risingwave_pb::catalog::function::{Kind, ScalarFunction, TableFunction};
+use risingwave_pb::catalog::{PbFunction, PbFunctionVolatility};
 
 use super::*;
 use crate::{Binder, bind_data_type};
+
+/// Map the parsed `IMMUTABLE | STABLE | VOLATILE` clause to the catalog volatility.
+/// An absent clause defaults to `VOLATILE` (the conservative, non-deterministic option).
+pub(crate) fn behavior_to_volatility(behavior: Option<&FunctionBehavior>) -> PbFunctionVolatility {
+    match behavior {
+        Some(FunctionBehavior::Immutable) => PbFunctionVolatility::Immutable,
+        Some(FunctionBehavior::Stable) => PbFunctionVolatility::Stable,
+        Some(FunctionBehavior::Volatile) | None => PbFunctionVolatility::Volatile,
+    }
+}
 
 pub async fn handle_create_function(
     handler_args: HandlerArgs,
@@ -187,6 +197,7 @@ pub async fn handle_create_function(
             .unwrap_or_default(),
         is_async: with_options.r#async,
         is_batched: with_options.batch,
+        volatility: behavior_to_volatility(params.behavior.as_ref()) as i32,
         created_at_epoch: None,
         created_at_cluster_version: None,
     };
