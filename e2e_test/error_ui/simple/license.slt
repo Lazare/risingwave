@@ -106,17 +106,19 @@ SELECT setting FROM pg_settings WHERE name = 'license_key';
 ----
 (empty)
 
-query error
-SELECT rw_test_feature('TestDummy');
-----
-db error: ERROR: Failed to run the query
-
-Caused by these errors (recent errors listed first):
-  1: Expr error
-  2: error while evaluating expression `test_feature('TestDummy')`
-  3: feature TestDummy is not available based on your license
-
-Hint: You may want to set a license key with `ALTER SYSTEM SET license_key = '...';` command. For more information, visit https://go.risingwave.com/premium.
+# DISABLED (full-premium build): default/empty license now unlocks all features,
+# so `rw_test_feature('TestDummy')` succeeds. Kept for reference.
+# query error
+# SELECT rw_test_feature('TestDummy');
+# ----
+# db error: ERROR: Failed to run the query
+#
+# Caused by these errors (recent errors listed first):
+#   1: Expr error
+#   2: error while evaluating expression `test_feature('TestDummy')`
+#   3: feature TestDummy is not available based on your license
+#
+# Hint: You may want to set a license key with `ALTER SYSTEM SET license_key = '...';` command. For more information, visit https://go.risingwave.com/premium.
 
 
 # Set the license key to default. In debug mode, this will set the license key to a paid tier key.
