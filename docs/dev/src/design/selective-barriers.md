@@ -99,8 +99,8 @@ Enabled with `[meta.developer] enable_selective_barrier = true` (off by default)
 
 - Only tables fed by DML can sleep (gated origins). Connector sources, `Now`, values and sinks
   receive every barrier, and so do their descendants.
-- A graph containing snapshot backfill, or a table that receives a sink (`sink into table`),
-  always receives full barriers.
+- A graph containing cross-database snapshot backfill, or a table that receives a sink
+  (`sink into table`), always receives full barriers.
 - While a job is being created, barriers are full.
 - `FLUSH` uses two barriers, so that data released by a fragment waking up at the first one is
   committed by the second.

@@ -520,7 +520,17 @@ impl<S: StateStore> SnapshotBackfillExecutor<S> {
             };
             match msg {
                 Message::Barrier(barrier) => {
-                    assert_eq!(barrier.epoch.prev, barrier_epoch.curr);
+                    if barrier.is_fragment_waking(self.actor_ctx.fragment_id) {
+                        // Selective barriers: the fragment slept during the previous epochs.
+                        assert!(
+                            progress_frozen && barrier.epoch.prev >= barrier_epoch.curr,
+                            "unexpected wake-up barrier {:?} after {:?}",
+                            barrier.epoch,
+                            barrier_epoch
+                        );
+                    } else if !barrier.is_with_stop_mutation() {
+                        assert_eq!(barrier.epoch.prev, barrier_epoch.curr);
+                    }
                     if !progress_frozen {
                         self.upstream_table
                             .vnodes()

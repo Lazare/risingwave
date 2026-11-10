@@ -115,6 +115,20 @@ class SqlError(Exception):
     pass
 
 
+LOG_DIR = ".risingwave/log"
+
+
+def check_no_panic():
+    """Fail if any process panicked. SIGKILL never prints `panicked`, so any occurrence is a bug,
+    even if the cluster recovered and the checks pass afterwards."""
+    for name in os.listdir(LOG_DIR):
+        path = os.path.join(LOG_DIR, name)
+        with open(path, errors="replace") as f:
+            for line in f:
+                if "panicked at" in line:
+                    sys.exit(f"panic found in {path}: {line.strip()}")
+
+
 class Cluster:
     def __init__(self, args):
         self.args = args
@@ -122,9 +136,8 @@ class Cluster:
     def psql(self, sql, timeout=120):
         cmd = ["psql", "-h", self.args.host, "-p", str(self.args.port), "-d", "dev", "-U", "root",
                "-X", "-A", "-t", "-q", "-v", "ON_ERROR_STOP=1",
-               # Snapshot backfill is not supported by selective barriers yet: a graph containing
-               # it always receives full barriers.
-               "-c", "set streaming_use_snapshot_backfill = false", "-c", sql]
+               "-c", f"set streaming_use_snapshot_backfill = {'true' if self.args.backfill == 'snapshot' else 'false'}",
+               "-c", sql]
         try:
             res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired as e:
@@ -145,6 +158,7 @@ class Cluster:
 
     def restart(self, attempts=3):
         out = ""
+        check_no_panic()
         for _ in range(attempts):
             if self.args.before_restart:
                 subprocess.run([self.args.before_restart], capture_output=True)
@@ -202,6 +216,8 @@ def main():
     p.add_argument("--crash-rate", default=0.3, type=float, help="probability of a crash in a round")
     p.add_argument("--seed", default=int(time.time()), type=int)
     p.add_argument("--no-setup", action="store_true", help="reuse an existing schema")
+    p.add_argument("--backfill", default="snapshot", choices=["snapshot", "arrangement"],
+                   help="backfill used to create the views (snapshot is the default in 3.x)")
     p.add_argument("--before-restart", default=None,
                    help="executable run before each restart, e.g. to save the logs")
     p.add_argument("--pause-before-flush", default=0.0, type=float,
@@ -321,6 +337,7 @@ def main():
         failures = run_checks(cluster)
         if failures:
             sys.exit(f"round {r}: consistency violated: {failures}")
+        check_no_panic()
         stats["rounds"] += 1
         if args.idle:
             time.sleep(rnd.uniform(0, args.idle))

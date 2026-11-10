@@ -475,6 +475,17 @@ impl DatabaseCheckpointControl {
 
         let mut notify_database_graph = command.is_some();
         let is_periodic_barrier = command.is_none();
+        let enable_selective_barrier = partial_graph_manager
+            .control_stream_manager()
+            .env
+            .opts
+            .enable_selective_barrier;
+        // A command barrier wakes every fragment. Compute which ones wake up before the command
+        // updates the graph: fragments dropped by the command still receive this barrier.
+        let command_selective = (enable_selective_barrier && !is_periodic_barrier).then(|| {
+            self.selective
+                .plan_command(self.database_info.fragment_infos())
+        });
         let mut throttle_config: Option<ThrottleConfigMap> = None;
 
         // Each variant handles its own pre-apply, edge building, mutation generation,
@@ -1775,12 +1786,7 @@ impl DatabaseCheckpointControl {
             InflightFragmentInfo::existing_table_ids(self.database_info.fragment_infos()).collect();
         let mut nodes_to_sync_table: HashSet<WorkerId> =
             InflightFragmentInfo::workers(self.database_info.fragment_infos()).collect();
-        let selective = if partial_graph_manager
-            .control_stream_manager()
-            .env
-            .opts
-            .enable_selective_barrier
-        {
+        let selective = if enable_selective_barrier {
             if is_periodic_barrier {
                 let may_sleep = barrier_info.kind.is_checkpoint()
                     && mutation.is_none()
@@ -1797,10 +1803,7 @@ impl DatabaseCheckpointControl {
                 }
                 Some(plan.info)
             } else {
-                Some(
-                    self.selective
-                        .plan_command(self.database_info.fragment_infos()),
-                )
+                command_selective
             }
         } else {
             None

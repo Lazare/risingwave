@@ -100,12 +100,8 @@ impl GraphView {
                 }
                 _ => {}
             });
-            // Snapshot backfill reads its upstream outside of the merge executor and is not
-            // supported yet.
-            if mask.contains_any([
-                FragmentTypeFlag::SnapshotBackfillStreamScan,
-                FragmentTypeFlag::CrossDbSnapshotBackfillStreamScan,
-            ]) {
+            // Cross-database snapshot backfill follows the barriers of another database.
+            if mask.contains(FragmentTypeFlag::CrossDbSnapshotBackfillStreamScan) {
                 unsupported = true;
             }
             let is_dml_table = mask.contains(FragmentTypeFlag::Dml)
@@ -505,7 +501,7 @@ mod tests {
         graph[4].nodes = StreamNode::default();
         graph[2]
             .fragment_type_mask
-            .add(FragmentTypeFlag::SnapshotBackfillStreamScan);
+            .add(FragmentTypeFlag::CrossDbSnapshotBackfillStreamScan);
         let fragments: Vec<_> = graph.iter().collect();
         let mut state = SelectiveBarrierState::default();
         for _ in 0..3 {

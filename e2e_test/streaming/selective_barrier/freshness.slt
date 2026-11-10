@@ -3,9 +3,6 @@
 # that data written to an idle table becomes visible without any FLUSH or DDL.
 
 statement ok
-set streaming_use_snapshot_backfill to false;
-
-statement ok
 create table sbf_x (k int primary key, v int);
 
 statement ok
