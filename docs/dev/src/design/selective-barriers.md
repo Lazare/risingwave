@@ -232,3 +232,43 @@ A gate only emits held data after a barrier that wakes its fragment if this barr
 the fragment. Otherwise (a full barrier planned before the ring reached meta, which can happen
 when several barriers are in flight), the next barrier may not be delivered to the fragment and
 would not close the epoch of the data: the gate keeps holding and rings again.
+
+## Benchmark: shared CDC workload
+
+`scripts/selective_barriers/cdc_benchmark.py`, on one machine (10 cores, debug build, local file
+system object store), feature on and off on the same cluster and data (same storage, restarted
+with the other profile), same workload and seed, 60 s warmup then 300 s measured.
+
+Graph: one shared Postgres CDC source, 100 CDC tables, one aggregate view per table, a chained
+view on every 4th view, 6 decoupled sinks: 232 jobs, 657 fragments, 1088 actors, parallelism 2.
+Workload, shaped like the production profile (in a 30-checkpoint window: ~6% of the jobs written
+at every checkpoint, ~4% at 30-95%, the rest rarely): 6% hot tables (an update every 0.5 s on
+average), 4% warm (every 2 s), 90% cold (every 120 s, i.e. about 0.75 wake-ups per second over
+the cold tables). Barrier interval 1 s, `checkpoint_frequency = 1`.
+
+| Metric (per 300 s window) | off | on | on (repeat) |
+|---|---|---|---|
+| jobs written per checkpoint | 24.6 | 22.2 | 22.0 |
+| state tables written per checkpoint | 42.2 | 37.5 | 37.1 |
+| SST objects uploaded per checkpoint | 1.0 | 1.0 | 1.0 |
+| object store ops, compute | 2659 | 2045 | 2899 |
+| object store ops, compactor | 2973 | 13599 (*) | 2993 |
+| barrier latency p50 / p99 (histogram buckets) | 0.25 s / 0.39 s | 0.10 s / 0.16 s | 0.10 s / 0.25 s |
+| CPU, compute node | 55% | 28% | 30% |
+| CPU, meta node | 10% | 14% | 11% |
+| CDC freshness of a cold table, p50 / max | 1.0 s / 2.0 s | 2.0 s / 2.9 s | 2.0 s / 3.0 s |
+
+(*) First run after the setup: compaction of the initial backfill. The repeat, run after the
+"off" run, shows no difference.
+
+Reading:
+
+- The cost of delivering barriers is halved: compute CPU -45%, barrier latency p50 -60%.
+- The data written barely changes (-10% of jobs and state tables written per checkpoint) and
+  object store operations do not change measurably: an idle job writes nothing to Hummock with or
+  without the feature. What writes at every checkpoint without data are mostly decoupled sinks
+  (kv log store), which still receive every barrier.
+- A cold table becomes visible about one barrier later (it rings, then is released).
+- To reduce the Blob Storage operations of the production deployment, the next lever is to let
+  decoupled sinks sleep when their upstream is idle (no log store write without data), and to
+  check what else writes at every checkpoint without data (`checkpoint_writers.sql`).
