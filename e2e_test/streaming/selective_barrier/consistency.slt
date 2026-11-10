@@ -3,6 +3,11 @@
 # fragments whose inputs did not change may skip barriers: every view must keep
 # matching its batch recomputation, whatever subset of tables is modified.
 
+# Snapshot backfill is not supported by selective barriers yet: a graph containing it always
+# receives full barriers, which would make this test pass without exercising sleeping fragments.
+statement ok
+set streaming_use_snapshot_backfill to false;
+
 statement ok
 create table sb_a (k int primary key, g int, v int);
 

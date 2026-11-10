@@ -34,6 +34,7 @@ use tokio::sync::oneshot;
 
 use crate::executor::prelude::*;
 use crate::executor::stream_reader::StreamReaderWithPause;
+use crate::task::{FragmentId, LocalBarrierManager};
 
 /// [`DmlExecutor`] accepts both stream data and batch data for data manipulation on a specific
 /// table. The two streams will be merged into one and then sent to downstream.
@@ -59,6 +60,10 @@ pub struct DmlExecutor<S: StateStore> {
     rate_limiter: Arc<MonitoredRateLimiter>,
 
     state_store: S,
+
+    /// Used to ring meta when input data is held while selective barriers are enabled.
+    /// `None` disables the gate, which is only valid when meta never sleeps this fragment.
+    pending_input_reporter: Option<LocalBarrierManager>,
 }
 
 /// If a transaction's data is less than `MAX_CHUNK_FOR_ATOMICITY` * `CHUNK_SIZE`, we can provide
@@ -101,7 +106,15 @@ impl<S: StateStore> DmlExecutor<S> {
             chunk_size,
             rate_limiter,
             state_store,
+            pending_input_reporter: None,
         }
+    }
+
+    /// Enable the input gate required by selective barriers, ringing meta through the given
+    /// barrier manager. See `docs/dev/src/design/selective-barriers.md`.
+    pub fn with_pending_input_reporter(mut self, barrier_manager: LocalBarrierManager) -> Self {
+        self.pending_input_reporter = Some(barrier_manager);
+        self
     }
 
     #[try_stream(ok = Message, error = StreamExecutorError)]
@@ -141,6 +154,7 @@ impl<S: StateStore> DmlExecutor<S> {
         if barrier.is_pause_on_startup() {
             stream.pause_stream();
         }
+        let barrier_is_selective = barrier.selective.is_some();
 
         yield Message::Barrier(barrier);
 
@@ -165,6 +179,12 @@ impl<S: StateStore> DmlExecutor<S> {
         // Polled concurrently with the input stream via next_input_driving_persistence.
         let mut persistence_futures = FuturesOrdered::new();
 
+        // Selective barriers: whether the last barrier was selective, in which case this fragment
+        // may sleep and must ring meta as soon as DML data arrives. Small transactions are kept in
+        // `batch_group` until the next barrier, so the output gate alone would not see them.
+        let mut selective_mode = barrier_is_selective;
+        let mut rang_in_epoch = false;
+
         while let Some(input_msg) =
             next_input_driving_persistence(&mut stream, &mut persistence_futures).await?
         {
@@ -172,10 +192,20 @@ impl<S: StateStore> DmlExecutor<S> {
                 Either::Left(msg) => {
                     // Stream messages.
                     if let Message::Barrier(barrier) = &msg {
+                        selective_mode = barrier.selective.is_some();
+                        rang_in_epoch = false;
                         // Flush any pending persistence notifiers for the epoch that is closing.
                         if !pending_persistence_notifiers.is_empty() {
                             let notifiers = mem::take(&mut pending_persistence_notifiers);
-                            let closing_epoch = barrier.epoch.prev;
+                            // With selective barriers, the data of a waking fragment was held
+                            // while it slept and is released after this barrier, in the new
+                            // epoch: wait for that epoch instead.
+                            let closing_epoch =
+                                if barrier.is_fragment_waking(self.actor_ctx.fragment_id) {
+                                    barrier.epoch.curr
+                                } else {
+                                    barrier.epoch.prev
+                                };
                             let store = self.state_store.clone();
                             let table_id = self.table_id;
                             persistence_futures.push_back(async move {
@@ -240,6 +270,13 @@ impl<S: StateStore> DmlExecutor<S> {
                     yield msg;
                 }
                 Either::Right(txn_msg) => {
+                    if selective_mode
+                        && !rang_in_epoch
+                        && let Some(reporter) = &self.pending_input_reporter
+                    {
+                        reporter.report_pending_input(self.actor_ctx.fragment_id);
+                        rang_in_epoch = true;
+                    }
                     // Batch data.
                     match txn_msg {
                         TxnMsg::Begin(txn_id) => {
@@ -356,7 +393,66 @@ impl<S: StateStore> DmlExecutor<S> {
 
 impl<S: StateStore> Execute for DmlExecutor<S> {
     fn execute(self: Box<Self>) -> BoxedMessageStream {
-        self.execute_inner().boxed()
+        match self.pending_input_reporter.clone() {
+            Some(reporter) => {
+                let fragment_id = self.actor_ctx.fragment_id;
+                gate_for_selective_barriers(fragment_id, reporter, self.execute_inner()).boxed()
+            }
+            None => self.execute_inner().boxed(),
+        }
+    }
+}
+
+/// Input gate required by selective barriers (see `docs/dev/src/design/selective-barriers.md`).
+///
+/// While the last received barrier is selective, data chunks are held instead of being emitted,
+/// and meta is told (once per epoch) that this fragment has pending input. Meta then delivers the
+/// next barrier to this fragment and to all its descendants. On that barrier:
+/// - if the fragment received the previous barrier, held chunks are emitted before the barrier,
+///   in the epoch being closed, exactly as without the gate;
+/// - if the fragment wakes up after sleeping, its open epoch is stale, so held chunks are emitted
+///   after the barrier, in the new epoch. Meta keeps the fragment woken for the next barrier,
+///   which closes that epoch.
+///
+/// Hence a sleeping fragment never emits data, which is what allows meta to skip it.
+#[try_stream(ok = Message, error = StreamExecutorError)]
+async fn gate_for_selective_barriers(
+    fragment_id: FragmentId,
+    reporter: LocalBarrierManager,
+    input: impl Stream<Item = MessageStreamItem>,
+) {
+    let mut gated = false;
+    let mut rang = false;
+    // Chunks and watermarks, held in order so that a watermark never overtakes data.
+    let mut held: Vec<Message> = vec![];
+
+    #[for_await]
+    for msg in input {
+        match msg? {
+            Message::Barrier(barrier) => {
+                let waking = barrier.is_fragment_waking(fragment_id);
+                if !waking {
+                    for msg in held.drain(..) {
+                        yield msg;
+                    }
+                }
+                let released_after = mem::take(&mut held);
+                gated = barrier.selective.is_some();
+                rang = false;
+                yield Message::Barrier(barrier);
+                for msg in released_after {
+                    yield msg;
+                }
+            }
+            msg if gated => {
+                held.push(msg);
+                if !rang {
+                    reporter.report_pending_input(fragment_id);
+                    rang = true;
+                }
+            }
+            msg => yield msg,
+        }
     }
 }
 

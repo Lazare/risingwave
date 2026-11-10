@@ -285,8 +285,14 @@ impl BarrierScheduler {
         let start = Instant::now();
 
         tracing::debug!("start barrier flush");
-        self.run_multiple_commands(database_id, vec![Command::Flush])
-            .await?;
+        // With selective barriers, data held by a fragment that wakes up at the flush barrier is
+        // released after it, in the next epoch, so a second barrier is needed to commit it.
+        let commands = if self.hummock_manager.env.opts.enable_selective_barrier {
+            vec![Command::Flush, Command::Flush]
+        } else {
+            vec![Command::Flush]
+        };
+        self.run_multiple_commands(database_id, commands).await?;
 
         let elapsed = Instant::now().duration_since(start);
         tracing::debug!("barrier flushed in {:?}", elapsed);

@@ -41,7 +41,7 @@ use risingwave_pb::source::{PbCdcTableSnapshotSplits, PbCdcTableSnapshotSplitsWi
 use risingwave_pb::stream_plan::barrier_mutation::Mutation;
 use risingwave_pb::stream_plan::stream_node::NodeBody;
 use risingwave_pb::stream_plan::{
-    AddMutation, Barrier, BarrierMutation, IcebergPkIndexCompactionContext,
+    AddMutation, Barrier, BarrierMutation, IcebergPkIndexCompactionContext, PbSelectiveBarrierInfo,
 };
 use risingwave_pb::stream_service::inject_barrier_request::build_actor_info::UpstreamActors;
 use risingwave_pb::stream_service::inject_barrier_request::{
@@ -1266,6 +1266,7 @@ impl ControlStreamManager {
         table_ids_to_sync: impl Iterator<Item = TableId>,
         nodes_to_sync_table: impl Iterator<Item = WorkerId>,
         mut new_actors: Option<StreamJobActorsToCreate>,
+        selective: Option<PbSelectiveBarrierInfo>,
     ) -> MetaResult<NodeToCollect> {
         fail_point!("inject_barrier_err", |_| risingwave_common::bail!(
             "inject_barrier_err"
@@ -1282,7 +1283,10 @@ impl ControlStreamManager {
 
         node_actors.iter()
             .try_for_each(|(worker_id, actor_ids_to_collect)| {
-                assert!(!actor_ids_to_collect.is_empty(), "empty actor_ids_to_collect on worker {worker_id} in node_actors {node_actors:?}");
+                // A selective barrier may wake no actor on a worker. It is still sent to keep the
+                // epoch chain of the worker contiguous, so that it abandons the epochs of tables
+                // that fall asleep.
+                assert!(selective.is_some() || !actor_ids_to_collect.is_empty(), "empty actor_ids_to_collect on worker {worker_id} in node_actors {node_actors:?}");
                 let table_ids_to_sync = if nodes_to_sync_table.contains(worker_id) {
                     table_ids_to_sync.clone()
                 } else {
@@ -1310,7 +1314,7 @@ impl ControlStreamManager {
                             .to_protobuf(),
                         kind: barrier_info.kind.to_protobuf() as i32,
                         iceberg_pk_index_compaction,
-                        selective: None,
+                        selective: selective.clone(),
                     };
 
                     node.handle

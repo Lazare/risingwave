@@ -121,7 +121,10 @@ class Cluster:
 
     def psql(self, sql, timeout=120):
         cmd = ["psql", "-h", self.args.host, "-p", str(self.args.port), "-d", "dev", "-U", "root",
-               "-X", "-A", "-t", "-q", "-v", "ON_ERROR_STOP=1", "-c", sql]
+               "-X", "-A", "-t", "-q", "-v", "ON_ERROR_STOP=1",
+               # Snapshot backfill is not supported by selective barriers yet: a graph containing
+               # it always receives full barriers.
+               "-c", "set streaming_use_snapshot_backfill = false", "-c", sql]
         try:
             res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired as e:
@@ -143,6 +146,8 @@ class Cluster:
     def restart(self, attempts=3):
         out = ""
         for _ in range(attempts):
+            if self.args.before_restart:
+                subprocess.run([self.args.before_restart], capture_output=True)
             # Make sure nothing from the previous run is left, including the tmux
             # server used by risedev, which may refuse a new session otherwise.
             subprocess.run(["./risedev", "k"], capture_output=True, text=True)
@@ -161,6 +166,9 @@ class Cluster:
         while time.time() < deadline:
             try:
                 self.psql("select count(*) from sb_abc_g", timeout=30)
+                # DML needs the vnode mappings, which the frontend may receive later than the
+                # catalog after a restart.
+                self.psql("delete from sb_a where k = -1", timeout=30)
                 return
             except SqlError as e:
                 last = e
@@ -194,6 +202,13 @@ def main():
     p.add_argument("--crash-rate", default=0.3, type=float, help="probability of a crash in a round")
     p.add_argument("--seed", default=int(time.time()), type=int)
     p.add_argument("--no-setup", action="store_true", help="reuse an existing schema")
+    p.add_argument("--before-restart", default=None,
+                   help="executable run before each restart, e.g. to save the logs")
+    p.add_argument("--pause-before-flush", default=0.0, type=float,
+                   help="max seconds to wait between the DML statements and FLUSH, so that "
+                        "periodic barriers deliver the data (with selective barriers, through rings)")
+    p.add_argument("--idle", default=0.0, type=float,
+                   help="max seconds without any change between rounds, so that fragments sleep")
     args = p.parse_args()
 
     rnd = random.Random(args.seed)
@@ -260,9 +275,15 @@ def main():
         try:
             for s in statements:
                 cluster.psql(s, timeout=60)
+                if args.pause_before_flush:
+                    time.sleep(rnd.uniform(0, args.pause_before_flush / max(len(statements), 1)))
+            if args.pause_before_flush:
+                time.sleep(rnd.uniform(0, args.pause_before_flush))
             cluster.psql("flush", timeout=60)
-        except SqlError:
+        except SqlError as e:
             ok = False
+            if not crash:
+                print(f"round {r}: statement failed without crash: {e}", flush=True)
         if killer:
             killer.join()
             time.sleep(0.5)
@@ -301,6 +322,13 @@ def main():
         if failures:
             sys.exit(f"round {r}: consistency violated: {failures}")
         stats["rounds"] += 1
+        if args.idle:
+            time.sleep(rnd.uniform(0, args.idle))
+            # Read while fragments may be asleep (no FLUSH): sleeping tables are published at the
+            # latest epoch without data, and every view must still be consistent.
+            failures = run_checks(cluster)
+            if failures:
+                sys.exit(f"round {r}: consistency violated while idle: {failures}")
         print(f"round {r:3}: tables={','.join(tables):14} statements={len(statements):3} "
               f"confirmed={ok} crash={target or '-'} checks=ok", flush=True)
 

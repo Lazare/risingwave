@@ -263,6 +263,10 @@ pub mod default {
             true
         }
 
+        pub fn enable_selective_barrier() -> bool {
+            false
+        }
+
         pub fn enable_check_task_level_overlap() -> bool {
             false
         }

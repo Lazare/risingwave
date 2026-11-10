@@ -93,13 +93,29 @@ and DML statements are only acknowledged as durable after `FLUSH` (a barrier com
 | Epoch checks | accept `prev > last` on wake-up only | `wrapper/epoch_check.rs`, `common/table/state_table.rs` |
 | Origins | gate + ring for DML, `Now`, sources, shared CDC source (per output) | `executor/dml.rs`, `now.rs`, `source/*` |
 
+## Current limitations
+
+Enabled with `[meta.developer] enable_selective_barrier = true` (off by default).
+
+- Only tables fed by DML can sleep (gated origins). Connector sources, `Now`, values and sinks
+  receive every barrier, and so do their descendants.
+- A graph containing snapshot backfill, or a table that receives a sink (`sink into table`),
+  always receives full barriers.
+- While a job is being created, barriers are full.
+- `FLUSH` uses two barriers, so that data released by a fragment waking up at the first one is
+  committed by the second.
+- A gated DML executor keeps the data of an epoch in memory until the next barrier; a very large
+  transaction on a sleeping table is held entirely until meta wakes the table up.
+- Every 30 barriers, a barrier is delivered to every fragment, so that a lost ring delays data
+  by at most 30 barriers.
+
 ## Steps
 
 1. Baseline: consistency SLT and crash/restart chaos test (done).
 2. Compute and storage protocol, inactive unless a barrier carries `selective` (done):
    `Barrier.selective`, merge exemption, epoch checks relaxed only for waking fragments
    and only without writes, uploader `abandon_epoch`, sync set of selective checkpoints.
-3. Meta scheduler and DML origins: ring channel (compute to meta), gated
+3. Meta scheduler and DML origins (done): ring channel (compute to meta), gated
    `DmlExecutor`, computation of `W_t`, injection to woken actors only, virtual commit,
    meta config flag off by default. `Now` and connector sources stay always awake.
 4. `Now` at its rounding granularity, then connector sources, then the shared CDC

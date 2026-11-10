@@ -474,6 +474,7 @@ impl DatabaseCheckpointControl {
         }
 
         let mut notify_database_graph = command.is_some();
+        let is_periodic_barrier = command.is_none();
         let mut throttle_config: Option<ThrottleConfigMap> = None;
 
         // Each variant handles its own pre-apply, edge building, mutation generation,
@@ -1764,20 +1765,62 @@ impl DatabaseCheckpointControl {
         } else {
             None
         };
+
+        // Selective barriers (see `docs/dev/src/design/selective-barriers.md`): a periodic
+        // barrier may be delivered only to the fragments whose inputs may have changed. Once the
+        // mode is on, every barrier carries selective information so that fragments that slept
+        // know that they wake up. Tables keep being committed all together (`table_ids_to_commit`
+        // is unchanged), which publishes sleeping tables at the new epoch without data.
+        let mut table_ids_to_sync: HashSet<TableId> =
+            InflightFragmentInfo::existing_table_ids(self.database_info.fragment_infos()).collect();
+        let mut nodes_to_sync_table: HashSet<WorkerId> =
+            InflightFragmentInfo::workers(self.database_info.fragment_infos()).collect();
+        let selective = if partial_graph_manager
+            .control_stream_manager()
+            .env
+            .opts
+            .enable_selective_barrier
+        {
+            if is_periodic_barrier {
+                let may_sleep = barrier_info.kind.is_checkpoint()
+                    && mutation.is_none()
+                    && actors_to_create.is_none()
+                    && !self.state.is_paused()
+                    && self.independent_checkpoint_job_controls.is_empty()
+                    && self.database_info.all_jobs_created();
+                let fragments: Vec<_> = self.database_info.fragment_infos().collect();
+                let plan = self.selective.plan(&fragments, may_sleep);
+                if !plan.full {
+                    node_actors = plan.node_actors;
+                    table_ids_to_sync = plan.table_ids_to_sync;
+                    nodes_to_sync_table = node_actors.keys().copied().collect();
+                }
+                Some(plan.info)
+            } else {
+                Some(
+                    self.selective
+                        .plan_command(self.database_info.fragment_infos()),
+                )
+            }
+        } else {
+            None
+        };
+
         partial_graph_manager.inject_barrier(
             to_partial_graph_id(self.database_id, None),
             mutation,
             None,
             &node_actors,
-            InflightFragmentInfo::existing_table_ids(self.database_info.fragment_infos()),
-            InflightFragmentInfo::workers(self.database_info.fragment_infos()),
+            table_ids_to_sync.into_iter(),
+            nodes_to_sync_table.into_iter(),
             actors_to_create,
             PartialGraphBarrierInfo::new(
                 post_collect_command,
                 barrier_info,
                 database_notifier,
                 table_ids_to_commit,
-            ),
+            )
+            .with_selective(selective),
         )?;
 
         // Publish the collection receivers only after all parts of a scheduled command have been

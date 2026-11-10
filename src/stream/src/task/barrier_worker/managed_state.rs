@@ -591,6 +591,11 @@ pub(super) enum ManagedBarrierStateEvent {
         upstream_partial_graph_id: PartialGraphId,
         tx: permit::Sender,
     },
+    /// Selective barriers: a fragment holds input data and waits for a barrier.
+    PendingInput {
+        partial_graph_id: PartialGraphId,
+        fragment_id: FragmentId,
+    },
 }
 
 impl ManagedBarrierState {
@@ -1004,6 +1009,12 @@ impl PartialGraphState {
                     self.report_iceberg_pk_index_sink_metadata(
                         epoch, sink_id, actor_id, role, metadata,
                     );
+                }
+                LocalBarrierEvent::ReportPendingInput { fragment_id } => {
+                    return Poll::Ready(ManagedBarrierStateEvent::PendingInput {
+                        partial_graph_id: self.partial_graph_id,
+                        fragment_id,
+                    });
                 }
             }
         }
@@ -1470,7 +1481,16 @@ impl PartialGraphManagedBarrierState {
                 None
             }
             BarrierKind::Checkpoint => {
-                let curr_table_ids = barrier.selective.is_some().then(|| table_ids.clone());
+                // Only a periodic barrier that leaves fragments asleep makes tables fall asleep.
+                // A barrier with a mutation (e.g. dropping jobs) is delivered to every fragment,
+                // and the tables it removes have sealed the previous epoch and must be synced.
+                let curr_table_ids = barrier
+                    .selective
+                    .as_ref()
+                    .filter(|info| {
+                        !info.sleeping_fragments.is_empty() && barrier.mutation.is_none()
+                    })
+                    .map(|_| table_ids.clone());
                 Some(
                     if let Some((prev_epoch, prev_table_ids)) = self
                         .prev_barrier_table_ids

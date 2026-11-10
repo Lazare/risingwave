@@ -45,6 +45,7 @@ use crate::barrier::checkpoint::recovery::{
     DatabaseRecoveringState, DatabaseStatusAction, EnterInitializing, EnterRunning,
     RecoveringStateAction,
 };
+use crate::barrier::checkpoint::selective::SelectiveBarrierState;
 use crate::barrier::checkpoint::state::{ApplyCommandInfo, BarrierWorkerState};
 use crate::barrier::complete_task::{BarrierCompleteOutput, CompleteBarrierTask};
 use crate::barrier::info::{InflightDatabaseInfo, SharedActorInfos};
@@ -583,6 +584,23 @@ impl CheckpointControl {
         }
     }
 
+    /// Selective barriers: fragments of a database hold input data and wait for a barrier.
+    pub(crate) fn on_pending_input(
+        &mut self,
+        partial_graph_id: PartialGraphId,
+        fragment_ids: Vec<FragmentId>,
+    ) {
+        let (database_id, independent_job_id) = from_partial_graph_id(partial_graph_id);
+        if independent_job_id.is_some() {
+            return;
+        }
+        if let Some(DatabaseCheckpointControlStatus::Running(database)) =
+            self.databases.get_mut(&database_id)
+        {
+            database.selective.on_ring(fragment_ids);
+        }
+    }
+
     pub(crate) fn on_partial_graph_initialized(
         &mut self,
         partial_graph_id: PartialGraphId,
@@ -758,6 +776,10 @@ pub(in crate::barrier) struct DatabaseCheckpointControl {
 
     pub(super) database_info: InflightDatabaseInfo,
     pub independent_checkpoint_job_controls: HashMap<JobId, IndependentCheckpointJobControl>,
+
+    /// Selective barrier scheduler state. Reset on recovery, since a new
+    /// `DatabaseCheckpointControl` is created.
+    pub(super) selective: SelectiveBarrierState,
 }
 
 impl DatabaseCheckpointControl {
@@ -772,6 +794,7 @@ impl DatabaseCheckpointControl {
             last_committed_barrier_time: None,
             database_info: InflightDatabaseInfo::empty(database_id, shared_actor_infos),
             independent_checkpoint_job_controls: Default::default(),
+            selective: Default::default(),
         }
     }
 
@@ -792,6 +815,7 @@ impl DatabaseCheckpointControl {
             last_committed_barrier_time: None,
             database_info,
             independent_checkpoint_job_controls,
+            selective: Default::default(),
         }
     }
 

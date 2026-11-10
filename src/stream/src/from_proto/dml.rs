@@ -48,7 +48,8 @@ impl ExecutorBuilder for DmlExecutorBuilder {
             params.config.developer.chunk_size,
             node.rate_limit.into(),
             store,
-        );
+        )
+        .with_pending_input_reporter(params.local_barrier_manager.clone());
         Ok((params.info, exec).into())
     }
 }
