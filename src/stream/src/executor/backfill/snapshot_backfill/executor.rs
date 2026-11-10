@@ -469,10 +469,14 @@ impl<S: StateStore> SnapshotBackfillExecutor<S> {
                     .latest_progress()
                     .for_each(|(vnode, progress)| {
                         let progress = progress.expect("should not be empty");
-                        assert_eq!(
-                            progress.epoch, first_upstream_barrier.epoch.prev,
-                            "vnode: {:?}",
-                            vnode
+                        // The progress is no longer persisted on every barrier once the job runs
+                        // in the main graph (see `progress_frozen` below), so it may lag behind.
+                        assert!(
+                            progress.epoch <= first_upstream_barrier.epoch.prev,
+                            "vnode: {:?}, progress epoch: {}, upstream prev epoch: {}",
+                            vnode,
+                            progress.epoch,
+                            first_upstream_barrier.epoch.prev
                         );
                         assert_eq!(
                             progress.progress,
@@ -500,6 +504,13 @@ impl<S: StateStore> SnapshotBackfillExecutor<S> {
             &upstream.info.stream_key,
             current_stream_key_indices,
         );
+        // When the executor starts in the main graph (the snapshot backfill was finished and merged
+        // before), the progress only serves as a sanity check on recovery. Rewriting one row per
+        // vnode on every barrier would then produce a constant write amplification even when no
+        // data flows, so the progress is frozen at its last persisted value.
+        // Note that a newly created job also takes this path once it is merged into the main
+        // graph, because its actors are rebuilt at that point.
+        let progress_frozen = should_snapshot_backfill.is_none();
         let mut upstream = upstream.into_executor(self.barrier_rx).execute();
         let mut epoch_row_count = 0;
         // Phase 3: consume upstream
@@ -510,14 +521,20 @@ impl<S: StateStore> SnapshotBackfillExecutor<S> {
             match msg {
                 Message::Barrier(barrier) => {
                     assert_eq!(barrier.epoch.prev, barrier_epoch.curr);
-                    self.upstream_table
-                        .vnodes()
-                        .iter_vnodes()
-                        .for_each(|vnode| {
-                            // Note: the `epoch_row_count` is the accumulated row count of all vnodes of the current
-                            // executor.
-                            backfill_state.finish_epoch(vnode, barrier.epoch.prev, epoch_row_count);
-                        });
+                    if !progress_frozen {
+                        self.upstream_table
+                            .vnodes()
+                            .iter_vnodes()
+                            .for_each(|vnode| {
+                                // Note: the `epoch_row_count` is the accumulated row count of all vnodes of the current
+                                // executor.
+                                backfill_state.finish_epoch(
+                                    vnode,
+                                    barrier.epoch.prev,
+                                    epoch_row_count,
+                                );
+                            });
+                    }
                     epoch_row_count = 0;
                     let update_vnode_bitmap = barrier.as_update_vnode_bitmap(self.actor_ctx.id);
                     barrier_epoch = barrier.epoch;
@@ -536,11 +553,19 @@ impl<S: StateStore> SnapshotBackfillExecutor<S> {
                             .latest_progress()
                             .for_each(|(vnode, progress)| {
                                 let progress = progress.expect("should not be empty");
-                                assert_eq!(
-                                    progress.epoch, barrier_epoch.prev,
-                                    "vnode {:?} has unexpected progress epoch",
-                                    vnode
-                                );
+                                if progress_frozen {
+                                    assert!(
+                                        progress.epoch <= barrier_epoch.prev,
+                                        "vnode {:?} has unexpected progress epoch",
+                                        vnode
+                                    );
+                                } else {
+                                    assert_eq!(
+                                        progress.epoch, barrier_epoch.prev,
+                                        "vnode {:?} has unexpected progress epoch",
+                                        vnode
+                                    );
+                                }
                                 assert_eq!(
                                     progress.progress,
                                     EpochBackfillProgress::Consumed,
