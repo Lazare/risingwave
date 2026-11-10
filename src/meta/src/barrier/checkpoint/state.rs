@@ -1795,7 +1795,10 @@ impl DatabaseCheckpointControl {
                     && self.independent_checkpoint_job_controls.is_empty()
                     && self.database_info.all_jobs_created();
                 let fragments: Vec<_> = self.database_info.fragment_infos().collect();
-                let plan = self.selective.plan(&fragments, may_sleep);
+                let barrier_time_ms =
+                    risingwave_common::util::epoch::Epoch(barrier_info.curr_epoch())
+                        .physical_time();
+                let plan = self.selective.plan(&fragments, may_sleep, barrier_time_ms);
                 if !plan.full {
                     node_actors = plan.node_actors;
                     table_ids_to_sync = plan.table_ids_to_sync;

@@ -419,6 +419,8 @@ pub struct SelectiveBarrierInfo {
     pub sleeping_fragments: HashSet<FragmentId>,
     /// Fragments that receive the barrier but did not receive the previous one.
     pub waking_fragments: HashSet<FragmentId>,
+    /// Fragments released by the barrier: they and their descendants receive the next barrier.
+    pub released_fragments: HashSet<FragmentId>,
 }
 
 impl SelectiveBarrierInfo {
@@ -434,6 +436,11 @@ impl SelectiveBarrierInfo {
                 .iter()
                 .map(|id| (*id).into())
                 .collect(),
+            released_fragments: pb
+                .released_fragment_ids
+                .iter()
+                .map(|id| (*id).into())
+                .collect(),
         }
     }
 
@@ -446,6 +453,11 @@ impl SelectiveBarrierInfo {
                 .collect(),
             waking_fragment_ids: self
                 .waking_fragments
+                .iter()
+                .map(|id| id.as_raw_id())
+                .collect(),
+            released_fragment_ids: self
+                .released_fragments
                 .iter()
                 .map(|id| id.as_raw_id())
                 .collect(),
@@ -1290,6 +1302,14 @@ impl<M> BarrierInner<M> {
         self.selective
             .as_ref()
             .is_some_and(|info| info.sleeping_fragments.contains(&fragment_id))
+    }
+
+    /// Whether the given fragment is released by this selective barrier, i.e. it and its
+    /// descendants also receive the next barrier. Always true when the barrier is not selective.
+    pub fn is_fragment_released(&self, fragment_id: FragmentId) -> bool {
+        self.selective
+            .as_ref()
+            .is_none_or(|info| info.released_fragments.contains(&fragment_id))
     }
 
     /// Whether the given fragment receives this barrier after having slept during the previous

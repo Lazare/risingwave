@@ -123,3 +123,37 @@ Enabled with `[meta.developer] enable_selective_barrier = true` (off by default)
 
 Each step must keep `e2e_test/streaming/selective_barrier/consistency.slt` and
 `scripts/selective_barriers/chaos_test.py` green, with the feature both on and off.
+
+## `now()`
+
+A `Now` fragment receives every barrier but only advances (state, output, watermark) on a barrier
+that *releases* it (`Barrier.selective.released_fragment_ids`). Meta reads the rounding of the
+`Project` that follows `Now` in the same fragment: for `date_trunc('<unit>', now())` it releases
+`Now` only when the rounded time changes (period capped at 15 minutes, since time zone offsets
+are multiples of 15 minutes); otherwise it releases it at every barrier. Between releases, the
+descendants of `Now` sleep. The output cannot be held in the dispatcher instead: `Now` commits
+its last timestamp at every barrier, and downstream dynamic filters reject the deletion of a value
+they never received after a recovery.
+
+Dispatchers do not send a barrier to a sleeping downstream fragment. Only released fragments emit
+data towards fragments that may sleep, so no data is ever sent to a sleeping fragment.
+
+## Shared CDC source: design options
+
+Constraint: everything a source emitted before barrier `t` is covered by the offset it commits at
+`t`, so it must be sealed by every consumer at `t`. Data held for a sleeping table across a
+barrier is lost on crash, and pausing the source until the table wakes up stalls every table.
+Today the shared source broadcasts every chunk to all table fragments, each filtering its own
+table (`CdcFilter`), so without routing every event would wake every table.
+
+| Design | Mechanism | Wake-up latency | Extra IO per checkpoint | Crash | Size |
+|---|---|---|---|---|---|
+| D1 | Route per table in the source; hold rows of sleeping tables, persist them in a source state table in the same epoch as the offset; replay after recovery | +1 barrier, no stall | no extra object | exactly-once | ~1.5-2.5k lines |
+| D2 | Hold in memory, commit the offset behind held rows | +1 barrier | none | duplicates after recovery | ~1-1.5k |
+| D3 | Durable per-table log between the source and each table, consumed lazily | +1 to +2 barriers | all rows stored, reads on wake | exactly-once | ~3-4k |
+| D4 | Keep the broadcast; `CdcFilter` stays awake and gates its table like DML, persisting held rows | +1 barrier | no extra object | exactly-once | ~0.8-1.2k |
+| D5 | Separate partial graph or database for CDC | - | - | breaks the common epoch | rejected |
+
+Plan: D4 as a prototype (validates sleep, wake-up and recovery of the CDC chain without touching
+the dispatcher; 272 stateless `CdcFilter` actors stay awake), then D1 (removes the broadcast).
+Testing requires a CDC source (e.g. Postgres in Docker).

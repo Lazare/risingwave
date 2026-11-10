@@ -262,6 +262,10 @@ message SelectiveBarrierInfo {
   // Fragments that receive this barrier but did not receive the previous one. Their actors
   // and state tables observe an epoch jump: `prev` is newer than the last sealed epoch.
   repeated uint32 waking_fragment_ids = 2;
+  // Fragments released by this barrier: they and their descendants are guaranteed to receive the
+  // next barrier too, so they may emit data during the epoch opened by this barrier. An origin
+  // that only emits on barriers (`Now`) advances only when it is released.
+  repeated uint32 released_fragment_ids = 3;
 }
 
 message Watermark {

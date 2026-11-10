@@ -155,6 +155,7 @@ mod tests {
         barrier.selective = Some(Arc::new(crate::executor::SelectiveBarrierInfo {
             sleeping_fragments: Default::default(),
             waking_fragments: waking.into_iter().map(Into::into).collect(),
+            released_fragments: Default::default(),
         }));
         barrier
     }

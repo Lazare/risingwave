@@ -213,13 +213,20 @@ impl DispatchExecutorInner {
                     .for_each_concurrent(limit, |dispatcher| async {
                         let metrics = &dispatcher.actor_output_buffer_blocking_duration_ns;
                         let dispatcher_output = &mut dispatcher.dispatcher;
-                        let fut = dispatcher_output.dispatch_barriers(
-                            barrier_batch
-                                .iter()
-                                .cloned()
-                                .map(|b| b.into_dispatcher())
-                                .collect(),
-                        );
+                        // Selective barriers: a sleeping downstream fragment does not receive the
+                        // barrier. It receives no data either, because only released fragments
+                        // emit data towards fragments that may sleep.
+                        let downstream_fragment_id = dispatcher_output.dispatcher_id();
+                        let barriers: DispatcherBarriers = barrier_batch
+                            .iter()
+                            .filter(|b| !b.is_fragment_sleeping(downstream_fragment_id))
+                            .cloned()
+                            .map(|b| b.into_dispatcher())
+                            .collect();
+                        if barriers.is_empty() {
+                            return;
+                        }
+                        let fut = dispatcher_output.dispatch_barriers(barriers);
                         await_with_metrics(fut, metrics).await;
                     })
                     .await;
