@@ -90,6 +90,13 @@ pub enum HummockEvent {
         table_ids: HashSet<TableId>,
     },
 
+    /// Abandon an epoch started by `StartEpoch` for tables that will not seal it, because their
+    /// fragment sleeps under selective barrier injection. The epoch must be empty for them.
+    AbandonEpoch {
+        epoch: HummockEpoch,
+        table_ids: HashSet<TableId>,
+    },
+
     InitEpoch {
         instance_id: LocalInstanceId,
         init_epoch: HummockEpoch,
@@ -161,6 +168,10 @@ impl HummockEvent {
                 format!("StartEpoch {} {:?}", epoch, table_ids)
             }
 
+            HummockEvent::AbandonEpoch { epoch, table_ids } => {
+                format!("AbandonEpoch {} {:?}", epoch, table_ids)
+            }
+
             HummockEvent::InitEpoch {
                 instance_id,
                 init_epoch,
@@ -223,6 +234,7 @@ impl HummockEvent {
             HummockEvent::Shutdown => "Shutdown",
             HummockEvent::ImmToUploader { .. } => "ImmToUploader",
             HummockEvent::StartEpoch { .. } => "StartEpoch",
+            HummockEvent::AbandonEpoch { .. } => "AbandonEpoch",
             HummockEvent::InitEpoch { .. } => "InitEpoch",
             HummockEvent::LocalSealEpoch { .. } => "LocalSealEpoch",
             #[cfg(any(test, feature = "test"))]

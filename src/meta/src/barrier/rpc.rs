@@ -1310,6 +1310,7 @@ impl ControlStreamManager {
                             .to_protobuf(),
                         kind: barrier_info.kind.to_protobuf() as i32,
                         iceberg_pk_index_compaction,
+                        selective: None,
                     };
 
                     node.handle

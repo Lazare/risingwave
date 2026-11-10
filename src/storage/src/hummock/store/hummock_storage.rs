@@ -622,6 +622,15 @@ impl HummockStorage {
             .send(HummockEvent::StartEpoch { epoch, table_ids });
     }
 
+    /// Abandon an epoch previously started with `start_epoch` for tables that will not seal it,
+    /// because their fragment sleeps under selective barrier injection. Nothing must have been
+    /// written to these tables in this epoch.
+    pub fn abandon_epoch(&self, epoch: HummockEpoch, table_ids: HashSet<TableId>) {
+        let _ = self
+            .hummock_event_sender
+            .send(HummockEvent::AbandonEpoch { epoch, table_ids });
+    }
+
     pub fn sstable_store(&self) -> SstableStoreRef {
         self.context.sstable_store.clone()
     }

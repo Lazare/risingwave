@@ -55,7 +55,7 @@ impl WrapperExecutor {
         // Schema check
         let stream = schema_check::schema_check(info.clone(), stream);
         // Epoch check
-        let stream = epoch_check::epoch_check(info.clone(), stream);
+        let stream = epoch_check::epoch_check(info.clone(), actor_ctx.fragment_id, stream);
 
         // Epoch provide
         let stream = epoch_provide::epoch_provide(stream);

@@ -19,11 +19,19 @@ use futures_async_stream::try_stream;
 
 use crate::executor::error::StreamExecutorError;
 use crate::executor::{ExecutorInfo, Message, MessageStream};
+use crate::task::FragmentId;
 
 /// Streams wrapped by `epoch_check` will check whether the first message received is a barrier, and
 /// the epoch in the barriers are monotonically increasing.
+///
+/// Barriers are contiguous (`prev` equals the last `curr`), except for a barrier that wakes up the
+/// fragment after it slept during selective barrier injection, whose `prev` may be newer.
 #[try_stream(ok = Message, error = StreamExecutorError)]
-pub async fn epoch_check(info: Arc<ExecutorInfo>, input: impl MessageStream) {
+pub async fn epoch_check(
+    info: Arc<ExecutorInfo>,
+    fragment_id: FragmentId,
+    input: impl MessageStream,
+) {
     // Epoch number recorded from last barrier message.
     let mut last_epoch = None;
 
@@ -47,11 +55,21 @@ pub async fn epoch_check(info: Arc<ExecutorInfo>, input: impl MessageStream) {
             if let Some(last_epoch) = last_epoch
                 && !b.is_with_stop_mutation()
             {
-                assert_eq!(
-                    b.epoch.prev, last_epoch,
-                    "missing barrier: last barrier's epoch = {}, while current barrier prev={} curr={}",
-                    last_epoch, b.epoch.prev, b.epoch.curr
-                );
+                if b.is_fragment_waking(fragment_id) {
+                    assert!(
+                        b.epoch.prev >= last_epoch,
+                        "stale wake-up barrier: last barrier's epoch = {}, while current barrier prev={} curr={}",
+                        last_epoch,
+                        b.epoch.prev,
+                        b.epoch.curr
+                    );
+                } else {
+                    assert_eq!(
+                        b.epoch.prev, last_epoch,
+                        "missing barrier: last barrier's epoch = {}, while current barrier prev={} curr={}",
+                        last_epoch, b.epoch.prev, b.epoch.curr
+                    );
+                }
             }
 
             last_epoch = Some(new_epoch);
@@ -86,7 +104,7 @@ mod tests {
         tx.push_barrier(test_epoch(3), false);
         tx.push_barrier(test_epoch(4), false);
 
-        let checked = epoch_check(source.info().clone().into(), source.execute());
+        let checked = epoch_check(source.info().clone().into(), 0.into(), source.execute());
         pin_mut!(checked);
 
         assert_matches!(checked.next().await.unwrap().unwrap(), Message::Barrier(b) if b.epoch.curr == test_epoch(1));
@@ -107,7 +125,7 @@ mod tests {
         tx.push_barrier(test_epoch(514), false);
         tx.push_barrier(test_epoch(114), false);
 
-        let checked = epoch_check(source.info().clone().into(), source.execute());
+        let checked = epoch_check(source.info().clone().into(), 0.into(), source.execute());
         pin_mut!(checked);
 
         assert_matches!(checked.next().await.unwrap().unwrap(), Message::Barrier(b) if b.epoch.curr == test_epoch(100));
@@ -126,9 +144,54 @@ mod tests {
         tx.push_chunk(StreamChunk::default());
         tx.push_barrier(test_epoch(114), false);
 
-        let checked = epoch_check(source.info().clone().into(), source.execute());
+        let checked = epoch_check(source.info().clone().into(), 0.into(), source.execute());
         pin_mut!(checked);
 
+        checked.next().await.unwrap().unwrap(); // should panic
+    }
+
+    fn wake_up_barrier(curr: u64, prev: u64, waking: Option<u32>) -> crate::executor::Barrier {
+        let mut barrier = crate::executor::Barrier::with_prev_epoch_for_test(curr, prev);
+        barrier.selective = Some(Arc::new(crate::executor::SelectiveBarrierInfo {
+            sleeping_fragments: Default::default(),
+            waking_fragments: waking.into_iter().map(Into::into).collect(),
+        }));
+        barrier
+    }
+
+    #[tokio::test]
+    async fn test_epoch_jump_on_wake_up() {
+        let (tx, source) = MockSource::channel();
+        let source = source.into_executor(Default::default(), vec![]);
+        tx.send_barrier(crate::executor::Barrier::new_test_barrier(test_epoch(1)));
+        // The fragment slept during epochs 2 to 4 and wakes up at epoch 5.
+        tx.send_barrier(wake_up_barrier(test_epoch(5), test_epoch(4), Some(7)));
+        tx.send_barrier(crate::executor::Barrier::with_prev_epoch_for_test(
+            test_epoch(6),
+            test_epoch(5),
+        ));
+
+        let checked = epoch_check(source.info().clone().into(), 7.into(), source.execute());
+        pin_mut!(checked);
+
+        assert_matches!(checked.next().await.unwrap().unwrap(), Message::Barrier(b) if b.epoch.curr == test_epoch(1));
+        assert_matches!(checked.next().await.unwrap().unwrap(), Message::Barrier(b) if b.epoch.curr == test_epoch(5));
+        assert_matches!(checked.next().await.unwrap().unwrap(), Message::Barrier(b) if b.epoch.curr == test_epoch(6));
+    }
+
+    #[should_panic(expected = "missing barrier")]
+    #[tokio::test]
+    async fn test_epoch_jump_without_wake_up() {
+        let (tx, source) = MockSource::channel();
+        let source = source.into_executor(Default::default(), vec![]);
+        tx.send_barrier(crate::executor::Barrier::new_test_barrier(test_epoch(1)));
+        // Another fragment wakes up: a jump for fragment 7 is still a missing barrier.
+        tx.send_barrier(wake_up_barrier(test_epoch(5), test_epoch(4), Some(8)));
+
+        let checked = epoch_check(source.info().clone().into(), 7.into(), source.execute());
+        pin_mut!(checked);
+
+        checked.next().await.unwrap().unwrap();
         checked.next().await.unwrap().unwrap(); // should panic
     }
 
@@ -138,7 +201,7 @@ mod tests {
         let source = source
             .stop_on_finish(false)
             .into_executor(Default::default(), vec![]);
-        let checked = epoch_check(source.info().clone().into(), source.execute());
+        let checked = epoch_check(source.info().clone().into(), 0.into(), source.execute());
         pin_mut!(checked);
 
         assert!(checked.next().await.transpose().unwrap().is_none());
