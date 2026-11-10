@@ -195,17 +195,21 @@ impl<S: StateStore> DmlExecutor<S> {
                         selective_mode = barrier.selective.is_some();
                         rang_in_epoch = false;
                         // Flush any pending persistence notifiers for the epoch that is closing.
-                        if !pending_persistence_notifiers.is_empty() {
+                        // With selective barriers, the data of a waking fragment was held while
+                        // it slept and is released after this barrier, in the new epoch, if the
+                        // barrier releases the fragment; otherwise it stays held by the gate and
+                        // the notifiers wait for a later barrier.
+                        let fragment_id = self.actor_ctx.fragment_id;
+                        let waking = barrier.is_fragment_waking(fragment_id);
+                        if !pending_persistence_notifiers.is_empty()
+                            && (!waking || barrier.is_fragment_released(fragment_id))
+                        {
                             let notifiers = mem::take(&mut pending_persistence_notifiers);
-                            // With selective barriers, the data of a waking fragment was held
-                            // while it slept and is released after this barrier, in the new
-                            // epoch: wait for that epoch instead.
-                            let closing_epoch =
-                                if barrier.is_fragment_waking(self.actor_ctx.fragment_id) {
-                                    barrier.epoch.curr
-                                } else {
-                                    barrier.epoch.prev
-                                };
+                            let closing_epoch = if waking {
+                                barrier.epoch.curr
+                            } else {
+                                barrier.epoch.prev
+                            };
                             let store = self.state_store.clone();
                             let table_id = self.table_id;
                             persistence_futures.push_back(async move {
@@ -411,8 +415,10 @@ impl<S: StateStore> Execute for DmlExecutor<S> {
 /// - if the fragment received the previous barrier, held chunks are emitted before the barrier,
 ///   in the epoch being closed, exactly as without the gate;
 /// - if the fragment wakes up after sleeping, its open epoch is stale, so held chunks are emitted
-///   after the barrier, in the new epoch. Meta keeps the fragment woken for the next barrier,
-///   which closes that epoch.
+///   after the barrier, in the new epoch, but only if the barrier releases the fragment: meta
+///   then delivers the next barrier, which closes that epoch, to the fragment and its
+///   descendants. A fragment may wake up without being released (a full barrier planned before
+///   its ring reached meta): it then keeps holding and rings again.
 ///
 /// Hence a sleeping fragment never emits data, which is what allows meta to skip it.
 #[try_stream(ok = Message, error = StreamExecutorError)]
@@ -436,9 +442,17 @@ async fn gate_for_selective_barriers(
                         yield msg;
                     }
                 }
-                let released_after = mem::take(&mut held);
+                let released_after = if barrier.is_fragment_released(fragment_id) {
+                    mem::take(&mut held)
+                } else {
+                    vec![]
+                };
                 gated = barrier.selective.is_some();
                 rang = false;
+                if gated && !held.is_empty() {
+                    reporter.report_pending_input(fragment_id);
+                    rang = true;
+                }
                 yield Message::Barrier(barrier);
                 for msg in released_after {
                     yield msg;

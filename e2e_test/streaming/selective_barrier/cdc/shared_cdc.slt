@@ -1,0 +1,144 @@
+# Shared Postgres CDC source with selective barriers (design D4). With the feature on, each
+# `CdcFilter` holds the rows of its table while the table sleeps, persists them, and rings meta,
+# which releases it at a next barrier. Tables that receive no change keep sleeping.
+# Also valid with the feature off. Requires a Postgres with `wal_level = logical` (PG* variables).
+
+control substitution on
+
+system ok
+psql -c "
+    SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots
+    WHERE slot_name = 'sbc_slot' AND active_pid IS NOT NULL;
+    SELECT pg_sleep(1);
+    SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots
+    WHERE slot_name = 'sbc_slot';
+    DROP TABLE IF EXISTS sbc_a;
+    DROP TABLE IF EXISTS sbc_b;
+    CREATE TABLE sbc_a (id int PRIMARY KEY, v int);
+    CREATE TABLE sbc_b (id int PRIMARY KEY, v int);
+    INSERT INTO sbc_a VALUES (1, 10), (2, 20);
+    INSERT INTO sbc_b VALUES (1, 1);
+"
+
+statement ok
+create source sbc_src with (
+  connector = 'postgres-cdc',
+  hostname = '${PGHOST:localhost}',
+  port = '${PGPORT:5432}',
+  username = '${PGUSER:$USER}',
+  password = '${PGPASSWORD:}',
+  database.name = '${PGDATABASE:postgres}',
+  schema.name = 'public',
+  slot.name = 'sbc_slot'
+);
+
+statement ok
+create table sbc_ta (id int primary key, v int) from sbc_src table 'public.sbc_a';
+
+statement ok
+create table sbc_tb (id int primary key, v int) from sbc_src table 'public.sbc_b';
+
+statement ok
+create materialized view sbc_ma as select count(*) as c, sum(v) as s from sbc_ta;
+
+statement ok
+create materialized view sbc_mb as select count(*) as c, sum(v) as s from sbc_tb;
+
+query II retry 20 backoff 1s
+select c, s from sbc_ma;
+----
+2 30
+
+query II retry 20 backoff 1s
+select c, s from sbc_mb;
+----
+1 1
+
+# Let both tables fall asleep, then change one of them only.
+sleep 5s
+
+system ok
+psql -c "INSERT INTO sbc_a VALUES (3, 30); UPDATE sbc_a SET v = 21 WHERE id = 2;"
+
+query II retry 20 backoff 1s
+select c, s from sbc_ma;
+----
+3 61
+
+query II
+select c, s from sbc_mb;
+----
+1 1
+
+# The other table, while the first one sleeps again.
+sleep 5s
+
+system ok
+psql -c "DELETE FROM sbc_b WHERE id = 1; INSERT INTO sbc_b VALUES (2, 2), (3, 3);"
+
+query II retry 20 backoff 1s
+select c, s from sbc_mb;
+----
+2 5
+
+# A stream of small transactions on both tables, spread over several barriers, so that tables
+# wake up, sleep and wake up again while rows are held. The final state must match Postgres.
+system ok
+psql -q -c "
+    DO \$\$
+    BEGIN
+      FOR i IN 10..59 LOOP
+        INSERT INTO sbc_a VALUES (i, i);
+        IF i % 3 = 0 THEN
+          INSERT INTO sbc_b VALUES (i, i);
+        END IF;
+        IF i % 7 = 0 THEN
+          DELETE FROM sbc_a WHERE id = i - 5;
+        END IF;
+        COMMIT;
+        PERFORM pg_sleep(0.1);
+      END LOOP;
+    END
+    \$\$;
+"
+
+system ok
+psql -tA -c "SELECT count(*), sum(v) FROM sbc_a; SELECT count(*), sum(v) FROM sbc_b;"
+----
+47|1585
+18|557
+
+
+query II retry 20 backoff 1s
+select c, s from sbc_ma;
+----
+47 1585
+
+query II retry 20 backoff 1s
+select c, s from sbc_mb;
+----
+18 557
+
+statement ok
+drop materialized view sbc_ma;
+
+statement ok
+drop materialized view sbc_mb;
+
+statement ok
+drop table sbc_ta;
+
+statement ok
+drop table sbc_tb;
+
+statement ok
+drop source sbc_src;
+
+system ok
+psql -c "
+    SELECT pg_sleep(1);
+    SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots
+    WHERE slot_name = 'sbc_slot' AND active_pid IS NULL;
+    DROP TABLE sbc_a;
+    DROP TABLE sbc_b;
+"

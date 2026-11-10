@@ -27,7 +27,7 @@ use risingwave_pb::expr::expr_node::{RexNode, Type as ExprType};
 use risingwave_pb::id::{ActorId, FragmentId, TableId, WorkerId};
 use risingwave_pb::stream_plan::now_node::Mode as NowNodeMode;
 use risingwave_pb::stream_plan::stream_node::NodeBody;
-use risingwave_pb::stream_plan::{PbSelectiveBarrierInfo, StreamNode};
+use risingwave_pb::stream_plan::{PbCdcRoute, PbSelectiveBarrierInfo, StreamNode};
 
 use crate::controller::fragment::InflightFragmentInfo;
 
@@ -68,8 +68,20 @@ pub(super) struct SelectiveBarrierPlan {
 /// Static view of the fragment graph needed by the scheduler.
 struct GraphView {
     downstreams: HashMap<FragmentId, Vec<FragmentId>>,
-    /// Origins that only emit data after ringing (tables fed by DML only).
-    gated_origins: HashSet<FragmentId>,
+    /// Fragments that receive every barrier but only emit data during an epoch opened by a
+    /// barrier that releases them, after ringing: `CdcFilter` with a state table (design D4).
+    awake_gated: HashSet<FragmentId>,
+    /// Origins whose output only goes to fragments that receive every barrier (the shared CDC
+    /// source followed by `CdcFilter` fragments): they receive every barrier but never need to
+    /// wake their descendants.
+    silent_roots: HashSet<FragmentId>,
+    /// Routes of shared CDC sources (design D1): `CdcFilter` fragments whose rows are held by
+    /// their source while they sleep. Such a fragment sleeps like a gated origin and is released
+    /// when its source rings for it.
+    cdc_routes: Vec<PbCdcRoute>,
+    /// Fragments whose rings are taken into account: gated origins, awake gated fragments and
+    /// any fragment with a DML executor, whose gate holds DML data until a barrier releases it.
+    ringing: HashSet<FragmentId>,
     /// Fragments that must receive every barrier: other origins (connector sources, `Now`,
     /// values, ...) and sinks.
     always_awake: HashSet<FragmentId>,
@@ -86,6 +98,10 @@ impl GraphView {
         let mut downstreams: HashMap<FragmentId, Vec<FragmentId>> = HashMap::new();
         let mut upstream_count: HashMap<FragmentId, usize> = HashMap::new();
         let mut gated_origins = HashSet::new();
+        let mut awake_gated = HashSet::new();
+        let mut cdc_filters: HashMap<FragmentId, Option<String>> = HashMap::new();
+        let mut connector_sources = HashSet::new();
+        let mut ringing = HashSet::new();
         let mut always_awake = HashSet::new();
         let mut now_periods = HashMap::new();
         let mut unsupported = false;
@@ -94,6 +110,8 @@ impl GraphView {
             let mask = fragment.fragment_type_mask;
             upstream_count.entry(fragment_id).or_default();
             let mut connector_source = false;
+            let mut gated_cdc_filter = false;
+            let mut cdc_table_name = None;
             visit_stream_node(&fragment.nodes, |node| match &node.node_body {
                 Some(NodeBody::Merge(merge)) => {
                     downstreams
@@ -104,6 +122,13 @@ impl GraphView {
                 }
                 Some(NodeBody::Source(source)) if source.source_inner.is_some() => {
                     connector_source = true;
+                }
+                Some(NodeBody::CdcFilter(filter)) => {
+                    gated_cdc_filter = filter.state_table.is_some();
+                    cdc_table_name = filter
+                        .search_condition
+                        .as_ref()
+                        .and_then(routable_cdc_table_name);
                 }
                 // Every table has this operator to receive sinks into the table. It merges
                 // several upstream fragments outside of the merge executor, which does not
@@ -130,6 +155,22 @@ impl GraphView {
             if is_dml_table {
                 gated_origins.insert(fragment_id);
             }
+            if connector_source {
+                connector_sources.insert(fragment_id);
+            }
+            if mask.contains(FragmentTypeFlag::Dml) {
+                ringing.insert(fragment_id);
+            }
+            if mask.contains(FragmentTypeFlag::CdcFilter) {
+                // A `CdcFilter` receives data from the shared CDC source at any time, so it never
+                // sleeps. Without a state table, it cannot hold rows and must always be released.
+                always_awake.insert(fragment_id);
+                cdc_filters.insert(fragment_id, cdc_table_name);
+                if gated_cdc_filter {
+                    awake_gated.insert(fragment_id);
+                    ringing.insert(fragment_id);
+                }
+            }
             if mask.contains(FragmentTypeFlag::Sink) {
                 always_awake.insert(fragment_id);
             }
@@ -138,9 +179,37 @@ impl GraphView {
                 now_periods.insert(fragment_id, now_fragment_period_ms(&fragment.nodes));
             }
         }
+        let mut silent_roots = HashSet::new();
         for (fragment_id, count) in upstream_count {
             if count == 0 && !gated_origins.contains(&fragment_id) {
                 always_awake.insert(fragment_id);
+                // Its downstream fragments receive every barrier anyway, and each decides itself
+                // when its own descendants must wake up.
+                if downstreams.get(&fragment_id).is_some_and(|downstreams| {
+                    downstreams
+                        .iter()
+                        .all(|downstream| cdc_filters.contains_key(downstream))
+                }) {
+                    silent_roots.insert(fragment_id);
+                }
+            }
+        }
+        // A shared CDC source routes the rows of each table and holds them for a sleeping
+        // `CdcFilter` (design D1), which then no longer needs to receive every barrier.
+        let mut cdc_routes = vec![];
+        for source_fragment_id in silent_roots.intersection(&connector_sources) {
+            for fragment_id in &downstreams[source_fragment_id] {
+                let Some(table_name) = &cdc_filters[fragment_id] else {
+                    continue;
+                };
+                always_awake.remove(fragment_id);
+                awake_gated.remove(fragment_id);
+                ringing.insert(*fragment_id);
+                cdc_routes.push(PbCdcRoute {
+                    source_fragment_id: source_fragment_id.as_raw_id(),
+                    fragment_id: fragment_id.as_raw_id(),
+                    table_name: table_name.clone(),
+                });
             }
         }
         // A gated origin with an upstream (e.g. a table fed by a sink) is not supported.
@@ -152,19 +221,27 @@ impl GraphView {
         }
         Self {
             downstreams,
-            gated_origins,
+            awake_gated,
+            silent_roots,
+            cdc_routes,
+            ringing,
             always_awake,
             now_periods,
             unsupported,
         }
     }
 
-    /// Origins released by every barrier: always awake roots other than `Now` (connector sources,
-    /// values, ...). Sinks have no descendant to wake.
+    /// Fragments released by every barrier: always awake fragments other than `Now`, gated
+    /// `CdcFilter` and silent roots (connector sources, values, `CdcFilter` without state, ...).
+    /// Sinks have no descendant to wake.
     fn always_released(&self) -> impl Iterator<Item = FragmentId> + '_ {
         self.always_awake
             .iter()
-            .filter(|fragment_id| !self.now_periods.contains_key(*fragment_id))
+            .filter(|fragment_id| {
+                !self.now_periods.contains_key(*fragment_id)
+                    && !self.awake_gated.contains(*fragment_id)
+                    && !self.silent_roots.contains(*fragment_id)
+            })
             .copied()
     }
 
@@ -185,12 +262,6 @@ impl GraphView {
 impl SelectiveBarrierState {
     pub(super) fn on_ring(&mut self, fragment_ids: impl IntoIterator<Item = FragmentId>) {
         self.pending_rings.extend(fragment_ids);
-    }
-
-    /// Whether some fragment may be asleep, i.e. barriers must keep carrying selective
-    /// information so that fragments can wake up.
-    pub(super) fn is_active(&self) -> bool {
-        self.prev_woken.is_some()
     }
 
     /// Plan the next barrier.
@@ -225,16 +296,23 @@ impl SelectiveBarrierState {
             .map(|(fragment_id, _)| *fragment_id)
             .collect();
 
-        // Origins released by this barrier: gated origins that rang, `Now` fragments whose output
+        // Fragments released by this barrier: fragments that rang, `Now` fragments whose output
         // may change, and all other origins.
         let released: HashSet<FragmentId> = self
             .pending_rings
             .drain()
-            .filter(|fragment_id| view.gated_origins.contains(fragment_id))
+            .filter(|fragment_id| view.ringing.contains(fragment_id))
             .chain(view.always_released())
             .chain(released_now)
             .collect();
 
+        // Sources keep the last routes they received: send them after each reset (recovery or
+        // command), the only times the graph may change.
+        let cdc_routes = if self.prev_woken.is_none() {
+            view.cdc_routes.clone()
+        } else {
+            vec![]
+        };
         let full = !may_sleep
             || view.unsupported
             || self.prev_woken.is_none()
@@ -296,6 +374,7 @@ impl SelectiveBarrierState {
                 sleeping_fragment_ids: sleeping.into_iter().map(|id| id.as_raw_id()).collect(),
                 waking_fragment_ids: waking.into_iter().map(|id| id.as_raw_id()).collect(),
                 released_fragment_ids,
+                cdc_routes,
             },
             full,
             node_actors,
@@ -331,8 +410,38 @@ impl SelectiveBarrierState {
             sleeping_fragment_ids: vec![],
             waking_fragment_ids: waking,
             released_fragment_ids: vec![],
+            cdc_routes: vec![],
         }
     }
+}
+
+/// Value of `_rw_table_name` matched by a `CdcFilter`, if its condition is `_rw_table_name =
+/// '<literal>'`. Must agree with the `CdcFilter` executor: literals of the form `a.b.c` are
+/// rewritten by it for legacy SQL Server tables, so they are not routed (the `CdcFilter` then
+/// stays awake and released, as without routing).
+fn routable_cdc_table_name(condition: &ExprNode) -> Option<String> {
+    /// Column index of `_rw_table_name` in the rows of a shared CDC source.
+    const RW_TABLE_NAME_COLUMN_IDX: u32 = 2;
+    if condition.function_type() != ExprType::Equal {
+        return None;
+    }
+    let Some(RexNode::FuncCall(call)) = &condition.rex_node else {
+        return None;
+    };
+    let [lhs, rhs] = call.children.as_slice() else {
+        return None;
+    };
+    let literal = match (&lhs.rex_node, &rhs.rex_node) {
+        (Some(RexNode::InputRef(RW_TABLE_NAME_COLUMN_IDX)), _) => rhs,
+        (_, Some(RexNode::InputRef(RW_TABLE_NAME_COLUMN_IDX))) => lhs,
+        _ => return None,
+    };
+    let Some(RexNode::Constant(datum)) = &literal.rex_node else {
+        return None;
+    };
+    let name = deserialize_datum(datum.body.as_slice(), &DataType::Varchar).ok()??;
+    let name = name.as_utf8().to_string();
+    (name.split('.').count() != 3).then_some(name)
 }
 
 /// Upper bound of the release period derived from `date_trunc`. Time zone offsets are multiples
@@ -614,6 +723,159 @@ mod tests {
         for _ in 0..3 {
             assert!(state.plan(&fragments, true, 0).full);
         }
+    }
+
+    fn cdc_filter(upstream: u32, gated: bool) -> StreamNode {
+        StreamNode {
+            node_body: Some(NodeBody::CdcFilter(Box::new(
+                risingwave_pb::stream_plan::CdcFilterNode {
+                    state_table: gated.then(Default::default),
+                    ..Default::default()
+                },
+            ))),
+            input: vec![merge(upstream)],
+            ..Default::default()
+        }
+    }
+
+    /// A shared CDC source (10) with a gated `CdcFilter` (11) and a `CdcFilter` without state
+    /// (12), their tables (13, 14), and a view on table 13 (15).
+    fn cdc_graph() -> Vec<InflightFragmentInfo> {
+        use FragmentTypeFlag::*;
+        let mut graph = vec![
+            fragment(10, &[Source], vec![], 10, 1, 20),
+            fragment(11, &[CdcFilter], vec![cdc_filter(10, true)], 11, 1, 21),
+            fragment(12, &[CdcFilter], vec![cdc_filter(10, false)], 12, 1, 22),
+            fragment(13, &[StreamCdcScan, Dml, Mview], vec![merge(11)], 13, 1, 23),
+            fragment(14, &[StreamCdcScan, Dml, Mview], vec![merge(12)], 14, 2, 24),
+            fragment(15, &[Mview], vec![merge(13)], 15, 2, 25),
+        ];
+        graph[0].nodes = StreamNode {
+            node_body: Some(NodeBody::Source(Box::new(SourceNode {
+                source_inner: Some(Default::default()),
+            }))),
+            ..Default::default()
+        };
+        // `fragment` puts the inputs under an empty root: use the `CdcFilter` node as the root.
+        for fragment in &mut graph[1..3] {
+            fragment.nodes = fragment.nodes.input.pop().unwrap();
+        }
+        graph
+    }
+
+    const CDC_ALL: [u32; 6] = [10, 11, 12, 13, 14, 15];
+
+    #[test]
+    fn test_cdc_filter_gate() {
+        let graph = cdc_graph();
+        let fragments: Vec<_> = graph.iter().collect();
+        let mut state = SelectiveBarrierState::default();
+        state.plan(&fragments, true, 0);
+
+        // The source and the `CdcFilter` fragments receive every barrier. Only the table behind
+        // the `CdcFilter` without state stays awake; the source releases nothing itself.
+        let plan = state.plan(&fragments, true, 0);
+        assert_eq!(woken(&plan, &CDC_ALL), ids(&[10, 11, 12, 14]));
+        assert_eq!(ids(&plan.info.released_fragment_ids), ids(&[12]));
+
+        // The gated `CdcFilter` rings: it is released, and its table wakes up with its view for
+        // this barrier and the next one, which closes the epoch of the released rows.
+        state.on_ring([11.into()]);
+        let plan = state.plan(&fragments, true, 0);
+        assert_eq!(woken(&plan, &CDC_ALL), ids(&CDC_ALL));
+        assert_eq!(ids(&plan.info.waking_fragment_ids), ids(&[13, 15]));
+        assert!(plan.info.released_fragment_ids.contains(&11));
+        let plan = state.plan(&fragments, true, 0);
+        assert_eq!(woken(&plan, &CDC_ALL), ids(&CDC_ALL));
+        assert!(!plan.info.released_fragment_ids.contains(&11));
+        let plan = state.plan(&fragments, true, 0);
+        assert_eq!(woken(&plan, &CDC_ALL), ids(&[10, 11, 12, 14]));
+
+        // DML on the CDC table: the table fragment is not an origin, but its DML gate rings.
+        state.on_ring([13.into()]);
+        let plan = state.plan(&fragments, true, 0);
+        assert_eq!(woken(&plan, &CDC_ALL), ids(&CDC_ALL));
+        assert_eq!(ids(&plan.info.waking_fragment_ids), ids(&[13, 15]));
+    }
+
+    /// `_rw_table_name = '<name>'`, as planned for a CDC table.
+    fn table_name_condition(name: &str) -> ExprNode {
+        use risingwave_common::types::ScalarImpl;
+        use risingwave_common::util::value_encoding::serialize_datum;
+        use risingwave_pb::data::PbDatum;
+        use risingwave_pb::expr::FunctionCall;
+        let input_ref = ExprNode {
+            rex_node: Some(RexNode::InputRef(2)),
+            ..Default::default()
+        };
+        let literal = ExprNode {
+            rex_node: Some(RexNode::Constant(PbDatum {
+                body: serialize_datum(Some(&ScalarImpl::Utf8(name.into()))),
+            })),
+            ..Default::default()
+        };
+        ExprNode {
+            function_type: ExprType::Equal as i32,
+            rex_node: Some(RexNode::FuncCall(FunctionCall {
+                children: vec![input_ref, literal],
+            })),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_cdc_routes() {
+        let mut graph = cdc_graph();
+        // 11 is routable; 12 has a three-part name, rewritten by the executor: not routed.
+        for (fragment, name) in [(1, "public.a"), (2, "db.dbo.b")] {
+            let NodeBody::CdcFilter(filter) = graph[fragment].nodes.node_body.as_mut().unwrap()
+            else {
+                unreachable!()
+            };
+            filter.search_condition = Some(table_name_condition(name));
+        }
+        let fragments: Vec<_> = graph.iter().collect();
+        let mut state = SelectiveBarrierState::default();
+
+        // Routes are sent with the first selective barrier only.
+        let plan = state.plan(&fragments, true, 0);
+        assert_eq!(
+            plan.info.cdc_routes,
+            vec![PbCdcRoute {
+                source_fragment_id: 10,
+                fragment_id: 11,
+                table_name: "public.a".to_owned(),
+            }]
+        );
+        // The routed `CdcFilter` sleeps with its table; the other one stays awake and released.
+        let plan = state.plan(&fragments, true, 0);
+        assert!(plan.info.cdc_routes.is_empty());
+        assert_eq!(woken(&plan, &CDC_ALL), ids(&[10, 12, 14]));
+
+        // The source rings for the routed `CdcFilter`: it wakes up with its descendants.
+        state.on_ring([11.into()]);
+        let plan = state.plan(&fragments, true, 0);
+        assert_eq!(woken(&plan, &CDC_ALL), ids(&CDC_ALL));
+        assert_eq!(ids(&plan.info.waking_fragment_ids), ids(&[11, 13, 15]));
+        assert!(plan.info.released_fragment_ids.contains(&11));
+
+        // After a command, routes are sent again.
+        state.plan_command(fragments.iter().copied());
+        let plan = state.plan(&fragments, true, 0);
+        assert_eq!(plan.info.cdc_routes.len(), 1);
+    }
+
+    #[test]
+    fn test_source_with_other_consumers_releases_descendants() {
+        use FragmentTypeFlag::*;
+        let mut graph = cdc_graph();
+        // Another consumer of the source, e.g. a source backfill: the source must be released.
+        graph.push(fragment(16, &[SourceScan], vec![merge(10)], 16, 1, 26));
+        let fragments: Vec<_> = graph.iter().collect();
+        let mut state = SelectiveBarrierState::default();
+        state.plan(&fragments, true, 0);
+        let plan = state.plan(&fragments, true, 0);
+        assert!(plan.info.sleeping_fragment_ids.is_empty());
     }
 
     fn date_trunc(unit: &str) -> ExprNode {

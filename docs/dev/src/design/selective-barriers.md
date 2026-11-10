@@ -91,14 +91,19 @@ and DML statements are only acknowledged as durable after `FLUSH` (a barrier com
 | Merge | fragment-level exemption from `sleeping_fragment_ids` | `executor/mod.rs` (`DispatchBarrierBuffer`), `merge.rs` |
 | Dispatcher | skip dispatchers whose downstream fragment sleeps | `executor/dispatch.rs` |
 | Epoch checks | accept `prev > last` on wake-up only | `wrapper/epoch_check.rs`, `common/table/state_table.rs` |
-| Origins | gate + ring for DML, `Now`, sources, shared CDC source (per output) | `executor/dml.rs`, `now.rs`, `source/*` |
+| Origins | gate + ring for DML, `Now` | `executor/dml.rs`, `now.rs` |
+| Shared CDC (D1) | routes per table sent by meta, per-table gate in the source, held rows in the split state table | `barrier/checkpoint/selective.rs`, `executor/source/cdc_router.rs`, `source_executor.rs` |
+| Shared CDC (D4, superseded) | gate after a `CdcFilter` that has a state table | `executor/cdc_filter_gate.rs` |
 
 ## Current limitations
 
 Enabled with `[meta.developer] enable_selective_barrier = true` (off by default).
 
-- Only tables fed by DML can sleep (gated origins). Connector sources, `Now`, values and sinks
-  receive every barrier, and so do their descendants.
+- Tables fed by DML, descendants of `Now` and tables of a shared CDC source (with their
+  `CdcFilter`) can sleep, including CDC tables created before the feature. Connector sources,
+  values and sinks receive every barrier, and so do their descendants.
+- A `CdcFilter` whose table name has the form `a.b.c` (legacy SQL Server tables, rewritten by the
+  executor) is not routed: it receives every barrier and its table never sleeps.
 - A graph containing cross-database snapshot backfill, or a table that receives a sink
   (`sink into table`), always receives full barriers.
 - While a job is being created, barriers are full.
@@ -118,8 +123,12 @@ Enabled with `[meta.developer] enable_selective_barrier = true` (off by default)
 3. Meta scheduler and DML origins (done): ring channel (compute to meta), gated
    `DmlExecutor`, computation of `W_t`, injection to woken actors only, virtual commit,
    meta config flag off by default. `Now` and connector sources stay always awake.
-4. `Now` at its rounding granularity, then connector sources, then the shared CDC
-   source with per-output gating and dispatcher skip.
+4. `Now` at its rounding granularity (done).
+5. Shared CDC source, design D4 (done, superseded by D1): `CdcFilter` stays awake and gates
+   its table.
+6. Shared CDC source, design D1 (done): the source gates each table, `CdcFilter` fragments sleep.
+   The broadcast to every `CdcFilter` remains (see below).
+7. Connector sources (Kafka, shared sources with `SourceBackfill`, tables with connector).
 
 Each step must keep `e2e_test/streaming/selective_barrier/consistency.slt` and
 `scripts/selective_barriers/chaos_test.py` green, with the feature both on and off.
@@ -155,5 +164,71 @@ table (`CdcFilter`), so without routing every event would wake every table.
 | D5 | Separate partial graph or database for CDC | - | - | breaks the common epoch | rejected |
 
 Plan: D4 as a prototype (validates sleep, wake-up and recovery of the CDC chain without touching
-the dispatcher; 272 stateless `CdcFilter` actors stay awake), then D1 (removes the broadcast).
-Testing requires a CDC source (e.g. Postgres in Docker).
+the dispatcher; the `CdcFilter` actors stay awake), then D1 (removes the broadcast).
+
+## Shared CDC source: D1
+
+D1 moves the gate of D4 from each `CdcFilter` into the source, so that `CdcFilter` fragments can
+sleep with their table, and needs no new state table, so it applies to existing CDC tables.
+
+- **Routes.** For a shared CDC source whose consumers are all `CdcFilter` fragments, meta reads
+  the table name of each `CdcFilter` (`_rw_table_name = '<name>'`) and sends the routes
+  (table name -> `CdcFilter` fragment) with the first selective barrier after each reset of the
+  scheduler (recovery or command, the only times the graph changes). The source keeps the last
+  routes it received.
+- **Sleeping `CdcFilter`.** A routed `CdcFilter` is scheduled like a gated origin: it sleeps
+  unless released, and is released when its source rings for it. Its descendants follow.
+- **Per-table gate in the source.** After a selective barrier, a row of a routed table is emitted
+  only if the barrier released the `CdcFilter` of the table. Otherwise it is held, written to the
+  split state table of the source under a reserved key (`__rw_held__/<fragment>/<seq>`, value:
+  the value-encoded row), so that it is committed with the offset that covers it, and the source
+  rings for the `CdcFilter`. After a barrier that releases it, held rows are emitted in order and
+  deleted. Rows of tables without route pass through. A barrier without selective information
+  releases everything.
+- **Recovery.** The source reads held rows back after initializing its state table, and emits
+  them after the first barrier that releases their table (barriers after a recovery are not
+  selective, so the first one). Held rows of a table that is no longer routed (dropped) are
+  deleted.
+- **Broadcast.** The dispatcher still sends every chunk to every `CdcFilter`, including sleeping
+  ones. This is safe: a sleeping `CdcFilter` only receives rows of other tables (the rows of its
+  table are held by the source), which it filters out, so it emits and writes nothing. Routing
+  rows in the dispatcher would only save CPU.
+
+## Shared CDC source: D4 (superseded)
+
+Graph of a CDC table: shared source (singleton) → `CdcFilter` fragment (singleton, `NoShuffle`,
+keeps the rows of its table) → exchange → table fragment (`StreamCdcScan`, `Materialize`) →
+downstream jobs.
+
+- **Awake gated fragments.** A `CdcFilter` with a state table receives every barrier, since the
+  source may send it data at any time. It only lets rows through during an epoch opened by a
+  barrier that *releases* it; meta releases it only when it rang. Its descendants are thus woken
+  exactly as for a gated origin (rule 1), the `CdcFilter` playing the role of the origin.
+- **Silent roots.** A root fragment whose downstream fragments are all `CdcFilter` fragments (the
+  shared CDC source) receives every barrier but releases nothing: each `CdcFilter` decides when
+  its own descendants wake up. A source with any other consumer keeps releasing every barrier.
+- **Hold and persist.** Rows arriving while the gate is closed are inserted in the state table
+  `(seq, payload, _rw_offset, _rw_table_name)` and kept in memory. They are committed at the next
+  barrier together with the source offset that covers them, so a crash cannot lose them. The gate
+  rings once per epoch whenever it sees rows (also while open, so that a busy table stays
+  released), and rings again at each barrier that does not release it while rows are held (a ring
+  can be consumed by a barrier that cannot release it, e.g. a command barrier).
+- **Release.** At a barrier that releases the fragment, held rows are emitted *after* the barrier,
+  in order, and deleted from the state table in the same epoch. Meta delivers the next barrier to
+  the table, which seals both the rows downstream and their deletion.
+- **Recovery.** Held rows are read back at the first barrier, and emitted after the first barrier
+  that releases the fragment (barriers after a recovery are not selective, so the first one).
+- **Cost.** One more empty state table sealed per CDC table at every barrier, and the held rows
+  written twice (insert, then delete one epoch later) when a sleeping table wakes up. A busy table
+  stays released and writes nothing to the `CdcFilter` state table.
+- **Creation.** The frontend no longer creates the state table since D1. A `CdcFilter` that has
+  one and is not routed by its source keeps this behavior.
+
+DML on a CDC table: the table fragment is not an origin but can now sleep, so its DML gate holds
+DML data while it sleeps. Meta accepts rings from every fragment with a DML executor, which
+releases the fragment and wakes its descendants.
+
+A gate only emits held data after a barrier that wakes its fragment if this barrier also releases
+the fragment. Otherwise (a full barrier planned before the ring reached meta, which can happen
+when several barriers are in flight), the next barrier may not be delivered to the fragment and
+would not close the epoch of the data: the gate keeps holding and rings again.

@@ -156,6 +156,7 @@ mod tests {
             sleeping_fragments: Default::default(),
             waking_fragments: waking.into_iter().map(Into::into).collect(),
             released_fragments: Default::default(),
+            cdc_routes: vec![],
         }));
         barrier
     }

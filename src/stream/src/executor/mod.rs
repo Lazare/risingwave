@@ -79,6 +79,7 @@ pub mod asof_join;
 mod backfill;
 mod barrier_recv;
 mod batch_query;
+mod cdc_filter_gate;
 mod chain;
 mod changelog;
 mod dedup;
@@ -144,6 +145,7 @@ pub use backfill::no_shuffle_backfill::*;
 pub use backfill::snapshot_backfill::*;
 pub use barrier_recv::BarrierRecvExecutor;
 pub use batch_query::BatchQueryExecutor;
+pub use cdc_filter_gate::CdcFilterGateExecutor;
 pub use chain::ChainExecutor;
 pub use changelog::{ChangeLogExecutor, ChangeLogMode};
 pub use dedup::AppendOnlyDedupExecutor;
@@ -421,6 +423,18 @@ pub struct SelectiveBarrierInfo {
     pub waking_fragments: HashSet<FragmentId>,
     /// Fragments released by the barrier: they and their descendants receive the next barrier.
     pub released_fragments: HashSet<FragmentId>,
+    /// Routes of shared CDC sources (design D1), only set on some barriers. Empty means that
+    /// sources keep their last routes.
+    pub cdc_routes: Vec<CdcRoute>,
+}
+
+/// The `CdcFilter` fragment that receives the rows of a table of a shared CDC source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CdcRoute {
+    pub source_fragment: FragmentId,
+    pub fragment: FragmentId,
+    /// Value of `_rw_table_name` of the rows of the table.
+    pub table_name: String,
 }
 
 impl SelectiveBarrierInfo {
@@ -441,6 +455,15 @@ impl SelectiveBarrierInfo {
                 .iter()
                 .map(|id| (*id).into())
                 .collect(),
+            cdc_routes: pb
+                .cdc_routes
+                .iter()
+                .map(|route| CdcRoute {
+                    source_fragment: route.source_fragment_id.into(),
+                    fragment: route.fragment_id.into(),
+                    table_name: route.table_name.clone(),
+                })
+                .collect(),
         }
     }
 
@@ -460,6 +483,15 @@ impl SelectiveBarrierInfo {
                 .released_fragments
                 .iter()
                 .map(|id| id.as_raw_id())
+                .collect(),
+            cdc_routes: self
+                .cdc_routes
+                .iter()
+                .map(|route| risingwave_pb::stream_plan::PbCdcRoute {
+                    source_fragment_id: route.source_fragment.as_raw_id(),
+                    fragment_id: route.fragment.as_raw_id(),
+                    table_name: route.table_name.clone(),
+                })
                 .collect(),
         }
     }

@@ -3,6 +3,9 @@
 # Requires the risedev profiles `selbar` (feature off) and `selbar-on` (feature on), both with
 # persistent storage (sqlite meta store and fs object store) so that restarts recover state.
 #
+# Shared CDC tests run only if PGHOST is set (a Postgres with `wal_level = logical`, see the PG*
+# variables in e2e_test/streaming/selective_barrier/cdc/shared_cdc.slt).
+#
 # Usage: scripts/selective_barriers/run_tests.sh [chaos rounds] [seed]
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -42,5 +45,14 @@ for profile in selbar selbar-on; do
       --backfill "$backfill" | tail -1
     no_panic
   done
+  if [[ -n "${PGHOST:-}" ]]; then
+    echo "=== $profile: shared CDC SLT and chaos ($ROUNDS rounds, seed $SEED)"
+    fresh_cluster "$profile"
+    ./risedev slt -p 4577 -d dev ./e2e_test/streaming/selective_barrier/cdc/shared_cdc.slt 2>&1 \
+      | grep -E "\[OK\]" || { echo "FAILED: shared_cdc.slt"; exit 1; }
+    python3 -I -u scripts/selective_barriers/cdc_chaos_test.py --profile "$profile" --port 4577 \
+      --rounds "$ROUNDS" --seed "$SEED" | tail -1
+    no_panic
+  fi
 done
 echo "ALL PASSED"
