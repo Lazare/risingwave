@@ -315,3 +315,21 @@ decoupled sinks, 300 s):
 
 `scripts/selective_barriers/sink_chaos_test.py` checks a decoupled upsert sink into Postgres with
 bursts separated by idle periods and random kills (15 rounds with and without selective barriers).
+
+## Benchmark with all changes
+
+Same graph and workloads as above, with the log store change, on a fresh cluster (setup, 3 min
+pause, then runs ordered off: mix, one table, idle; on: idle, one table, mix). Per 300 s window:
+
+| Load | Mode | Jobs / state tables written per checkpoint | Checkpoints with writes | Object store ops, compute / compactor | Barrier p50 / p99 | CPU compute / meta | Freshness p50 / max |
+|---|---|---|---|---|---|---|---|
+| mix | off | 23.9 / 41.5 | 301 | 2524 / 2882 | 0.25 s / 0.39 s | 54% / 10% | 1.0 s / 2.1 s |
+| mix | on | 20.5 / 35.6 | 300 | 2807 / 1010 | 0.10 s / 0.16 s | 27% / 9% | 2.0 s / 2.9 s |
+| 1 table, 1/s | off | 5.0 / 8.0 | 291 | 512 / 1498 | 0.25 s / 0.25 s | 46% / 9% | 0.9 s / 2.1 s |
+| 1 table, 1/s | on | 4.9 / 7.8 | 293 | 520 / 1002 | 0.10 s / 0.10 s | 14% / 10% | 1.0 s / 2.0 s |
+| idle | off | 1.0 / 1.0 | 1 | 1 / 0 | 0.25 s / 0.39 s | 45% / 8% | - |
+| idle | on | 1.0 / 1.0 | 1 | 1 / 0 | 0.10 s / 0.10 s | 10% / 9% | - |
+
+Compactor operations depend on the backlog left by the previous run (the first run after a heavy
+one is penalized) and are not comparable between runs of a 5-minute window; compute operations
+(uploads and reads) are.
