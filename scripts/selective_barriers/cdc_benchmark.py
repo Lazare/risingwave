@@ -72,9 +72,10 @@ def pg(sql, timeout=300):
     return run(["psql", "-X", "-A", "-t", "-q", "-v", "ON_ERROR_STOP=1", "-c", sql], timeout)
 
 
-def classes(n, hot, warm):
-    """Table index -> class, deterministic."""
-    n_hot, n_warm = max(1, round(n * hot)), max(1, round(n * warm))
+def classes(n, hot, warm, hot_tables=None, warm_tables=None):
+    """Table index -> class, deterministic. Counts override shares."""
+    n_hot = hot_tables if hot_tables is not None else max(1, round(n * hot))
+    n_warm = warm_tables if warm_tables is not None else max(1, round(n * warm))
     return ["hot"] * n_hot + ["warm"] * n_warm + ["cold"] * (n - n_hot - n_warm)
 
 
@@ -246,7 +247,9 @@ class Driver(threading.Thread):
 
     def run(self):
         now = time.time()
-        due = [now + self.rnd.expovariate(1 / self.mean[k]) for k in self.kinds]
+        # A mean interval of 0 means that the class receives no update.
+        due = [now + self.rnd.expovariate(1 / self.mean[k]) if self.mean[k] > 0 else float("inf")
+               for k in self.kinds]
         while not self.stop:
             now = time.time()
             for i, k in enumerate(self.kinds):
@@ -255,13 +258,15 @@ class Driver(threading.Thread):
                     self.send(f"UPDATE bench_t{i} SET v = v + 1 WHERE k = {key};")
                     self.updates += 1
                     due[i] = now + self.rnd.expovariate(1 / self.mean[k])
+                    if self.args.periodic:
+                        due[i] = now + self.mean[k]
             time.sleep(0.05)
 
 
 def measure_freshness(args, kinds, rnd, driver, samples):
     """Update row 0 of a random cold table and wait until RisingWave shows it."""
-    cold = [i for i, k in enumerate(kinds) if k == "cold"]
-    i = rnd.choice(cold)
+    candidates = [i for i, k in enumerate(kinds) if k == args.probe_class]
+    i = rnd.choice(candidates)
     marker = rnd.randrange(10 ** 6, 10 ** 9)
     start = time.time()
     driver.send(f"UPDATE bench_t{i} SET v = {marker} WHERE k = 0;")
@@ -276,7 +281,7 @@ def measure_freshness(args, kinds, rnd, driver, samples):
 def run_bench(args):
     rnd = random.Random(args.seed)
     n = int(rw("select count(*) from rw_tables where name like 'bench_t%'", args.port))
-    kinds = classes(n, args.hot, args.warm)
+    kinds = classes(n, args.hot, args.warm, args.hot_tables, args.warm_tables)
     driver = Driver(args, kinds, rnd)
     driver.start()
     print(f"[{args.label}] warmup {args.warmup}s, tables={n}", flush=True)
@@ -290,7 +295,7 @@ def run_bench(args):
     freshness = []
     next_probe = time.time() + 5
     while time.time() - t0 < args.duration:
-        if time.time() >= next_probe:
+        if args.probe_interval > 0 and time.time() >= next_probe:
             measure_freshness(args, kinds, rnd, driver, freshness)
             next_probe = time.time() + args.probe_interval
         time.sleep(0.5)
@@ -345,9 +350,14 @@ def main():
     p.add_argument("--hot-interval", default=0.5, type=float, help="mean seconds between updates")
     p.add_argument("--warm-interval", default=2.0, type=float)
     p.add_argument("--cold-interval", default=120.0, type=float)
+    p.add_argument("--hot-tables", default=None, type=int, help="number of hot tables (overrides --hot)")
+    p.add_argument("--warm-tables", default=None, type=int, help="number of warm tables (overrides --warm)")
+    p.add_argument("--periodic", action="store_true", help="fixed intervals instead of random ones")
+    p.add_argument("--probe-class", default="cold", choices=["hot", "warm", "cold"],
+                   help="class of the tables used to measure freshness")
     p.add_argument("--duration", default=300, type=int)
     p.add_argument("--warmup", default=60, type=int)
-    p.add_argument("--probe-interval", default=10, type=float)
+    p.add_argument("--probe-interval", default=10, type=float, help="0 disables freshness probes")
     p.add_argument("--seed", default=1, type=int)
     p.add_argument("--label", default="run")
     p.add_argument("--out", default=None)

@@ -272,3 +272,23 @@ Reading:
 - To reduce the Blob Storage operations of the production deployment, the next lever is to let
   decoupled sinks sleep when their upstream is idle (no log store write without data), and to
   check what else writes at every checkpoint without data (`checkpoint_writers.sql`).
+
+Same graph, two more workloads (90 s warmup, 300 s measured; runs ordered on, on, off, off):
+a single table updated once per second (`--hot-tables 1 --hot-interval 1 --periodic`, freshness
+measured on that table), and no traffic at all.
+
+| Metric (per 300 s window) | 1 table, off | 1 table, on | idle, off | idle, on |
+|---|---|---|---|---|
+| jobs written per checkpoint | 9.9 | 9.8 | 6.0 | 6.0 |
+| state tables written per checkpoint | 12.8 | 12.7 | 6.0 | 6.0 |
+| object store ops, compute + compactor | 1482 | 1509 | 1392 | 1356 |
+| barrier latency p50 / p99 | 0.25 s / 0.39 s | 0.10 s / 0.10 s | 0.25 s / 0.39 s | 0.10 s / 0.10 s |
+| CPU, compute node | 49% | 15% | 46% | 11% |
+| CPU, meta node | 9.5% | 9.2% | 9.1% | 9.8% |
+| freshness p50 / max | 1.0 s / 2.0 s | 0.9 s / 2.0 s | - | - |
+
+- Without traffic, the 6 jobs written at every checkpoint are exactly the 6 decoupled sinks, with
+  or without the feature: they are the only writers without data.
+- The cost of barriers alone is large without the feature (46% of a core for 1088 actors in a
+  debug build, idle) and drops by about 75% with it.
+- A table with continuous traffic keeps its freshness: it rings at every epoch and stays released.
