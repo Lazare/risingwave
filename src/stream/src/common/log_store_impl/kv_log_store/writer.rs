@@ -143,7 +143,17 @@ impl<LS: LocalStateStore> LogWriter for KvLogStoreWriter<LS> {
 
         // When the stream is paused, donot flush barrier to ensure there is no dirty data in state store.
         // Besides, barrier on a paused stream is useless in log store because it won't change the log store state.
-        if !self.is_paused {
+        //
+        // For the same reason, the barrier of an epoch without data is not persisted either, so
+        // that an idle sink writes nothing at every checkpoint. The reader always receives barriers
+        // from the in-memory buffer; persisted barriers are only read when replaying the log from
+        // the state store (on start, rewind or vnode change), where a skipped empty epoch only
+        // means one barrier less before the next epoch with data. Barriers carrying a schema
+        // change or a stop are still persisted.
+        let epoch_has_data = self.seq_id != FIRST_SEQ_ID;
+        if !self.is_paused
+            && (epoch_has_data || options.schema_change.is_some() || options.is_stop)
+        {
             writer.write_barrier(epoch, options.is_checkpoint)?;
         }
         self.tx

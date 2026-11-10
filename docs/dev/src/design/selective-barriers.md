@@ -292,3 +292,26 @@ measured on that table), and no traffic at all.
 - The cost of barriers alone is large without the feature (46% of a core for 1088 actors in a
   debug build, idle) and drops by about 75% with it.
 - A table with continuous traffic keeps its freshness: it rings at every epoch and stays released.
+
+## Decoupled sinks: no barrier row for an empty epoch
+
+The benchmark without traffic shows that the only writers left are decoupled sinks: at every
+barrier, the kv log store writes one barrier row per vnode, even when the epoch has no data. The
+reader of the log store always receives barriers from its in-memory buffer; persisted barrier
+rows are only read when the log is replayed from the state store (start, rewind, vnode change),
+where the epoch after a barrier only has to be greater than it. The writer therefore no longer
+persists the barrier of an epoch without data (as it already did while paused), except for
+barriers carrying a schema change or a stop. A replay then sees one barrier less per skipped
+epoch; a sink that commits every N checkpoints may commit a little later after a recovery.
+
+This change does not depend on selective barriers. Benchmark without traffic (same graph, 6
+decoupled sinks, 300 s):
+
+| | before | after |
+|---|---|---|
+| checkpoints with writes | 301 | 1 |
+| jobs / state tables written per checkpoint | 6 / 6 | 1 / 1 (only one checkpoint) |
+| object store ops, compute + compactor | ~1390 | 1 |
+
+`scripts/selective_barriers/sink_chaos_test.py` checks a decoupled upsert sink into Postgres with
+bursts separated by idle periods and random kills (15 rounds with and without selective barriers).
