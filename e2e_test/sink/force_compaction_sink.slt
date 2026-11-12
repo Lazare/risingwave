@@ -26,3 +26,37 @@ drop sink sink_t_force_compaction;
 
 statement ok
 drop table t_force_compaction;
+
+# `force_compaction` on an append-only sink with `force_append_only`: the changes are buffered until
+# the barrier, and a row inserted and then retracted within the same epoch is not emitted.
+statement ok
+create table t_force_compaction_append_only (
+    id integer primary key,
+    v_int int
+);
+
+statement ok
+create sink sink_t_force_compaction_append_only from t_force_compaction_append_only with (
+  connector = 'blackhole',
+  type = 'append-only',
+  force_append_only = 'true',
+  force_compaction = 'true',
+);
+
+statement ok
+insert into t_force_compaction_append_only values (1, 10), (2, 20), (3, 30);
+
+statement ok
+delete from t_force_compaction_append_only where id = 2;
+
+statement ok
+update t_force_compaction_append_only set v_int = 100 where id = 3;
+
+statement ok
+flush;
+
+statement ok
+drop sink sink_t_force_compaction_append_only;
+
+statement ok
+drop table t_force_compaction_append_only;
