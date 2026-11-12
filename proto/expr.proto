@@ -671,6 +671,16 @@ enum UdfExprVersion {
   UDF_EXPR_VERSION_NAME_IN_RUNTIME = 1;
 }
 
+// The volatility declared by the user for a user-defined function.
+enum UdfVolatility {
+  // Not declared. Treated as `VOLATILE`, which is also the behavior before introducing this enum.
+  UDF_VOLATILITY_UNSPECIFIED = 0;
+  // The function always returns the same result for the same arguments, i.e., it is deterministic.
+  UDF_VOLATILITY_IMMUTABLE = 1;
+  UDF_VOLATILITY_STABLE = 2;
+  UDF_VOLATILITY_VOLATILE = 3;
+}
+
 message UserDefinedFunction {
   repeated ExprNode children = 1;
   string name = 2;
@@ -693,6 +703,8 @@ message UserDefinedFunction {
   // additional options for javascript functions
   optional bool is_async = 13;
   optional bool is_batched = 14;
+  // The volatility declared by the user. Only used by the frontend to analyze the purity.
+  UdfVolatility volatility = 15;
 
   UdfExprVersion version = 1000;
 }

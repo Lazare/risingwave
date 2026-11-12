@@ -20,6 +20,7 @@ use risingwave_pb::catalog::function::{Kind, ScalarFunction, TableFunction};
 
 use super::*;
 use crate::expr::{Expr, Literal};
+use crate::handler::create_function::bind_volatility;
 use crate::{Binder, bind_data_type};
 
 pub async fn handle_create_sql_function(
@@ -175,6 +176,7 @@ pub async fn handle_create_sql_function(
         always_retry_on_network_error: false,
         is_async: None,
         is_batched: None,
+        volatility: bind_volatility(params.behavior.as_ref()) as _,
         created_at_epoch: None,
         created_at_cluster_version: None,
     };

@@ -16,11 +16,16 @@ use std::collections::BTreeMap;
 
 use risingwave_pb::catalog::PbFunction;
 use risingwave_pb::catalog::function::Kind;
+use risingwave_pb::expr::PbUdfVolatility;
 use sea_orm::ActiveValue::Set;
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{DataType, DataTypeArray, FunctionId, Property};
+
+/// The key in `options` storing the volatility declared by the user, encoded as the name of
+/// [`PbUdfVolatility`].
+pub const VOLATILITY_OPTION_KEY: &str = "volatility";
 
 #[derive(Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
 #[sea_orm(rs_type = "String", db_type = "string(None)")]
@@ -103,6 +108,13 @@ impl From<PbFunction> for ActiveModel {
         }
         if let Some(b) = function.is_async {
             options.insert("async".to_string(), b.to_string());
+        }
+        let volatility = function.volatility();
+        if volatility != PbUdfVolatility::Unspecified {
+            options.insert(
+                VOLATILITY_OPTION_KEY.to_owned(),
+                volatility.as_str_name().to_owned(),
+            );
         }
         Self {
             function_id: Set(function.id),
