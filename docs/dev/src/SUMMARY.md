@@ -38,6 +38,7 @@
 - [Streaming Engine](./design/streaming-overview.md)
     - [Checkpoint](./design/checkpoint.md)
     - [Selective Barriers](./design/selective-barriers.md)
+    - [Sink Groups](./design/sink-group.md)
     - [Aggregation](./design/aggregation.md)
     - [MView on Top of MView](./design/mv-on-mv.md)
     - [Backfill](./design/backfill.md)

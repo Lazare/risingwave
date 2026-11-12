@@ -13,11 +13,14 @@
 // limitations under the License.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::num::NonZeroUsize;
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::anyhow;
 use itertools::Itertools;
+use parking_lot::Mutex;
 use risingwave_common::bitmap::Bitmap;
 use risingwave_common::catalog::{FragmentTypeFlag, FragmentTypeMask, TableId};
 #[cfg(debug_assertions)]
@@ -25,7 +28,9 @@ use risingwave_common::hash::VnodeBitmapExt;
 use risingwave_common::id::JobId;
 use risingwave_common::system_param::AdaptiveParallelismStrategy;
 use risingwave_common::system_param::adaptive_parallelism_strategy::parse_strategy;
+use risingwave_common::util::stream_graph_visitor::visit_stream_node_cont;
 use risingwave_common::util::worker_util::DEFAULT_RESOURCE_GROUP;
+use risingwave_connector::sink::sink_group::SINK_GROUP_KEY;
 use risingwave_connector::source::{SplitId, SplitImpl, SplitMetaData};
 use risingwave_meta_model::fragment::DistributionType;
 use risingwave_meta_model::prelude::{
@@ -39,6 +44,7 @@ use risingwave_meta_model::{
 use risingwave_meta_model_migration::Condition;
 use risingwave_pb::common::WorkerNode;
 use risingwave_pb::stream_plan::PbStreamNode;
+use risingwave_pb::stream_plan::stream_node::NodeBody;
 use sea_orm::{
     ColumnTrait, ConnectionTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, QueryTrait,
     RelationTrait,
@@ -999,6 +1005,10 @@ fn render_actors_with_allocator(
             database_resource_group,
             distribution_type,
             vnode_count,
+            entry_fragments
+                .iter()
+                .find_map(|fragment| fragment_sink_group(&fragment.nodes))
+                .as_deref(),
         )?;
 
         let source_splits = match source_entry_fragment {
@@ -1094,6 +1104,58 @@ pub(crate) struct EnsembleActorTemplate {
     actor_count: u32,
 }
 
+/// The worker chosen for each sink group, by group and resource group.
+///
+/// It is only kept in memory: after a restart of the meta node, every job is placed again during
+/// the recovery, with the same set of workers, so all the sinks of a group agree again.
+static SINK_GROUP_WORKERS: LazyLock<Mutex<HashMap<(String, String), WorkerId>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The sink group of the sink held by the fragment, if any. Such a fragment is placed on a single
+/// worker, see [`choose_sink_group_worker`].
+pub(crate) fn fragment_sink_group(node: &PbStreamNode) -> Option<String> {
+    let mut group = None;
+    visit_stream_node_cont(node, |node| {
+        if let Some(NodeBody::Sink(sink)) = &node.node_body
+            && let Some(sink_desc) = &sink.sink_desc
+            && let Some(sink_group) = sink_desc.properties.get(SINK_GROUP_KEY)
+        {
+            group = Some(sink_group.clone());
+        }
+        true
+    });
+    group
+}
+
+/// Chooses the worker that runs all the sinks of a sink group: they share a connection pool and
+/// an ordering registry that are local to a compute node.
+///
+/// The first choice for a group hashes the group with each worker (rendezvous hashing), so that
+/// the groups are spread over the workers. The choice is then kept as long as the worker is
+/// available, so that the sinks of the group stay together when workers are added, whenever each
+/// of them is placed. When the worker is lost, the recovery places every sink of the group again
+/// and the first of them chooses another worker for all.
+fn choose_sink_group_worker<V>(
+    group: &str,
+    resource_group: &str,
+    available_workers: &BTreeMap<WorkerId, V>,
+) -> Option<WorkerId> {
+    let mut chosen_workers = SINK_GROUP_WORKERS.lock();
+    let key = (group.to_owned(), resource_group.to_owned());
+    if let Some(worker_id) = chosen_workers.get(&key)
+        && available_workers.contains_key(worker_id)
+    {
+        return Some(*worker_id);
+    }
+    let worker_id = *available_workers.keys().max_by_key(|worker_id| {
+        let mut hasher = DefaultHasher::new();
+        (group, worker_id).hash(&mut hasher);
+        hasher.finish()
+    })?;
+    chosen_workers.insert(key, worker_id);
+    Some(worker_id)
+}
+
 impl EnsembleActorTemplate {
     pub(crate) fn render_new(
         job: &streaming_job::Model,
@@ -1102,6 +1164,7 @@ impl EnsembleActorTemplate {
         database_resource_group: String,
         distribution_type: DistributionType,
         vnode_count: usize,
+        sink_group: Option<&str>,
     ) -> MetaResult<Self> {
         let job_id = job.job_id;
         let job_strategy = job
@@ -1140,6 +1203,17 @@ impl EnsembleActorTemplate {
                 }
             })
             .collect();
+
+        // The sinks of a group must run on the same compute node.
+        let available_workers: BTreeMap<WorkerId, NonZeroUsize> = match sink_group
+            .and_then(|group| choose_sink_group_worker(group, &resource_group, &available_workers))
+        {
+            Some(worker_id) => available_workers
+                .into_iter()
+                .filter(|(id, _)| *id == worker_id)
+                .collect(),
+            None => available_workers,
+        };
 
         let total_parallelism = available_workers.values().map(|w| w.get()).sum::<usize>();
 
@@ -2952,5 +3026,212 @@ mod tests {
             4,
             "created jobs should use the main job strategy before any backfill override applies"
         );
+    }
+
+    fn sink_group_test_workers(ids: &[u32]) -> BTreeMap<WorkerId, ()> {
+        ids.iter().map(|id| (WorkerId::from(*id), ())).collect()
+    }
+
+    #[test]
+    fn sink_group_worker_is_kept_while_available() {
+        let group = "test-sink-group-sticky";
+        let workers = sink_group_test_workers(&[1, 2, 3, 4]);
+        let chosen = choose_sink_group_worker(group, "rg", &workers).unwrap();
+        assert!(workers.contains_key(&chosen));
+        // Every sink of the group gets the same worker.
+        assert_eq!(
+            choose_sink_group_worker(group, "rg", &workers),
+            Some(chosen)
+        );
+
+        // Adding workers never moves the group, whatever their hash.
+        let more_workers = sink_group_test_workers(&(1..=64).collect_vec());
+        assert_eq!(
+            choose_sink_group_worker(group, "rg", &more_workers),
+            Some(chosen)
+        );
+
+        // When the worker is lost, another one is chosen, and kept in turn.
+        let remaining: BTreeMap<_, _> = workers
+            .iter()
+            .filter(|(id, _)| **id != chosen)
+            .map(|(id, _)| (*id, ()))
+            .collect();
+        let next = choose_sink_group_worker(group, "rg", &remaining).unwrap();
+        assert_ne!(next, chosen);
+        assert!(remaining.contains_key(&next));
+        assert_eq!(
+            choose_sink_group_worker(group, "rg", &remaining),
+            Some(next)
+        );
+        // The lost worker coming back does not move the group again.
+        assert_eq!(choose_sink_group_worker(group, "rg", &workers), Some(next));
+
+        // Without worker, there is no choice.
+        assert_eq!(
+            choose_sink_group_worker(group, "rg", &sink_group_test_workers(&[])),
+            None
+        );
+    }
+
+    #[test]
+    fn sink_groups_are_spread_over_workers() {
+        let workers = sink_group_test_workers(&[1, 2, 3, 4]);
+        let chosen: BTreeSet<WorkerId> = (0..32)
+            .map(|i| {
+                choose_sink_group_worker(&format!("test-sink-group-spread-{i}"), "rg", &workers)
+                    .unwrap()
+            })
+            .collect();
+        assert!(
+            chosen.len() >= 3,
+            "32 groups should use most of the 4 workers, used {chosen:?}"
+        );
+
+        // The choice is made per resource group.
+        let other_workers = sink_group_test_workers(&[7, 8]);
+        let other =
+            choose_sink_group_worker("test-sink-group-spread-0", "rg-2", &other_workers).unwrap();
+        assert!(other_workers.contains_key(&other));
+        assert!(workers.contains_key(
+            &choose_sink_group_worker("test-sink-group-spread-0", "rg", &workers).unwrap()
+        ));
+    }
+
+    #[test]
+    fn render_actors_places_sink_group_on_one_worker() {
+        const GROUP: &str = "test-sink-group-render";
+        const RESOURCE_GROUP: &str = "rg-sink-group";
+        let database_id: DatabaseId = DatabaseId::new(9);
+        let sink_job_ids: [JobId; 2] = [31.into(), 32.into()];
+        let plain_job_id: JobId = 33.into();
+
+        let sink_node = PbStreamNode {
+            node_body: Some(NodeBody::Sink(
+                risingwave_pb::stream_plan::SinkNode {
+                    sink_desc: Some(risingwave_pb::stream_plan::SinkDesc {
+                        properties: [(SINK_GROUP_KEY.to_owned(), GROUP.to_owned())].into(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+            )),
+            ..Default::default()
+        };
+        assert_eq!(fragment_sink_group(&sink_node), Some(GROUP.to_owned()));
+        assert_eq!(fragment_sink_group(&PbStreamNode::default()), None);
+
+        let job_model = |job_id: JobId| streaming_job::Model {
+            job_id,
+            job_status: JobStatus::Created,
+            create_type: CreateType::Background,
+            timezone: None,
+            config_override: None,
+            adaptive_parallelism_strategy: None,
+            parallelism: StreamingParallelism::Fixed(4),
+            backfill_parallelism: None,
+            backfill_adaptive_parallelism_strategy: None,
+            backfill_orders: None,
+            max_parallelism: 8,
+            specific_resource_group: None,
+            is_serverless_backfill: false,
+            refresh_interval_sec: None,
+        };
+        let database_model = database::Model {
+            database_id,
+            name: "test_db_sink_group".into(),
+            resource_group: RESOURCE_GROUP.into(),
+            barrier_interval_ms: None,
+            checkpoint_frequency: None,
+        };
+
+        // Two sinks of the same group, each in its own fragment, and a job without group.
+        let mut ensembles = vec![];
+        let mut job_fragments = HashMap::new();
+        let mut job_map = HashMap::new();
+        for (idx, job_id) in sink_job_ids.into_iter().chain([plain_job_id]).enumerate() {
+            let fragment_id: FragmentId = (idx as u32 + 1).into();
+            let mut fragment = build_fragment(
+                fragment_id,
+                job_id,
+                0,
+                DistributionType::Hash,
+                8,
+                StreamingParallelism::Fixed(4),
+            );
+            if job_id != plain_job_id {
+                fragment.nodes = sink_node.clone();
+            }
+            ensembles.push(NoShuffleEnsemble {
+                entries: HashSet::from([fragment_id]),
+                components: HashSet::from([fragment_id]),
+            });
+            job_fragments.insert(job_id, HashMap::from([(fragment_id, fragment)]));
+            job_map.insert(job_id, job_model(job_id));
+        }
+        let fragment_source_ids: HashMap<FragmentId, SourceId> = HashMap::new();
+        let fragment_splits: HashMap<FragmentId, Vec<SplitImpl>> = HashMap::new();
+        let streaming_job_databases: HashMap<JobId, DatabaseId> = job_map
+            .keys()
+            .map(|job_id| (*job_id, database_id))
+            .collect();
+        let database_map = HashMap::from([(database_id, database_model)]);
+
+        // Workers used by each job when rendered with the given workers.
+        let render = |worker_ids: &[u32]| -> HashMap<JobId, BTreeSet<WorkerId>> {
+            let worker_map: HashMap<WorkerId, WorkerNode> = worker_ids
+                .iter()
+                .map(|id| ((*id).into(), build_worker_node(*id, 4, RESOURCE_GROUP)))
+                .collect();
+            let result = render_actors(
+                &AtomicU32::new(0),
+                &ensembles,
+                &job_fragments,
+                &job_map,
+                &worker_map,
+                RenderActorsContext {
+                    fragment_source_ids: &fragment_source_ids,
+                    fragment_splits: &fragment_splits,
+                    streaming_job_databases: &streaming_job_databases,
+                    database_map: &database_map,
+                },
+            )
+            .expect("actor rendering succeeds");
+            result[&database_id]
+                .iter()
+                .map(|(job_id, fragments)| {
+                    let fragment = fragments.values().exactly_one().ok().unwrap();
+                    // The parallelism of the job is kept.
+                    assert_eq!(fragment.actors.len(), 4);
+                    (
+                        *job_id,
+                        fragment.actors.values().map(|a| a.worker_id).collect(),
+                    )
+                })
+                .collect()
+        };
+
+        let workers = render(&[1, 2, 3]);
+        let sink_workers = &workers[&sink_job_ids[0]];
+        assert_eq!(sink_workers.len(), 1, "a sink of a group uses one worker");
+        assert_eq!(sink_workers, &workers[&sink_job_ids[1]]);
+        assert!(workers[&plain_job_id].len() > 1, "other jobs are spread");
+        let chosen = *sink_workers.first().unwrap();
+
+        // More workers: the sinks of the group do not move.
+        let workers = render(&[1, 2, 3, 4, 5, 6]);
+        assert_eq!(workers[&sink_job_ids[0]], BTreeSet::from([chosen]));
+        assert_eq!(workers[&sink_job_ids[1]], BTreeSet::from([chosen]));
+
+        // The worker is lost: both sinks move to the same other worker.
+        let remaining = (1..=3u32)
+            .filter(|id| WorkerId::from(*id) != chosen)
+            .collect_vec();
+        let workers = render(&remaining);
+        let sink_workers = &workers[&sink_job_ids[0]];
+        assert_eq!(sink_workers.len(), 1);
+        assert!(!sink_workers.contains(&chosen));
+        assert_eq!(sink_workers, &workers[&sink_job_ids[1]]);
     }
 }
