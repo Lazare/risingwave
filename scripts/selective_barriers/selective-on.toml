@@ -1,0 +1,3 @@
+# Cluster configuration for testing selective barriers.
+[meta.developer]
+enable_selective_barrier = true

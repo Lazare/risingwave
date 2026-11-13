@@ -898,6 +898,9 @@ impl HummockEventHandler {
             HummockEvent::StartEpoch { epoch, table_ids } => {
                 self.uploader.start_epoch(epoch, table_ids);
             }
+            HummockEvent::AbandonEpoch { epoch, table_ids } => {
+                self.uploader.abandon_epoch(epoch, table_ids);
+            }
             HummockEvent::InitEpoch {
                 instance_id,
                 init_epoch,

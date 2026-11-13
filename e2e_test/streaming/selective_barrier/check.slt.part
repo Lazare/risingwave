@@ -1,0 +1,89 @@
+# Consistency checks for the selective barrier test graph.
+# Each query counts the rows that differ between a materialized view and the
+# same query recomputed in batch mode. All of them must return 0.
+
+statement ok
+flush;
+
+query I
+select count(*) from (
+  (select g, c, s from sb_a_by_g except select g, count(*), sum(v) from sb_a group by g)
+  union all
+  (select g, count(*), sum(v) from sb_a group by g except select g, c, s from sb_a_by_g)
+) d;
+----
+0
+
+query I
+select count(*) from (
+  (select g, c, s from sb_b_by_g except select g, count(*), sum(v) from sb_b group by g)
+  union all
+  (select g, count(*), sum(v) from sb_b group by g except select g, c, s from sb_b_by_g)
+) d;
+----
+0
+
+query I
+select count(*) from (
+  (select k, va, vb from sb_ab except select a.k, a.v, b.v from sb_a a join sb_b b on a.k = b.k)
+  union all
+  (select a.k, a.v, b.v from sb_a a join sb_b b on a.k = b.k except select k, va, vb from sb_ab)
+) d;
+----
+0
+
+query I
+select count(*) from (
+  (select k, va, vb, vc from sb_abc
+   except
+   select a.k, a.v, b.v, c.v from sb_a a join sb_b b on a.k = b.k join sb_c c on a.k = c.k)
+  union all
+  (select a.k, a.v, b.v, c.v from sb_a a join sb_b b on a.k = b.k join sb_c c on a.k = c.k
+   except
+   select k, va, vb, vc from sb_abc)
+) d;
+----
+0
+
+query I
+select count(*) from (
+  (select g, c, s from sb_abc_g
+   except
+   select a.k % 3, count(*), sum(a.v + b.v + c.v)
+   from sb_a a join sb_b b on a.k = b.k join sb_c c on a.k = c.k group by a.k % 3)
+  union all
+  (select a.k % 3, count(*), sum(a.v + b.v + c.v)
+   from sb_a a join sb_b b on a.k = b.k join sb_c c on a.k = c.k group by a.k % 3
+   except
+   select g, c, s from sb_abc_g)
+) d;
+----
+0
+
+query I
+select count(*) from (
+  (select g, m from sb_c_only except select g, max(v) from sb_c group by g)
+  union all
+  (select g, max(v) from sb_c group by g except select g, m from sb_c_only)
+) d;
+----
+0
+
+# Rows of sb_ev are either far in the past or far in the future, so the result
+# does not depend on the exact value of now().
+query I
+select count(*) from (
+  (select k from sb_ev_past except select k from sb_ev where ts < now())
+  union all
+  (select k from sb_ev where ts < now() except select k from sb_ev_past)
+) d;
+----
+0
+
+# Two materialized views derived from the same table, read in the same query,
+# must reflect the same epoch.
+query T
+select coalesce((select c from sb_a_total), 0) = coalesce((select sum(c) from sb_a_by_g), 0)
+   and coalesce((select s from sb_a_total), 0) = coalesce((select sum(s) from sb_a_by_g), 0);
+----
+t

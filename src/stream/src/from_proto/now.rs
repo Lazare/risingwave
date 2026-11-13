@@ -83,7 +83,8 @@ impl ExecutorBuilder for NowExecutorBuilder {
             barrier_receiver,
             state_table,
             progress_ratio,
-        );
+        )
+        .with_selective_fragment_id(params.actor_context.fragment_id);
         Ok((params.info, exec).into())
     }
 }

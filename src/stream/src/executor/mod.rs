@@ -53,7 +53,8 @@ use risingwave_pb::stream_plan::throttle_mutation::ThrottleConfig;
 use risingwave_pb::stream_plan::update_mutation::{DispatcherUpdate, MergeUpdate};
 use risingwave_pb::stream_plan::{
     IcebergPkIndexCompactionContext, PbBarrier, PbBarrierMutation, PbDispatcher,
-    PbSinkSchemaChange, PbStreamMessageBatch, PbWatermark, SubscriptionUpstreamInfo,
+    PbSelectiveBarrierInfo, PbSinkSchemaChange, PbStreamMessageBatch, PbWatermark,
+    SubscriptionUpstreamInfo,
 };
 use smallvec::SmallVec;
 use tokio::sync::mpsc;
@@ -78,6 +79,7 @@ pub mod asof_join;
 mod backfill;
 mod barrier_recv;
 mod batch_query;
+mod cdc_filter_gate;
 mod chain;
 mod changelog;
 mod dedup;
@@ -143,6 +145,7 @@ pub use backfill::no_shuffle_backfill::*;
 pub use backfill::snapshot_backfill::*;
 pub use barrier_recv::BarrierRecvExecutor;
 pub use batch_query::BatchQueryExecutor;
+pub use cdc_filter_gate::CdcFilterGateExecutor;
 pub use chain::ChainExecutor;
 pub use changelog::{ChangeLogExecutor, ChangeLogMode};
 pub use dedup::AppendOnlyDedupExecutor;
@@ -405,6 +408,93 @@ pub struct BarrierInner<M> {
     /// Tracing context for the **current** epoch of this barrier.
     pub tracing_context: TracingContext,
     pub iceberg_pk_index_compaction: Option<IcebergPkIndexCompactionContext>,
+    /// Set only when the barrier is injected selectively. `None` means every fragment of the
+    /// partial graph receives the barrier, which is the default behavior.
+    pub selective: Option<Arc<SelectiveBarrierInfo>>,
+}
+
+/// Fragments that take part in a selectively injected barrier.
+/// See `docs/dev/src/design/selective-barriers.md`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SelectiveBarrierInfo {
+    /// Fragments that do not receive the barrier.
+    pub sleeping_fragments: HashSet<FragmentId>,
+    /// Fragments that receive the barrier but did not receive the previous one.
+    pub waking_fragments: HashSet<FragmentId>,
+    /// Fragments released by the barrier: they and their descendants receive the next barrier.
+    pub released_fragments: HashSet<FragmentId>,
+    /// Routes of shared CDC sources (design D1), only set on some barriers. Empty means that
+    /// sources keep their last routes.
+    pub cdc_routes: Vec<CdcRoute>,
+}
+
+/// The `CdcFilter` fragment that receives the rows of a table of a shared CDC source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CdcRoute {
+    pub source_fragment: FragmentId,
+    pub fragment: FragmentId,
+    /// Value of `_rw_table_name` of the rows of the table.
+    pub table_name: String,
+}
+
+impl SelectiveBarrierInfo {
+    fn from_protobuf(pb: &PbSelectiveBarrierInfo) -> Self {
+        Self {
+            sleeping_fragments: pb
+                .sleeping_fragment_ids
+                .iter()
+                .map(|id| (*id).into())
+                .collect(),
+            waking_fragments: pb
+                .waking_fragment_ids
+                .iter()
+                .map(|id| (*id).into())
+                .collect(),
+            released_fragments: pb
+                .released_fragment_ids
+                .iter()
+                .map(|id| (*id).into())
+                .collect(),
+            cdc_routes: pb
+                .cdc_routes
+                .iter()
+                .map(|route| CdcRoute {
+                    source_fragment: route.source_fragment_id.into(),
+                    fragment: route.fragment_id.into(),
+                    table_name: route.table_name.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    fn to_protobuf(&self) -> PbSelectiveBarrierInfo {
+        PbSelectiveBarrierInfo {
+            sleeping_fragment_ids: self
+                .sleeping_fragments
+                .iter()
+                .map(|id| id.as_raw_id())
+                .collect(),
+            waking_fragment_ids: self
+                .waking_fragments
+                .iter()
+                .map(|id| id.as_raw_id())
+                .collect(),
+            released_fragment_ids: self
+                .released_fragments
+                .iter()
+                .map(|id| id.as_raw_id())
+                .collect(),
+            cdc_routes: self
+                .cdc_routes
+                .iter()
+                .map(|route| risingwave_pb::stream_plan::PbCdcRoute {
+                    source_fragment_id: route.source_fragment.as_raw_id(),
+                    fragment_id: route.fragment.as_raw_id(),
+                    table_name: route.table_name.clone(),
+                })
+                .collect(),
+        }
+    }
 }
 
 pub type BarrierMutationType = Option<Arc<Mutation>>;
@@ -420,6 +510,7 @@ impl<M: Default> BarrierInner<M> {
             tracing_context: TracingContext::none(),
             mutation: Default::default(),
             iceberg_pk_index_compaction: None,
+            selective: None,
         }
     }
 
@@ -430,6 +521,7 @@ impl<M: Default> BarrierInner<M> {
             tracing_context: TracingContext::none(),
             mutation: Default::default(),
             iceberg_pk_index_compaction: None,
+            selective: None,
         }
     }
 }
@@ -442,6 +534,7 @@ impl Barrier {
             kind: self.kind,
             tracing_context: self.tracing_context,
             iceberg_pk_index_compaction: self.iceberg_pk_index_compaction,
+            selective: self.selective,
         }
     }
 
@@ -1182,6 +1275,7 @@ impl<M> BarrierInner<M> {
             kind,
             tracing_context,
             iceberg_pk_index_compaction,
+            selective,
         } = self;
 
         PbBarrier {
@@ -1195,6 +1289,7 @@ impl<M> BarrierInner<M> {
             tracing_context: tracing_context.to_protobuf(),
             kind: *kind as _,
             iceberg_pk_index_compaction: *iceberg_pk_index_compaction,
+            selective: selective.as_ref().map(|info| info.to_protobuf()),
         }
     }
 
@@ -1212,6 +1307,10 @@ impl<M> BarrierInner<M> {
             )?,
             tracing_context: TracingContext::from_protobuf(&prost.tracing_context),
             iceberg_pk_index_compaction: prost.iceberg_pk_index_compaction,
+            selective: prost
+                .selective
+                .as_ref()
+                .map(|info| Arc::new(SelectiveBarrierInfo::from_protobuf(info))),
         })
     }
 
@@ -1222,11 +1321,35 @@ impl<M> BarrierInner<M> {
             kind: self.kind,
             tracing_context: self.tracing_context,
             iceberg_pk_index_compaction: self.iceberg_pk_index_compaction,
+            selective: self.selective,
         }
     }
 
     pub fn iceberg_pk_index_compaction(&self) -> Option<&IcebergPkIndexCompactionContext> {
         self.iceberg_pk_index_compaction.as_ref()
+    }
+
+    /// Whether the given fragment does not receive this barrier (selective injection).
+    pub fn is_fragment_sleeping(&self, fragment_id: FragmentId) -> bool {
+        self.selective
+            .as_ref()
+            .is_some_and(|info| info.sleeping_fragments.contains(&fragment_id))
+    }
+
+    /// Whether the given fragment is released by this selective barrier, i.e. it and its
+    /// descendants also receive the next barrier. Always true when the barrier is not selective.
+    pub fn is_fragment_released(&self, fragment_id: FragmentId) -> bool {
+        self.selective
+            .as_ref()
+            .is_none_or(|info| info.released_fragments.contains(&fragment_id))
+    }
+
+    /// Whether the given fragment receives this barrier after having slept during the previous
+    /// epochs. Its actors may then observe `prev` newer than their last sealed epoch.
+    pub fn is_fragment_waking(&self, fragment_id: FragmentId) -> bool {
+        self.selective
+            .as_ref()
+            .is_some_and(|info| info.waking_fragments.contains(&fragment_id))
     }
 }
 
@@ -1828,6 +1951,11 @@ impl DispatchBarrierBuffer {
             tokio::time::interval_at(start_time + interval_duration, interval_duration);
 
         loop {
+            // With selective barriers, the upstream fragment may sleep during this epoch: it sends
+            // neither data nor barrier, so the barrier is forwarded without waiting for it.
+            if let Some(barrier) = self.front_barrier_with_sleeping_upstream() {
+                return Ok(DispatcherMessage::Barrier(barrier));
+            }
             tokio::select! {
                 biased;
                 msg = stream.try_next() => {
@@ -1839,8 +1967,10 @@ impl DispatchBarrierBuffer {
                     );
                 }
 
-                e = self.continuously_fetch_barrier_rx() => {
-                    return Err(e);
+                res = self.try_fetch_barrier_rx(true) => {
+                    // A new barrier may exempt the upstream: check again at the top of the loop.
+                    res?;
+                    continue;
                 }
 
                 _ = interval.tick() => {
@@ -1865,12 +1995,18 @@ impl DispatchBarrierBuffer {
         Ok((recv_barrier, inputs))
     }
 
-    async fn continuously_fetch_barrier_rx(&mut self) -> StreamExecutorError {
-        loop {
-            if let Err(e) = self.try_fetch_barrier_rx(true).await {
-                return e;
-            }
+    /// Returns the barrier at the front of the buffer if the current upstream fragment does not
+    /// receive it (selective barrier injection), so that it can be forwarded without waiting for
+    /// the upstream.
+    fn front_barrier_with_sleeping_upstream(&self) -> Option<DispatcherBarrier> {
+        let (barrier, inputs) = self.buffer.front()?;
+        if !barrier.is_fragment_sleeping(self.curr_upstream_fragment_id) {
+            return None;
         }
+        // Barriers that change the upstream set carry a mutation and are always delivered to
+        // every fragment, so they never exempt an upstream.
+        debug_assert!(inputs.is_none() && barrier.mutation.is_none());
+        Some(barrier.clone().into_dispatcher())
     }
 
     async fn try_fetch_barrier_rx(&mut self, pending_on_end: bool) -> StreamExecutorResult<()> {

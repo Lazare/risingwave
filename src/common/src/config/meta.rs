@@ -530,6 +530,11 @@ pub struct MetaDeveloperConfig {
     /// Compaction picker config
     #[serde(default = "default::developer::enable_trivial_move")]
     pub enable_trivial_move: bool,
+
+    /// Deliver periodic barriers only to the fragments whose inputs may have changed (only for
+    /// DML-driven tables for now). Experimental, see `docs/dev/src/design/selective-barriers.md`.
+    #[serde(default = "default::developer::enable_selective_barrier")]
+    pub enable_selective_barrier: bool,
     #[serde(default = "default::developer::enable_check_task_level_overlap")]
     pub enable_check_task_level_overlap: bool,
     #[serde(default = "default::developer::max_trivial_move_task_count_per_loop")]

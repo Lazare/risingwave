@@ -591,6 +591,11 @@ pub(super) enum ManagedBarrierStateEvent {
         upstream_partial_graph_id: PartialGraphId,
         tx: permit::Sender,
     },
+    /// Selective barriers: a fragment holds input data and waits for a barrier.
+    PendingInput {
+        partial_graph_id: PartialGraphId,
+        fragment_id: FragmentId,
+    },
 }
 
 impl ManagedBarrierState {
@@ -1004,6 +1009,12 @@ impl PartialGraphState {
                     self.report_iceberg_pk_index_sink_metadata(
                         epoch, sink_id, actor_id, role, metadata,
                     );
+                }
+                LocalBarrierEvent::ReportPendingInput { fragment_id } => {
+                    return Poll::Ready(ManagedBarrierStateEvent::PendingInput {
+                        partial_graph_id: self.partial_graph_id,
+                        fragment_id,
+                    });
                 }
             }
         }
@@ -1453,6 +1464,12 @@ impl PartialGraphManagedBarrierState {
                 None
             }
             BarrierKind::Barrier => {
+                // Selective barriers may only change the set of woken tables at checkpoints.
+                assert!(
+                    barrier.selective.is_none(),
+                    "selective barrier must be a checkpoint: {:?}",
+                    barrier.epoch
+                );
                 if let Some((prev_epoch, prev_table_ids)) = self.prev_barrier_table_ids.as_mut() {
                     assert_eq!(prev_epoch.curr, barrier.epoch.prev);
                     assert_eq!(prev_table_ids, &table_ids);
@@ -1463,18 +1480,46 @@ impl PartialGraphManagedBarrierState {
                 }
                 None
             }
-            BarrierKind::Checkpoint => Some(
-                if let Some((prev_epoch, prev_table_ids)) = self
-                    .prev_barrier_table_ids
-                    .replace((barrier.epoch, table_ids))
-                    && prev_epoch.curr == barrier.epoch.prev
-                {
-                    prev_table_ids
-                } else {
-                    debug!(epoch = ?barrier.epoch, "reinitialize at Checkpoint barrier");
-                    HashSet::new()
-                },
-            ),
+            BarrierKind::Checkpoint => {
+                // Only a periodic barrier that leaves fragments asleep makes tables fall asleep.
+                // A barrier with a mutation (e.g. dropping jobs) is delivered to every fragment,
+                // and the tables it removes have sealed the previous epoch and must be synced.
+                let curr_table_ids = barrier
+                    .selective
+                    .as_ref()
+                    .filter(|info| {
+                        !info.sleeping_fragments.is_empty() && barrier.mutation.is_none()
+                    })
+                    .map(|_| table_ids.clone());
+                Some(
+                    if let Some((prev_epoch, prev_table_ids)) = self
+                        .prev_barrier_table_ids
+                        .replace((barrier.epoch, table_ids))
+                        && prev_epoch.curr == barrier.epoch.prev
+                    {
+                        match curr_table_ids {
+                            // Tables that started the previous epoch but do not receive this
+                            // barrier fall asleep: their actors will not seal the previous epoch,
+                            // which is empty for them. Abandon it and do not sync them.
+                            Some(curr_table_ids) => {
+                                let (synced, asleep): (HashSet<_>, HashSet<_>) = prev_table_ids
+                                    .into_iter()
+                                    .partition(|table_id| curr_table_ids.contains(table_id));
+                                if !asleep.is_empty()
+                                    && let Some(hummock) = self.state_store.as_hummock()
+                                {
+                                    hummock.abandon_epoch(prev_epoch.curr, asleep);
+                                }
+                                synced
+                            }
+                            None => prev_table_ids,
+                        }
+                    } else {
+                        debug!(epoch = ?barrier.epoch, "reinitialize at Checkpoint barrier");
+                        HashSet::new()
+                    },
+                )
+            }
         };
 
         if let Some(&mut BarrierState { ref inner, .. }) =

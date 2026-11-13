@@ -60,8 +60,8 @@ use risingwave_pb::stream_service::streaming_control_stream_request::{
     InitRequest, Request, ResetPartialGraphsRequest,
 };
 use risingwave_pb::stream_service::streaming_control_stream_response::{
-    InitResponse, ReportPartialGraphFailureResponse, ResetPartialGraphResponse, Response,
-    ShutdownResponse,
+    InitResponse, ReportPartialGraphFailureResponse, ReportPendingInputResponse,
+    ResetPartialGraphResponse, Response, ShutdownResponse,
 };
 use risingwave_pb::stream_service::{
     BarrierCompleteResponse, InjectBarrierRequest, PbScoredError, StreamingControlStreamRequest,
@@ -397,6 +397,17 @@ impl LocalBarrierWorker {
                                 self.ack_partial_graph_reset(partial_graph_id, Some(output));
                             }
                         }
+                        ManagedBarrierStateEvent::PendingInput {
+                            partial_graph_id,
+                            fragment_id,
+                        } => {
+                            self.control_stream_handle.send_response(Response::ReportPendingInput(
+                                ReportPendingInputResponse {
+                                    partial_graph_id,
+                                    fragment_ids: vec![fragment_id],
+                                },
+                            ));
+                        }
                         ManagedBarrierStateEvent::RegisterLocalUpstreamOutput{
                             actor_id,
                             upstream_actor_id,
@@ -617,7 +628,8 @@ impl LocalBarrierWorker {
                         }
                         ManagedBarrierStateEvent::ActorError { .. }
                         | ManagedBarrierStateEvent::PartialGraphsReset { .. }
-                        | ManagedBarrierStateEvent::RegisterLocalUpstreamOutput { .. } => {
+                        | ManagedBarrierStateEvent::RegisterLocalUpstreamOutput { .. }
+                        | ManagedBarrierStateEvent::PendingInput { .. } => {
                             unreachable!()
                         }
                     }

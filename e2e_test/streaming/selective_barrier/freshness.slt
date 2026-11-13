@@ -1,0 +1,64 @@
+# Freshness without FLUSH. With selective barriers, an idle table sleeps and its DML data is held
+# until meta delivers a barrier to it, which requires the table to ring meta. This test checks
+# that data written to an idle table becomes visible without any FLUSH or DDL.
+
+statement ok
+create table sbf_x (k int primary key, v int);
+
+statement ok
+create table sbf_y (k int primary key, v int);
+
+statement ok
+create materialized view sbf_xm as select count(*) as c, sum(v) as s from sbf_x;
+
+statement ok
+create materialized view sbf_ym as select count(*) as c from sbf_y;
+
+# Let both tables fall asleep.
+sleep 5s
+
+# A small transaction, kept by the DML executor until the next barrier.
+statement ok
+insert into sbf_x values (1, 10), (2, 20);
+
+sleep 5s
+
+query II
+select c, s from sbf_xm;
+----
+2 30
+
+query I
+select c from sbf_ym;
+----
+0
+
+# The other table, while the first one sleeps again.
+sleep 5s
+
+statement ok
+insert into sbf_y values (1, 1);
+
+sleep 5s
+
+query I
+select c from sbf_ym;
+----
+1
+
+query II
+select c, s from sbf_xm;
+----
+2 30
+
+statement ok
+drop materialized view sbf_xm;
+
+statement ok
+drop materialized view sbf_ym;
+
+statement ok
+drop table sbf_x;
+
+statement ok
+drop table sbf_y;

@@ -194,12 +194,20 @@ message StreamingControlStreamResponse {
     reserved "reset_request_id";
   }
 
+  // Selective barriers: the listed fragments hold input data and wait for a barrier to release
+  // it. Meta must deliver the next barrier to them and to their descendants.
+  message ReportPendingInputResponse {
+    uint64 partial_graph_id = 1;
+    repeated uint32 fragment_ids = 2;
+  }
+
   oneof response {
     InitResponse init = 1;
     BarrierCompleteResponse complete_barrier = 2;
     ShutdownResponse shutdown = 3;
     ReportPartialGraphFailureResponse report_partial_graph_failure = 4;
     ResetPartialGraphResponse reset_partial_graph = 5;
+    ReportPendingInputResponse report_pending_input = 6;
   }
 }
 
