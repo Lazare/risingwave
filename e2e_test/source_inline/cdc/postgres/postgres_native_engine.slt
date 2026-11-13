@@ -1,0 +1,288 @@
+# Postgres CDC with the native engine (`cdc.engine = 'native'`), which reads the logical
+# replication stream in Rust instead of running Debezium in the embedded JVM.
+#
+# The same upstream tables are ingested with both engines, and the results must be identical.
+
+control substitution on
+
+statement ok
+drop source if exists pg_native_engine_src_native cascade;
+
+statement ok
+drop source if exists pg_native_engine_src_dbz cascade;
+
+system ok
+PGDATABASE=${PGDATABASE:-postgres} psql -c "
+    SELECT pg_terminate_backend(active_pid)
+    FROM pg_replication_slots
+    WHERE slot_name LIKE 'pg_native_engine_slot_%' AND active_pid IS NOT NULL;
+    SELECT pg_sleep(1);
+    SELECT pg_drop_replication_slot(slot_name)
+    FROM pg_replication_slots
+    WHERE slot_name LIKE 'pg_native_engine_slot_%';
+    DROP PUBLICATION IF EXISTS pg_native_engine_pub;
+    DROP TABLE IF EXISTS public.pg_native_engine_types CASCADE;
+    DROP TABLE IF EXISTS public.pg_native_engine_other CASCADE;
+    DROP TABLE IF EXISTS public.pg_native_engine_marker CASCADE;
+    DROP TYPE IF EXISTS public.pg_native_engine_mood;
+    CREATE TYPE public.pg_native_engine_mood AS ENUM ('sad', 'happy');
+    CREATE TABLE public.pg_native_engine_types (
+        id int PRIMARY KEY,
+        c_bool boolean,
+        c_int2 smallint,
+        c_int8 bigint,
+        c_real real,
+        c_double double precision,
+        c_numeric numeric(20, 4),
+        c_text text,
+        c_varchar varchar(20),
+        c_bytea bytea,
+        c_date date,
+        c_time time,
+        c_ts timestamp,
+        c_tstz timestamptz,
+        c_interval interval,
+        c_jsonb jsonb,
+        c_uuid uuid,
+        c_mood public.pg_native_engine_mood,
+        c_int_arr int[],
+        c_text_arr text[],
+        c_big text
+    );
+    CREATE TABLE public.pg_native_engine_other (id int PRIMARY KEY, v text);
+    ALTER TABLE public.pg_native_engine_other REPLICA IDENTITY FULL;
+    INSERT INTO public.pg_native_engine_types (id, c_text) VALUES (1, 'snapshot');
+    INSERT INTO public.pg_native_engine_other VALUES (1, 'snapshot');
+    CREATE PUBLICATION pg_native_engine_pub
+        FOR TABLE public.pg_native_engine_types, public.pg_native_engine_other;
+    "
+
+# The option is validated.
+statement error invalid value `rust` of option `cdc.engine`
+create source pg_native_engine_src_native with (
+    connector = 'postgres-cdc',
+    hostname = '${PGHOST:localhost}',
+    port = '${PGPORT:5432}',
+    username = '${PGUSER:$USER}',
+    password = '${PGPASSWORD:}',
+    database.name = '${PGDATABASE:postgres}',
+    schema.name = 'public',
+    slot.name = 'pg_native_engine_slot_native',
+    cdc.engine = 'rust'
+);
+
+statement error is not supported with 'cdc.engine' = 'native'
+create source pg_native_engine_src_native with (
+    connector = 'postgres-cdc',
+    hostname = '${PGHOST:localhost}',
+    port = '${PGPORT:5432}',
+    username = '${PGUSER:$USER}',
+    password = '${PGPASSWORD:}',
+    database.name = '${PGDATABASE:postgres}',
+    schema.name = 'public',
+    slot.name = 'pg_native_engine_slot_native',
+    auto.schema.change = 'true',
+    cdc.engine = 'native'
+);
+
+# A short heartbeat interval, to check below that the position of an idle source is
+# confirmed to the upstream.
+statement ok
+create source pg_native_engine_src_native with (
+    connector = 'postgres-cdc',
+    hostname = '${PGHOST:localhost}',
+    port = '${PGPORT:5432}',
+    username = '${PGUSER:$USER}',
+    password = '${PGPASSWORD:}',
+    database.name = '${PGDATABASE:postgres}',
+    schema.name = 'public',
+    publication.name = 'pg_native_engine_pub',
+    publication.create.enable = 'false',
+    slot.name = 'pg_native_engine_slot_native',
+    debezium.heartbeat.interval.ms = '1000',
+    cdc.engine = 'native'
+);
+
+statement ok
+create source pg_native_engine_src_dbz with (
+    connector = 'postgres-cdc',
+    hostname = '${PGHOST:localhost}',
+    port = '${PGPORT:5432}',
+    username = '${PGUSER:$USER}',
+    password = '${PGPASSWORD:}',
+    database.name = '${PGDATABASE:postgres}',
+    schema.name = 'public',
+    publication.name = 'pg_native_engine_pub',
+    publication.create.enable = 'false',
+    slot.name = 'pg_native_engine_slot_dbz',
+    cdc.engine = 'debezium'
+);
+
+statement ok
+create table pg_native_engine_types_native (*)
+from pg_native_engine_src_native table 'public.pg_native_engine_types';
+
+statement ok
+create table pg_native_engine_other_native (*)
+from pg_native_engine_src_native table 'public.pg_native_engine_other';
+
+statement ok
+create table pg_native_engine_types_dbz (*)
+from pg_native_engine_src_dbz table 'public.pg_native_engine_types';
+
+statement ok
+create table pg_native_engine_other_dbz (*)
+from pg_native_engine_src_dbz table 'public.pg_native_engine_other';
+
+# The existing rows are backfilled.
+query IT retry 30 backoff 1s
+select id, c_text from pg_native_engine_types_native order by id;
+----
+1 snapshot
+
+query IT retry 30 backoff 1s
+select id, v from pg_native_engine_other_native order by id;
+----
+1 snapshot
+
+# Changes of all the types, with NULLs, special dates, an unchanged TOAST value, an update of the primary
+# key, deletes, and a transaction that spans the two tables, one of which has the replica
+# identity FULL.
+system ok
+PGDATABASE=${PGDATABASE:-postgres} psql -c "
+    INSERT INTO public.pg_native_engine_types VALUES (
+        2, true, -2, 9223372036854775807, 1.5, -2.25, 12345.6789, 'hello', 'say \"hi\"',
+        '\x68656c6c6f', '2024-01-30', '12:34:56.123456', '2024-01-30 12:34:56.123456',
+        '2024-01-30 12:34:56.123456+08', '1 year 2 mons 3 days 04:05:06', '{\"a\": [1, 2]}',
+        '123e4567-e89b-12d3-a456-426614174000', 'happy', '{1,NULL,3}', '{a,\"b c\",NULL}',
+        (SELECT string_agg(md5(i::text), '') FROM generate_series(1, 400) i)
+    );
+    INSERT INTO public.pg_native_engine_types (id) VALUES (3), (4), (5);
+    INSERT INTO public.pg_native_engine_types (id, c_date, c_ts, c_tstz, c_interval) VALUES
+        (8, '0044-03-15 BC', '10000-01-01 00:00:00', '0044-03-15 12:00:00+00 BC', '0'),
+        (9, 'infinity', '-infinity', 'infinity', '100:00:00');
+    UPDATE public.pg_native_engine_types SET c_text = 'updated' WHERE id = 2;
+    UPDATE public.pg_native_engine_types SET c_text = 'three', c_bool = false WHERE id = 3;
+    UPDATE public.pg_native_engine_types SET id = 40, c_text = 'moved' WHERE id = 4;
+    DELETE FROM public.pg_native_engine_types WHERE id = 5;
+    BEGIN;
+    INSERT INTO public.pg_native_engine_types (id, c_text) VALUES (6, 'txn');
+    INSERT INTO public.pg_native_engine_other SELECT i, 'row ' || i FROM generate_series(2, 3000) i;
+    UPDATE public.pg_native_engine_other SET v = 'updated' WHERE id <= 10;
+    DELETE FROM public.pg_native_engine_other WHERE id > 2990;
+    COMMIT;
+    "
+
+query ITTT retry 30 backoff 1s
+select id, c_text, c_bool, length(c_big) from pg_native_engine_types_native order by id;
+----
+1 snapshot NULL NULL
+2 updated t 12800
+3 three f NULL
+6 txn NULL NULL
+8 NULL NULL NULL
+9 NULL NULL NULL
+40 moved NULL NULL
+
+query ITIIRRTTTTTTTTTTTTTT
+select
+    id, c_bool, c_int2, c_int8, c_real, c_double, c_numeric, c_text, c_varchar, c_bytea,
+    c_date, c_time, c_ts, c_tstz, c_interval, c_jsonb, c_uuid, c_mood, c_int_arr, c_text_arr
+from pg_native_engine_types_native where id = 2;
+----
+2 t -2 9223372036854775807 1.5 -2.25 12345.6789 updated say "hi" \x68656c6c6f 2024-01-30 12:34:56.123456 2024-01-30 12:34:56.123456 2024-01-30 04:34:56.123456+00:00 1 year 2 mons 3 days 04:05:06 {"a": [1, 2]} 123e4567-e89b-12d3-a456-426614174000 happy {1,NULL,3} {a,"b c",NULL}
+
+# Dates before Christ and beyond the year 9999 are supported. The infinite dates and timestamps
+# are not representable, they are NULL with both engines.
+query ITTTT
+select id, c_date, c_ts, c_tstz, c_interval from pg_native_engine_types_native where id in (8, 9) order by id;
+----
+8 0044-03-15 BC 10000-01-01 00:00:00 0044-03-15 12:00:00+00:00 BC 00:00:00
+9 NULL NULL NULL 100:00:00
+
+query III retry 30 backoff 1s
+select count(*), count(*) filter (where v = 'updated'), max(id) from pg_native_engine_other_native;
+----
+2990 10 2990
+
+# The two engines produce the same tables.
+query II retry 30 backoff 1s
+select count(*), count(*) filter (where v = 'updated') from pg_native_engine_other_dbz;
+----
+2990 10
+
+query I retry 30 backoff 1s
+select count(*) from pg_native_engine_types_dbz where c_text in ('updated', 'three', 'moved', 'txn');
+----
+4
+
+query I
+select count(*) from (
+    (select * from pg_native_engine_types_native except select * from pg_native_engine_types_dbz)
+    union all
+    (select * from pg_native_engine_types_dbz except select * from pg_native_engine_types_native)
+) t;
+----
+0
+
+query I
+select count(*) from (
+    (select * from pg_native_engine_other_native except select * from pg_native_engine_other_dbz)
+    union all
+    (select * from pg_native_engine_other_dbz except select * from pg_native_engine_other_native)
+) t;
+----
+0
+
+# The consumed position is confirmed to the upstream after a checkpoint, also when there is
+# no more change to the captured tables: the marker is taken after writes to a table that is
+# not captured, so it is beyond the last change received by the source.
+system ok
+PGDATABASE=${PGDATABASE:-postgres} psql -c "
+    CREATE TABLE public.pg_native_engine_marker (lsn pg_lsn);
+    INSERT INTO public.pg_native_engine_marker SELECT pg_current_wal_insert_lsn();
+    "
+
+system ok
+for i in $(seq 1 90); do
+    confirmed=$(PGDATABASE=${PGDATABASE:-postgres} psql -At -c "
+        SELECT active AND confirmed_flush_lsn >= (SELECT lsn FROM public.pg_native_engine_marker)
+        FROM pg_replication_slots WHERE slot_name = 'pg_native_engine_slot_native';")
+    if [ "$confirmed" = "t" ]; then exit 0; fi
+    sleep 1
+done
+echo "the position of the slot is not confirmed: $confirmed"
+exit 1
+
+# Changes are still received after the position has been advanced while idle.
+system ok
+PGDATABASE=${PGDATABASE:-postgres} psql -c "
+    INSERT INTO public.pg_native_engine_types (id, c_text) VALUES (7, 'after idle');
+    "
+
+query IT retry 30 backoff 1s
+select id, c_text from pg_native_engine_types_native where id = 7;
+----
+7 after idle
+
+statement ok
+drop source pg_native_engine_src_native cascade;
+
+statement ok
+drop source pg_native_engine_src_dbz cascade;
+
+system ok
+PGDATABASE=${PGDATABASE:-postgres} psql -c "
+    SELECT pg_terminate_backend(active_pid)
+    FROM pg_replication_slots
+    WHERE slot_name LIKE 'pg_native_engine_slot_%' AND active_pid IS NOT NULL;
+    SELECT pg_sleep(1);
+    SELECT pg_drop_replication_slot(slot_name)
+    FROM pg_replication_slots
+    WHERE slot_name LIKE 'pg_native_engine_slot_%';
+    DROP PUBLICATION IF EXISTS pg_native_engine_pub;
+    DROP TABLE IF EXISTS public.pg_native_engine_types CASCADE;
+    DROP TABLE IF EXISTS public.pg_native_engine_other CASCADE;
+    DROP TABLE IF EXISTS public.pg_native_engine_marker CASCADE;
+    DROP TYPE IF EXISTS public.pg_native_engine_mood;
+    "
