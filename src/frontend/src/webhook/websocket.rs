@@ -632,7 +632,10 @@ mod tests {
         }
     }
 
+    // DISABLED (full-premium build): the default/empty license now unlocks all
+    // features, so the license check no longer fails. Kept for reference.
     #[test]
+    #[ignore = "full-premium build: features are no longer gated by the license"]
     fn test_websocket_ingest_requires_license() {
         let _restore = RestoreDefaultLicense;
         LicenseManager::get().refresh(LicenseKey::default().as_ref());

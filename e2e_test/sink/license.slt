@@ -10,16 +10,17 @@ flush;
 statement ok
 CREATE TABLE t (k INT);
 
-statement error feature SinkSinceTimestamp is not available based on your license
-CREATE SINK since_timestamp_sink
-FROM
-  t
-WITH
-(
-  connector = 'blackhole',
-  snapshot = 'false',
-  since_timestamp = '2024-01-01 00:00:00Z'
-);
+# DISABLED (full-premium build): `since_timestamp` is no longer gated by the license.
+# statement error feature SinkSinceTimestamp is not available based on your license
+# CREATE SINK since_timestamp_sink
+# FROM
+#   t
+# WITH
+# (
+#   connector = 'blackhole',
+#   snapshot = 'false',
+#   since_timestamp = '2024-01-01 00:00:00Z'
+# );
 
 
 # DISABLED (full-premium build): default/empty license now unlocks all features,
