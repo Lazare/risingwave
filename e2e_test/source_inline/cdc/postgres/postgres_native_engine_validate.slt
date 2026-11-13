@@ -1,0 +1,166 @@
+# The sources and tables of the native engine of Postgres CDC (`cdc.engine = 'native'`) are
+# validated against the upstream database in Rust, with the same checks and the same error
+# messages as the validation of the Debezium based engine by the connector node.
+
+control substitution on
+
+statement ok
+drop source if exists pg_native_validate_src cascade;
+
+system ok
+PGDATABASE=${PGDATABASE:-postgres} psql -v ON_ERROR_STOP=1 -c "
+    SELECT pg_terminate_backend(active_pid)
+    FROM pg_replication_slots
+    WHERE slot_name = 'pg_native_validate_slot' AND active_pid IS NOT NULL;
+    SELECT pg_sleep(1);
+    SELECT pg_drop_replication_slot(slot_name)
+    FROM pg_replication_slots
+    WHERE slot_name = 'pg_native_validate_slot';
+    DROP PUBLICATION IF EXISTS pg_native_validate_pub;
+    DROP TABLE IF EXISTS public.pg_native_validate CASCADE;
+    DROP TABLE IF EXISTS public.pg_native_validate_parted CASCADE;
+    DROP ROLE IF EXISTS rw_native_validate_norepl;
+    CREATE ROLE rw_native_validate_norepl LOGIN PASSWORD 'rw_native_validate_norepl';
+    CREATE TABLE public.pg_native_validate (id int PRIMARY KEY, v text, n int);
+    INSERT INTO public.pg_native_validate VALUES (1, 'one', 10);
+    CREATE TABLE public.pg_native_validate_parted (id int PRIMARY KEY, v text) PARTITION BY RANGE (id);
+    CREATE TABLE public.pg_native_validate_parted_1 PARTITION OF public.pg_native_validate_parted
+        FOR VALUES FROM (0) TO (1000);
+    INSERT INTO public.pg_native_validate_parted VALUES (1, 'one');
+    "
+
+# The publication must exist when it is not allowed to be created.
+statement error Publication 'pg_native_validate_pub' doesn't exist and auto create is disabled
+create source pg_native_validate_src with (
+    connector = 'postgres-cdc',
+    hostname = '${PGHOST:localhost}',
+    port = '${PGPORT:5432}',
+    username = '${PGUSER:$USER}',
+    password = '${PGPASSWORD:}',
+    database.name = '${PGDATABASE:postgres}',
+    schema.name = 'public',
+    publication.name = 'pg_native_validate_pub',
+    publication.create.enable = 'false',
+    slot.name = 'pg_native_validate_slot',
+    cdc.engine = 'native'
+);
+
+# The user must be allowed to read the replication stream.
+statement error Postgres user must be superuser or replication role to start walsender
+create source pg_native_validate_src with (
+    connector = 'postgres-cdc',
+    hostname = '${PGHOST:localhost}',
+    port = '${PGPORT:5432}',
+    username = 'rw_native_validate_norepl',
+    password = 'rw_native_validate_norepl',
+    database.name = '${PGDATABASE:postgres}',
+    schema.name = 'public',
+    publication.name = 'pg_native_validate_pub',
+    slot.name = 'pg_native_validate_slot',
+    cdc.engine = 'native'
+);
+
+# The publication is created with the source, without any table.
+statement ok
+create source pg_native_validate_src with (
+    connector = 'postgres-cdc',
+    hostname = '${PGHOST:localhost}',
+    port = '${PGPORT:5432}',
+    username = '${PGUSER:$USER}',
+    password = '${PGPASSWORD:}',
+    database.name = '${PGDATABASE:postgres}',
+    schema.name = 'public',
+    publication.name = 'pg_native_validate_pub',
+    slot.name = 'pg_native_validate_slot',
+    cdc.engine = 'native'
+);
+
+system ok
+PGDATABASE=${PGDATABASE:-postgres} psql -At -c "
+    SELECT pubname, pubviaroot,
+        (SELECT count(*) FROM pg_publication_tables t WHERE t.pubname = p.pubname)
+    FROM pg_publication p WHERE pubname = 'pg_native_validate_pub';"
+----
+pg_native_validate_pub|t|0
+
+
+# The declared schema of a table is validated against the upstream table.
+statement error Incompatible data type of column id
+create table pg_native_validate_bad_type (id varchar, v varchar, n int, primary key (id))
+from pg_native_validate_src table 'public.pg_native_validate';
+
+statement error Primary key mismatch
+create table pg_native_validate_bad_pk (id int, v varchar, n int, primary key (n))
+from pg_native_validate_src table 'public.pg_native_validate';
+
+statement error Column 'missing' not found in the upstream database
+create table pg_native_validate_bad_column (id int, missing varchar, primary key (id))
+from pg_native_validate_src table 'public.pg_native_validate';
+
+# A failed validation does not add the table to the publication.
+system ok
+PGDATABASE=${PGDATABASE:-postgres} psql -At -c "
+    SELECT count(*) FROM pg_publication_tables WHERE pubname = 'pg_native_validate_pub';"
+----
+0
+
+
+# A valid table is added to the publication, and is ingested.
+statement ok
+create table pg_native_validate_rw (id int, v varchar, primary key (id))
+from pg_native_validate_src table 'public.pg_native_validate';
+
+statement ok
+create table pg_native_validate_parted_rw (*)
+from pg_native_validate_src table 'public.pg_native_validate_parted';
+
+system ok
+PGDATABASE=${PGDATABASE:-postgres} psql -At -c "
+    SELECT tablename FROM pg_publication_tables
+    WHERE pubname = 'pg_native_validate_pub' ORDER BY tablename;"
+----
+pg_native_validate
+pg_native_validate_parted
+
+
+system ok
+PGDATABASE=${PGDATABASE:-postgres} psql -c "
+    INSERT INTO public.pg_native_validate VALUES (2, 'two', 20);
+    INSERT INTO public.pg_native_validate_parted VALUES (2, 'two');
+    "
+
+query IT retry 30 backoff 1s
+select id, v from pg_native_validate_rw order by id;
+----
+1 one
+2 two
+
+# The changes of a partitioned table are published as the ones of its root.
+query IT retry 30 backoff 1s
+select id, v from pg_native_validate_parted_rw order by id;
+----
+1 one
+2 two
+
+# A partition cannot be captured when its root is already in the publication.
+statement error is already covered in the publication 'pg_native_validate_pub'
+create table pg_native_validate_partition_rw (*)
+from pg_native_validate_src table 'public.pg_native_validate_parted_1';
+
+statement ok
+drop source pg_native_validate_src cascade;
+
+system ok
+PGDATABASE=${PGDATABASE:-postgres} psql -v ON_ERROR_STOP=1 -c "
+    SELECT pg_terminate_backend(active_pid)
+    FROM pg_replication_slots
+    WHERE slot_name = 'pg_native_validate_slot' AND active_pid IS NOT NULL;
+    SELECT pg_sleep(1);
+    SELECT pg_drop_replication_slot(slot_name)
+    FROM pg_replication_slots
+    WHERE slot_name = 'pg_native_validate_slot';
+    DROP PUBLICATION IF EXISTS pg_native_validate_pub;
+    DROP TABLE IF EXISTS public.pg_native_validate CASCADE;
+    DROP TABLE IF EXISTS public.pg_native_validate_parted CASCADE;
+    DROP ROLE IF EXISTS rw_native_validate_norepl;
+    "

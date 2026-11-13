@@ -171,7 +171,14 @@ impl WaitCheckpointTask {
                 if let Some((split_id, offset)) = updated_offset {
                     let committed_source_id: u64 = u64::from_str(split_id.as_ref()).unwrap();
                     // notify cdc connector to commit offset
-                    match cdc::jni_source::commit_cdc_offset(committed_source_id, offset.clone()) {
+                    let result = match cdc::native::commit_offset(committed_source_id, &offset) {
+                        Some(result) => result,
+                        // not read by the native engine
+                        None => {
+                            cdc::jni_source::commit_cdc_offset(committed_source_id, offset.clone())
+                        }
+                    };
+                    match result {
                         Ok(()) => {
                             // Execute callback after successful commit
                             on_commit_success(committed_source_id, &offset);

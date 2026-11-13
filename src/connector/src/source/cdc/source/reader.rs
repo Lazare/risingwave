@@ -32,6 +32,9 @@ use tokio::sync::mpsc;
 use crate::error::{ConnectorError, ConnectorResult};
 use crate::parser::ParserConfig;
 use crate::source::base::SourceMessage;
+use crate::source::cdc::native::{
+    CDC_ENGINE_KEY, CdcEngine, NativeCdcReceiver, start_postgres_cdc_stream,
+};
 use crate::source::cdc::{CdcProperties, CdcSourceType, CdcSourceTypeTrait, DebeziumCdcSplit};
 use crate::source::{
     BoxSourceChunkStream, Column, SourceContextRef, SplitId, SplitMetaData, SplitReader,
@@ -54,7 +57,15 @@ pub struct CdcSplitReader<T: CdcSourceTypeTrait> {
     snapshot_done: bool,
     parser_config: ParserConfig,
     source_ctx: SourceContextRef,
-    rx: JniReceiverType<anyhow::Result<GetEventStreamResponse>>,
+    rx: CdcEventReceiver,
+}
+
+/// The channel of the events produced by the engine that reads the upstream database.
+enum CdcEventReceiver {
+    /// The Debezium connector running in the embedded JVM.
+    Jni(JniReceiverType<anyhow::Result<GetEventStreamResponse>>),
+    /// The native engine, see [`crate::source::cdc::native`].
+    Native(NativeCdcReceiver),
 }
 
 const DEFAULT_CHANNEL_SIZE: usize = 16;
@@ -97,6 +108,35 @@ impl<T: CdcSourceTypeTrait> SplitReader for CdcSplitReader<T> {
         }
 
         let source_id = split.split_id() as u64;
+
+        if matches!(T::source_type(), CdcSourceType::Postgres)
+            && CdcEngine::from_option(properties.get(CDC_ENGINE_KEY).map(|v| v.as_str()))?
+                == CdcEngine::Native
+        {
+            if !conn_props.is_cdc_source_job {
+                bail!(
+                    "`{} = '{}'` is only supported by shared CDC sources",
+                    CDC_ENGINE_KEY,
+                    CdcEngine::NATIVE
+                );
+            }
+            let rx =
+                start_postgres_cdc_stream(source_id, &properties, split.start_offset().as_deref())
+                    .await?;
+            tracing::info!(?source_id, "native CDC reader started");
+            return Ok(Self {
+                source_id,
+                start_offset: split.start_offset().clone(),
+                server_addr: None,
+                conn_props,
+                split_id,
+                snapshot_done: split.snapshot_done(),
+                parser_config,
+                source_ctx,
+                rx: CdcEventReceiver::Native(rx),
+            });
+        }
+
         let source_type = conn_props.get_source_type_pb();
         let (tx, mut rx) = mpsc::channel(DEFAULT_CHANNEL_SIZE);
 
@@ -192,7 +232,7 @@ impl<T: CdcSourceTypeTrait> SplitReader for CdcSplitReader<T> {
                 snapshot_done: split.snapshot_done(),
                 parser_config,
                 source_ctx,
-                rx,
+                rx: CdcEventReceiver::Jni(rx),
             },
             CdcSourceType::Citus => Self {
                 source_id: split.split_id() as u64,
@@ -203,7 +243,7 @@ impl<T: CdcSourceTypeTrait> SplitReader for CdcSplitReader<T> {
                 snapshot_done: split.snapshot_done(),
                 parser_config,
                 source_ctx,
-                rx,
+                rx: CdcEventReceiver::Jni(rx),
             },
             CdcSourceType::Unspecified => {
                 unreachable!();
@@ -222,24 +262,44 @@ impl<T: CdcSourceTypeTrait> SplitReader for CdcSplitReader<T> {
 impl<T: CdcSourceTypeTrait> CdcSplitReader<T> {
     #[try_stream(ok = Vec<SourceMessage>, error = ConnectorError)]
     async fn into_data_stream(self) {
-        let mut rx = self.rx;
         let source_id = self.source_id.to_string();
+        let report_error = |source_ctx: &SourceContextRef| {
+            GLOBAL_ERROR_METRICS.user_source_error.report([
+                "cdc_source".to_owned(),
+                source_id.clone(),
+                source_ctx.source_name.clone(),
+                source_ctx.fragment_id.to_string(),
+            ]);
+        };
 
-        while let Some(result) = rx.recv().await {
-            match result {
-                Ok(GetEventStreamResponse { events, .. }) => {
-                    tracing::trace!("receive {} cdc events ", events.len());
-                    let msgs = events.into_iter().map(SourceMessage::from).collect_vec();
-                    yield msgs;
+        match self.rx {
+            CdcEventReceiver::Jni(mut rx) => {
+                while let Some(result) = rx.recv().await {
+                    match result {
+                        Ok(GetEventStreamResponse { events, .. }) => {
+                            tracing::trace!("receive {} cdc events ", events.len());
+                            let msgs = events.into_iter().map(SourceMessage::from).collect_vec();
+                            yield msgs;
+                        }
+                        Err(e) => {
+                            report_error(&self.source_ctx);
+                            Err(e)?;
+                        }
+                    }
                 }
-                Err(e) => {
-                    GLOBAL_ERROR_METRICS.user_source_error.report([
-                        "cdc_source".to_owned(),
-                        source_id.clone(),
-                        self.source_ctx.source_name.clone(),
-                        self.source_ctx.fragment_id.to_string(),
-                    ]);
-                    Err(e)?;
+            }
+            CdcEventReceiver::Native(mut rx) => {
+                while let Some(result) = rx.recv().await {
+                    match result {
+                        Ok(msgs) => {
+                            tracing::trace!("receive {} cdc events ", msgs.len());
+                            yield msgs;
+                        }
+                        Err(e) => {
+                            report_error(&self.source_ctx);
+                            Err(e)?;
+                        }
+                    }
                 }
             }
         }
