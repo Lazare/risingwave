@@ -19,6 +19,8 @@ use risingwave_common::types::StructType;
 use risingwave_expr::sig::{CreateOptions, UdfKind};
 use risingwave_pb::catalog::PbFunction;
 use risingwave_pb::catalog::function::{Kind, ScalarFunction, TableFunction};
+use risingwave_pb::expr::PbUdfVolatility;
+use risingwave_sqlparser::ast::FunctionBehavior;
 
 use super::*;
 use crate::{Binder, bind_data_type};
@@ -37,6 +39,16 @@ pub(crate) fn reject_variant_in_udf_signature(
         .into());
     }
     Ok(())
+}
+
+/// Converts the `IMMUTABLE | STABLE | VOLATILE` clause into the volatility stored in the catalog.
+pub(super) fn bind_volatility(behavior: Option<&FunctionBehavior>) -> PbUdfVolatility {
+    match behavior {
+        None => PbUdfVolatility::Unspecified,
+        Some(FunctionBehavior::Immutable) => PbUdfVolatility::Immutable,
+        Some(FunctionBehavior::Stable) => PbUdfVolatility::Stable,
+        Some(FunctionBehavior::Volatile) => PbUdfVolatility::Volatile,
+    }
 }
 
 pub async fn handle_create_function(
@@ -205,6 +217,7 @@ pub async fn handle_create_function(
             .unwrap_or_default(),
         is_async: with_options.r#async,
         is_batched: with_options.batch,
+        volatility: bind_volatility(params.behavior.as_ref()) as _,
         created_at_epoch: None,
         created_at_cluster_version: None,
     };

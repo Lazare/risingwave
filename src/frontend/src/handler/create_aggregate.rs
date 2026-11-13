@@ -21,7 +21,7 @@ use risingwave_pb::catalog::function::{AggregateFunction, Kind};
 use risingwave_sqlparser::ast::DataType as AstDataType;
 
 use super::*;
-use crate::handler::create_function::reject_variant_in_udf_signature;
+use crate::handler::create_function::{bind_volatility, reject_variant_in_udf_signature};
 use crate::{Binder, bind_data_type};
 
 pub async fn handle_create_aggregate(
@@ -148,6 +148,7 @@ pub async fn handle_create_aggregate(
         always_retry_on_network_error: false,
         is_async: None,
         is_batched: None,
+        volatility: bind_volatility(params.behavior.as_ref()) as _,
         created_at_epoch: None,
         created_at_cluster_version: None,
     };

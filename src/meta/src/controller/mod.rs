@@ -32,6 +32,7 @@ use risingwave_pb::catalog::{
     PbSchema, PbSecret, PbSink, PbSinkType, PbSource, PbStreamJobStatus, PbSubscription, PbTable,
     PbView,
 };
+use risingwave_pb::expr::PbUdfVolatility;
 use sea_orm::{ConnectOptions, DatabaseConnection, DbBackend, ModelTrait};
 
 use crate::{MetaError, MetaResult, MetaStoreBackend};
@@ -522,6 +523,13 @@ impl From<ObjectModel<function::Model>> for PbFunction {
                 .options
                 .as_ref()
                 .and_then(|o| o.0.get("batch").map(|v| v == "true")),
+            volatility: value
+                .0
+                .options
+                .as_ref()
+                .and_then(|o| o.0.get(function::VOLATILITY_OPTION_KEY))
+                .and_then(|v| PbUdfVolatility::from_str_name(v))
+                .unwrap_or_default() as _,
             created_at_epoch: Some(
                 Epoch::from_unix_millis(datetime_to_timestamp_millis(value.1.created_at) as _).0,
             ),

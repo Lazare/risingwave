@@ -44,8 +44,13 @@ impl ImpureAnalyzer {
 
 impl ExprVisitor for ImpureAnalyzer {
     fn visit_user_defined_function(&mut self, func_call: &super::UserDefinedFunction) {
-        let name = &func_call.catalog.name;
-        self.impure = Some(format!("user-defined function `{name}`").into());
+        if func_call.catalog.is_immutable() {
+            // Declared as `IMMUTABLE` by the user, so the function itself is pure.
+            func_call.args.iter().for_each(|expr| self.visit_expr(expr));
+        } else {
+            let name = &func_call.catalog.name;
+            self.impure = Some(format!("user-defined function `{name}`").into());
+        }
     }
 
     fn visit_table_function(&mut self, func_call: &super::TableFunction) {
@@ -83,8 +88,14 @@ impl ExprVisitor for ImpureAnalyzer {
                 self.impure = Some(func_type.as_str_name().into());
             }
             Type::UserDefined => {
-                let name = &func_call.user_defined.as_ref().unwrap().name;
-                self.impure = Some(format!("user-defined table function `{name}`").into());
+                let catalog = func_call.user_defined.as_ref().unwrap();
+                if catalog.is_immutable() {
+                    // Declared as `IMMUTABLE` by the user, so the function itself is pure.
+                    func_call.args.iter().for_each(|expr| self.visit_expr(expr));
+                } else {
+                    let name = &catalog.name;
+                    self.impure = Some(format!("user-defined table function `{name}`").into());
+                }
             }
         }
     }
@@ -439,10 +450,56 @@ pub fn impure_expr_desc(expr: &ExprImpl) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use risingwave_common::catalog::FunctionId;
     use risingwave_common::types::DataType;
+    use risingwave_pb::expr::PbUdfVolatility;
     use risingwave_pb::expr::expr_node::Type;
 
-    use crate::expr::{ExprImpl, FunctionCall, InputRef, is_impure, is_pure};
+    use crate::catalog::function_catalog::{FunctionCatalog, FunctionKind};
+    use crate::expr::{
+        Expr, ExprImpl, FunctionCall, InputRef, UserDefinedFunction, is_impure, is_pure,
+    };
+
+    fn udf(volatility: PbUdfVolatility, args: Vec<ExprImpl>) -> ExprImpl {
+        let catalog = FunctionCatalog {
+            id: FunctionId::placeholder(),
+            name: "foo".to_owned(),
+            owner: 1.into(),
+            kind: FunctionKind::Scalar,
+            arg_names: vec![],
+            arg_types: args.iter().map(|a| a.return_type()).collect(),
+            return_type: DataType::Int32,
+            language: "javascript".to_owned(),
+            runtime: None,
+            name_in_runtime: None,
+            body: None,
+            link: None,
+            compressed_binary: None,
+            always_retry_on_network_error: false,
+            is_async: None,
+            is_batched: None,
+            volatility,
+            created_at_epoch: None,
+            created_at_cluster_version: None,
+        };
+        UserDefinedFunction::new(Arc::new(catalog), args).into()
+    }
+
+    #[test]
+    fn test_udf_volatility() {
+        let input = || -> ExprImpl { InputRef::new(0, DataType::Int32).into() };
+
+        expect_impure(&udf(PbUdfVolatility::Unspecified, vec![input()]));
+        expect_impure(&udf(PbUdfVolatility::Volatile, vec![input()]));
+        expect_impure(&udf(PbUdfVolatility::Stable, vec![input()]));
+        expect_pure(&udf(PbUdfVolatility::Immutable, vec![input()]));
+
+        // An immutable function with impure arguments is still impure.
+        let random = FunctionCall::new(Type::Random, vec![]).unwrap().into();
+        expect_impure(&udf(PbUdfVolatility::Immutable, vec![random]));
+    }
 
     fn expect_pure(expr: &ExprImpl) {
         assert!(is_pure(expr));
