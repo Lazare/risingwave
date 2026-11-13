@@ -14,6 +14,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use async_trait::async_trait;
@@ -39,9 +40,15 @@ use crate::connector_common::{
 use crate::enforce_secret::EnforceSecret;
 use crate::parser::scalar_adapter::{ScalarAdapter, validate_pg_type_to_rw_type};
 use crate::sink::log_store::{LogStoreReadItem, TruncateOffset};
+use crate::sink::postgres_pool::{DEFAULT_POOL_MAX_SIZE, PgPool, PgPooledClient};
+use crate::sink::sink_group::{SINK_ORDER_LAST, SinkGroupMember, SinkGroupRegistry};
 use crate::sink::{Result, Sink, SinkParam, SinkWriterParam};
 
 pub const POSTGRES_SINK: &str = "postgres";
+
+/// Number of times a chunk is written again after a connection failure before the sink fails.
+const MAX_RECONNECT_RETRIES: u32 = 5;
+const RECONNECT_BASE_BACKOFF: Duration = Duration::from_millis(200);
 
 const CHECK_FOREIGN_KEY_SQL: &str = r#"
     SELECT EXISTS (
@@ -81,6 +88,18 @@ pub struct PostgresConfig {
 
     #[serde(flatten)]
     pub tcp_keepalive: Option<TcpKeepaliveConfig>,
+
+    /// The group of the sink, set by the frontend from the connection of the sink. The sinks of
+    /// a group share a connection pool and can be ordered with `sink_order`.
+    #[serde(default)]
+    pub sink_group: Option<String>,
+    /// `last`: write the data of an epoch after the other sinks of the group have committed it.
+    #[serde(default)]
+    pub sink_order: Option<String>,
+    /// Maximum number of connections of the pool shared by the sinks of the group.
+    #[serde(default, rename = "pool.max_size")]
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub pool_max_size: Option<usize>,
 
     #[serde(flatten)]
     pub unknown_fields: std::collections::HashMap<String, String>,
@@ -155,7 +174,29 @@ impl PostgresConfig {
                 SINK_TYPE_UPSERT
             )));
         }
+        if let Some(order) = &config.sink_order {
+            if order != SINK_ORDER_LAST {
+                return Err(SinkError::Config(anyhow!(
+                    "`sink_order` must be `{}`",
+                    SINK_ORDER_LAST
+                )));
+            }
+            if config.sink_group.is_none() {
+                return Err(SinkError::Config(anyhow!(
+                    "`sink_order` requires the sink to use a connection (`connection = <name>`)"
+                )));
+            }
+        }
+        if config.pool_max_size == Some(0) {
+            return Err(SinkError::Config(anyhow!(
+                "`pool.max_size` must be greater than 0"
+            )));
+        }
         Ok(config)
+    }
+
+    pub fn is_last_in_group(&self) -> bool {
+        self.sink_order.as_deref() == Some(SINK_ORDER_LAST)
     }
 
     pub fn pg_connection_config(&self) -> PgConnectionConfig {
@@ -319,12 +360,13 @@ impl Sink for PostgresSink {
         Ok(())
     }
 
-    async fn new_log_sinker(&self, _writer_param: SinkWriterParam) -> Result<Self::LogSinker> {
+    async fn new_log_sinker(&self, writer_param: SinkWriterParam) -> Result<Self::LogSinker> {
         PostgresSinkWriter::new(
             self.config.clone(),
             self.schema.clone(),
             self.pk_indices.clone(),
             self.is_append_only,
+            &writer_param,
         )
         .await
     }
@@ -332,16 +374,17 @@ impl Sink for PostgresSink {
 
 pub struct PostgresSinkWriter {
     is_append_only: bool,
-    client: tokio_postgres::Client,
+    /// Connections are taken from the pool for each chunk. The pool is shared with the other
+    /// sinks of the group, if any.
+    pool: Arc<PgPool>,
+    /// Ordering with the other sinks of the group, if any.
+    group: Option<SinkGroupMember>,
     pk_indices: Vec<usize>,
     pk_types: Vec<PgType>,
     schema_types: Vec<PgType>,
     raw_insert_sql: Arc<String>,
     raw_upsert_sql: Arc<String>,
     raw_delete_sql: Arc<String>,
-    insert_sql: Arc<tokio_postgres::Statement>,
-    delete_sql: Arc<tokio_postgres::Statement>,
-    upsert_sql: Arc<tokio_postgres::Statement>,
 }
 
 impl PostgresSinkWriter {
@@ -350,13 +393,28 @@ impl PostgresSinkWriter {
         schema: Schema,
         pk_indices: Vec<usize>,
         is_append_only: bool,
+        writer_param: &SinkWriterParam,
     ) -> Result<Self> {
         let tcp_keepalive = tcp_keepalive_from_config(&config);
 
         let pg_conn = config.pg_connection_config();
-        let client = create_pg_client(&pg_conn, tcp_keepalive).await?;
-
-        ensure_no_foreign_key_with_client(&client, &config.schema, &config.table).await?;
+        let pool = match &config.sink_group {
+            Some(group) => PgPool::shared(
+                group,
+                pg_conn.clone(),
+                tcp_keepalive,
+                config.pool_max_size.unwrap_or(DEFAULT_POOL_MAX_SIZE),
+            ),
+            None => PgPool::new(pg_conn.clone(), tcp_keepalive, 1),
+        };
+        let group = config.sink_group.as_ref().map(|group| {
+            SinkGroupRegistry::global().join(
+                group,
+                writer_param.sink_id,
+                writer_param.actor_id,
+                config.is_last_in_group(),
+            )
+        });
 
         let pk_indices_lookup = pk_indices.iter().copied().collect::<HashSet<_>>();
 
@@ -400,58 +458,92 @@ impl PostgresSinkWriter {
         );
         let raw_delete_sql = create_delete_sql(&schema, &config.schema, &config.table, &pk_indices);
 
-        let insert_sql = client
-            .prepare(&raw_insert_sql)
-            .await
-            .with_context(|| format!("failed to prepare insert statement: {}", raw_insert_sql))?;
-        let upsert_sql = client
-            .prepare(&raw_upsert_sql)
-            .await
-            .with_context(|| format!("failed to prepare upsert statement: {}", raw_upsert_sql))?;
-        let delete_sql = client
-            .prepare(&raw_delete_sql)
-            .await
-            .with_context(|| format!("failed to prepare delete statement: {}", raw_delete_sql))?;
+        // Check the target table and the statements once, to fail early.
+        {
+            let mut client = pool.acquire().await?;
+            ensure_no_foreign_key_with_client(&client, &config.schema, &config.table).await?;
+            client.prepare_cached(&raw_insert_sql).await?;
+            client.prepare_cached(&raw_upsert_sql).await?;
+            client.prepare_cached(&raw_delete_sql).await?;
+        }
 
         let writer = Self {
             is_append_only,
-            client,
+            pool,
+            group,
             pk_indices,
             pk_types,
             schema_types,
             raw_insert_sql: Arc::new(raw_insert_sql),
             raw_upsert_sql: Arc::new(raw_upsert_sql),
             raw_delete_sql: Arc::new(raw_delete_sql),
-            insert_sql: Arc::new(insert_sql),
-            delete_sql: Arc::new(delete_sql),
-            upsert_sql: Arc::new(upsert_sql),
         };
         Ok(writer)
     }
 
+    /// Writes a chunk in one transaction. After a connection failure, the chunk is written again
+    /// on another connection: the transaction of the failed attempt is rolled back by Postgres,
+    /// unless the failure happened while committing, in which case the chunk may be written twice
+    /// (the sink is at-least-once).
     async fn write_batch(&mut self, chunk: StreamChunk) -> Result<()> {
-        // https://www.postgresql.org/docs/current/limits.html
-        // We have a limit of 65,535 parameters in a single query, as restricted by the PostgreSQL protocol.
-        if self.is_append_only {
-            self.write_batch_append_only(chunk).await
-        } else {
-            self.write_batch_non_append_only(chunk).await
+        let mut attempt = 0;
+        loop {
+            let (result, connection_failed) = match self.pool.acquire().await {
+                Ok(mut client) => {
+                    // https://www.postgresql.org/docs/current/limits.html
+                    // We have a limit of 65,535 parameters in a single query, as restricted by the PostgreSQL protocol.
+                    let result = if self.is_append_only {
+                        self.write_batch_append_only(&mut client, &chunk).await
+                    } else {
+                        self.write_batch_non_append_only(&mut client, &chunk).await
+                    };
+                    match result {
+                        Ok(()) => (Ok(()), false),
+                        Err(e) => {
+                            let connection_failed = client.is_closed() || is_connection_error(&e);
+                            // The state of the connection is unknown: do not reuse it.
+                            client.discard();
+                            (Err(SinkError::Postgres(e)), connection_failed)
+                        }
+                    }
+                }
+                Err(e) => (Err(SinkError::Postgres(e)), true),
+            };
+            match result {
+                Err(e) if connection_failed && attempt < MAX_RECONNECT_RETRIES => {
+                    let backoff = RECONNECT_BASE_BACKOFF * 2u32.pow(attempt);
+                    attempt += 1;
+                    tracing::warn!(
+                        error = %e.as_report(),
+                        attempt,
+                        ?backoff,
+                        "postgres sink connection failed, retrying"
+                    );
+                    tokio::time::sleep(backoff).await;
+                }
+                result => return result,
+            }
         }
     }
 
-    async fn write_batch_append_only(&mut self, chunk: StreamChunk) -> Result<()> {
-        let transaction = Arc::new(self.client.transaction().await?);
+    async fn write_batch_append_only(
+        &self,
+        client: &mut PgPooledClient,
+        chunk: &StreamChunk,
+    ) -> anyhow::Result<()> {
+        let insert_sql = client.prepare_cached(&self.raw_insert_sql).await?;
+        let transaction = Arc::new(client.transaction().await?);
         let mut insert_futures = FuturesUnordered::new();
         for (op, row) in chunk.rows() {
             match op {
                 Op::Insert => {
                     let pg_row = convert_row_to_pg_row(row, &self.schema_types);
-                    let insert_sql = self.insert_sql.clone();
+                    let insert_sql = insert_sql.clone();
                     let raw_insert_sql = self.raw_insert_sql.clone();
                     let transaction = transaction.clone();
                     let future = async move {
                         transaction
-                            .execute_raw(insert_sql.as_ref(), &pg_row)
+                            .execute_raw(&insert_sql, &pg_row)
                             .await
                             .with_context(|| {
                                 format!(
@@ -473,6 +565,7 @@ impl PostgresSinkWriter {
         while let Some(result) = insert_futures.next().await {
             result?;
         }
+        drop(insert_futures);
         if let Some(transaction) = Arc::into_inner(transaction) {
             transaction.commit().await?;
         } else {
@@ -482,8 +575,14 @@ impl PostgresSinkWriter {
         Ok(())
     }
 
-    async fn write_batch_non_append_only(&mut self, chunk: StreamChunk) -> Result<()> {
-        let transaction = Arc::new(self.client.transaction().await?);
+    async fn write_batch_non_append_only(
+        &self,
+        client: &mut PgPooledClient,
+        chunk: &StreamChunk,
+    ) -> anyhow::Result<()> {
+        let delete_sql = client.prepare_cached(&self.raw_delete_sql).await?;
+        let upsert_sql = client.prepare_cached(&self.raw_upsert_sql).await?;
+        let transaction = Arc::new(client.transaction().await?);
         let mut delete_futures = FuturesUnordered::new();
         let mut upsert_futures = FuturesUnordered::new();
         for (op, row) in chunk.rows() {
@@ -491,12 +590,12 @@ impl PostgresSinkWriter {
                 Op::Delete | Op::UpdateDelete => {
                     let pg_row =
                         convert_row_to_pg_row(row.project(&self.pk_indices), &self.pk_types);
-                    let delete_sql = self.delete_sql.clone();
+                    let delete_sql = delete_sql.clone();
                     let raw_delete_sql = self.raw_delete_sql.clone();
                     let transaction = transaction.clone();
                     let future = async move {
                         transaction
-                            .execute_raw(delete_sql.as_ref(), &pg_row)
+                            .execute_raw(&delete_sql, &pg_row)
                             .await
                             .with_context(|| {
                                 format!(
@@ -509,12 +608,12 @@ impl PostgresSinkWriter {
                 }
                 Op::Insert | Op::UpdateInsert => {
                     let pg_row = convert_row_to_pg_row(row, &self.schema_types);
-                    let upsert_sql = self.upsert_sql.clone();
+                    let upsert_sql = upsert_sql.clone();
                     let raw_upsert_sql = self.raw_upsert_sql.clone();
                     let transaction = transaction.clone();
                     let future = async move {
                         transaction
-                            .execute_raw(upsert_sql.as_ref(), &pg_row)
+                            .execute_raw(&upsert_sql, &pg_row)
                             .await
                             .with_context(|| {
                                 format!(
@@ -533,6 +632,8 @@ impl PostgresSinkWriter {
         while let Some(result) = upsert_futures.next().await {
             result?;
         }
+        drop(delete_futures);
+        drop(upsert_futures);
         if let Some(transaction) = Arc::into_inner(transaction) {
             transaction.commit().await?;
         } else {
@@ -550,15 +651,42 @@ impl LogSinker for PostgresSinkWriter {
             let (epoch, item) = log_reader.next_item().await?;
             match item {
                 LogStoreReadItem::StreamChunk { chunk, chunk_id } => {
+                    if let Some(group) = &self.group {
+                        // All the earlier epochs of this sink are committed. A `last` sink then
+                        // waits for the other sinks of the group to commit this epoch.
+                        group.start_epoch(epoch);
+                        group.wait_others_finished(epoch).await;
+                    }
                     self.write_batch(chunk).await?;
                     log_reader.truncate(TruncateOffset::Chunk { epoch, chunk_id })?;
                 }
                 LogStoreReadItem::Barrier { .. } => {
+                    if let Some(group) = &self.group {
+                        // Chunks are committed as they are read: the epoch is committed. This
+                        // only updates memory, so a sink without data costs nothing here.
+                        group.finish_epoch(epoch);
+                    }
                     log_reader.truncate(TruncateOffset::Barrier { epoch })?;
                 }
             }
         }
     }
+}
+
+/// Whether the error comes from the connection (closed, or terminated by the server) rather than
+/// from the statement.
+fn is_connection_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<tokio_postgres::Error>())
+        .any(|pg_error| {
+            pg_error.is_closed()
+                || pg_error.code().is_some_and(|state| {
+                    // Class 08: connection exception. Class 57P: operator intervention
+                    // (admin shutdown, crash shutdown, cannot connect now).
+                    state.code().starts_with("08") || state.code().starts_with("57P")
+                })
+        })
 }
 
 fn create_insert_sql(schema: &Schema, schema_name: &str, table_name: &str) -> String {

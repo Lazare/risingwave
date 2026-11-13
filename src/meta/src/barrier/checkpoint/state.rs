@@ -58,7 +58,7 @@ use crate::barrier::{BarrierKind, Command, CreateStreamingJobType, TracedEpoch};
 use crate::controller::fragment::{InflightActorInfo, InflightFragmentInfo};
 use crate::controller::scale::{
     ComponentFragmentAligner, EnsembleActorTemplate, LoadedFragment, NoShuffleEnsemble,
-    build_no_shuffle_fragment_graph_edges, find_no_shuffle_graphs,
+    build_no_shuffle_fragment_graph_edges, find_no_shuffle_graphs, fragment_sink_group,
 };
 use crate::model::{
     ActorId, ActorNewNoShuffle, FragmentDownstreamRelation, FragmentId, StreamActor, StreamContext,
@@ -334,6 +334,16 @@ pub(super) fn render_actors(
                 database_resource_group.to_owned(),
                 distribution_type,
                 vnode_count,
+                ensemble
+                    .entry_fragments()
+                    .find_map(|fragment_id| {
+                        fragments
+                            .inner
+                            .fragments
+                            .get(&fragment_id)
+                            .and_then(|fragment| fragment_sink_group(&fragment.nodes))
+                    })
+                    .as_deref(),
             )?
         };
 

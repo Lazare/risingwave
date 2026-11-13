@@ -28,6 +28,7 @@ use risingwave_connector::sink::catalog::desc::SinkDesc;
 use risingwave_connector::sink::catalog::{SinkFormat, SinkFormatDesc, SinkId, SinkType};
 use risingwave_connector::sink::file_sink::fs::FsSink;
 use risingwave_connector::sink::iceberg::{ENABLE_PK_INDEX, ICEBERG_SINK};
+use risingwave_connector::sink::sink_group::SINK_GROUP_KEY;
 use risingwave_connector::sink::trivial::TABLE_SINK;
 use risingwave_connector::sink::{
     CONNECTOR_TYPE_KEY, SINK_TYPE_APPEND_ONLY, SINK_TYPE_DEBEZIUM, SINK_TYPE_OPTION,
@@ -536,6 +537,25 @@ impl StreamSink {
             }
         };
         let input = required_dist.streaming_enforce_if_not_satisfies(input)?;
+        // The sinks of a group must run on the same compute node (see `sink_group`). Give the
+        // sink its own fragment with a shuffle, so that it is not placed with the actors of its
+        // upstream: the meta node then places this fragment on a single worker.
+        let input = if properties.get(SINK_GROUP_KEY).is_some()
+            && input
+                .as_stream_exchange()
+                .is_none_or(|exchange| exchange.no_shuffle())
+        {
+            let dist = match input.distribution() {
+                Distribution::Single => Distribution::Single,
+                _ => Distribution::HashShard(match &downstream_pk {
+                    Some(downstream_pk) => downstream_pk.clone(),
+                    None => input.expect_stream_key().to_vec(),
+                }),
+            };
+            StreamExchange::new(input, dist).into()
+        } else {
+            input
+        };
         let input = if input.ctx().session_ctx().config().streaming_separate_sink()
             && input.as_stream_exchange().is_none()
         {

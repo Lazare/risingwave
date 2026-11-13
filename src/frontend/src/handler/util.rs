@@ -38,6 +38,7 @@ use risingwave_common::util::epoch::Epoch;
 use risingwave_common::util::iter_util::ZipEqFast;
 use risingwave_connector::sink::elasticsearch_opensearch::elasticsearch::ES_SINK;
 use risingwave_connector::sink::file_sink::fs::FS_SINK;
+use risingwave_connector::sink::postgres::POSTGRES_SINK;
 use risingwave_connector::source::iceberg::ICEBERG_CONNECTOR;
 use risingwave_connector::source::{BATCH_POSIX_FS_CONNECTOR, KAFKA_CONNECTOR, POSIX_FS_CONNECTOR};
 use risingwave_pb::catalog::connection_params::PbConnectionType;
@@ -312,6 +313,7 @@ fn connection_type_to_connector(connection_type: &PbConnectionType) -> &str {
         PbConnectionType::Kafka => KAFKA_CONNECTOR,
         PbConnectionType::Iceberg => ICEBERG_CONNECTOR,
         PbConnectionType::Elasticsearch => ES_SINK,
+        PbConnectionType::Postgres => POSTGRES_SINK,
         _ => unreachable!(),
     }
 }

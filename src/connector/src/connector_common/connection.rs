@@ -33,6 +33,7 @@ use url::Url;
 use with_options::WithOptions;
 
 use crate::connector_common::common::DISABLE_DEFAULT_CREDENTIAL;
+use crate::connector_common::postgres::{PgConnectionConfig, create_pg_client};
 use crate::connector_common::{
     AwsAuthProps, IcebergCommon, IcebergTableIdentifier, KafkaConnectionProps,
     KafkaPrivateLinkCommon,
@@ -364,5 +365,88 @@ impl Connection for ElasticsearchConnection {
 impl EnforceSecret for ElasticsearchConnection {
     const ENFORCE_SECRET_PROPERTIES: Set<&'static str> = phf_set! {
         "elasticsearch.password",
+    };
+}
+
+/// Connection settings shared by Postgres sinks. The sinks that reference the same connection
+/// form a group: they share a connection pool on each compute node (see
+/// [`crate::sink::postgres_pool`]) and can be ordered (see [`crate::sink::sink_group`]).
+#[derive(Debug, Clone, Deserialize, PartialEq, Hash, Eq)]
+pub struct PostgresConnection(pub BTreeMap<String, String>);
+
+impl PostgresConnection {
+    const ALLOWED_PROPERTIES: Set<&'static str> = phf_set! {
+        "host",
+        "port",
+        "user",
+        "password",
+        "database",
+        "ssl_mode",
+        "ssl.root.cert",
+        "tcp.keepalive.enable",
+        "tcp.keepalive.idle",
+        "tcp.keepalive.interval",
+        "tcp.keepalive.count",
+        "pool.max_size",
+    };
+
+    fn required(&self, key: &str) -> ConnectorResult<&String> {
+        self.0
+            .get(key)
+            .with_context(|| format!("missing `{key}` in postgres connection"))
+            .map_err(Into::into)
+    }
+
+    fn pg_connection_config(&self) -> ConnectorResult<PgConnectionConfig> {
+        for key in self.0.keys() {
+            if !Self::ALLOWED_PROPERTIES.contains(key.as_str()) {
+                bail!("unknown property `{key}` in postgres connection");
+            }
+        }
+        if let Some(max_size) = self.0.get("pool.max_size") {
+            let max_size: usize = max_size
+                .parse()
+                .context("failed to parse `pool.max_size` in postgres connection")?;
+            if max_size == 0 {
+                bail!("`pool.max_size` must be greater than 0");
+            }
+        }
+        Ok(PgConnectionConfig {
+            host: self.required("host")?.clone(),
+            port: self
+                .required("port")?
+                .parse()
+                .context("failed to parse `port` in postgres connection")?,
+            user: self.required("user")?.clone(),
+            password: self.required("password")?.clone(),
+            database: self.required("database")?.clone(),
+            ssl_mode: match self.0.get("ssl_mode") {
+                Some(mode) => mode
+                    .parse()
+                    .context("failed to parse `ssl_mode` in postgres connection")?,
+                None => Default::default(),
+            },
+            ssl_root_cert: self.0.get("ssl.root.cert").cloned(),
+        })
+    }
+}
+
+#[async_trait]
+impl Connection for PostgresConnection {
+    async fn validate_connection(&self) -> ConnectorResult<()> {
+        let config = self.pg_connection_config()?;
+        let client = create_pg_client(&config, None).await?;
+        client
+            .simple_query("SELECT 1")
+            .await
+            .context("failed to query postgres")?;
+        Ok(())
+    }
+}
+
+impl EnforceSecret for PostgresConnection {
+    const ENFORCE_SECRET_PROPERTIES: Set<&'static str> = phf_set! {
+        "password",
+        "ssl.root.cert",
     };
 }

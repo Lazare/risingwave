@@ -25,6 +25,10 @@ use risingwave_common::catalog::{ColumnId, Field, Schema};
 use risingwave_common::config::{MetricLevel, StreamingConfig, merge_streaming_config_section};
 use risingwave_common::operator::{unique_executor_id, unique_operator_id};
 use risingwave_common::util::runtime::BackgroundShutdownRuntime;
+use risingwave_common::util::stream_graph_visitor::visit_stream_node_body;
+use risingwave_connector::sink::sink_group::{
+    SINK_GROUP_KEY, SINK_ORDER_KEY, SINK_ORDER_LAST, SinkGroupMemberGuard, SinkGroupRegistry,
+};
 use risingwave_pb::id::{ExecutorId, GlobalOperatorId};
 use risingwave_pb::stream_plan::stream_node::NodeBody;
 use risingwave_pb::stream_plan::{
@@ -554,6 +558,10 @@ impl StreamActorManager {
             let trace_span = format!("Actor {actor_id}: `{}`", stream_actor_ref.mview_definition);
             let barrier_manager = local_barrier_manager;
             let node_body = node.get_node_body().unwrap().clone();
+            // Register the sinks of this actor in their group before the actor starts: the
+            // `last` sinks of the group must wait for this actor from now on, even if it has
+            // not built its sink writer yet.
+            let sink_group_guards = expect_sink_group_members(&node, actor_id);
             let use_sync_log_store_dispatcher =
                 !actor_config.developer.disable_sync_log_store_dispatcher;
             // wrap the future of `create_actor` with `boxed` to avoid stack overflow
@@ -608,6 +616,11 @@ impl StreamActorManager {
                     })
                     .boxed()
                 }
+            };
+            // Keep the sink group registration for the whole life of the actor.
+            let actor = async move {
+                let _sink_group_guards = sink_group_guards;
+                actor.await
             };
             let traced = match &self.await_tree_reg {
                 Some(m) => m
@@ -722,4 +735,28 @@ impl Debug for ExecutorParams {
             .field("actor_id", &self.actor_context.id)
             .finish_non_exhaustive()
     }
+}
+
+/// Registers the sinks of the fragment that belong to a sink group, for the given actor. See
+/// [`risingwave_connector::sink::sink_group`].
+fn expect_sink_group_members(node: &StreamNode, actor_id: ActorId) -> Vec<SinkGroupMemberGuard> {
+    let mut guards = vec![];
+    visit_stream_node_body(node, |body| {
+        if let NodeBody::Sink(sink) = body
+            && let Some(sink_desc) = &sink.sink_desc
+            && let Some(group) = sink_desc.properties.get(SINK_GROUP_KEY)
+        {
+            let is_last = sink_desc
+                .properties
+                .get(SINK_ORDER_KEY)
+                .is_some_and(|order| order == SINK_ORDER_LAST);
+            guards.push(SinkGroupRegistry::global().expect_member(
+                group,
+                sink_desc.id,
+                actor_id,
+                is_last,
+            ));
+        }
+    });
+    guards
 }
