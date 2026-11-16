@@ -884,3 +884,19 @@
             └─StreamProject { exprs: [Unnest(ARRAY[2, 3, 4]:List(Int32)), _row_id, _rw_projected_row_id] }
               └─StreamProjectSet { select_list: [Unnest(ARRAY[2, 3, 4]:List(Int32)), $0] }
                 └─StreamValues { rows: [[0:Int64]] }
+- name: union with a filtered scan of a materialized view ordered by a non-stream-key column
+  sql: |
+    create table t (id int primary key, k int, v int);
+    create table u (id int primary key, k int);
+    create materialized view mv as select id, k, v from t order by v;
+    select id from u union all select k from mv where v = 1;
+  stream_plan: |-
+    StreamMaterialize { columns: [id, u.id(hidden), null:Int32(hidden), $src(hidden)], stream_key: [u.id, null:Int32, $src], pk_columns: [u.id, null:Int32, $src], pk_conflict: NoCheck }
+    └─StreamUnion { all: true }
+      ├─StreamExchange { dist: HashShard(u.id, null:Int32, 0:Int32) }
+      │ └─StreamProject { exprs: [u.id, u.id, null:Int32, 0:Int32] }
+      │   └─StreamTableScan { table: u, columns: [u.id], stream_scan_type: SnapshotBackfill, stream_key: [u.id], pk: [id], dist: UpstreamHashShard(u.id) }
+      └─StreamExchange { dist: HashShard(mv.id, mv.v, 1:Int32) }
+        └─StreamProject { exprs: [mv.k, mv.id, mv.v, 1:Int32] }
+          └─StreamFilter { predicate: (mv.v = 1:Int32) }
+            └─StreamTableScan { table: mv, columns: [mv.k, mv.v, mv.id], pk_scan_range: v = Some(Int32(1)), stream_scan_type: SnapshotBackfill, stream_key: [mv.id, mv.v], pk: [v, id], dist: UpstreamHashShard(mv.id) }
