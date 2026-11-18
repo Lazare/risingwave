@@ -1084,6 +1084,11 @@ message NowNode {
     NowModeUpdateCurrent update_current = 101;
     NowModeGenerateSeries generate_series = 102;
   }
+
+  // Snapshot epoch of the job when it is created with snapshot backfill, filled by meta.
+  // The barriers of the snapshot phase carry fake epochs: `now()` is evaluated at this epoch
+  // until the epochs of the job get past it.
+  optional uint64 snapshot_backfill_epoch = 2;
 }
 
 message ValuesNode {
