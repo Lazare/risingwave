@@ -139,7 +139,12 @@ A `Now` fragment receives every barrier but only advances (state, output, waterm
 that *releases* it (`Barrier.selective.released_fragment_ids`). Meta reads the rounding of the
 `Project` that follows `Now` in the same fragment: for `date_trunc('<unit>', now())` it releases
 `Now` only when the rounded time changes (period capped at 15 minutes, since time zone offsets
-are multiples of 15 minutes); otherwise it releases it at every barrier. Between releases, the
+are multiples of 15 minutes); otherwise it releases it at every barrier. The same holds for a
+deterministic expression over the rounded time and constants, such as
+`date_trunc('hour', now()) - interval '2 days'` (arithmetic, casts, `AT TIME ZONE`, `extract`,
+`greatest`/`least`, `coalesce`). An expression that reads `now()` without rounding it, or that
+rounds a shifted time (`date_trunc('day', now() - interval '10 seconds')`), is released at every
+barrier. Between releases, the
 descendants of `Now` sleep. The output cannot be held in the dispatcher instead: `Now` commits
 its last timestamp at every barrier, and downstream dynamic filters reject the deletion of a value
 they never received after a recovery.
