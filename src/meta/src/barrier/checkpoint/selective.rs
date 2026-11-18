@@ -449,8 +449,9 @@ fn routable_cdc_table_name(condition: &ExprNode) -> Option<String> {
 const MAX_NOW_PERIOD_MS: u64 = 15 * 60 * 1000;
 
 /// Period (ms) at which the output of a `Now` fragment may change, or 0 if it may change at every
-/// barrier. Only `date_trunc(unit, now)` projections are recognized: the rounded value only
-/// changes at multiples of the unit.
+/// barrier. Recognized projections are `date_trunc(unit, now)`, whose value only changes at
+/// multiples of the unit, and deterministic expressions over it and constants, such as
+/// `date_trunc('hour', now) - interval '2 days'`, which only change when it does.
 fn now_fragment_period_ms(nodes: &StreamNode) -> u64 {
     let mut update_current = false;
     let mut period: Option<u64> = None;
@@ -461,7 +462,9 @@ fn now_fragment_period_ms(nodes: &StreamNode) -> u64 {
         }
         Some(NodeBody::Project(project)) => {
             for expr in &project.select_list {
-                match date_trunc_period_ms(expr) {
+                match rounded_expr_period_ms(expr) {
+                    // A constant never changes: it does not constrain the period.
+                    Some(CONSTANT_PERIOD_MS) => {}
                     Some(p) => period = Some(period.map_or(p, |q: u64| q.min(p))),
                     None => every_barrier = true,
                 }
@@ -475,7 +478,55 @@ fn now_fragment_period_ms(nodes: &StreamNode) -> u64 {
     period.unwrap_or(0)
 }
 
-/// `date_trunc('<unit>', <input>[, <tz>])` with a constant unit: the period of the unit (capped).
+/// Period of an expression that never changes.
+const CONSTANT_PERIOD_MS: u64 = u64::MAX;
+
+/// Period (ms) at which the value of an expression over the output of `Now` may change:
+/// [`CONSTANT_PERIOD_MS`] for a constant, the period of the unit for `date_trunc(unit, now)`, and
+/// the lowest period of the arguments for the deterministic functions listed below. `None` when
+/// the expression may change at every barrier, in particular when it reads `now` without rounding
+/// it, or is not recognized.
+fn rounded_expr_period_ms(expr: &ExprNode) -> Option<u64> {
+    match &expr.rex_node {
+        Some(RexNode::Constant(_)) => Some(CONSTANT_PERIOD_MS),
+        Some(RexNode::FuncCall(call)) => {
+            if let Some(period_ms) = date_trunc_period_ms(expr) {
+                return Some(period_ms);
+            }
+            // Deterministic functions of their arguments only (the time zone, when any, is an
+            // explicit argument).
+            if !matches!(
+                expr.function_type(),
+                ExprType::Add
+                    | ExprType::Subtract
+                    | ExprType::AddWithTimeZone
+                    | ExprType::SubtractWithTimeZone
+                    | ExprType::Multiply
+                    | ExprType::Divide
+                    | ExprType::Neg
+                    | ExprType::Cast
+                    | ExprType::CastWithTimeZone
+                    | ExprType::AtTimeZone
+                    | ExprType::Extract
+                    | ExprType::DatePart
+                    | ExprType::Greatest
+                    | ExprType::Least
+                    | ExprType::Coalesce
+            ) {
+                return None;
+            }
+            call.children
+                .iter()
+                .map(rounded_expr_period_ms)
+                .try_fold(CONSTANT_PERIOD_MS, |period, child| Some(period.min(child?)))
+        }
+        _ => None,
+    }
+}
+
+/// `date_trunc('<unit>', now[, <tz>])` with a constant unit: the period of the unit (capped).
+/// The rounded input must be `now` itself: the rounding of a shifted time, such as
+/// `date_trunc('day', now - interval '10 seconds')`, does not change at multiples of the unit.
 fn date_trunc_period_ms(expr: &ExprNode) -> Option<u64> {
     if expr.function_type() != ExprType::DateTrunc {
         return None;
@@ -483,6 +534,14 @@ fn date_trunc_period_ms(expr: &ExprNode) -> Option<u64> {
     let Some(RexNode::FuncCall(call)) = &expr.rex_node else {
         return None;
     };
+    if !matches!(
+        call.children
+            .get(1)
+            .and_then(|input| input.rex_node.as_ref()),
+        Some(RexNode::InputRef(_))
+    ) {
+        return None;
+    }
     let unit = call.children.first()?;
     let Some(RexNode::Constant(datum)) = &unit.rex_node else {
         return None;
@@ -945,6 +1004,75 @@ mod tests {
             0
         );
         assert_eq!(now_fragment_period_ms(&now_fragment(vec![])), 0);
+    }
+
+    #[test]
+    fn test_now_period_of_derived_expressions() {
+        use risingwave_pb::data::PbDatum;
+        use risingwave_pb::expr::FunctionCall;
+        let constant = || ExprNode {
+            rex_node: Some(RexNode::Constant(PbDatum { body: vec![] })),
+            ..Default::default()
+        };
+        let raw = || ExprNode {
+            rex_node: Some(RexNode::InputRef(0)),
+            ..Default::default()
+        };
+        let call = |function_type: ExprType, children: Vec<ExprNode>| ExprNode {
+            function_type: function_type as i32,
+            rex_node: Some(RexNode::FuncCall(FunctionCall { children })),
+            ..Default::default()
+        };
+        let period = |expr: ExprNode| now_fragment_period_ms(&now_fragment(vec![expr]));
+
+        // `date_trunc('minute', now) - interval`: changes when the rounded time changes.
+        assert_eq!(
+            period(call(
+                ExprType::SubtractWithTimeZone,
+                vec![date_trunc("minute"), constant(), constant()]
+            )),
+            60_000
+        );
+        // Nested, with two roundings: the finest one wins.
+        assert_eq!(
+            period(call(
+                ExprType::Least,
+                vec![
+                    call(ExprType::Add, vec![date_trunc("day"), constant()]),
+                    date_trunc("second"),
+                ]
+            )),
+            1_000
+        );
+        // `now` read without rounding somewhere in the expression.
+        assert_eq!(
+            period(call(ExprType::Least, vec![date_trunc("minute"), raw()])),
+            0
+        );
+        assert_eq!(period(call(ExprType::Subtract, vec![raw(), constant()])), 0);
+        // The rounding of a shifted time does not change at multiples of the unit.
+        let unit = date_trunc("minute");
+        let Some(RexNode::FuncCall(unit_call)) = &unit.rex_node else {
+            unreachable!()
+        };
+        let shifted = call(
+            ExprType::DateTrunc,
+            vec![
+                unit_call.children[0].clone(),
+                call(ExprType::Subtract, vec![raw(), constant()]),
+            ],
+        );
+        assert_eq!(period(shifted), 0);
+        // A function that is not known to be deterministic.
+        assert_eq!(
+            period(call(ExprType::Proctime, vec![date_trunc("minute")])),
+            0
+        );
+        // A constant column next to a rounded one does not constrain the period.
+        assert_eq!(
+            now_fragment_period_ms(&now_fragment(vec![date_trunc("minute"), constant()])),
+            60_000
+        );
     }
 
     #[test]
