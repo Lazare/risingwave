@@ -531,8 +531,9 @@ pub struct MetaDeveloperConfig {
     #[serde(default = "default::developer::enable_trivial_move")]
     pub enable_trivial_move: bool,
 
-    /// Deliver periodic barriers only to the fragments whose inputs may have changed (only for
-    /// DML-driven tables for now). Experimental, see `docs/dev/src/design/selective-barriers.md`.
+    /// Deliver periodic barriers only to the fragments whose inputs may have changed: tables fed
+    /// by DML or by a shared CDC source, and descendants of a rounded `now()`. Experimental, see
+    /// `docs/dev/src/design/selective-barriers.md`.
     #[serde(default = "default::developer::enable_selective_barrier")]
     pub enable_selective_barrier: bool,
     #[serde(default = "default::developer::enable_check_task_level_overlap")]
