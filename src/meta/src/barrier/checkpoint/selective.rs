@@ -913,6 +913,7 @@ mod tests {
                 node_body: Some(NodeBody::Now(Box::new(NowNode {
                     state_table: None,
                     mode: Some(NowNodeMode::UpdateCurrent(NowModeUpdateCurrent {})),
+                    snapshot_backfill_epoch: None,
                 }))),
                 ..Default::default()
             }],

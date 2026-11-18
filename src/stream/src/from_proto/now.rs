@@ -84,7 +84,8 @@ impl ExecutorBuilder for NowExecutorBuilder {
             state_table,
             progress_ratio,
         )
-        .with_selective_fragment_id(params.actor_context.fragment_id);
+        .with_selective_fragment_id(params.actor_context.fragment_id)
+        .with_snapshot_backfill_epoch(node.snapshot_backfill_epoch);
         Ok((params.info, exec).into())
     }
 }

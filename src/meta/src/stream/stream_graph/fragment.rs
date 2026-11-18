@@ -1589,7 +1589,8 @@ impl StreamFragmentGraph {
     }
 }
 
-/// Fill snapshot epoch for `StreamScanNode` of `SnapshotBackfill`.
+/// Fill snapshot epoch for `StreamScanNode` of `SnapshotBackfill`, and for the `NowNode` of a
+/// job created with snapshot backfill.
 /// Return `true` when has change applied.
 pub fn fill_snapshot_backfill_epoch(
     node: &mut StreamNode,
@@ -1598,7 +1599,27 @@ pub fn fill_snapshot_backfill_epoch(
 ) -> MetaResult<bool> {
     let mut result = Ok(());
     let mut applied = false;
+    // All the upstream tables of the job in the same database share the snapshot epoch of the job.
+    let job_snapshot_epoch = snapshot_backfill_info.and_then(|info| {
+        info.upstream_mv_table_id_to_backfill_epoch
+            .values()
+            .flatten()
+            .max()
+            .copied()
+    });
     visit_stream_node_cont_mut(node, |node| {
+        if let Some(NodeBody::Now(now)) = node.node_body.as_mut()
+            && let Some(snapshot_epoch) = job_snapshot_epoch
+        {
+            // During the snapshot phase the barriers of the job carry fake epochs. Let `now()`
+            // be evaluated at the snapshot epoch instead, so that it does not jump from the
+            // fake time to the real time at the end of the snapshot.
+            if now.snapshot_backfill_epoch != Some(snapshot_epoch) {
+                now.snapshot_backfill_epoch = Some(snapshot_epoch);
+                applied = true;
+            }
+            return true;
+        }
         if let Some(NodeBody::StreamScan(stream_scan)) = node.node_body.as_mut()
             && (stream_scan.stream_scan_type == StreamScanType::SnapshotBackfill as i32
                 || stream_scan.stream_scan_type == StreamScanType::CrossDbSnapshotBackfill as i32)
