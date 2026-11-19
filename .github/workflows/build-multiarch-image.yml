@@ -72,6 +72,9 @@ jobs:
       CARGO_PROFILE_PRODUCTION_DEBUG: '0'
       CARGO_PROFILE_PRODUCTION_SPLIT_DEBUGINFO: 'off'
       ENABLE_BUILD_DASHBOARD: '1'
+      # The dashboard is built by the build script of `risingwave_meta_dashboard`. The type
+      # check of `next build` needs more than the default heap of Node.js (about 2 GB).
+      NODE_OPTIONS: '--max-old-space-size=6144'
       OPENSSL_STATIC: '1'
       GIT_SHA: ${{ github.sha }}
     steps:
