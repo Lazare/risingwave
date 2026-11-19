@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Run the selective barrier test suite on a local cluster, with the feature off then on.
-# Requires the risedev profiles `selbar` (feature off) and `selbar-on` (feature on), both with
-# persistent storage (sqlite meta store and fs object store) so that restarts recover state.
+# Requires the risedev profiles `selbar` (feature off), `selbar-on` (feature on) and
+# `selbar-on-cf30` (feature on with `checkpoint_frequency = 30`, config
+# `scripts/selective_barriers/selective-on-cf30.toml`), all with persistent storage (sqlite meta
+# store and fs object store) so that restarts recover state.
 #
 # Shared CDC tests run only if PGHOST is set (a Postgres with `wal_level = logical`, see the PG*
 # variables in e2e_test/streaming/selective_barrier/cdc/shared_cdc.slt).
@@ -27,7 +29,7 @@ no_panic() {
   fi
 }
 
-for profile in selbar selbar-on; do
+for profile in selbar selbar-on selbar-on-cf30; do
   echo "=== $profile: SLT"
   fresh_cluster "$profile"
   for f in e2e_test/streaming/selective_barrier/*.slt; do

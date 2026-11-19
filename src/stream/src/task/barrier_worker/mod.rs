@@ -727,14 +727,24 @@ fn sync_epoch(
     state_store: &StateStoreImpl,
     barrier_sync_latency: LabelGuardedHistogram,
     prev_epoch: u64,
-    table_ids: HashSet<TableId>,
+    table_id_groups: Vec<HashSet<TableId>>,
 ) -> BoxFuture<'static, StreamResult<SyncResult>> {
     let timer = barrier_sync_latency.start_timer();
 
+    // Each group of tables started the same epochs since its last sync, as required by the
+    // uploader. There are several groups only with selective barriers.
+    let sync_table_epochs = if table_id_groups.is_empty() {
+        vec![(prev_epoch, HashSet::new())]
+    } else {
+        table_id_groups
+            .into_iter()
+            .map(|table_ids| (prev_epoch, table_ids))
+            .collect()
+    };
     let state_store = state_store.clone();
     let future = async move {
         dispatch_state_store!(state_store, hummock, {
-            hummock.sync(vec![(prev_epoch, table_ids)]).await
+            hummock.sync(sync_table_epochs).await
         })
     };
 

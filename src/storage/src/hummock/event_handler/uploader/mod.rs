@@ -2337,6 +2337,101 @@ pub(crate) mod tests {
         );
     }
 
+    /// Selective barriers with `checkpoint_frequency > 1`: a table falls asleep right after a
+    /// checkpoint and wakes up at a non-checkpoint barrier. It did not start the same epochs as
+    /// the other table since the last sync, so the two tables start their epochs as separate
+    /// groups and are synced as two groups at the next checkpoint.
+    #[tokio::test]
+    async fn test_uploader_wake_up_between_checkpoints() {
+        const SLEEPY_TABLE_ID: TableId = TableId::new(235);
+        const SLEEPY_INSTANCE_ID: LocalInstanceId = TEST_LOCAL_INSTANCE_ID + 1;
+        let both = HashSet::from_iter([TEST_TABLE_ID, SLEEPY_TABLE_ID]);
+        let only_test = HashSet::from_iter([TEST_TABLE_ID]);
+        let only_sleepy = HashSet::from_iter([SLEEPY_TABLE_ID]);
+
+        let mut uploader = test_uploader(dummy_success_upload_future);
+        let mut sst_collector = UploadedSstCollector::default();
+        let epoch1 = INITIAL_EPOCH.next_epoch();
+        let epoch2 = epoch1.next_epoch();
+        let epoch3 = epoch2.next_epoch();
+        let epoch4 = epoch3.next_epoch();
+        let epoch5 = epoch4.next_epoch();
+        let epoch6 = epoch5.next_epoch();
+        let epoch7 = epoch6.next_epoch();
+
+        // Barrier 2 (checkpoint): both tables are woken and synced.
+        uploader.start_epoch(epoch1, both.clone());
+        uploader.init_instance(TEST_LOCAL_INSTANCE_ID, TEST_TABLE_ID, epoch1);
+        uploader.init_instance(SLEEPY_INSTANCE_ID, SLEEPY_TABLE_ID, epoch1);
+        uploader.start_epoch(epoch2, both.clone());
+        uploader.local_seal_epoch_for_test(TEST_LOCAL_INSTANCE_ID, epoch1);
+        uploader.local_seal_epoch_for_test(SLEEPY_INSTANCE_ID, epoch1);
+        let (sync_tx, sync_rx) = oneshot::channel();
+        uploader.start_single_epoch_sync(epoch1, sync_tx, both.clone());
+        assert_uploader_pending(&mut uploader).await;
+        assert!(sync_rx.await.unwrap().unwrap().uploaded_ssts.is_empty());
+
+        // Barrier 3 (not a checkpoint): the sleepy table falls asleep, the other one writes.
+        uploader.abandon_epoch(epoch2, only_sleepy.clone());
+        uploader.start_epoch(epoch3, only_test.clone());
+        let (test_imm, tracker) = gen_imm_with_unlimit(epoch2);
+        uploader.add_imm(TEST_LOCAL_INSTANCE_ID, (test_imm.clone(), tracker));
+        uploader.local_seal_epoch_for_test(TEST_LOCAL_INSTANCE_ID, epoch2);
+
+        // Barrier 4 (not a checkpoint): the sleepy table wakes up and jumps from epoch 2 to
+        // epoch 4. It starts the epoch as a group of its own.
+        uploader.start_epoch(epoch4, only_test.clone());
+        uploader.start_epoch(epoch4, only_sleepy.clone());
+        uploader.local_seal_epoch_for_test(TEST_LOCAL_INSTANCE_ID, epoch3);
+        uploader.local_seal_epoch(
+            SLEEPY_INSTANCE_ID,
+            epoch4,
+            SealCurrentEpochOptions::for_test(),
+        );
+
+        // Barrier 5 (not a checkpoint): the sleepy table writes in epoch 4.
+        uploader.start_epoch(epoch5, only_test.clone());
+        uploader.start_epoch(epoch5, only_sleepy.clone());
+        let (sleepy_imm, tracker) = gen_imm_inner_with_unlimit(SLEEPY_TABLE_ID, epoch4, 0);
+        uploader.add_imm(SLEEPY_INSTANCE_ID, (sleepy_imm.clone(), tracker));
+        uploader.local_seal_epoch_for_test(TEST_LOCAL_INSTANCE_ID, epoch4);
+        uploader.local_seal_epoch_for_test(SLEEPY_INSTANCE_ID, epoch4);
+
+        // Barrier 6 (checkpoint): the new epoch is started by both tables as a single group
+        // again, and epoch 5 is synced for the two groups.
+        uploader.start_epoch(epoch6, both.clone());
+        uploader.local_seal_epoch_for_test(TEST_LOCAL_INSTANCE_ID, epoch5);
+        uploader.local_seal_epoch_for_test(SLEEPY_INSTANCE_ID, epoch5);
+        let (sync_tx, sync_rx) = oneshot::channel();
+        uploader.start_sync_epoch(
+            sync_tx,
+            vec![(epoch5, only_test.clone()), (epoch5, only_sleepy.clone())],
+        );
+        sst_collector.next(&mut uploader).await;
+        let synced = sync_rx.await.unwrap().unwrap();
+        let synced_imm_ids: HashMap<_, _> = synced
+            .uploaded_ssts
+            .iter()
+            .flat_map(|sst| sst.imm_ids().clone())
+            .collect();
+        assert_eq!(
+            HashMap::from_iter([
+                (TEST_LOCAL_INSTANCE_ID, vec![test_imm.batch_id()]),
+                (SLEEPY_INSTANCE_ID, vec![sleepy_imm.batch_id()]),
+            ]),
+            synced_imm_ids
+        );
+
+        // Barrier 7 (checkpoint): both tables are synced as one group.
+        uploader.start_epoch(epoch7, both.clone());
+        uploader.local_seal_epoch_for_test(TEST_LOCAL_INSTANCE_ID, epoch6);
+        uploader.local_seal_epoch_for_test(SLEEPY_INSTANCE_ID, epoch6);
+        let (sync_tx, sync_rx) = oneshot::channel();
+        uploader.start_single_epoch_sync(epoch6, sync_tx, both.clone());
+        assert_uploader_pending(&mut uploader).await;
+        assert!(sync_rx.await.unwrap().unwrap().uploaded_ssts.is_empty());
+    }
+
     /// Selective barriers: a table falls asleep while one of its actors has not processed the
     /// previous barrier yet (e.g. right after a recovery, when the actors are slow to start).
     /// The late seal into the abandoned epoch must not mark the instance as stopped, otherwise

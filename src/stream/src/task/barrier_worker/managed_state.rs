@@ -83,11 +83,26 @@ enum ManagedBarrierStateInner {
     },
 }
 
+/// Tables that started the epoch opened by the latest barrier.
+#[derive(Debug)]
+struct PrevBarrierTableIds {
+    epoch: EpochPair,
+    /// Tables grouped by the set of epochs they started since the last checkpoint. Without
+    /// selective barriers there is a single group. With selective barriers, the tables that wake
+    /// up at a non-checkpoint barrier form a new group, since they did not start the previous
+    /// epochs of the other tables. The uploader syncs each group separately.
+    groups: Vec<HashSet<TableId>>,
+    /// Whether the latest barrier was a checkpoint (or the initial barrier), i.e. every epoch
+    /// before the one it opened is synced.
+    synced: bool,
+}
+
 #[derive(Debug)]
 struct BarrierState {
     barrier: Barrier,
-    /// Only be `Some(_)` when `barrier.kind` is `Checkpoint`
-    table_ids: Option<HashSet<TableId>>,
+    /// Only be `Some(_)` when `barrier.kind` is `Checkpoint`: the groups of tables to sync, see
+    /// [`PrevBarrierTableIds::groups`].
+    table_ids: Option<Vec<HashSet<TableId>>>,
     inner: ManagedBarrierStateInner,
 }
 
@@ -296,7 +311,7 @@ pub(crate) struct PartialGraphManagedBarrierState {
     /// The key is `prev_epoch`, and the first value is `curr_epoch`
     epoch_barrier_state_map: BTreeMap<u64, BarrierState>,
 
-    prev_barrier_table_ids: Option<(EpochPair, HashSet<TableId>)>,
+    prev_barrier_table_ids: Option<PrevBarrierTableIds>,
 
     /// Record the progress updates of creating mviews for each epoch of concurrent checkpoints.
     ///
@@ -1378,7 +1393,8 @@ impl PartialGraphManagedBarrierState {
 
 pub(crate) struct BarrierToComplete {
     pub barrier: Barrier,
-    pub table_ids: Option<HashSet<TableId>>,
+    /// Groups of tables to sync, each synced separately by the uploader.
+    pub table_ids: Option<Vec<HashSet<TableId>>>,
     pub create_mview_progress: Vec<PbCreateMviewProgress>,
     pub list_finished_source_ids: Vec<PbListFinishedSource>,
     pub load_finished_source_ids: Vec<PbLoadFinishedSource>,
@@ -1445,11 +1461,20 @@ impl PartialGraphManagedBarrierState {
     ) {
         let timer = self.barrier_inflight_latency.start_timer();
 
-        if let Some(hummock) = self.state_store.as_hummock() {
-            hummock.start_epoch(barrier.epoch.curr, table_ids.clone());
-        }
+        let hummock = self.state_store.as_hummock();
+        let is_checkpoint = barrier.kind.is_checkpoint();
+        // Tables fall asleep only at a periodic barrier that leaves fragments asleep. A barrier
+        // with a mutation (e.g. dropping jobs) is delivered to every fragment, and the tables it
+        // removes have sealed the previous epoch and must be synced.
+        let may_sleep = barrier
+            .selective
+            .as_ref()
+            .is_some_and(|info| !info.sleeping_fragments.is_empty() && barrier.mutation.is_none());
 
-        let table_ids = match barrier.kind {
+        // Groups of tables that start the new epoch. The uploader requires the tables synced
+        // together to have started the same epochs since their last sync, so each group is
+        // started separately.
+        let (table_ids_to_sync, curr_groups) = match barrier.kind {
             BarrierKind::Unspecified => {
                 unreachable!()
             }
@@ -1460,67 +1485,104 @@ impl PartialGraphManagedBarrierState {
                     self.prev_barrier_table_ids
                 );
                 info!(epoch = ?barrier.epoch, "initialize at Initial barrier");
-                self.prev_barrier_table_ids = Some((barrier.epoch, table_ids));
-                None
+                (None, vec![table_ids])
             }
-            BarrierKind::Barrier => {
-                // Selective barriers may only change the set of woken tables at checkpoints.
-                assert!(
-                    barrier.selective.is_none(),
-                    "selective barrier must be a checkpoint: {:?}",
-                    barrier.epoch
-                );
-                if let Some((prev_epoch, prev_table_ids)) = self.prev_barrier_table_ids.as_mut() {
-                    assert_eq!(prev_epoch.curr, barrier.epoch.prev);
-                    assert_eq!(prev_table_ids, &table_ids);
-                    *prev_epoch = barrier.epoch;
-                } else {
-                    info!(epoch = ?barrier.epoch, "initialize at non-checkpoint barrier");
-                    self.prev_barrier_table_ids = Some((barrier.epoch, table_ids));
-                }
-                None
-            }
-            BarrierKind::Checkpoint => {
-                // Only a periodic barrier that leaves fragments asleep makes tables fall asleep.
-                // A barrier with a mutation (e.g. dropping jobs) is delivered to every fragment,
-                // and the tables it removes have sealed the previous epoch and must be synced.
-                let curr_table_ids = barrier
-                    .selective
-                    .as_ref()
-                    .filter(|info| {
-                        !info.sleeping_fragments.is_empty() && barrier.mutation.is_none()
-                    })
-                    .map(|_| table_ids.clone());
-                Some(
-                    if let Some((prev_epoch, prev_table_ids)) = self
-                        .prev_barrier_table_ids
-                        .replace((barrier.epoch, table_ids))
-                        && prev_epoch.curr == barrier.epoch.prev
-                    {
-                        match curr_table_ids {
-                            // Tables that started the previous epoch but do not receive this
-                            // barrier fall asleep: their actors will not seal the previous epoch,
-                            // which is empty for them. Abandon it and do not sync them.
-                            Some(curr_table_ids) => {
-                                let (synced, asleep): (HashSet<_>, HashSet<_>) = prev_table_ids
-                                    .into_iter()
-                                    .partition(|table_id| curr_table_ids.contains(table_id));
-                                if !asleep.is_empty()
-                                    && let Some(hummock) = self.state_store.as_hummock()
-                                {
-                                    hummock.abandon_epoch(prev_epoch.curr, asleep);
+            BarrierKind::Barrier | BarrierKind::Checkpoint => {
+                match self.prev_barrier_table_ids.take() {
+                    Some(prev) if prev.epoch.curr == barrier.epoch.prev => {
+                        let mut groups = prev.groups;
+                        if barrier.selective.is_some() {
+                            if may_sleep {
+                                // Tables that started the previous epoch but do not receive
+                                // this barrier fall asleep: their actors will not seal the
+                                // previous epoch, which is empty for them. Abandon it and do
+                                // not sync them.
+                                let asleep: HashSet<TableId> = groups
+                                    .iter()
+                                    .flatten()
+                                    .filter(|table_id| !table_ids.contains(*table_id))
+                                    .copied()
+                                    .collect();
+                                if !asleep.is_empty() {
+                                    // Meta lets a table fall asleep only right after a
+                                    // checkpoint, when everything the table wrote is synced.
+                                    assert!(
+                                        prev.synced,
+                                        "tables {:?} fall asleep at {:?} with unsynced epochs",
+                                        asleep, barrier.epoch
+                                    );
+                                    for group in &mut groups {
+                                        group.retain(|table_id| !asleep.contains(table_id));
+                                    }
+                                    if let Some(hummock) = hummock {
+                                        hummock.abandon_epoch(prev.epoch.curr, asleep);
+                                    }
                                 }
-                                synced
                             }
-                            None => prev_table_ids,
+                        } else if !is_checkpoint {
+                            assert!(groups.len() <= 1, "{:?}", groups);
+                            assert_eq!(
+                                groups.first().cloned().unwrap_or_default(),
+                                table_ids,
+                                "table ids changed at non-checkpoint barrier {:?}",
+                                barrier.epoch
+                            );
                         }
-                    } else {
+                        if is_checkpoint {
+                            // Everything started so far is synced by this barrier: the tables
+                            // start the new epoch as a single group again.
+                            (Some(groups), vec![table_ids])
+                        } else {
+                            // Tables waking up at this barrier did not start the previous
+                            // epochs of the other tables: they form a new group.
+                            let waking: HashSet<TableId> = table_ids
+                                .iter()
+                                .filter(|table_id| {
+                                    !groups.iter().any(|group| group.contains(*table_id))
+                                })
+                                .copied()
+                                .collect();
+                            groups.push(waking);
+                            (None, groups)
+                        }
+                    }
+                    _ if is_checkpoint => {
                         debug!(epoch = ?barrier.epoch, "reinitialize at Checkpoint barrier");
-                        HashSet::new()
-                    },
-                )
+                        (Some(vec![]), vec![table_ids])
+                    }
+                    None => {
+                        info!(epoch = ?barrier.epoch, "initialize at non-checkpoint barrier");
+                        (None, vec![table_ids])
+                    }
+                    Some(prev) => {
+                        panic!(
+                            "non-checkpoint barrier {:?} does not follow the previous barrier {:?}",
+                            barrier.epoch, prev.epoch
+                        )
+                    }
+                }
             }
         };
+        let curr_groups: Vec<_> = curr_groups
+            .into_iter()
+            .filter(|group| !group.is_empty())
+            .collect();
+        if let Some(hummock) = hummock {
+            for group in &curr_groups {
+                hummock.start_epoch(barrier.epoch.curr, group.clone());
+            }
+        }
+        self.prev_barrier_table_ids = Some(PrevBarrierTableIds {
+            epoch: barrier.epoch,
+            groups: curr_groups,
+            synced: is_checkpoint || matches!(barrier.kind, BarrierKind::Initial),
+        });
+        let table_ids = table_ids_to_sync.map(|groups| {
+            groups
+                .into_iter()
+                .filter(|group| !group.is_empty())
+                .collect()
+        });
 
         if let Some(&mut BarrierState { ref inner, .. }) =
             self.epoch_barrier_state_map.get_mut(&barrier.epoch.prev)
@@ -1559,10 +1621,14 @@ impl PartialGraphManagedBarrierState {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::sync::Arc;
 
+    use risingwave_common::catalog::TableId;
     use risingwave_common::util::epoch::test_epoch;
+    use risingwave_pb::id::FragmentId;
+    use risingwave_pb::stream_plan::barrier::BarrierKind;
 
-    use crate::executor::Barrier;
+    use crate::executor::{Barrier, SelectiveBarrierInfo};
     use crate::task::barrier_worker::managed_state::PartialGraphManagedBarrierState;
 
     #[tokio::test]
@@ -1613,6 +1679,80 @@ mod tests {
             test_epoch(2)
         );
         assert!(managed_barrier_state.epoch_barrier_state_map.is_empty());
+    }
+
+    /// A selective barrier that leaves some fragment asleep.
+    fn selective_barrier(epoch: u64, is_checkpoint: bool) -> Barrier {
+        let mut barrier = Barrier::new_test_barrier(test_epoch(epoch));
+        if !is_checkpoint {
+            barrier.kind = BarrierKind::Barrier;
+        }
+        barrier.selective = Some(Arc::new(SelectiveBarrierInfo {
+            sleeping_fragments: HashSet::from([FragmentId::new(1)]),
+            ..Default::default()
+        }));
+        barrier
+    }
+
+    fn tables(ids: &[u32]) -> HashSet<TableId> {
+        ids.iter().map(|id| TableId::new(*id)).collect()
+    }
+
+    /// Selective barriers with `checkpoint_frequency > 1`: tables that wake up between two
+    /// checkpoints are synced as separate groups.
+    #[tokio::test]
+    async fn test_selective_table_groups_between_checkpoints() {
+        let mut state = PartialGraphManagedBarrierState::for_test();
+        let mut issue = |epoch: u64, is_checkpoint: bool, table_ids: &[u32]| {
+            let barrier = selective_barrier(epoch, is_checkpoint);
+            state.transform_to_issued(&barrier, [], tables(table_ids));
+            let barrier_state = state
+                .epoch_barrier_state_map
+                .remove(&barrier.epoch.prev)
+                .unwrap();
+            let groups = state
+                .prev_barrier_table_ids
+                .as_ref()
+                .unwrap()
+                .groups
+                .clone();
+            (barrier_state.table_ids, groups)
+        };
+
+        // Checkpoint: nothing to sync at the first barrier.
+        let (to_sync, groups) = issue(1, true, &[1, 2, 3]);
+        assert_eq!(to_sync, Some(vec![]));
+        assert_eq!(groups, vec![tables(&[1, 2, 3])]);
+        // Right after the checkpoint, tables 2 and 3 fall asleep.
+        let (to_sync, groups) = issue(2, false, &[1]);
+        assert_eq!(to_sync, None);
+        assert_eq!(groups, vec![tables(&[1])]);
+        // Table 2 wakes up at a non-checkpoint barrier: it forms a new group.
+        let (to_sync, groups) = issue(3, false, &[1, 2]);
+        assert_eq!(to_sync, None);
+        assert_eq!(groups, vec![tables(&[1]), tables(&[2])]);
+        let (to_sync, groups) = issue(4, false, &[1, 2]);
+        assert_eq!(to_sync, None);
+        assert_eq!(groups, vec![tables(&[1]), tables(&[2])]);
+        // Checkpoint: the two groups are synced, table 3 wakes up and is not synced. All tables
+        // start the new epoch as one group.
+        let (to_sync, groups) = issue(5, true, &[1, 2, 3]);
+        assert_eq!(to_sync, Some(vec![tables(&[1]), tables(&[2])]));
+        assert_eq!(groups, vec![tables(&[1, 2, 3])]);
+        // Checkpoint right after a checkpoint: table 1 falls asleep and is not synced.
+        let (to_sync, groups) = issue(6, true, &[2, 3]);
+        assert_eq!(to_sync, Some(vec![tables(&[2, 3])]));
+        assert_eq!(groups, vec![tables(&[2, 3])]);
+    }
+
+    /// A table must not fall asleep while it may hold unsynced data.
+    #[tokio::test]
+    #[should_panic(expected = "fall asleep")]
+    async fn test_selective_table_cannot_sleep_between_checkpoints() {
+        let mut state = PartialGraphManagedBarrierState::for_test();
+        state.transform_to_issued(&selective_barrier(1, true), [], tables(&[1, 2]));
+        state.transform_to_issued(&selective_barrier(2, false), [], tables(&[1, 2]));
+        state.transform_to_issued(&selective_barrier(3, false), [], tables(&[1]));
     }
 
     #[tokio::test]

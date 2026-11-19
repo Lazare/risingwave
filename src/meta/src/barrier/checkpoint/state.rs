@@ -493,8 +493,10 @@ impl DatabaseCheckpointControl {
         // A command barrier wakes every fragment. Compute which ones wake up before the command
         // updates the graph: fragments dropped by the command still receive this barrier.
         let command_selective = (enable_selective_barrier && !is_periodic_barrier).then(|| {
-            self.selective
-                .plan_command(self.database_info.fragment_infos())
+            self.selective.plan_command(
+                self.database_info.fragment_infos(),
+                barrier_info.kind.is_checkpoint(),
+            )
         });
         let mut throttle_config: Option<ThrottleConfigMap> = None;
 
@@ -1791,15 +1793,16 @@ impl DatabaseCheckpointControl {
         // barrier may be delivered only to the fragments whose inputs may have changed. Once the
         // mode is on, every barrier carries selective information so that fragments that slept
         // know that they wake up. Tables keep being committed all together (`table_ids_to_commit`
-        // is unchanged), which publishes sleeping tables at the new epoch without data.
+        // is unchanged), which publishes sleeping tables at the new epoch without data. A
+        // fragment wakes up at any barrier but falls asleep only right after a checkpoint, so a
+        // sleeping table never holds unsynced data.
         let mut table_ids_to_sync: HashSet<TableId> =
             InflightFragmentInfo::existing_table_ids(self.database_info.fragment_infos()).collect();
         let mut nodes_to_sync_table: HashSet<WorkerId> =
             InflightFragmentInfo::workers(self.database_info.fragment_infos()).collect();
         let selective = if enable_selective_barrier {
             if is_periodic_barrier {
-                let may_sleep = barrier_info.kind.is_checkpoint()
-                    && mutation.is_none()
+                let may_sleep = mutation.is_none()
                     && actors_to_create.is_none()
                     && !self.state.is_paused()
                     && self.independent_checkpoint_job_controls.is_empty()
@@ -1808,7 +1811,12 @@ impl DatabaseCheckpointControl {
                 let barrier_time_ms =
                     risingwave_common::util::epoch::Epoch(barrier_info.curr_epoch())
                         .physical_time();
-                let plan = self.selective.plan(&fragments, may_sleep, barrier_time_ms);
+                let plan = self.selective.plan(
+                    &fragments,
+                    may_sleep,
+                    barrier_info.kind.is_checkpoint(),
+                    barrier_time_ms,
+                );
                 if !plan.full {
                     node_actors = plan.node_actors;
                     table_ids_to_sync = plan.table_ids_to_sync;
