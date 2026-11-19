@@ -29,7 +29,7 @@ use serde::Deserialize;
 use serde_with::{DisplayFromStr, serde_as};
 use simd_json::prelude::ArrayTrait;
 use thiserror_ext::AsReport;
-use tokio_postgres::types::Type as PgType;
+use tokio_postgres::types::{Kind as PgKind, Type as PgType};
 
 use super::{
     LogSinker, SINK_TYPE_APPEND_ONLY, SINK_TYPE_OPTION, SINK_TYPE_UPSERT, SinkError, SinkLogReader,
@@ -59,6 +59,18 @@ const CHECK_FOREIGN_KEY_SQL: &str = r#"
         WHERE n.nspname = $1
           AND t.relname = $2
           AND c.contype = 'f'
+    )
+"#;
+
+const CHECK_PRIMARY_KEY_SQL: &str = r#"
+    SELECT EXISTS (
+        SELECT 1
+        FROM pg_index i
+        JOIN pg_class t ON t.oid = i.indrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = $1
+          AND t.relname = $2
+          AND i.indisprimary
     )
 "#;
 
@@ -159,6 +171,35 @@ async fn ensure_no_foreign_key_with_client(
     }
 
     Ok(())
+}
+
+async fn ensure_primary_key_with_client(
+    client: &tokio_postgres::Client,
+    schema: &str,
+    table: &str,
+) -> Result<()> {
+    let has_primary_key = client
+        .query_one(CHECK_PRIMARY_KEY_SQL, &[&schema, &table])
+        .await
+        .context("failed to check the primary key")?
+        .get::<_, bool>(0);
+
+    if !has_primary_key {
+        return Err(SinkError::Config(anyhow!(
+            "Postgres table should define the primary key for non-append-only tables"
+        )));
+    }
+
+    Ok(())
+}
+
+/// The type that decides how the values of a column are encoded: the base type of a domain, the
+/// type itself otherwise.
+fn encoding_type(ty: &PgType) -> PgType {
+    match ty.kind() {
+        PgKind::Domain(base) => encoding_type(base),
+        _ => ty.clone(),
+    }
 }
 
 impl PostgresConfig {
@@ -401,11 +442,11 @@ impl PostgresSinkWriter {
         let pool = match &config.sink_group {
             Some(group) => PgPool::shared(
                 group,
-                pg_conn.clone(),
+                pg_conn,
                 tcp_keepalive,
                 config.pool_max_size.unwrap_or(DEFAULT_POOL_MAX_SIZE),
             ),
-            None => PgPool::new(pg_conn.clone(), tcp_keepalive, 1),
+            None => PgPool::new(pg_conn, tcp_keepalive, 1),
         };
         let group = config.sink_group.as_ref().map(|group| {
             SinkGroupRegistry::global().join(
@@ -418,36 +459,6 @@ impl PostgresSinkWriter {
 
         let pk_indices_lookup = pk_indices.iter().copied().collect::<HashSet<_>>();
 
-        // Rewrite schema types for serialization
-        let (pk_types, schema_types) = {
-            let name_to_type = PostgresExternalTable::type_mapping(
-                &pg_conn,
-                &config.schema,
-                &config.table,
-                is_append_only,
-            )
-            .await?;
-            let mut schema_types = Vec::with_capacity(schema.fields.len());
-            let mut pk_types = Vec::with_capacity(pk_indices.len());
-            for (i, field) in schema.fields.iter().enumerate() {
-                let field_name = &field.name;
-                let actual_data_type = name_to_type.get(field_name).map(|t| (*t).clone());
-                let actual_data_type = actual_data_type
-                    .ok_or_else(|| {
-                        SinkError::Config(anyhow!(
-                            "Column `{}` not found in sink schema",
-                            field_name
-                        ))
-                    })?
-                    .clone();
-                if pk_indices_lookup.contains(&i) {
-                    pk_types.push(actual_data_type.clone())
-                }
-                schema_types.push(actual_data_type);
-            }
-            (pk_types, schema_types)
-        };
-
         let raw_insert_sql = create_insert_sql(&schema, &config.schema, &config.table);
         let raw_upsert_sql = create_upsert_sql(
             &schema,
@@ -458,14 +469,32 @@ impl PostgresSinkWriter {
         );
         let raw_delete_sql = create_delete_sql(&schema, &config.schema, &config.table, &pk_indices);
 
-        // Check the target table and the statements once, to fail early.
-        {
+        // Check the target table and the statements once, to fail early. This runs on a
+        // connection of the pool: creating a sink opens no other connection.
+        let schema_types = {
             let mut client = pool.acquire().await?;
             ensure_no_foreign_key_with_client(&client, &config.schema, &config.table).await?;
-            client.prepare_cached(&raw_insert_sql).await?;
+            if !is_append_only {
+                ensure_primary_key_with_client(&client, &config.schema, &config.table).await?;
+            }
+            let insert_sql = client.prepare_cached(&raw_insert_sql).await?;
             client.prepare_cached(&raw_upsert_sql).await?;
             client.prepare_cached(&raw_delete_sql).await?;
+            // The parameters of the insert statement are the columns of the sink, in order:
+            // Postgres gives their types, with no schema discovery query.
+            insert_sql.params().iter().map(encoding_type).collect_vec()
+        };
+        if schema_types.len() != schema.fields.len() {
+            return Err(SinkError::Postgres(anyhow!(
+                "the insert statement has {} parameters, but the sink has {} columns",
+                schema_types.len(),
+                schema.fields.len()
+            )));
         }
+        let pk_types = pk_indices
+            .iter()
+            .map(|i| schema_types[*i].clone())
+            .collect_vec();
 
         let writer = Self {
             is_append_only,
@@ -907,5 +936,351 @@ mod tests {
                 r#"INSERT INTO "test_schema"."test_table" ("user_id", "client_id") VALUES ($1, $2) on conflict ("user_id", "client_id") do nothing"#
             ]],
         );
+    }
+
+    mod live {
+        //! Tests against a Postgres server, ignored by default. They need `PGHOST`, `PGPORT` and
+        //! `PGUSER` (a superuser with trust authentication):
+        //! `cargo test -p risingwave_connector --lib sink::postgres::tests::live -- --ignored`
+
+        use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+
+        use risingwave_common::catalog::Field;
+        use risingwave_common::test_prelude::StreamChunkTestExt;
+        use risingwave_common::types::DataType;
+
+        use super::super::*;
+        use crate::sink::catalog::SinkId;
+
+        const TEST_DATABASE: &str = "rw_postgres_sink_live_test";
+
+        fn connection_config(database: &str) -> PgConnectionConfig {
+            PgConnectionConfig {
+                host: std::env::var("PGHOST").unwrap_or_else(|_| "localhost".to_owned()),
+                port: std::env::var("PGPORT")
+                    .ok()
+                    .and_then(|port| port.parse().ok())
+                    .unwrap_or(5432),
+                user: std::env::var("PGUSER").unwrap_or_else(|_| "postgres".to_owned()),
+                password: String::new(),
+                database: database.to_owned(),
+                ssl_mode: SslMode::Disabled,
+                ssl_root_cert: None,
+            }
+        }
+
+        fn sink_config(table: &str, sink_type: &str, group: Option<&str>) -> PostgresConfig {
+            let conn = connection_config(TEST_DATABASE);
+            let mut properties = BTreeMap::from([
+                ("host".to_owned(), conn.host),
+                ("port".to_owned(), conn.port.to_string()),
+                ("user".to_owned(), conn.user),
+                ("password".to_owned(), conn.password),
+                ("database".to_owned(), conn.database),
+                ("schema".to_owned(), "s".to_owned()),
+                ("table".to_owned(), table.to_owned()),
+                ("type".to_owned(), sink_type.to_owned()),
+            ]);
+            if let Some(group) = group {
+                properties.insert("sink_group".to_owned(), group.to_owned());
+                properties.insert("pool.max_size".to_owned(), "2".to_owned());
+            }
+            PostgresConfig::from_btreemap(properties).unwrap()
+        }
+
+        fn fields(fields: &[(&str, DataType)]) -> Schema {
+            Schema::new(
+                fields
+                    .iter()
+                    .map(|(name, data_type)| Field {
+                        data_type: data_type.clone(),
+                        name: (*name).to_owned(),
+                    })
+                    .collect(),
+            )
+        }
+
+        fn writer_param(id: u32) -> SinkWriterParam {
+            let mut param = SinkWriterParam::for_test();
+            param.sink_id = SinkId::new(id);
+            param.actor_id = id.into();
+            param
+        }
+
+        /// Number of server processes serving the test database.
+        async fn backends(admin: &tokio_postgres::Client) -> i64 {
+            admin
+                .query_one(
+                    "SELECT count(*) FROM pg_stat_activity WHERE datname = $1",
+                    &[&TEST_DATABASE],
+                )
+                .await
+                .unwrap()
+                .get(0)
+        }
+
+        /// Waits for the number of server processes of the test database to be `expected`.
+        async fn wait_for_backends(admin: &tokio_postgres::Client, expected: i64) -> i64 {
+            let mut count = backends(admin).await;
+            for _ in 0..100 {
+                if count == expected {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                count = backends(admin).await;
+            }
+            count
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore]
+        async fn test_writer_uses_only_pool_connections() {
+            let admin = create_pg_client(&connection_config("postgres"), None)
+                .await
+                .unwrap();
+            // One statement at a time: these cannot run in a transaction.
+            for sql in [
+                format!("DROP DATABASE IF EXISTS {TEST_DATABASE} WITH (FORCE)"),
+                format!("CREATE DATABASE {TEST_DATABASE}"),
+            ] {
+                admin.batch_execute(&sql).await.unwrap();
+            }
+            {
+                let setup = create_pg_client(&connection_config(TEST_DATABASE), None)
+                    .await
+                    .unwrap();
+                setup
+                    .batch_execute(
+                        r#"
+                        CREATE SCHEMA s;
+                        CREATE TYPE s.mood AS ENUM ('sad', 'happy');
+                        CREATE DOMAIN s.label AS text;
+                        CREATE TABLE s.t (
+                            id int PRIMARY KEY,
+                            name varchar,
+                            u uuid,
+                            n numeric,
+                            e s.mood,
+                            ts timestamptz
+                        );
+                        CREATE TABLE s.types (id int PRIMARY KEY, tags text[], moods s.mood[], d s.label);
+                        CREATE TABLE s.no_pk (id int, name varchar);
+                        CREATE TABLE s.parent (id int PRIMARY KEY);
+                        CREATE TABLE s.child (id int PRIMARY KEY, parent_id int REFERENCES s.parent (id));
+                        "#,
+                    )
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(wait_for_backends(&admin, 0).await, 0);
+
+            // The types come from the insert statement, for the columns of the sink only.
+            {
+                let schema = fields(&[
+                    ("d", DataType::Varchar),
+                    ("moods", DataType::Varchar.list()),
+                    ("tags", DataType::Varchar.list()),
+                    ("id", DataType::Int32),
+                ]);
+                let writer = PostgresSinkWriter::new(
+                    sink_config("types", "upsert", None),
+                    schema,
+                    vec![3],
+                    false,
+                    &writer_param(100),
+                )
+                .await
+                .unwrap();
+                assert_eq!(writer.schema_types[0], PgType::TEXT);
+                assert!(matches!(
+                    writer.schema_types[1].kind(),
+                    PgKind::Array(inner) if matches!(inner.kind(), PgKind::Enum(_))
+                ));
+                assert_eq!(writer.schema_types[2], PgType::TEXT_ARRAY);
+                assert_eq!(writer.schema_types[3], PgType::INT4);
+                assert_eq!(writer.pk_types, vec![PgType::INT4]);
+                // A sink without a group has a pool of one connection.
+                assert_eq!(backends(&admin).await, 1);
+            }
+            assert_eq!(wait_for_backends(&admin, 0).await, 0);
+
+            // The checks of the target table still fail early.
+            let simple = fields(&[("id", DataType::Int32), ("name", DataType::Varchar)]);
+            let error = PostgresSinkWriter::new(
+                sink_config("no_pk", "upsert", None),
+                simple.clone(),
+                vec![0],
+                false,
+                &writer_param(101),
+            )
+            .await
+            .err()
+            .unwrap();
+            assert!(
+                error
+                    .to_report_string()
+                    .contains("should define the primary key"),
+                "{}",
+                error.to_report_string()
+            );
+            PostgresSinkWriter::new(
+                sink_config("no_pk", "append-only", None),
+                simple.clone(),
+                vec![],
+                true,
+                &writer_param(102),
+            )
+            .await
+            .unwrap();
+            let error = PostgresSinkWriter::new(
+                sink_config("child", "upsert", None),
+                fields(&[("id", DataType::Int32), ("parent_id", DataType::Int32)]),
+                vec![0],
+                false,
+                &writer_param(103),
+            )
+            .await
+            .err()
+            .unwrap();
+            assert!(
+                error.to_report_string().contains("foreign key"),
+                "{}",
+                error.to_report_string()
+            );
+            let error = PostgresSinkWriter::new(
+                sink_config("t", "upsert", None),
+                fields(&[("id", DataType::Int32), ("missing", DataType::Varchar)]),
+                vec![0],
+                false,
+                &writer_param(104),
+            )
+            .await
+            .err()
+            .unwrap();
+            assert!(
+                error.to_report_string().contains("missing"),
+                "{}",
+                error.to_report_string()
+            );
+            assert_eq!(wait_for_backends(&admin, 0).await, 0);
+
+            // The sinks of a group are created and write with the connections of the pool only.
+            let schema = fields(&[
+                ("id", DataType::Int32),
+                ("name", DataType::Varchar),
+                ("u", DataType::Varchar),
+                ("n", DataType::Varchar),
+                ("e", DataType::Varchar),
+                ("ts", DataType::Timestamptz),
+            ]);
+            let max_backends = Arc::new(AtomicI64::new(0));
+            let stop = Arc::new(AtomicBool::new(false));
+            let sampler = {
+                let max_backends = max_backends.clone();
+                let stop = stop.clone();
+                let sampler_client = create_pg_client(&connection_config("postgres"), None)
+                    .await
+                    .unwrap();
+                tokio::spawn(async move {
+                    while !stop.load(Ordering::Relaxed) {
+                        max_backends.fetch_max(backends(&sampler_client).await, Ordering::Relaxed);
+                        tokio::time::sleep(Duration::from_millis(2)).await;
+                    }
+                })
+            };
+            let mut writers = futures::future::try_join_all((0..8).map(|i| {
+                let schema = schema.clone();
+                async move {
+                    PostgresSinkWriter::new(
+                        sink_config("t", "upsert", Some("live-test-group")),
+                        schema,
+                        vec![0],
+                        false,
+                        &writer_param(i),
+                    )
+                    .await
+                }
+            }))
+            .await
+            .unwrap();
+            assert_eq!(
+                writers[0].schema_types[..4],
+                [PgType::INT4, PgType::VARCHAR, PgType::UUID, PgType::NUMERIC]
+            );
+            assert!(matches!(writers[0].schema_types[4].kind(), PgKind::Enum(_)));
+            assert_eq!(writers[0].schema_types[5], PgType::TIMESTAMPTZ);
+
+            futures::future::try_join_all(writers.iter_mut().enumerate().map(|(i, writer)| {
+                let chunk = StreamChunk::from_pretty(&format!(
+                    " i T T T T TZ
+                    + {i} a 123e4567-e89b-12d3-a456-426614174000 1.5 sad 2024-01-01T00:00:00Z
+                    + {} b 123e4567-e89b-12d3-a456-426614174001 2.5 happy 2024-01-01T00:00:00Z",
+                    i + 100
+                ));
+                async move { writer.write_batch(chunk).await }
+            }))
+            .await
+            .unwrap();
+            futures::future::try_join_all(writers.iter_mut().enumerate().map(|(i, writer)| {
+                let chunk = StreamChunk::from_pretty(&format!(
+                    " i T T T T TZ
+                    - {} b 123e4567-e89b-12d3-a456-426614174001 2.5 happy 2024-01-01T00:00:00Z
+                    + {i} c 123e4567-e89b-12d3-a456-426614174000 3.5 happy 2024-01-01T00:00:00Z",
+                    i + 100
+                ));
+                async move { writer.write_batch(chunk).await }
+            }))
+            .await
+            .unwrap();
+
+            stop.store(true, Ordering::Relaxed);
+            sampler.await.unwrap();
+            assert!(
+                (1..=2).contains(&max_backends.load(Ordering::Relaxed)),
+                "8 sinks of a group with `pool.max_size = 2` used {} connections",
+                max_backends.load(Ordering::Relaxed)
+            );
+            let row = admin_query_one(
+                "SELECT count(*), min(name), max(name), sum(n)::text, min(e::text), min(u::text) FROM s.t",
+            )
+            .await;
+            assert_eq!(row.get::<_, i64>(0), 8);
+            assert_eq!(row.get::<_, &str>(1), "c");
+            assert_eq!(row.get::<_, &str>(2), "c");
+            assert_eq!(row.get::<_, &str>(3), "28.0");
+            assert_eq!(row.get::<_, &str>(4), "happy");
+            assert_eq!(
+                row.get::<_, &str>(5),
+                "123e4567-e89b-12d3-a456-426614174000"
+            );
+
+            // The connections are closed with the last sink of the group.
+            drop(writers);
+            assert_eq!(wait_for_backends(&admin, 0).await, 0);
+
+            // A statement abandoned by its caller does not leave a connection behind: the
+            // connection is closed once the server has finished the statement.
+            let pool = PgPool::new(connection_config(TEST_DATABASE), None, 1);
+            let abandoned = tokio::time::timeout(Duration::from_millis(300), async {
+                let client = pool.acquire().await.unwrap();
+                client.batch_execute("SELECT pg_sleep(2)").await.unwrap();
+            })
+            .await;
+            assert!(abandoned.is_err());
+            drop(pool);
+            assert_eq!(wait_for_backends(&admin, 0).await, 0);
+
+            admin
+                .batch_execute(&format!("DROP DATABASE {TEST_DATABASE} WITH (FORCE)"))
+                .await
+                .unwrap();
+        }
+
+        async fn admin_query_one(sql: &str) -> tokio_postgres::Row {
+            let client = create_pg_client(&connection_config(TEST_DATABASE), None)
+                .await
+                .unwrap();
+            client.query_one(sql, &[]).await.unwrap()
+        }
     }
 }
