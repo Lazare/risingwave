@@ -106,8 +106,11 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
+          # `libprotobuf-dev` provides the well-known `google/protobuf/*.proto` files. It is only
+          # recommended by `protobuf-compiler`, so it must be listed explicitly here.
           sudo apt-get -y install --no-install-recommends \
-            build-essential pkg-config make cmake lld protobuf-compiler curl git unzip \
+            build-essential pkg-config make cmake lld protobuf-compiler libprotobuf-dev \
+            curl git unzip \
             libssl-dev libsasl2-dev python3.12 python3.12-dev libblas-dev liblapack-dev libomp-dev
 
       - name: Install Rust toolchain
