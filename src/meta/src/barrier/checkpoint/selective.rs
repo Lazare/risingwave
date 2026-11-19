@@ -32,7 +32,9 @@ use risingwave_pb::stream_plan::{PbCdcRoute, PbSelectiveBarrierInfo, StreamNode}
 use crate::controller::fragment::InflightFragmentInfo;
 
 /// Deliver a barrier to every fragment at least every this many barriers, so that a lost ring
-/// cannot delay data forever.
+/// cannot delay data forever. Such a barrier is always a checkpoint, so that fragments can fall
+/// asleep again right after it: with `checkpoint_frequency > 1` it is the first checkpoint once
+/// this many barriers have passed.
 const FULL_BARRIER_INTERVAL: u32 = 30;
 
 /// Per-database state of the selective barrier scheduler. A fresh state is created on recovery,
@@ -47,6 +49,11 @@ pub(super) struct SelectiveBarrierState {
     /// Fragments that received the previous barrier. `None` until the first selective barrier,
     /// which is delivered to every fragment.
     prev_woken: Option<HashSet<FragmentId>>,
+    /// Whether the previous barrier was a checkpoint. A fragment may fall asleep only at the
+    /// barrier that follows a checkpoint, when everything its tables wrote is synced: with
+    /// `checkpoint_frequency > 1`, compute nodes only sync tables at checkpoints, and a table
+    /// that stopped receiving barriers in between would be committed without its unsynced data.
+    prev_checkpoint: bool,
     barriers_since_full: u32,
     /// For each `Now` fragment with a rounding granularity, the time bucket in which it was last
     /// released.
@@ -267,13 +274,18 @@ impl SelectiveBarrierState {
     /// Plan the next barrier.
     ///
     /// `may_sleep` is false when the barrier must be delivered to every fragment: it carries a
-    /// command, it is not a checkpoint, or the database is not eligible (e.g. a job is being
-    /// created). Such a barrier still carries selective information so that fragments that were
-    /// asleep know that they wake up.
+    /// command or the database is not eligible (e.g. a job is being created). Such a barrier
+    /// still carries selective information so that fragments that were asleep know that they
+    /// wake up.
+    ///
+    /// `is_checkpoint` tells whether this barrier is a checkpoint. Fragments wake up at any
+    /// barrier, but fall asleep only at the barrier that follows a checkpoint: until the next
+    /// checkpoint, the woken set can only grow.
     pub(super) fn plan(
         &mut self,
         fragments: &[&InflightFragmentInfo],
         may_sleep: bool,
+        is_checkpoint: bool,
         barrier_time_ms: u64,
     ) -> SelectiveBarrierPlan {
         let view = GraphView::new(fragments.iter().copied());
@@ -316,13 +328,21 @@ impl SelectiveBarrierState {
         let full = !may_sleep
             || view.unsupported
             || self.prev_woken.is_none()
-            || self.barriers_since_full + 1 >= FULL_BARRIER_INTERVAL;
+            || (is_checkpoint && self.barriers_since_full + 1 >= FULL_BARRIER_INTERVAL);
         let woken: HashSet<FragmentId> = if full {
             all.clone()
         } else {
+            // Fragments woken by the previous barrier stay awake unless it was a checkpoint.
+            let kept_awake = self
+                .prev_woken
+                .iter()
+                .filter(|_| !self.prev_checkpoint)
+                .flatten()
+                .copied();
             view.descendants(released.iter().chain(self.prev_released.iter()).copied())
                 .into_iter()
                 .chain(view.always_awake.iter().copied())
+                .chain(kept_awake)
                 .filter(|fragment_id| all.contains(fragment_id))
                 .collect()
         };
@@ -336,6 +356,8 @@ impl SelectiveBarrierState {
         tracing::debug!(
             full,
             may_sleep,
+            is_checkpoint,
+            prev_checkpoint = self.prev_checkpoint,
             unsupported = view.unsupported,
             first = self.prev_woken.is_none(),
             woken = woken.len(),
@@ -368,6 +390,7 @@ impl SelectiveBarrierState {
         let released_fragment_ids = released.iter().map(|id| id.as_raw_id()).collect();
         self.prev_released = released;
         self.prev_woken = Some(woken);
+        self.prev_checkpoint = is_checkpoint;
 
         SelectiveBarrierPlan {
             info: PbSelectiveBarrierInfo {
@@ -389,6 +412,7 @@ impl SelectiveBarrierState {
     pub(super) fn plan_command<'a>(
         &mut self,
         fragments: impl Iterator<Item = &'a InflightFragmentInfo>,
+        is_checkpoint: bool,
     ) -> PbSelectiveBarrierInfo {
         let waking: Vec<u32> = match &self.prev_woken {
             Some(prev_woken) => fragments
@@ -404,6 +428,7 @@ impl SelectiveBarrierState {
         self.pending_rings.clear();
         self.prev_released.clear();
         self.prev_woken = None;
+        self.prev_checkpoint = is_checkpoint;
         self.barriers_since_full = 0;
         // `Now` fragments are not released by a command barrier: they do not advance at it.
         PbSelectiveBarrierInfo {
@@ -658,13 +683,13 @@ mod tests {
         let mut state = SelectiveBarrierState::default();
 
         // The first selective barrier is delivered to every fragment.
-        let plan = state.plan(&fragments, true, 0);
+        let plan = state.plan(&fragments, true, true, 0);
         assert!(plan.full);
         assert!(plan.info.sleeping_fragment_ids.is_empty());
         assert!(plan.info.waking_fragment_ids.is_empty());
 
         // Nothing rang: only `Now` and its descendant receive the barrier.
-        let plan = state.plan(&fragments, true, 0);
+        let plan = state.plan(&fragments, true, true, 0);
         assert!(!plan.full);
         assert_eq!(woken(&plan, &ALL), ids(&[5, 6]));
         assert!(plan.info.waking_fragment_ids.is_empty());
@@ -684,7 +709,7 @@ mod tests {
 
         // Table 1 rings: it wakes up with its descendants.
         state.on_ring([1.into()]);
-        let plan = state.plan(&fragments, true, 0);
+        let plan = state.plan(&fragments, true, true, 0);
         assert_eq!(woken(&plan, &ALL), ids(&[1, 3, 4, 5, 6]));
         assert_eq!(
             plan.info
@@ -696,12 +721,12 @@ mod tests {
         );
 
         // Closing barrier: the data released by the previous barrier must be sealed.
-        let plan = state.plan(&fragments, true, 0);
+        let plan = state.plan(&fragments, true, true, 0);
         assert_eq!(woken(&plan, &ALL), ids(&[1, 3, 4, 5, 6]));
         assert!(plan.info.waking_fragment_ids.is_empty());
 
         // Then they sleep again.
-        let plan = state.plan(&fragments, true, 0);
+        let plan = state.plan(&fragments, true, true, 0);
         assert_eq!(woken(&plan, &ALL), ids(&[5, 6]));
     }
 
@@ -711,11 +736,11 @@ mod tests {
         graph[4].nodes = StreamNode::default();
         let fragments: Vec<_> = graph.iter().collect();
         let mut state = SelectiveBarrierState::default();
-        state.plan(&fragments, true, 0);
-        state.plan(&fragments, true, 0);
+        state.plan(&fragments, true, true, 0);
+        state.plan(&fragments, true, true, 0);
         // Fragment 3 is not an origin: its ring does not wake it.
         state.on_ring([3.into()]);
-        let plan = state.plan(&fragments, true, 0);
+        let plan = state.plan(&fragments, true, true, 0);
         assert_eq!(woken(&plan, &ALL), ids(&[5, 6]));
     }
 
@@ -725,11 +750,11 @@ mod tests {
         graph[4].nodes = StreamNode::default();
         let fragments: Vec<_> = graph.iter().collect();
         let mut state = SelectiveBarrierState::default();
-        state.plan(&fragments, true, 0);
-        state.plan(&fragments, true, 0);
+        state.plan(&fragments, true, true, 0);
+        state.plan(&fragments, true, true, 0);
 
         // A barrier that may not sleep is delivered to every fragment and wakes the sleepers.
-        let plan = state.plan(&fragments, false, 0);
+        let plan = state.plan(&fragments, false, true, 0);
         assert!(plan.full);
         assert!(plan.info.sleeping_fragment_ids.is_empty());
         assert_eq!(
@@ -742,8 +767,8 @@ mod tests {
         );
 
         // A command barrier wakes the sleepers, then the scheduler restarts with a full barrier.
-        state.plan(&fragments, true, 0);
-        let info = state.plan_command(fragments.iter().copied());
+        state.plan(&fragments, true, true, 0);
+        let info = state.plan_command(fragments.iter().copied(), true);
         assert!(info.sleeping_fragment_ids.is_empty());
         assert_eq!(
             info.waking_fragment_ids
@@ -752,7 +777,7 @@ mod tests {
                 .collect::<HashSet<_>>(),
             ids(&[1, 2, 3, 4])
         );
-        let plan = state.plan(&fragments, true, 0);
+        let plan = state.plan(&fragments, true, true, 0);
         assert!(plan.full);
         assert!(plan.info.waking_fragment_ids.is_empty());
     }
@@ -763,11 +788,102 @@ mod tests {
         graph[4].nodes = StreamNode::default();
         let fragments: Vec<_> = graph.iter().collect();
         let mut state = SelectiveBarrierState::default();
-        assert!(state.plan(&fragments, true, 0).full);
+        assert!(state.plan(&fragments, true, true, 0).full);
         for _ in 1..FULL_BARRIER_INTERVAL {
-            assert!(!state.plan(&fragments, true, 0).full);
+            assert!(!state.plan(&fragments, true, true, 0).full);
         }
-        assert!(state.plan(&fragments, true, 0).full);
+        assert!(state.plan(&fragments, true, true, 0).full);
+    }
+
+    /// With `checkpoint_frequency > 1`, a fragment wakes up at any barrier but falls asleep only
+    /// at the barrier that follows a checkpoint.
+    #[test]
+    fn test_sleep_only_after_checkpoint() {
+        let mut graph = graph();
+        graph[4].nodes = StreamNode::default();
+        let fragments: Vec<_> = graph.iter().collect();
+        let mut state = SelectiveBarrierState::default();
+
+        // The first selective barrier is delivered to every fragment.
+        assert!(state.plan(&fragments, true, false, 0).full);
+        // Nothing rang, but the tables may hold unsynced data: nobody falls asleep before the
+        // barrier that follows the next checkpoint.
+        let plan = state.plan(&fragments, true, false, 0);
+        assert!(!plan.full);
+        assert_eq!(woken(&plan, &ALL), ids(&ALL));
+        let plan = state.plan(&fragments, true, true, 0);
+        assert_eq!(woken(&plan, &ALL), ids(&ALL));
+        let plan = state.plan(&fragments, true, false, 0);
+        assert_eq!(woken(&plan, &ALL), ids(&[5, 6]));
+
+        // Table 1 rings: it wakes up with its descendants at a non-checkpoint barrier.
+        state.on_ring([1.into()]);
+        let plan = state.plan(&fragments, true, false, 0);
+        assert_eq!(woken(&plan, &ALL), ids(&[1, 3, 4, 5, 6]));
+        assert_eq!(
+            plan.info
+                .waking_fragment_ids
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>(),
+            ids(&[1, 3, 4])
+        );
+        assert_eq!(
+            plan.table_ids_to_sync,
+            HashSet::from([11.into(), 13.into(), 14.into(), 15.into(), 16.into()])
+        );
+
+        // It stays awake without ringing until the checkpoint, included.
+        for is_checkpoint in [false, false, true] {
+            let plan = state.plan(&fragments, true, is_checkpoint, 0);
+            assert_eq!(woken(&plan, &ALL), ids(&[1, 3, 4, 5, 6]));
+            assert!(plan.info.waking_fragment_ids.is_empty());
+        }
+
+        // Table 2 rings and is released by the barrier that follows the checkpoint, at which
+        // table 1 falls asleep.
+        state.on_ring([2.into()]);
+        let plan = state.plan(&fragments, true, false, 0);
+        assert_eq!(woken(&plan, &ALL), ids(&[2, 4, 5, 6]));
+    }
+
+    /// With `checkpoint_frequency > 1`, the periodic full barrier is a checkpoint, so that
+    /// fragments can fall asleep again right after it.
+    #[test]
+    fn test_periodic_full_barrier_is_a_checkpoint() {
+        let graph = graph();
+        let fragments: Vec<_> = graph.iter().collect();
+        let mut state = SelectiveBarrierState::default();
+
+        assert!(state.plan(&fragments, true, true, 0).full);
+        for _ in 0..FULL_BARRIER_INTERVAL + 5 {
+            assert!(!state.plan(&fragments, true, false, 0).full);
+        }
+        assert!(state.plan(&fragments, true, true, 0).full);
+        let plan = state.plan(&fragments, true, false, 0);
+        assert!(!plan.full);
+        assert!(!plan.info.sleeping_fragment_ids.is_empty());
+    }
+
+    /// A command barrier wakes every fragment. Fragments fall asleep again after the full barrier
+    /// that follows it only if that barrier is a checkpoint.
+    #[test]
+    fn test_sleep_after_command_waits_for_checkpoint() {
+        let mut graph = graph();
+        graph[4].nodes = StreamNode::default();
+        let fragments: Vec<_> = graph.iter().collect();
+        let mut state = SelectiveBarrierState::default();
+
+        state.plan(&fragments, true, true, 0);
+        state.plan(&fragments, true, false, 0);
+        state.plan_command(fragments.iter().copied(), true);
+        assert!(state.plan(&fragments, true, false, 0).full);
+        let plan = state.plan(&fragments, true, false, 0);
+        assert_eq!(woken(&plan, &ALL), ids(&ALL));
+        let plan = state.plan(&fragments, true, true, 0);
+        assert_eq!(woken(&plan, &ALL), ids(&ALL));
+        let plan = state.plan(&fragments, true, false, 0);
+        assert_eq!(woken(&plan, &ALL), ids(&[5, 6]));
     }
 
     #[test]
@@ -780,7 +896,7 @@ mod tests {
         let fragments: Vec<_> = graph.iter().collect();
         let mut state = SelectiveBarrierState::default();
         for _ in 0..3 {
-            assert!(state.plan(&fragments, true, 0).full);
+            assert!(state.plan(&fragments, true, true, 0).full);
         }
     }
 
@@ -829,30 +945,30 @@ mod tests {
         let graph = cdc_graph();
         let fragments: Vec<_> = graph.iter().collect();
         let mut state = SelectiveBarrierState::default();
-        state.plan(&fragments, true, 0);
+        state.plan(&fragments, true, true, 0);
 
         // The source and the `CdcFilter` fragments receive every barrier. Only the table behind
         // the `CdcFilter` without state stays awake; the source releases nothing itself.
-        let plan = state.plan(&fragments, true, 0);
+        let plan = state.plan(&fragments, true, true, 0);
         assert_eq!(woken(&plan, &CDC_ALL), ids(&[10, 11, 12, 14]));
         assert_eq!(ids(&plan.info.released_fragment_ids), ids(&[12]));
 
         // The gated `CdcFilter` rings: it is released, and its table wakes up with its view for
         // this barrier and the next one, which closes the epoch of the released rows.
         state.on_ring([11.into()]);
-        let plan = state.plan(&fragments, true, 0);
+        let plan = state.plan(&fragments, true, true, 0);
         assert_eq!(woken(&plan, &CDC_ALL), ids(&CDC_ALL));
         assert_eq!(ids(&plan.info.waking_fragment_ids), ids(&[13, 15]));
         assert!(plan.info.released_fragment_ids.contains(&11));
-        let plan = state.plan(&fragments, true, 0);
+        let plan = state.plan(&fragments, true, true, 0);
         assert_eq!(woken(&plan, &CDC_ALL), ids(&CDC_ALL));
         assert!(!plan.info.released_fragment_ids.contains(&11));
-        let plan = state.plan(&fragments, true, 0);
+        let plan = state.plan(&fragments, true, true, 0);
         assert_eq!(woken(&plan, &CDC_ALL), ids(&[10, 11, 12, 14]));
 
         // DML on the CDC table: the table fragment is not an origin, but its DML gate rings.
         state.on_ring([13.into()]);
-        let plan = state.plan(&fragments, true, 0);
+        let plan = state.plan(&fragments, true, true, 0);
         assert_eq!(woken(&plan, &CDC_ALL), ids(&CDC_ALL));
         assert_eq!(ids(&plan.info.waking_fragment_ids), ids(&[13, 15]));
     }
@@ -897,7 +1013,7 @@ mod tests {
         let mut state = SelectiveBarrierState::default();
 
         // Routes are sent with the first selective barrier only.
-        let plan = state.plan(&fragments, true, 0);
+        let plan = state.plan(&fragments, true, true, 0);
         assert_eq!(
             plan.info.cdc_routes,
             vec![PbCdcRoute {
@@ -907,20 +1023,20 @@ mod tests {
             }]
         );
         // The routed `CdcFilter` sleeps with its table; the other one stays awake and released.
-        let plan = state.plan(&fragments, true, 0);
+        let plan = state.plan(&fragments, true, true, 0);
         assert!(plan.info.cdc_routes.is_empty());
         assert_eq!(woken(&plan, &CDC_ALL), ids(&[10, 12, 14]));
 
         // The source rings for the routed `CdcFilter`: it wakes up with its descendants.
         state.on_ring([11.into()]);
-        let plan = state.plan(&fragments, true, 0);
+        let plan = state.plan(&fragments, true, true, 0);
         assert_eq!(woken(&plan, &CDC_ALL), ids(&CDC_ALL));
         assert_eq!(ids(&plan.info.waking_fragment_ids), ids(&[11, 13, 15]));
         assert!(plan.info.released_fragment_ids.contains(&11));
 
         // After a command, routes are sent again.
-        state.plan_command(fragments.iter().copied());
-        let plan = state.plan(&fragments, true, 0);
+        state.plan_command(fragments.iter().copied(), true);
+        let plan = state.plan(&fragments, true, true, 0);
         assert_eq!(plan.info.cdc_routes.len(), 1);
     }
 
@@ -932,8 +1048,8 @@ mod tests {
         graph.push(fragment(16, &[SourceScan], vec![merge(10)], 16, 1, 26));
         let fragments: Vec<_> = graph.iter().collect();
         let mut state = SelectiveBarrierState::default();
-        state.plan(&fragments, true, 0);
-        let plan = state.plan(&fragments, true, 0);
+        state.plan(&fragments, true, true, 0);
+        let plan = state.plan(&fragments, true, true, 0);
         assert!(plan.info.sleeping_fragment_ids.is_empty());
     }
 
@@ -1086,17 +1202,17 @@ mod tests {
         };
 
         // First barrier: full, `Now` is released (first bucket).
-        let plan = state.plan(&fragments, true, 60_000);
+        let plan = state.plan(&fragments, true, true, 60_000);
         assert!(released(&plan).contains(&5));
         // Closing barrier for its descendant, then only `Now` itself stays awake.
-        let plan = state.plan(&fragments, true, 61_000);
+        let plan = state.plan(&fragments, true, true, 61_000);
         assert!(!released(&plan).contains(&5));
         assert_eq!(woken(&plan, &ALL), ids(&[5, 6]));
-        let plan = state.plan(&fragments, true, 62_000);
+        let plan = state.plan(&fragments, true, true, 62_000);
         assert_eq!(woken(&plan, &ALL), ids(&[5]));
         assert!(released(&plan).is_empty());
         // The next minute releases `Now` and wakes its descendant.
-        let plan = state.plan(&fragments, true, 120_000);
+        let plan = state.plan(&fragments, true, true, 120_000);
         assert!(released(&plan).contains(&5));
         assert_eq!(woken(&plan, &ALL), ids(&[5, 6]));
         assert_eq!(

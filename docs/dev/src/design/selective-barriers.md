@@ -45,9 +45,40 @@ tables**, and batch reads stay as fresh as today.
    new epoch: woken tables with their data, sleeping tables without data. All tables
    therefore keep a common committed epoch, which is what batch reads and recovery
    rely on.
-7. **Transitions only at checkpoints.** `W_t` may differ from `W_{t-1}` only if barrier
-   `t-1` is a checkpoint. The feature is enabled only with `checkpoint_frequency = 1`
-   in a first version.
+7. **Sleep only after a checkpoint.** A fragment of `W_{t-1}` may be left out of `W_t` only
+   if barrier `t-1` is a checkpoint. A fragment may wake up at any barrier. See
+   [Checkpoint frequency](#checkpoint-frequency).
+
+## Checkpoint frequency
+
+With `checkpoint_frequency = N > 1`, compute nodes only sync state tables at checkpoints: at a
+non-checkpoint barrier, a table seals its epoch and keeps the data in the uploader. Two
+constraints follow.
+
+- **A table with unsynced data cannot sleep.** A sleeping table is not part of the sync of the
+  next checkpoint, while meta commits it at that checkpoint (rule 6): its unsynced data would be
+  missing from the committed snapshot. Hence rule 7: the woken set may only shrink at the barrier
+  that follows a checkpoint, when everything is synced. Between two checkpoints it only grows:
+  `W_t = W_{t-1} ∪ descendants(R_t ∪ R_{t-1})`. A fragment that wakes up stays awake until the
+  barrier after the next checkpoint, i.e. at most `N` barriers longer than with `N = 1`.
+- **The uploader syncs together only tables that started the same epochs since their last
+  sync.** A table that wakes up between two checkpoints did not start the earlier epochs of the
+  window. The barrier worker therefore keeps the tables in groups (the tables awake since the
+  last checkpoint, then one group per non-checkpoint barrier at which tables woke up), starts
+  each epoch once per group, and syncs each group separately at the checkpoint. The checkpoint
+  merges the groups again. With `N = 1` there is a single group, as before. The uploader itself
+  is unchanged.
+
+Waking up does not wait for a checkpoint, so the wake-up latency stays one barrier. The data of a
+woken table is committed at the checkpoint of its window, as without the feature.
+
+The periodic full barrier (see the limitations) is always a checkpoint, so that fragments fall
+asleep again right after it; a full barrier in the middle of a window would keep every fragment
+awake until the next checkpoint. After a command barrier, the next barrier is full, so fragments
+fall asleep again only after the following checkpoint.
+
+The frequency may change at any time (`ALTER SYSTEM`, `ALTER DATABASE`): the scheduler only
+looks at the kind of each barrier.
 
 ## Turning the mode on and off
 
@@ -86,7 +117,7 @@ and DML statements are only acknowledged as durable after `FLUSH` (a barrier com
 | Meta: injection | compute `W_t`; inject only to actors of `W_t`; omit workers with no woken actor | `barrier/checkpoint/state.rs`, `barrier/rpc.rs` |
 | Meta: commit | keep committing every table (virtual commit) | `barrier/command.rs` (`collect_commit_epoch_info`) |
 | Proto | `Barrier.sleeping_fragment_ids`; sync set per barrier | `proto/stream_plan.proto`, `proto/stream_service.proto` |
-| Compute: barrier worker | sync only tables of `W_{t-1}`; drop the empty open epoch of tables entering `S_t` | `task/barrier_worker/managed_state.rs` |
+| Compute: barrier worker | sync only tables of `W_{t-1}`, in groups of tables that started the same epochs; drop the empty open epoch of tables entering `S_t` | `task/barrier_worker/managed_state.rs` |
 | Storage: uploader | "abandon empty open epoch" for a set of tables | `hummock/event_handler/uploader/mod.rs` |
 | Merge | fragment-level exemption from `sleeping_fragment_ids` | `executor/mod.rs` (`DispatchBarrierBuffer`), `merge.rs` |
 | Dispatcher | skip dispatchers whose downstream fragment sleeps | `executor/dispatch.rs` |
@@ -112,7 +143,11 @@ Enabled with `[meta.developer] enable_selective_barrier = true` (off by default)
 - A gated DML executor keeps the data of an epoch in memory until the next barrier; a very large
   transaction on a sleeping table is held entirely until meta wakes the table up.
 - Every 30 barriers, a barrier is delivered to every fragment, so that a lost ring delays data
-  by at most 30 barriers.
+  by at most 30 barriers. With `checkpoint_frequency > 1`, it is the first checkpoint once 30
+  barriers have passed (at most `30 + checkpoint_frequency` barriers).
+- With `checkpoint_frequency = N > 1`, a woken fragment stays awake until the barrier that follows
+  the next checkpoint, and every fragment stays awake until the checkpoint that follows a command
+  (DDL, `FLUSH`): the fewer barriers saved, the larger `N` and the more frequent the commands.
 
 ## Steps
 
