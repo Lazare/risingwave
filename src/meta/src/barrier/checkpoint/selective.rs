@@ -267,8 +267,15 @@ impl GraphView {
 }
 
 impl SelectiveBarrierState {
-    pub(super) fn on_ring(&mut self, fragment_ids: impl IntoIterator<Item = FragmentId>) {
-        self.pending_rings.extend(fragment_ids);
+    /// Returns whether one of the fragments was not released by the previous barrier, i.e. it
+    /// holds data until the next barrier, while a released fragment only rings to stay released.
+    pub(super) fn on_ring(&mut self, fragment_ids: impl IntoIterator<Item = FragmentId>) -> bool {
+        let mut holds_data = false;
+        for fragment_id in fragment_ids {
+            holds_data |= self.prev_woken.is_some() && !self.prev_released.contains(&fragment_id);
+            self.pending_rings.insert(fragment_id);
+        }
+        holds_data
     }
 
     /// Plan the next barrier.
@@ -742,6 +749,26 @@ mod tests {
         state.on_ring([3.into()]);
         let plan = state.plan(&fragments, true, true, 0);
         assert_eq!(woken(&plan, &ALL), ids(&[5, 6]));
+    }
+
+    /// A ring tells whether the fragment holds data: it was not released by the previous barrier.
+    #[test]
+    fn test_ring_of_a_fragment_that_holds_data() {
+        let graph = graph();
+        let fragments: Vec<_> = graph.iter().collect();
+        let mut state = SelectiveBarrierState::default();
+        // Before the first selective barrier, nothing is held.
+        assert!(!state.on_ring([1.into()]));
+        state.plan(&fragments, true, true, 0);
+        state.plan(&fragments, true, true, 0);
+
+        // Table 1 sleeps: its data waits for the next barrier.
+        assert!(state.on_ring([1.into()]));
+        state.plan(&fragments, true, true, 0);
+        // Released: it rings to stay released, its data flows.
+        assert!(!state.on_ring([1.into()]));
+        // Table 2 still sleeps.
+        assert!(state.on_ring([1.into(), 2.into()]));
     }
 
     #[test]

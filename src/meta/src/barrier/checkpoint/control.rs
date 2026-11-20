@@ -585,19 +585,26 @@ impl CheckpointControl {
     }
 
     /// Selective barriers: fragments of a database hold input data and wait for a barrier.
+    /// Returns the database when one of them is not released, i.e. its data waits for the next
+    /// barrier.
     pub(crate) fn on_pending_input(
         &mut self,
         partial_graph_id: PartialGraphId,
         fragment_ids: Vec<FragmentId>,
-    ) {
+    ) -> Option<DatabaseId> {
         let (database_id, independent_job_id) = from_partial_graph_id(partial_graph_id);
         if independent_job_id.is_some() {
-            return;
+            return None;
         }
         if let Some(DatabaseCheckpointControlStatus::Running(database)) =
             self.databases.get_mut(&database_id)
         {
-            database.selective.on_ring(fragment_ids);
+            database
+                .selective
+                .on_ring(fragment_ids)
+                .then_some(database_id)
+        } else {
+            None
         }
     }
 
