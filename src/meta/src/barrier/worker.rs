@@ -772,7 +772,9 @@ impl<C: GlobalBarrierWorkerContext> GlobalBarrierWorker<C> {
                                         )?;
                                     }
                                     PartialGraphEvent::PendingInput(fragment_ids) => {
-                                        self.checkpoint_control.on_pending_input(partial_graph_id, fragment_ids);
+                                        if let Some(database_id) = self.checkpoint_control.on_pending_input(partial_graph_id, fragment_ids) {
+                                            self.periodic_barriers.request_intermediate_barrier(database_id);
+                                        }
                                     }
                                 }
                             }

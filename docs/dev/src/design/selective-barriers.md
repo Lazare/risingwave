@@ -126,6 +126,26 @@ and DML statements are only acknowledged as durable after `FLUSH` (a barrier com
 | Shared CDC (D1) | routes per table sent by meta, per-table gate in the source, held rows in the split state table | `barrier/checkpoint/selective.rs`, `executor/source/cdc_router.rs`, `source_executor.rs` |
 | Shared CDC (D4, superseded) | gate after a `CdcFilter` that has a state table | `executor/cdc_filter_gate.rs` |
 
+## Intermediate barrier
+
+Data held by a sleeping fragment waits for the next periodic barrier, up to one barrier interval.
+To shorten this wait, meta may inject one **intermediate barrier** per barrier interval
+(`PeriodicBarriers::request_intermediate_barrier`):
+
+- **Trigger.** A ring of a fragment that the previous barrier did not release, i.e. one that
+  holds data. The ring of a released fragment (a busy table ringing to stay released) does not
+  count: its data already flows, and it would double the number of barriers under load.
+- **When.** Between 40% and 60% of the interval since the last periodic barrier (or since the
+  last command barrier, which restarts the interval): at 40% when the ring comes earlier, at once
+  inside the window, and not at all after 60%, where the periodic barrier is close. Neither of the
+  two epochs is thus shorter than 40% of the interval.
+- **What.** A selective barrier like the others (it releases the fragments that rang), never a
+  checkpoint, not counted for `checkpoint_frequency`, and it does not move the periodic barriers.
+
+With an interval `I`, a row written at `t` to a sleeping table is released at `max(t, 0.4 I)`
+instead of `I` when `t <= 0.6 I`. What waits for the end of the epoch of the released data (e.g. a
+`last` sink) is then served by the periodic barrier at `I` instead of `2 I`.
+
 ## Current limitations
 
 Enabled with `[meta.developer] enable_selective_barrier = true` (off by default).
@@ -225,6 +245,22 @@ sleep with their table, and needs no new state table, so it applies to existing 
   rings for the `CdcFilter`. After a barrier that releases it, held rows are emitted in order and
   deleted. Rows of tables without route pass through. A barrier without selective information
   releases everything.
+- **Order of the source.** Holding only the rows of the sleeping table would let a table that is
+  awake overtake it: a transaction of the upstream database touching both would be split between
+  two epochs (the awake table in the current one, the waking table in the next one), while
+  without the feature it lands in one epoch. A job that compares tables of the same epoch would
+  then be wrong, e.g. a `last` sink ([sink groups](./sink-group.md)) acknowledging in epoch `E` a
+  write that the other sinks only receive in `E + 1`. The source therefore holds in order:
+  - a chunk with a row to hold is held entirely (a chunk never splits a transaction, up to 4096
+    rows);
+  - while rows are held, every routed row that follows is held too;
+  - after a barrier, held rows are emitted in order, chunk by chunk, up to the first chunk with a
+    row whose `CdcFilter` is not released; the source rings for the fragments of the rows left
+    behind, so that the next barrier releases them together.
+
+  Cost: when a sleeping table wakes up, the routed tables that are awake are delayed with it
+  (rows that follow in the same epoch: one barrier, and they are written to and deleted from the
+  split state table). Rows of tables without route are not held and may still overtake.
 - **Recovery.** The source reads held rows back after initializing its state table, and emits
   them after the first barrier that releases their table (barriers after a recovery are not
   selective, so the first one). Held rows of a table that is no longer routed (dropped) are
