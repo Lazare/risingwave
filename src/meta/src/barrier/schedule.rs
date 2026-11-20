@@ -45,6 +45,8 @@ pub(super) struct NewBarrier {
     pub command: Option<(Command, Notifier)>,
     pub span: tracing::Span,
     pub checkpoint: bool,
+    /// An intermediate barrier, see [`PeriodicBarriers::request_intermediate_barrier`].
+    pub intermediate: bool,
 }
 
 /// A queue for scheduling barriers.
@@ -307,12 +309,18 @@ pub struct ScheduledBarriers {
     inner: Arc<Inner>,
 }
 
-/// An intermediate barrier is injected no earlier than this share of the barrier interval, so
-/// that neither of the two epochs it creates is much shorter than the interval.
-const INTERMEDIATE_BARRIER_MIN_RATIO: f64 = 0.4;
-/// An intermediate barrier is not injected after this share of the barrier interval: the periodic
-/// barrier is close enough.
-const INTERMEDIATE_BARRIER_MAX_RATIO: f64 = 0.6;
+/// An intermediate barrier is injected at this share of the barrier interval.
+const INTERMEDIATE_BARRIER_RATIO: f64 = 0.5;
+
+/// No intermediate barrier is injected when more than this number of barriers of the database
+/// are not completed yet: a database that is late does not need more barriers.
+const MAX_PENDING_BARRIERS_FOR_INTERMEDIATE: usize = 3;
+
+/// Whether an intermediate barrier may be injected into a database that has this number of
+/// barriers not completed yet.
+pub(super) fn allows_intermediate_barrier(pending_barrier_num: usize) -> bool {
+    pending_barrier_num <= MAX_PENDING_BARRIERS_FOR_INTERMEDIATE
+}
 
 /// The intermediate barrier of the current barrier interval of a database, see
 /// [`PeriodicBarriers::request_intermediate_barrier`].
@@ -321,8 +329,8 @@ enum IntermediateBarrier {
     NotRequested,
     /// To inject at this instant.
     Scheduled(Instant),
-    /// Injected, or requested too late: at most one per interval.
-    Done,
+    /// Requested in the second half of this interval: to schedule in the next one.
+    NextInterval,
 }
 
 /// State specific to each database for barrier generation.
@@ -349,9 +357,19 @@ impl DatabaseBarrierState {
         }
     }
 
-    fn start_interval(&mut self) {
+    fn start_interval(&mut self, sys_barrier_interval: Duration) {
         self.interval_start = Instant::now();
-        self.intermediate_barrier = IntermediateBarrier::NotRequested;
+        self.intermediate_barrier = match self.intermediate_barrier {
+            // The barrier that starts this interval releases the fragment that asked: the
+            // intermediate barrier of this interval ends the epoch of its data.
+            IntermediateBarrier::NextInterval => {
+                let interval = self.barrier_interval.unwrap_or(sys_barrier_interval);
+                IntermediateBarrier::Scheduled(
+                    self.interval_start + interval.mul_f64(INTERMEDIATE_BARRIER_RATIO),
+                )
+            }
+            _ => IntermediateBarrier::NotRequested,
+        };
     }
 }
 
@@ -426,7 +444,7 @@ impl PeriodicBarriers {
             if db_state.barrier_interval.is_none() {
                 let interval_stream = Self::new_interval_stream(duration, db_id);
                 self.timer_streams.insert(*db_id, interval_stream);
-                db_state.start_interval();
+                db_state.start_interval(duration);
             }
         }
     }
@@ -459,7 +477,7 @@ impl PeriodicBarriers {
                 db_state.checkpoint_frequency = checkpoint_frequency;
                 // Reset the `num_uncheckpointed_barrier` since the barrier interval or checkpoint frequency is changed.
                 db_state.num_uncheckpointed_barrier = 0;
-                db_state.start_interval();
+                db_state.start_interval(self.sys_barrier_interval);
             }
             Entry::Vacant(entry) => {
                 entry.insert(DatabaseBarrierState::new(
@@ -513,14 +531,21 @@ impl PeriodicBarriers {
         self.databases
             .get_mut(&database_id)
             .unwrap()
-            .start_interval();
+            .start_interval(self.sys_barrier_interval);
     }
 
     /// Selective barriers: a fragment of the database holds data until a barrier releases it.
-    /// Instead of waiting for the next periodic barrier, inject one intermediate barrier, at
-    /// most once per barrier interval and only between
-    /// [`INTERMEDIATE_BARRIER_MIN_RATIO`] and [`INTERMEDIATE_BARRIER_MAX_RATIO`] of the interval:
-    /// at the lower bound when the request comes earlier, and not at all when it comes later.
+    /// Its data needs two barriers: one that releases the fragment, one that ends the epoch of the
+    /// data. Instead of waiting for two periodic barriers, inject one intermediate barrier, at
+    /// most once per barrier interval, at [`INTERMEDIATE_BARRIER_RATIO`] of the interval.
+    /// - Requested in the first half of the interval: the intermediate barrier of this interval
+    ///   releases the fragment, along with the others that ask before it, and the next periodic
+    ///   barrier ends the epoch.
+    /// - Requested in the second half: the next periodic barrier releases the fragment, and the
+    ///   intermediate barrier of the next interval ends the epoch.
+    ///
+    /// It is dropped when the database is late by more than
+    /// [`MAX_PENDING_BARRIERS_FOR_INTERMEDIATE`] barriers, see [`allows_intermediate_barrier`].
     /// This barrier is never a checkpoint, does not count for the checkpoint frequency and does
     /// not move the periodic barriers.
     pub(super) fn request_intermediate_barrier(&mut self, database_id: DatabaseId) {
@@ -532,44 +557,37 @@ impl PeriodicBarriers {
             return;
         }
         let interval = db_state.barrier_interval.unwrap_or(sys_barrier_interval);
-        let earliest = db_state.interval_start + interval.mul_f64(INTERMEDIATE_BARRIER_MIN_RATIO);
-        let latest = db_state.interval_start + interval.mul_f64(INTERMEDIATE_BARRIER_MAX_RATIO);
-        let now = Instant::now();
-        db_state.intermediate_barrier = if now > latest {
-            IntermediateBarrier::Done
+        let middle = db_state.interval_start + interval.mul_f64(INTERMEDIATE_BARRIER_RATIO);
+        db_state.intermediate_barrier = if Instant::now() < middle {
+            IntermediateBarrier::Scheduled(middle)
         } else {
-            IntermediateBarrier::Scheduled(now.max(earliest))
+            IntermediateBarrier::NextInterval
         };
     }
 
     /// Waits for the next intermediate barrier to inject, forever if there is none.
     async fn next_intermediate_barrier(
         databases: &mut HashMap<DatabaseId, DatabaseBarrierState>,
-        sys_barrier_interval: Duration,
     ) -> DatabaseId {
-        loop {
-            let next = databases
-                .iter()
-                .filter_map(
-                    |(database_id, db_state)| match db_state.intermediate_barrier {
-                        IntermediateBarrier::Scheduled(at) => Some((at, *database_id)),
-                        _ => None,
-                    },
-                )
-                .min();
-            let Some((at, database_id)) = next else {
-                return std::future::pending().await;
-            };
-            tokio::time::sleep_until(at).await;
-            let db_state = databases.get_mut(&database_id).unwrap();
-            db_state.intermediate_barrier = IntermediateBarrier::Done;
-            let interval = db_state.barrier_interval.unwrap_or(sys_barrier_interval);
-            // The worker may have been busy: too late, the periodic barrier is close.
-            if db_state.interval_start.elapsed() <= interval.mul_f64(INTERMEDIATE_BARRIER_MAX_RATIO)
-            {
-                return database_id;
-            }
-        }
+        let next = databases
+            .iter()
+            .filter_map(
+                |(database_id, db_state)| match db_state.intermediate_barrier {
+                    IntermediateBarrier::Scheduled(at) => Some((at, *database_id)),
+                    _ => None,
+                },
+            )
+            .min();
+        let Some((at, database_id)) = next else {
+            return std::future::pending().await;
+        };
+        tokio::time::sleep_until(at).await;
+        // A request that comes after it, in the second half, is for the next interval.
+        databases
+            .get_mut(&database_id)
+            .unwrap()
+            .intermediate_barrier = IntermediateBarrier::NotRequested;
+        database_id
     }
 
     #[await_tree::instrument]
@@ -585,6 +603,7 @@ impl PeriodicBarriers {
                 command: None,
                 span: tracing_span(),
                 checkpoint: true,
+                intermediate: false,
             }
         } else {
             select! {
@@ -598,13 +617,14 @@ impl PeriodicBarriers {
                         command: Some((scheduled.command, scheduled.notifier)),
                         span: scheduled.span,
                         checkpoint,
+                        intermediate: false,
                     }
                 },
                 // If there is no database, we won't wait for `Interval`, but only wait for command.
                 // Normally it will not return None, because there is always at least one database.
                 (database_id, _instant) = pending_on_none(self.timer_streams.next()) => {
                     if let Some(db_state) = self.databases.get_mut(&database_id) {
-                        db_state.start_interval();
+                        db_state.start_interval(self.sys_barrier_interval);
                     }
                     let checkpoint = self.try_get_checkpoint(database_id);
                     NewBarrier {
@@ -612,15 +632,17 @@ impl PeriodicBarriers {
                         command: None,
                         span: tracing_span(),
                         checkpoint,
+                        intermediate: false,
                     }
                 }
-                database_id = Self::next_intermediate_barrier(&mut self.databases, self.sys_barrier_interval) => {
+                database_id = Self::next_intermediate_barrier(&mut self.databases) => {
                     // Not counted for the checkpoint frequency.
                     return NewBarrier {
                         database_id,
                         command: None,
                         span: tracing_span(),
                         checkpoint: false,
+                        intermediate: true,
                     };
                 }
             }
@@ -1111,8 +1133,18 @@ mod tests {
         );
     }
 
-    /// An intermediate barrier is injected between 40% and 60% of the interval, once, and
-    /// changes neither the periodic barriers nor the checkpoints.
+    /// No intermediate barrier when more than 3 barriers are late.
+    #[test]
+    fn test_no_intermediate_barrier_when_late() {
+        for pending in 0..=3 {
+            assert!(allows_intermediate_barrier(pending));
+        }
+        assert!(!allows_intermediate_barrier(4));
+        assert!(!allows_intermediate_barrier(10));
+    }
+
+    /// An intermediate barrier is injected at the middle of the interval, once, and changes
+    /// neither the periodic barriers nor the checkpoints.
     #[tokio::test(start_paused = true)]
     async fn test_intermediate_barrier() {
         let db = DatabaseId::from(1);
@@ -1124,34 +1156,46 @@ mod tests {
         periodic.next_barrier(&context).await;
         let start = Instant::now();
 
-        // Requested early: injected at 40% of the interval.
+        // Requested in the first half, twice: one barrier at the middle of the interval.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        periodic.request_intermediate_barrier(db);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        periodic.request_intermediate_barrier(db);
+        let barrier = periodic.next_barrier(&context).await;
+        assert_eq!(start.elapsed(), Duration::from_millis(500));
+        assert!(barrier.intermediate && !barrier.checkpoint && barrier.command.is_none());
+        // The next barrier is the periodic one, on time.
+        let barrier = periodic.next_barrier(&context).await;
+        assert_eq!(start.elapsed(), Duration::from_millis(1000));
+        assert!(!barrier.intermediate && !barrier.checkpoint);
+
+        // Requested in the second half, twice: the periodic barrier comes first, and one
+        // intermediate barrier is injected at the middle of the next interval.
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        periodic.request_intermediate_barrier(db);
+        periodic.request_intermediate_barrier(db);
+        let barrier = periodic.next_barrier(&context).await;
+        assert_eq!(start.elapsed(), Duration::from_millis(2000));
+        // The checkpoint frequency (3) only counts the periodic barriers: this is the third.
+        assert!(!barrier.intermediate && barrier.checkpoint);
+        let barrier = periodic.next_barrier(&context).await;
+        assert_eq!(start.elapsed(), Duration::from_millis(2500));
+        assert!(barrier.intermediate && !barrier.checkpoint);
+        // Requested after the intermediate barrier of the same interval: for the next interval.
         tokio::time::sleep(Duration::from_millis(100)).await;
         periodic.request_intermediate_barrier(db);
         let barrier = periodic.next_barrier(&context).await;
-        assert_eq!(start.elapsed(), Duration::from_millis(400));
-        assert!(!barrier.checkpoint && barrier.command.is_none());
-        // Only one per interval: the next barrier is the periodic one, on time.
-        periodic.request_intermediate_barrier(db);
-        let barrier = periodic.next_barrier(&context).await;
-        assert_eq!(start.elapsed(), Duration::from_millis(1000));
-        assert!(!barrier.checkpoint);
-
-        // Requested inside the window: injected at once.
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        periodic.request_intermediate_barrier(db);
-        let barrier = periodic.next_barrier(&context).await;
-        assert_eq!(start.elapsed(), Duration::from_millis(1500));
-        assert!(!barrier.checkpoint);
-        // The checkpoint frequency (3) only counts the periodic barriers: this is the third.
-        let barrier = periodic.next_barrier(&context).await;
-        assert_eq!(start.elapsed(), Duration::from_millis(2000));
-        assert!(barrier.checkpoint);
-
-        // Requested after 60% of the interval: no intermediate barrier.
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        periodic.request_intermediate_barrier(db);
-        periodic.next_barrier(&context).await;
         assert_eq!(start.elapsed(), Duration::from_millis(3000));
+        assert!(!barrier.intermediate && !barrier.checkpoint);
+        let barrier = periodic.next_barrier(&context).await;
+        assert_eq!(start.elapsed(), Duration::from_millis(3500));
+        assert!(barrier.intermediate);
+
+        // Not requested: periodic barriers only.
+        periodic.next_barrier(&context).await;
+        assert_eq!(start.elapsed(), Duration::from_millis(4000));
+        periodic.next_barrier(&context).await;
+        assert_eq!(start.elapsed(), Duration::from_millis(5000));
     }
 
     #[tokio::test]

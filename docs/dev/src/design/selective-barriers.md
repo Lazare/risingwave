@@ -128,23 +128,29 @@ and DML statements are only acknowledged as durable after `FLUSH` (a barrier com
 
 ## Intermediate barrier
 
-Data held by a sleeping fragment waits for the next periodic barrier, up to one barrier interval.
-To shorten this wait, meta may inject one **intermediate barrier** per barrier interval
-(`PeriodicBarriers::request_intermediate_barrier`):
+Data held by a sleeping fragment needs two barriers: one that releases the fragment, and one that
+ends the epoch of the data (what a `last` sink waits for). With periodic barriers only, this takes
+between one and two barrier intervals. To halve this reaction time, meta may inject one
+**intermediate barrier** per barrier interval (`PeriodicBarriers::request_intermediate_barrier`):
 
 - **Trigger.** A ring of a fragment that the previous barrier did not release, i.e. one that
   holds data. The ring of a released fragment (a busy table ringing to stay released) does not
   count: its data already flows, and it would double the number of barriers under load.
-- **When.** Between 40% and 60% of the interval since the last periodic barrier (or since the
-  last command barrier, which restarts the interval): at 40% when the ring comes earlier, at once
-  inside the window, and not at all after 60%, where the periodic barrier is close. Neither of the
-  two epochs is thus shorter than 40% of the interval.
+- **When.** At the middle of the interval since the last periodic barrier (or since the last
+  command barrier, which restarts the interval):
+  - the ring comes in the first half of the interval: the intermediate barrier of this interval
+    releases the fragment, along with the others that ring before it, and the next periodic
+    barrier ends the epoch of its data;
+  - the ring comes in the second half: the next periodic barrier releases the fragment, and the
+    intermediate barrier of the next interval ends the epoch of its data.
+- **Not when late.** No intermediate barrier is injected while more than 3 barriers of the
+  database are not completed yet.
 - **What.** A selective barrier like the others (it releases the fragments that rang), never a
   checkpoint, not counted for `checkpoint_frequency`, and it does not move the periodic barriers.
 
-With an interval `I`, a row written at `t` to a sleeping table is released at `max(t, 0.4 I)`
-instead of `I` when `t <= 0.6 I`. What waits for the end of the epoch of the released data (e.g. a
-`last` sink) is then served by the periodic barrier at `I` instead of `2 I`.
+With an interval `I`, the epoch of a row written at `t` to a sleeping table ends at `I` when
+`t < 0.5 I` and at `1.5 I` otherwise, instead of `2 I`: the reaction time is between `0.5 I` and
+`I` instead of between `I` and `2 I`, i.e. `0.75 I` on average instead of `1.5 I`.
 
 ## Current limitations
 

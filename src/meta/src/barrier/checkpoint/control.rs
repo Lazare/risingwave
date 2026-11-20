@@ -53,7 +53,7 @@ use crate::barrier::notifier::Notifier;
 use crate::barrier::partial_graph::{CollectedBarrier, PartialGraphManager, PartialGraphStat};
 use crate::barrier::progress::TrackingJob;
 use crate::barrier::rpc::{from_partial_graph_id, to_partial_graph_id};
-use crate::barrier::schedule::{NewBarrier, PeriodicBarriers};
+use crate::barrier::schedule::{NewBarrier, PeriodicBarriers, allows_intermediate_barrier};
 use crate::barrier::utils::{BarrierItemCollector, collect_independent_job_commit_epoch_info};
 use crate::barrier::{
     BackfillProgress, Command, CreateStreamingJobType, FragmentBackfillProgress, Reschedule,
@@ -244,6 +244,7 @@ impl CheckpointControl {
             command,
             span,
             checkpoint,
+            intermediate,
         } = new_barrier;
 
         if let Some((mut command, notifier)) = command {
@@ -374,6 +375,14 @@ impl CheckpointControl {
                 >= self.in_flight_barrier_nums
             {
                 // Skip new barrier with no explicit command when the database should pause inject additional barrier
+                return Ok(());
+            }
+            if intermediate
+                && !allows_intermediate_barrier(
+                    partial_graph_manager.pending_barrier_num(database.partial_graph_id),
+                )
+            {
+                // The database is late: an intermediate barrier would only add to the backlog.
                 return Ok(());
             }
             database.handle_new_barrier(
