@@ -225,6 +225,22 @@ sleep with their table, and needs no new state table, so it applies to existing 
   rings for the `CdcFilter`. After a barrier that releases it, held rows are emitted in order and
   deleted. Rows of tables without route pass through. A barrier without selective information
   releases everything.
+- **Order of the source.** Holding only the rows of the sleeping table would let a table that is
+  awake overtake it: a transaction of the upstream database touching both would be split between
+  two epochs (the awake table in the current one, the waking table in the next one), while
+  without the feature it lands in one epoch. A job that compares tables of the same epoch would
+  then be wrong, e.g. a `last` sink ([sink groups](./sink-group.md)) acknowledging in epoch `E` a
+  write that the other sinks only receive in `E + 1`. The source therefore holds in order:
+  - a chunk with a row to hold is held entirely (a chunk never splits a transaction, up to 4096
+    rows);
+  - while rows are held, every routed row that follows is held too;
+  - after a barrier, held rows are emitted in order, chunk by chunk, up to the first chunk with a
+    row whose `CdcFilter` is not released; the source rings for the fragments of the rows left
+    behind, so that the next barrier releases them together.
+
+  Cost: when a sleeping table wakes up, the routed tables that are awake are delayed with it
+  (rows that follow in the same epoch: one barrier, and they are written to and deleted from the
+  split state table). Rows of tables without route are not held and may still overtake.
 - **Recovery.** The source reads held rows back after initializing its state table, and emits
   them after the first barrier that releases their table (barriers after a recovery are not
   selective, so the first one). Held rows of a table that is no longer routed (dropped) are
