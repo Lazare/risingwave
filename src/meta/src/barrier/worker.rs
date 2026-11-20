@@ -135,6 +135,7 @@ mod tests {
             )),
             span: tracing::Span::none(),
             checkpoint: false,
+            intermediate: false,
         };
 
         let result =
