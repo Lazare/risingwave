@@ -41,5 +41,5 @@
     WHERE dep.refobjid=$1
     ORDER BY type
   batch_plan: |-
-    BatchSort { order: [$expr10066 ASC] }
+    BatchSort { order: [$expr10072 ASC] }
     └─BatchValues { rows: [] }
