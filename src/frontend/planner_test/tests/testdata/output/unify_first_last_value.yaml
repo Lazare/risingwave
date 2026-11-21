@@ -60,3 +60,63 @@
         └─StreamExchange { dist: Single }
           └─StreamProject { exprs: [t.a, t.c, Row(t.a, t.b) as $expr1, t._row_id] }
             └─StreamTableScan { table: t, columns: [t.a, t.b, t.c, t._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }
+- name: prune the last_value calls that are not read before unifying, so that their columns are not scanned
+  sql: |
+    create table t(id varchar, entity_id varchar, fact jsonb, created_at timestamptz, created_by varchar);
+    with last_updates as (
+      select entity_id,
+        last_value('set' order by created_at) as op,
+        last_value(id order by created_at) as id,
+        last_value(fact order by created_at) as fact,
+        last_value(created_at order by created_at) as created_at,
+        last_value(created_by order by created_at) as created_by
+      from t group by entity_id
+    )
+    select entity_id from last_updates where op = 'set';
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchProject { exprs: [t.entity_id] }
+      └─BatchFilter { predicate: (last_value('set':Varchar order_by(t.created_at ASC)) = 'set':Varchar) }
+        └─BatchHashAgg { group_key: [t.entity_id], aggs: [last_value('set':Varchar order_by(t.created_at ASC))] }
+          └─BatchExchange { order: [], dist: HashShard(t.entity_id) }
+            └─BatchProject { exprs: [t.entity_id, 'set':Varchar, t.created_at] }
+              └─BatchScan { table: t, columns: [t.entity_id, t.created_at], distribution: SomeShard }
+  stream_plan: |-
+    StreamMaterialize { columns: [entity_id], stream_key: [entity_id], pk_columns: [entity_id], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [t.entity_id] }
+      └─StreamFilter { predicate: (last_value('set':Varchar order_by(t.created_at ASC)) = 'set':Varchar) }
+        └─StreamProject { exprs: [t.entity_id, last_value('set':Varchar order_by(t.created_at ASC))] }
+          └─StreamHashAgg { group_key: [t.entity_id], aggs: [last_value('set':Varchar order_by(t.created_at ASC)), count] }
+            └─StreamExchange { dist: HashShard(t.entity_id) }
+              └─StreamProject { exprs: [t.entity_id, 'set':Varchar, t.created_at, t._row_id] }
+                └─StreamTableScan { table: t, columns: [t.entity_id, t.created_at, t._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }
+- name: unify only the last_value calls that are read
+  sql: |
+    create table t(id varchar, entity_id varchar, fact jsonb, created_at timestamptz, created_by varchar);
+    with last_updates as (
+      select entity_id,
+        last_value('set' order by created_at) as op,
+        last_value(id order by created_at) as id,
+        last_value(fact order by created_at) as fact,
+        last_value(created_at order by created_at) as created_at,
+        last_value(created_by order by created_at) as created_by
+      from t group by entity_id
+    )
+    select entity_id, id, created_by from last_updates where op = 'set';
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchProject { exprs: [t.entity_id, Field(last_value($expr1 order_by(t.created_at ASC)), 1:Int32) as $expr2, Field(last_value($expr1 order_by(t.created_at ASC)), 2:Int32) as $expr3] }
+      └─BatchFilter { predicate: (Field(last_value($expr1 order_by(t.created_at ASC)), 0:Int32) = 'set':Varchar) }
+        └─BatchHashAgg { group_key: [t.entity_id], aggs: [last_value($expr1 order_by(t.created_at ASC))] }
+          └─BatchExchange { order: [], dist: HashShard(t.entity_id) }
+            └─BatchProject { exprs: [t.entity_id, t.created_at, Row('set':Varchar, t.id, t.created_by) as $expr1] }
+              └─BatchScan { table: t, columns: [t.id, t.entity_id, t.created_at, t.created_by], distribution: SomeShard }
+  stream_plan: |-
+    StreamMaterialize { columns: [entity_id, id, created_by], stream_key: [entity_id], pk_columns: [entity_id], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [t.entity_id, Field(last_value($expr1 order_by(t.created_at ASC)), 1:Int32) as $expr2, Field(last_value($expr1 order_by(t.created_at ASC)), 2:Int32) as $expr3] }
+      └─StreamFilter { predicate: (Field(last_value($expr1 order_by(t.created_at ASC)), 0:Int32) = 'set':Varchar) }
+        └─StreamProject { exprs: [t.entity_id, last_value($expr1 order_by(t.created_at ASC))] }
+          └─StreamHashAgg { group_key: [t.entity_id], aggs: [last_value($expr1 order_by(t.created_at ASC)), count] }
+            └─StreamExchange { dist: HashShard(t.entity_id) }
+              └─StreamProject { exprs: [t.entity_id, t.created_at, Row('set':Varchar, t.id, t.created_by) as $expr1, t._row_id] }
+                └─StreamTableScan { table: t, columns: [t.id, t.entity_id, t.created_at, t.created_by, t._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }
