@@ -71,6 +71,14 @@ pub trait AggregateFunction: Send + Sync + 'static {
     fn decode_state(&self, datum: Datum) -> Result<AggregateState> {
         Ok(AggregateState::Datum(datum))
     }
+
+    /// Returns the type of the datum produced by `encode_state`.
+    ///
+    /// It defaults to the return type, which is what the aggregate functions with a scalar state
+    /// encode. It is used by the batch hash aggregation to spill the states to disk.
+    fn encoded_state_type(&self) -> DataType {
+        self.return_type()
+    }
 }
 
 /// Intermediate state of an aggregate function.

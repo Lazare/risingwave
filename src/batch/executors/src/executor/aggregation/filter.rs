@@ -68,6 +68,18 @@ impl AggregateFunction for Filter {
     async fn get_result(&self, state: &AggregateState) -> Result<Datum> {
         self.inner.get_result(state).await
     }
+
+    fn encode_state(&self, state: &AggregateState) -> Result<Datum> {
+        self.inner.encode_state(state)
+    }
+
+    fn decode_state(&self, datum: Datum) -> Result<AggregateState> {
+        self.inner.decode_state(datum)
+    }
+
+    fn encoded_state_type(&self) -> DataType {
+        self.inner.encoded_state_type()
+    }
 }
 
 #[cfg(test)]
