@@ -504,12 +504,18 @@ impl<K: HashKey + Send + Sync> HashAggExecutor<K> {
             self.mem_context.global_allocator(),
         );
 
-        if let Some(init_agg_state_executor) = self.init_agg_state_executor {
-            // `init_agg_state_executor` exists which means this is a sub `HashAggExecutor` used to consume spilling data.
-            // The spilled agg states by its parent executor need to be recovered first.
-            let mut init_agg_state_stream = init_agg_state_executor.execute();
+        // Memory of the agg states that the memory context refused to count: it must not be
+        // released from the context when the states are spilled.
+        let mut untracked_memory_usage = 0;
+
+        // `init_agg_state_executor` exists which means this is a sub `HashAggExecutor` used to consume spilling data.
+        // The spilled agg states by its parent executor need to be recovered first.
+        let mut init_agg_state_stream = self.init_agg_state_executor.map(|e| e.execute());
+        // Whether some spilled agg states are left in `init_agg_state_stream`.
+        let mut init_agg_state_remaining = false;
+        if let Some(init_agg_state_stream) = &mut init_agg_state_stream {
             #[for_await]
-            for chunk in &mut init_agg_state_stream {
+            for chunk in init_agg_state_stream {
                 let chunk = chunk?;
                 let group_key_indices = (0..self.group_key_columns.len()).collect_vec();
                 let keys = K::build_many(&group_key_indices, &chunk);
@@ -530,56 +536,71 @@ impl<K: HashKey + Send + Sync> HashAggExecutor<K> {
                     groups.try_insert(key, agg_states).unwrap();
                 }
 
-                if !self.mem_context.add(memory_usage_diff) && check_memory {
-                    warn!(
-                        "not enough memory to load one partition agg state after spill which is not a normal case, so keep going"
-                    );
+                if !self.mem_context.add(memory_usage_diff) {
+                    untracked_memory_usage += memory_usage_diff;
+                    if check_memory {
+                        if self.spill_backend.is_some() {
+                            // The agg states of this partition do not fit in memory: spill again
+                            // what is loaded, the states left in the stream and the input.
+                            need_to_spill = true;
+                            init_agg_state_remaining = true;
+                            break;
+                        }
+                        warn!(
+                            "not enough memory to load one partition agg state after spill which is not a normal case, so keep going"
+                        );
+                    }
                 }
             }
         }
 
         let mut input_stream = self.child.execute();
-        // consume all chunks to compute the agg result
-        #[for_await]
-        for chunk in &mut input_stream {
-            let chunk = StreamChunk::from(chunk?);
-            let keys = K::build_many(self.group_key_columns.as_slice(), &chunk);
-            let mut memory_usage_diff = 0;
-            for (row_id, key) in keys
-                .into_iter()
-                .enumerate()
-                .filter_by_bitmap(chunk.visibility())
-            {
-                let mut new_group = false;
-                let states = match groups.entry(key) {
-                    Entry::Occupied(entry) => entry.into_mut(),
-                    Entry::Vacant(entry) => {
-                        new_group = true;
-                        let states = self
-                            .aggs
-                            .iter()
-                            .map(|agg| agg.create_state())
-                            .try_collect()?;
-                        entry.insert(states)
-                    }
-                };
+        // consume all chunks to compute the agg result, unless the agg states already do not fit
+        if !need_to_spill {
+            #[for_await]
+            for chunk in &mut input_stream {
+                let chunk = StreamChunk::from(chunk?);
+                let keys = K::build_many(self.group_key_columns.as_slice(), &chunk);
+                let mut memory_usage_diff = 0;
+                for (row_id, key) in keys
+                    .into_iter()
+                    .enumerate()
+                    .filter_by_bitmap(chunk.visibility())
+                {
+                    let mut new_group = false;
+                    let states = match groups.entry(key) {
+                        Entry::Occupied(entry) => entry.into_mut(),
+                        Entry::Vacant(entry) => {
+                            new_group = true;
+                            let states = self
+                                .aggs
+                                .iter()
+                                .map(|agg| agg.create_state())
+                                .try_collect()?;
+                            entry.insert(states)
+                        }
+                    };
 
-                // TODO: currently not a vectorized implementation
-                for (agg, state) in self.aggs.iter().zip_eq_fast(states) {
-                    if !new_group {
-                        memory_usage_diff -= state.estimated_size() as i64;
+                    // TODO: currently not a vectorized implementation
+                    for (agg, state) in self.aggs.iter().zip_eq_fast(states) {
+                        if !new_group {
+                            memory_usage_diff -= state.estimated_size() as i64;
+                        }
+                        agg.update_range(state, &chunk, row_id..row_id + 1).await?;
+                        memory_usage_diff += state.estimated_size() as i64;
                     }
-                    agg.update_range(state, &chunk, row_id..row_id + 1).await?;
-                    memory_usage_diff += state.estimated_size() as i64;
                 }
-            }
-            // update memory usage
-            if !self.mem_context.add(memory_usage_diff) && check_memory {
-                if self.spill_backend.is_some() {
-                    need_to_spill = true;
-                    break;
-                } else {
-                    Err(BatchError::OutOfMemory(self.mem_context.mem_limit()))?;
+                // update memory usage
+                if !self.mem_context.add(memory_usage_diff) {
+                    untracked_memory_usage += memory_usage_diff;
+                    if check_memory {
+                        if self.spill_backend.is_some() {
+                            need_to_spill = true;
+                            break;
+                        } else {
+                            Err(BatchError::OutOfMemory(self.mem_context.mem_limit()))?;
+                        }
+                    }
                 }
             }
         }
@@ -632,8 +653,30 @@ impl<K: HashKey + Send + Sync> HashAggExecutor<K> {
                     .await?;
             }
 
-            // Release memory occupied by agg hash map.
-            self.mem_context.add(memory_usage_diff);
+            // Spill the agg states of the parent executor that were not loaded.
+            if init_agg_state_remaining
+                && let Some(init_agg_state_stream) = &mut init_agg_state_stream
+            {
+                let group_key_indices = (0..self.group_key_columns.len()).collect_vec();
+                #[for_await]
+                for chunk in init_agg_state_stream {
+                    let chunk: DataChunk = chunk?;
+                    let hash_codes = chunk
+                        .get_hash_values(&group_key_indices, agg_spill_manager.spill_build_hasher);
+                    for (row_id, hash_code) in hash_codes.into_iter().enumerate() {
+                        let (row, visible) = chunk.row_at(row_id);
+                        if visible {
+                            agg_spill_manager
+                                .write_agg_state_row(row, hash_code.value())
+                                .await?;
+                        }
+                    }
+                }
+            }
+
+            // Release memory occupied by agg hash map, except the part that was never counted.
+            self.mem_context
+                .add(memory_usage_diff + untracked_memory_usage);
 
             // Spill input chunks.
             #[for_await]
@@ -1249,6 +1292,95 @@ mod tests {
 
         let expect_exec = create_order_by_executor(expect_exec);
         diff_executor_output(actual_exec, expect_exec).await;
+    }
+
+    /// The agg states spilled to one partition do not fit in memory when the sub executor loads
+    /// them back: they must be spilled again instead of being kept in memory without being
+    /// counted.
+    #[tokio::test]
+    async fn test_spill_hash_agg_respill_when_loading_states() {
+        use risingwave_common::array::{Array, I64Array, Utf8Array};
+
+        // Large agg states, so that each spill partition exceeds `SPILL_AT_LEAST_MEMORY` and the
+        // sub executors check the memory.
+        const GROUPS: usize = 3000;
+        const VALUE_LEN: usize = 10 * 1024;
+        let chunk = |value: &str| {
+            let keys = I64Array::from_iter((0..GROUPS).map(|i| Some(i as i64)));
+            let value = value.repeat(VALUE_LEN);
+            let values = Utf8Array::from_iter(std::iter::repeat_n(value.as_str(), GROUPS));
+            DataChunk::new(vec![keys.into_ref(), values.into_ref()], GROUPS)
+        };
+        let schema = Schema::new(vec![
+            Field::unnamed(DataType::Int64),
+            Field::unnamed(DataType::Varchar),
+        ]);
+        // The first chunk fills the hash table and triggers the spill of the agg states, the
+        // second one is spilled as input.
+        let mut src_exec = MockExecutor::new(schema);
+        src_exec.add(chunk("a"));
+        src_exec.add(chunk("b"));
+
+        let varchar = || PbDataType {
+            type_name: TypeName::Varchar as i32,
+            ..Default::default()
+        };
+        let agg_call = AggCall {
+            kind: PbAggKind::Max as i32,
+            args: vec![InputRef {
+                index: 1,
+                r#type: Some(varchar()),
+            }],
+            return_type: Some(varchar()),
+            distinct: false,
+            order_by: vec![],
+            filter: None,
+            direct_args: vec![],
+            udf: None,
+            scalar: None,
+        };
+        let agg_prost = HashAggNode {
+            group_key: vec![0],
+            agg_calls: vec![agg_call],
+        };
+
+        let mem_context = MemoryContext::new_with_mem_limit(
+            None,
+            LabelGuardedIntGauge::test_int_gauge::<4>(),
+            // Less than the agg states of one spill partition (about 1.5 MB).
+            SPILL_AT_LEAST_MEMORY,
+        );
+        let spill_metrics = BatchSpillMetrics::for_test();
+        let actual_exec = HashAggExecutorBuilder::deserialize(
+            &agg_prost,
+            Box::new(src_exec),
+            TaskId::default(),
+            "HashAggExecutor".to_owned(),
+            CHUNK_SIZE,
+            mem_context.clone(),
+            Some(SpillBackend::Memory),
+            spill_metrics.clone(),
+            ShutdownToken::empty(),
+        )
+        .unwrap();
+
+        let mut groups = std::collections::HashSet::new();
+        #[for_await]
+        for chunk in actual_exec.execute() {
+            let chunk = chunk.unwrap();
+            for row in chunk.rows() {
+                let key = row.datum_at(0).unwrap().into_int64();
+                let max = row.datum_at(1).unwrap().into_utf8();
+                assert!(max.len() == VALUE_LEN && max.starts_with('b'));
+                assert!(groups.insert(key), "a group came out twice");
+            }
+        }
+        assert_eq!(groups.len(), GROUPS);
+        // The values are written once (the first chunk as agg states, the second one as input),
+        // then again when the agg states of each partition are spilled a second time.
+        let spilled_once = (2 * GROUPS * VALUE_LEN) as u64;
+        let spilled = spill_metrics.batch_spill_write_bytes.get();
+        assert!(spilled > spilled_once * 3 / 2, "spilled {spilled} bytes");
     }
 
     /// The spilled state of a group and its input rows that arrive after the spill must be
