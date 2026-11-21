@@ -1882,6 +1882,9 @@ pub(crate) struct DispatchBarrierBuffer {
     barrier_rx: mpsc::UnboundedReceiver<Barrier>,
     recv_state: BarrierReceiverState,
     curr_upstream_fragment_id: FragmentId,
+    /// A barrier received from the upstream ahead of barriers that exempt it (selective barrier
+    /// injection). It is returned once the exempted barriers before it have been forwarded.
+    pending_upstream_barrier: Option<DispatcherBarrier>,
     actor_id: ActorId,
     // read-only context for building new inputs
     build_input_ctx: Arc<BuildInputContext>,
@@ -1918,6 +1921,7 @@ impl DispatchBarrierBuffer {
             barrier_rx,
             recv_state: BarrierReceiverState::ReceivingBarrier,
             curr_upstream_fragment_id,
+            pending_upstream_barrier: None,
             actor_id,
             build_input_ctx: Arc::new(BuildInputContext {
                 actor_id,
@@ -1956,15 +1960,34 @@ impl DispatchBarrierBuffer {
             if let Some(barrier) = self.front_barrier_with_sleeping_upstream() {
                 return Ok(DispatcherMessage::Barrier(barrier));
             }
+            if self.pending_upstream_barrier.is_some() {
+                // The upstream slept during earlier epochs and its next barrier arrived before
+                // this actor fetched the barriers of these epochs from `barrier_rx`: forward the
+                // exempted barriers first (check above), then the barrier of the upstream.
+                if self.buffer.is_empty() {
+                    self.try_fetch_barrier_rx(false).await?;
+                    continue;
+                }
+                return Ok(DispatcherMessage::Barrier(
+                    self.pending_upstream_barrier.take().unwrap(),
+                ));
+            }
             tokio::select! {
                 biased;
                 msg = stream.try_next() => {
                     metrics
                         .actor_input_buffer_blocking_duration_ns
                         .inc_by(start_time.elapsed().as_nanos() as u64);
-                    return msg?.ok_or_else(
+                    let msg = msg?.ok_or_else(
                         || StreamExecutorError::channel_closed("upstream executor closed unexpectedly")
-                    );
+                    )?;
+                    if let DispatcherMessage::Barrier(barrier) = msg {
+                        // Barriers that exempt the upstream may still be in `barrier_rx`: they
+                        // precede this one.
+                        self.pending_upstream_barrier = Some(barrier);
+                        continue;
+                    }
+                    return Ok(msg);
                 }
 
                 res = self.try_fetch_barrier_rx(true) => {

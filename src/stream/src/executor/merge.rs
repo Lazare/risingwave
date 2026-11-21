@@ -598,6 +598,62 @@ mod tests {
         });
     }
 
+    /// The upstream fragment sleeps during an epoch (selective barrier injection) and its next
+    /// barrier reaches the merge before the merge fetched the barrier that exempts it.
+    #[tokio::test]
+    async fn test_merger_upstream_barrier_ahead_of_exempted_barrier() {
+        let barrier_test_env = LocalBarrierTestEnv::for_test().await;
+        let (tx, rx) = channel_for_test();
+        let (barrier_tx, barrier_rx) = mpsc::unbounded_channel();
+
+        let b1 = Barrier::with_prev_epoch_for_test(test_epoch(1), 0);
+        // The upstream fragment (1919 in `for_test`) does not receive the next two barriers.
+        let exempted = |epoch, prev_epoch| {
+            let mut barrier =
+                Barrier::with_prev_epoch_for_test(test_epoch(epoch), test_epoch(prev_epoch));
+            barrier.selective = Some(Arc::new(crate::executor::SelectiveBarrierInfo {
+                sleeping_fragments: HashSet::from_iter([1919.into()]),
+                ..Default::default()
+            }));
+            barrier
+        };
+        let b2 = exempted(2, 1);
+        let b3 = exempted(3, 2);
+        let b4 = Barrier::with_prev_epoch_for_test(test_epoch(4), test_epoch(3));
+
+        // Everything is available before the merge is polled.
+        for barrier in [&b1, &b2, &b3, &b4] {
+            barrier_tx.send(barrier.clone()).unwrap();
+        }
+        tx.send(Message::Barrier(b1.clone().into_dispatcher()).into())
+            .await
+            .unwrap();
+        tx.send(Message::Barrier(b4.clone().into_dispatcher()).into())
+            .await
+            .unwrap();
+        tx.send(Message::Chunk(build_test_chunk(10)).into())
+            .await
+            .unwrap();
+
+        let merger = MergeExecutor::for_test(
+            233,
+            vec![rx],
+            barrier_test_env.local_barrier_manager.clone(),
+            Schema::new(vec![]),
+            100,
+            Some(barrier_rx),
+        );
+        let mut merger = merger.boxed().execute();
+        for epoch in 1..=4 {
+            assert_matches!(merger.next().await.unwrap().unwrap(), Message::Barrier(Barrier { epoch: barrier_epoch, .. }) => {
+                assert_eq!(barrier_epoch.curr, test_epoch(epoch));
+            });
+        }
+        assert_matches!(merger.next().await.unwrap().unwrap(), Message::Chunk(chunk) => {
+            assert_eq!(chunk.ops().len(), 10);
+        });
+    }
+
     #[tokio::test]
     async fn test_merger() {
         const CHANNEL_NUMBER: usize = 10;
