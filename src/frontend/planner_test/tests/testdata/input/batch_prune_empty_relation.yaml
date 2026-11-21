@@ -1,0 +1,352 @@
+# Tests for `ContradictoryNullFilterRule` and `EmptyRelationPropagateRule` (batch only).
+#
+# Positive cases: `x IS NULL` combined with a null-rejecting conjunct on the same column can never
+# be true in a filter, so the sub-plan depending on it is removed.
+- id: create_tables
+  sql: |
+    create table t (v1 int, v2 int, v3 varchar);
+    create table s (k int, w int);
+    create table r (k int, x int);
+  expected_outputs: []
+- name: is null and in-list
+  before:
+  - create_tables
+  sql: |
+    select * from t where v3 is null and v3 in ('a', 'b');
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+- name: is null and comparison (column on either side)
+  before:
+  - create_tables
+  sql: |
+    select * from t where v1 is null and 1 < v1 and v2 = 2;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+- name: is null and column-to-column comparison
+  before:
+  - create_tables
+  sql: |
+    select * from t where v1 is null and v1 <> v2;
+  expected_outputs:
+  - batch_plan
+- name: is null and is not null
+  before:
+  - create_tables
+  sql: |
+    select * from t where v1 is null and v1 is not null;
+  expected_outputs:
+  - batch_plan
+- name: streaming plan must not change
+  before:
+  - create_tables
+  sql: |
+    select * from t where v3 is null and v3 in ('a', 'b');
+  expected_outputs:
+  - stream_plan
+- name: conjuncts merged by predicate pushdown through a subquery
+  before:
+  - create_tables
+  sql: |
+    select * from (select * from t where v3 in ('a', 'b')) sub where v3 is null;
+  expected_outputs:
+  - batch_plan
+- name: filter above a non-scan input (limit blocks pushdown)
+  before:
+  - create_tables
+  sql: |
+    select * from (select * from t limit 10) sub where v1 is null and v1 = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+- name: inner join with an empty input is empty
+  before:
+  - create_tables
+  sql: |
+    select * from t join s on t.v1 = s.k join r on s.k = r.k where t.v3 is null and t.v3 in ('a', 'b');
+  expected_outputs:
+  - batch_plan
+- name: inner join with a non-equi condition and an empty input is empty
+  before:
+  - create_tables
+  sql: |
+    select * from s join (select * from t where v1 is null and v1 = 1) e on s.k < e.v2;
+  expected_outputs:
+  - batch_plan
+- name: left outer join with an empty left input is empty
+  before:
+  - create_tables
+  sql: |
+    select * from (select * from t where v1 is null and v1 = 1) e left join s on e.v1 = s.k;
+  expected_outputs:
+  - batch_plan
+- name: right outer join with an empty right input is empty
+  before:
+  - create_tables
+  sql: |
+    select * from s right join (select * from t where v1 is null and v1 = 1) e on e.v1 = s.k;
+  expected_outputs:
+  - batch_plan
+- name: semi join with an empty right input is empty
+  before:
+  - create_tables
+  sql: |
+    select * from s where k in (select v1 from t where v2 is null and v2 = 1);
+  expected_outputs:
+  - batch_plan
+- name: semi join with an empty left input is empty
+  before:
+  - create_tables
+  sql: |
+    select * from (select * from t where v1 is null and v1 = 1) e where exists (select 1 from s where s.k = e.v2);
+  expected_outputs:
+  - batch_plan
+- name: anti join with an empty left input is empty
+  before:
+  - create_tables
+  sql: |
+    select * from (select * from t where v1 is null and v1 = 1) e where not exists (select 1 from s where s.k = e.v2);
+  expected_outputs:
+  - batch_plan
+- name: union all drops the empty input and keeps the others
+  before:
+  - create_tables
+  sql: |
+    select v1 as a, v2 as b from t where v1 is null and v1 = 1
+    union all
+    select k, w from s
+    union all
+    select k, x from r;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+- name: union all with a single remaining input
+  before:
+  - create_tables
+  sql: |
+    select v1 as a, v2 as b from t where v1 is null and v1 = 1
+    union all
+    select k, w from s;
+  expected_outputs:
+  - batch_plan
+- name: union all with a single remaining input keeps order by
+  before:
+  - create_tables
+  sql: |
+    select v1 as a, v2 as b from t where v1 is null and v1 = 1
+    union all
+    select k, w from s
+    order by b desc;
+  expected_outputs:
+  - batch_plan
+- name: union all with all inputs empty
+  before:
+  - create_tables
+  sql: |
+    select v1 as a, v2 as b from t where v1 is null and v1 = 1
+    union all
+    select k, w from s where k is null and k > 0;
+  expected_outputs:
+  - batch_plan
+- name: union (distinct) with an empty input
+  before:
+  - create_tables
+  sql: |
+    select v1 as a, v2 as b from t where v1 is null and v1 = 1
+    union
+    select k, w from s;
+  expected_outputs:
+  - batch_plan
+- name: grouped aggregation over an empty input is empty
+  before:
+  - create_tables
+  sql: |
+    select v2, count(*) from t where v1 is null and v1 = 1 group by v2;
+  expected_outputs:
+  - batch_plan
+- name: order by and limit over an empty input are empty
+  before:
+  - create_tables
+  sql: |
+    select * from t where v1 is null and v1 = 1 order by v2 limit 3;
+  expected_outputs:
+  - batch_plan
+- name: dbt not_null test shape (empty join branch under union all, ungrouped count on top)
+  before:
+  - create_tables
+  sql: |
+    create table other (k int, tag varchar, total bigint);
+    create view v as
+      select t.v1, t.v3, u.total
+      from t
+      join s on t.v1 = s.k
+      join (
+        select k, sum(x) as total from r group by k
+        union all
+        select k, count(*) as total from s group by k
+      ) u on s.k = u.k
+      where t.v3 in ('a', 'b')
+      union all
+      select k, tag, total from other;
+    select count(*) from (select * from v where v3 is null limit 10) sub;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+# Negative cases: none of the following may be folded to an empty relation (or only up to the
+# operator that still has to produce rows).
+- name: ungrouped aggregation over an empty input still returns one row
+  before:
+  - create_tables
+  sql: |
+    select count(*), sum(v2) from t where v1 is null and v1 = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+- name: contradiction under NOT must not be folded
+  before:
+  - create_tables
+  sql: |
+    select * from t where not (v1 is null and v1 = 1);
+  expected_outputs:
+  - batch_plan
+- name: contradiction inside OR must not be folded
+  before:
+  - create_tables
+  sql: |
+    select * from t where (v1 is null and v1 = 1) or v2 = 2;
+  expected_outputs:
+  - batch_plan
+- name: is null OR null-rejecting is not a contradiction
+  before:
+  - create_tables
+  sql: |
+    select * from t where v1 is null or v1 = 1;
+  expected_outputs:
+  - batch_plan
+- name: contradiction in a projection must not be folded
+  before:
+  - create_tables
+  sql: |
+    select v1 is null and v1 = 1 as c from t;
+  expected_outputs:
+  - batch_plan
+- name: contradiction inside CASE and COALESCE must not be folded
+  before:
+  - create_tables
+  sql: |
+    select * from t where case when v1 is null and v1 = 1 then false else true end and coalesce(v1 is null and v1 = 1, true);
+  expected_outputs:
+  - batch_plan
+- name: conditions on different columns are not a contradiction
+  before:
+  - create_tables
+  sql: |
+    select * from t where v1 is null and v2 = 1;
+  expected_outputs:
+  - batch_plan
+- name: is distinct from is not null-rejecting
+  before:
+  - create_tables
+  sql: |
+    select * from t where v1 is null and v1 is distinct from 1;
+  expected_outputs:
+  - batch_plan
+- name: is not distinct from null is satisfiable together with is null
+  before:
+  - create_tables
+  sql: |
+    select * from t where v1 is null and v1 is not distinct from null::int;
+  expected_outputs:
+  - batch_plan
+- name: is not distinct from null with a comparison is not recognized
+  before:
+  - create_tables
+  sql: |
+    select * from t where v1 = 1 and v1 is not distinct from null::int;
+  expected_outputs:
+  - batch_plan
+- name: nullable column compared through a non-strict function must not be folded
+  before:
+  - create_tables
+  sql: |
+    select * from t where v1 is null and coalesce(v1, 1) = 1;
+  expected_outputs:
+  - batch_plan
+- name: column wrapped in a strict function or a cast is not recognized
+  before:
+  - create_tables
+  sql: |
+    select * from t where v1 is null and v1 + 1 = 2 and v1::varchar in ('1', '2');
+  expected_outputs:
+  - batch_plan
+- name: equals any(array) is not recognized
+  before:
+  - create_tables
+  sql: |
+    select * from t where v1 is null and v1 = any(array[1, 2]);
+  expected_outputs:
+  - batch_plan
+- name: not in is not recognized
+  before:
+  - create_tables
+  sql: |
+    select * from t where v1 is null and v1 not in (1, 2);
+  expected_outputs:
+  - batch_plan
+- name: is null of an expression is not recognized
+  before:
+  - create_tables
+  sql: |
+    select * from t where (v1 + v2) is null and v1 = 1;
+  expected_outputs:
+  - batch_plan
+- name: left outer join with an empty right input keeps the left rows
+  before:
+  - create_tables
+  sql: |
+    select * from s left join (select * from t where v1 is null and v1 = 1) e on e.v1 = s.k;
+  expected_outputs:
+  - batch_plan
+- name: right outer join with an empty left input keeps the right rows
+  before:
+  - create_tables
+  sql: |
+    select * from (select * from t where v1 is null and v1 = 1) e right join s on e.v1 = s.k;
+  expected_outputs:
+  - batch_plan
+- name: full outer join with an empty input keeps the other side
+  before:
+  - create_tables
+  sql: |
+    select * from s full join (select * from t where v1 is null and v1 = 1) e on e.v1 = s.k;
+  expected_outputs:
+  - batch_plan
+- name: anti join with an empty right input keeps the left rows
+  before:
+  - create_tables
+  sql: |
+    select * from s where not exists (select 1 from t where t.v2 = s.k and t.v1 is null and t.v1 = 1);
+  expected_outputs:
+  - batch_plan
+- name: contradiction in a left join ON condition only empties the right side
+  before:
+  - create_tables
+  sql: |
+    select * from s left join t on s.k = t.v2 and t.v1 is null and t.v1 = 1;
+  expected_outputs:
+  - batch_plan
+- name: scalar subquery over an empty input still yields a NULL row
+  before:
+  - create_tables
+  sql: |
+    select k, (select max(v2) from t where v1 is null and v1 = 1) as m from s;
+  expected_outputs:
+  - batch_plan
+- name: dml over a contradictory filter keeps the dml node
+  before:
+  - create_tables
+  sql: |
+    delete from t where v1 is null and v1 = 1;
+  expected_outputs:
+  - batch_plan

@@ -232,13 +232,7 @@
 - sql: |
     create table t (v int);
     select * from t natural join (select * from t where 1=0);
-  batch_plan: |-
-    BatchExchange { order: [], dist: Single }
-    └─BatchHashJoin { type: Inner, predicate: t.v = t.v, output: [t.v] }
-      ├─BatchExchange { order: [], dist: HashShard(t.v) }
-      │ └─BatchScan { table: t, columns: [t.v], distribution: SomeShard }
-      └─BatchExchange { order: [], dist: HashShard(t.v) }
-        └─BatchValues { rows: [] }
+  batch_plan: 'BatchValues { rows: [] }'
   stream_plan: |-
     StreamMaterialize { columns: [v, t._row_id(hidden), t._row_id#1(hidden)], stream_key: [t._row_id, t._row_id#1, v], pk_columns: [t._row_id, t._row_id#1, v], pk_conflict: NoCheck }
     └─StreamExchange { dist: HashShard(t.v, t._row_id, t._row_id) }
