@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::hash::BuildHasher;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -602,7 +601,10 @@ impl<K: HashKey + Send + Sync> HashAggExecutor<K> {
                 &self.identity,
                 DEFAULT_SPILL_PARTITION_NUM,
                 self.group_key_types.clone(),
-                self.aggs.iter().map(|agg| agg.return_type()).collect(),
+                self.aggs
+                    .iter()
+                    .map(|agg| agg.encoded_state_type())
+                    .collect(),
                 child_schema.data_types(),
                 self.chunk_size,
                 self.spill_metrics.clone(),
@@ -620,7 +622,11 @@ impl<K: HashKey + Send + Sync> HashAggExecutor<K> {
                     agg_datums.push(encode_state);
                 }
                 let agg_state_row = OwnedRow::from_iter(agg_datums.into_iter());
-                let hash_code = agg_spill_manager.spill_build_hasher.hash_one(key);
+                // The partition must be the one that the input rows of this group are spilled to,
+                // so hash the group key values the same way as `get_hash_values` does below.
+                let hash_code = (&key_row)
+                    .hash(agg_spill_manager.spill_build_hasher)
+                    .value();
                 agg_spill_manager
                     .write_agg_state_row(key_row.chain(agg_state_row), hash_code)
                     .await?;
@@ -752,6 +758,7 @@ mod tests {
     use risingwave_common::metrics::LabelGuardedIntGauge;
     use risingwave_common::test_prelude::DataChunkTestExt;
     use risingwave_common::util::sort_util::{ColumnOrder, OrderType};
+    use risingwave_pb::common::PbColumnOrder;
     use risingwave_pb::data::PbDataType;
     use risingwave_pb::data::data_type::TypeName;
     use risingwave_pb::expr::agg_call::PbKind as PbAggKind;
@@ -1148,6 +1155,179 @@ mod tests {
             ),
             Schema::new(vec![
                 Field::unnamed(DataType::Int32),
+                Field::unnamed(DataType::Int32),
+                Field::unnamed(DataType::Int64),
+            ]),
+        ));
+
+        let expect_exec = create_order_by_executor(expect_exec);
+        diff_executor_output(actual_exec, expect_exec).await;
+    }
+
+    /// An aggregate function with `ORDER BY` keeps rows in its state, which must be spilled too.
+    #[tokio::test]
+    async fn test_spill_hash_agg_with_order_by() {
+        let schema = Schema::new(vec![
+            Field::unnamed(DataType::Int32),
+            Field::unnamed(DataType::Int32),
+            Field::unnamed(DataType::Int32),
+        ]);
+        // The first chunk fills the hash table and triggers the spill, the second one is spilled
+        // as input.
+        let mut src_exec = MockExecutor::new(schema.clone());
+        src_exec.add(DataChunk::from_pretty(
+            "i i i
+             0 5 10
+             1 3 20
+             0 7 30
+             1 1 40",
+        ));
+        src_exec.add(DataChunk::from_pretty(
+            "i i i
+             0 6 50
+             1 9 60
+             2 4 70
+             0 2 80",
+        ));
+
+        let int32 = || PbDataType {
+            type_name: TypeName::Int32 as i32,
+            ..Default::default()
+        };
+        let agg_call = |kind: PbAggKind| AggCall {
+            kind: kind as i32,
+            args: vec![InputRef {
+                index: 2,
+                r#type: Some(int32()),
+            }],
+            return_type: Some(int32()),
+            distinct: false,
+            order_by: vec![PbColumnOrder {
+                column_index: 1,
+                order_type: Some(OrderType::ascending().to_protobuf()),
+            }],
+            filter: None,
+            direct_args: vec![],
+            udf: None,
+            scalar: None,
+        };
+
+        let agg_prost = HashAggNode {
+            group_key: vec![0],
+            agg_calls: vec![
+                agg_call(PbAggKind::FirstValue),
+                agg_call(PbAggKind::LastValue),
+            ],
+        };
+
+        let mem_context =
+            MemoryContext::new_with_mem_limit(None, LabelGuardedIntGauge::test_int_gauge::<4>(), 0);
+        let actual_exec = HashAggExecutorBuilder::deserialize(
+            &agg_prost,
+            Box::new(src_exec),
+            TaskId::default(),
+            "HashAggExecutor".to_owned(),
+            CHUNK_SIZE,
+            mem_context.clone(),
+            Some(SpillBackend::Memory),
+            BatchSpillMetrics::for_test(),
+            ShutdownToken::empty(),
+        )
+        .unwrap();
+
+        let actual_exec = create_order_by_executor(actual_exec);
+
+        let expect_exec = Box::new(MockExecutor::with_chunk(
+            DataChunk::from_pretty(
+                "i i  i
+                 0 80 30
+                 1 40 60
+                 2 70 70",
+            ),
+            schema,
+        ));
+
+        let expect_exec = create_order_by_executor(expect_exec);
+        diff_executor_output(actual_exec, expect_exec).await;
+    }
+
+    /// The spilled state of a group and its input rows that arrive after the spill must be
+    /// merged into a single group.
+    #[tokio::test]
+    async fn test_spill_hash_agg_with_remaining_input() {
+        let int32 = || PbDataType {
+            type_name: TypeName::Int32 as i32,
+            ..Default::default()
+        };
+        let mut src_exec = MockExecutor::new(Schema::new(vec![
+            Field::unnamed(DataType::Int32),
+            Field::unnamed(DataType::Int32),
+        ]));
+        // The first chunk fills the hash table and triggers the spill, the second one is spilled
+        // as input.
+        src_exec.add(DataChunk::from_pretty(
+            "i i
+             0 10
+             1 20
+             0 30
+             1 40",
+        ));
+        src_exec.add(DataChunk::from_pretty(
+            "i i
+             0 50
+             1 60
+             2 70
+             0 80",
+        ));
+
+        let agg_call = AggCall {
+            kind: PbAggKind::Sum as i32,
+            args: vec![InputRef {
+                index: 1,
+                r#type: Some(int32()),
+            }],
+            return_type: Some(PbDataType {
+                type_name: TypeName::Int64 as i32,
+                ..Default::default()
+            }),
+            distinct: false,
+            order_by: vec![],
+            filter: None,
+            direct_args: vec![],
+            udf: None,
+            scalar: None,
+        };
+
+        let agg_prost = HashAggNode {
+            group_key: vec![0],
+            agg_calls: vec![agg_call],
+        };
+
+        let mem_context =
+            MemoryContext::new_with_mem_limit(None, LabelGuardedIntGauge::test_int_gauge::<4>(), 0);
+        let actual_exec = HashAggExecutorBuilder::deserialize(
+            &agg_prost,
+            Box::new(src_exec),
+            TaskId::default(),
+            "HashAggExecutor".to_owned(),
+            CHUNK_SIZE,
+            mem_context.clone(),
+            Some(SpillBackend::Memory),
+            BatchSpillMetrics::for_test(),
+            ShutdownToken::empty(),
+        )
+        .unwrap();
+
+        let actual_exec = create_order_by_executor(actual_exec);
+
+        let expect_exec = Box::new(MockExecutor::with_chunk(
+            DataChunk::from_pretty(
+                "i I
+                 0 170
+                 1 120
+                 2 70",
+            ),
+            Schema::new(vec![
                 Field::unnamed(DataType::Int32),
                 Field::unnamed(DataType::Int64),
             ]),

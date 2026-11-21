@@ -21,11 +21,13 @@ mod orderby;
 mod projection;
 
 use risingwave_expr::Result;
-use risingwave_expr::aggregate::{AggCall, BoxedAggregateFunction, build_append_only};
+use risingwave_expr::aggregate::{
+    AggCall, AggType, BoxedAggregateFunction, PbAggKind, build_append_only,
+};
 
 use self::distinct::Distinct;
 use self::filter::*;
-use self::orderby::ProjectionOrderBy;
+use self::orderby::{KeptRows, ProjectionOrderBy};
 use self::projection::Projection;
 
 /// Build an `BoxedAggregateFunction` from `AggCall`.
@@ -38,10 +40,18 @@ pub fn build(agg: &AggCall) -> Result<BoxedAggregateFunction> {
     if agg.column_orders.is_empty() {
         aggregator = Box::new(Projection::new(agg.args.val_indices().to_vec(), aggregator));
     } else {
+        // `first_value` and `last_value` only read one of the ordered rows, so the other rows do
+        // not need to be kept in the state.
+        let kept_rows = match agg.agg_type {
+            AggType::Builtin(PbAggKind::FirstValue) => KeptRows::First,
+            AggType::Builtin(PbAggKind::LastValue) => KeptRows::Last,
+            _ => KeptRows::All,
+        };
         aggregator = Box::new(ProjectionOrderBy::new(
             agg.args.arg_types().to_vec(),
             agg.args.val_indices().to_vec(),
             agg.column_orders.clone(),
+            kept_rows,
             aggregator,
         ));
     }
