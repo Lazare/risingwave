@@ -27,3 +27,35 @@
   expected_outputs:
     - batch_plan
     - stream_plan
+- name: prune the last_value calls that are not read before unifying, so that their columns are not scanned
+  sql: |
+    create table t(id varchar, entity_id varchar, fact jsonb, created_at timestamptz, created_by varchar);
+    with last_updates as (
+      select entity_id,
+        last_value('set' order by created_at) as op,
+        last_value(id order by created_at) as id,
+        last_value(fact order by created_at) as fact,
+        last_value(created_at order by created_at) as created_at,
+        last_value(created_by order by created_at) as created_by
+      from t group by entity_id
+    )
+    select entity_id from last_updates where op = 'set';
+  expected_outputs:
+    - batch_plan
+    - stream_plan
+- name: unify only the last_value calls that are read
+  sql: |
+    create table t(id varchar, entity_id varchar, fact jsonb, created_at timestamptz, created_by varchar);
+    with last_updates as (
+      select entity_id,
+        last_value('set' order by created_at) as op,
+        last_value(id order by created_at) as id,
+        last_value(fact order by created_at) as fact,
+        last_value(created_at order by created_at) as created_at,
+        last_value(created_by order by created_at) as created_by
+      from t group by entity_id
+    )
+    select entity_id, id, created_by from last_updates where op = 'set';
+  expected_outputs:
+    - batch_plan
+    - stream_plan
