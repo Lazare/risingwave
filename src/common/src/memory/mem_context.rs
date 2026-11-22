@@ -64,6 +64,21 @@ struct MemoryContextInner {
     counter: Box<dyn MemCounter>,
     parent: Option<MemoryContext>,
     mem_limit: u64,
+    /// See [`MemoryContext::new_with_reservation`].
+    reservation: Option<Reservation>,
+}
+
+/// The first `bytes` used by a context are charged to `charged_to` instead of its parent.
+struct Reservation {
+    bytes: i64,
+    charged_to: MemoryContext,
+}
+
+impl Reservation {
+    /// Splits a usage into the part covered by the reservation and the part beyond it.
+    fn split(&self, used: i64) -> (i64, i64) {
+        (used.clamp(0, self.bytes), (used - self.bytes).max(0))
+    }
 }
 
 #[derive(Clone)]
@@ -90,6 +105,31 @@ impl MemoryContext {
                 counter: c,
                 parent,
                 mem_limit,
+                reservation: None,
+            })),
+        }
+    }
+
+    /// Creates a context with a reserved amount of memory.
+    ///
+    /// The first `reserved` bytes that the context uses are charged to `reserved_in`, where they
+    /// are expected to be set aside for it. Only what it uses beyond them is charged to `shared`,
+    /// which it shares with other contexts and which decides whether it may grow.
+    pub fn new_with_reservation(
+        shared: MemoryContext,
+        reserved_in: MemoryContext,
+        reserved: u64,
+        counter: impl MemCounter,
+    ) -> Self {
+        Self {
+            inner: Some(Arc::new(MemoryContextInner {
+                counter: Box::new(counter),
+                parent: Some(shared),
+                mem_limit: u64::MAX,
+                reservation: Some(Reservation {
+                    bytes: reserved.min(i64::MAX as u64) as i64,
+                    charged_to: reserved_in,
+                }),
             })),
         }
     }
@@ -111,6 +151,9 @@ impl MemoryContext {
     /// Returns `false` if the memory usage exceeds the limit.
     pub fn add(&self, bytes: i64) -> bool {
         if let Some(inner) = &self.inner {
+            if let Some(reservation) = &inner.reservation {
+                return Self::add_with_reservation(inner, reservation, bytes);
+            }
             if (inner.counter.get_bytes_used() + bytes) as u64 > inner.mem_limit {
                 inner.counter.on_limit_exceeded();
                 return false;
@@ -128,12 +171,60 @@ impl MemoryContext {
         true
     }
 
+    fn add_with_reservation(
+        inner: &MemoryContextInner,
+        reservation: &Reservation,
+        bytes: i64,
+    ) -> bool {
+        let used = inner.counter.get_bytes_used();
+        let (reserved_before, shared_before) = reservation.split(used);
+        let (reserved_after, shared_after) = reservation.split(used + bytes);
+        let reserved_diff = reserved_after - reserved_before;
+        let shared_diff = shared_after - shared_before;
+
+        if shared_diff != 0
+            && let Some(shared) = &inner.parent
+            && !shared.add(shared_diff)
+        {
+            inner.counter.on_limit_exceeded();
+            return false;
+        }
+        if reserved_diff != 0 && !reservation.charged_to.add(reserved_diff) {
+            if shared_diff != 0
+                && let Some(shared) = &inner.parent
+            {
+                shared.add(-shared_diff);
+            }
+            inner.counter.on_limit_exceeded();
+            return false;
+        }
+        inner.counter.add(bytes);
+        true
+    }
+
     pub fn get_bytes_used(&self) -> i64 {
         if let Some(inner) = &self.inner {
             inner.counter.get_bytes_used()
         } else {
             0
         }
+    }
+
+    /// The memory that other contexts hold in the parent of this context. When it is zero, a
+    /// refused [`add`](Self::add) cannot succeed later on by waiting for others to release memory.
+    pub fn parent_bytes_used_by_others(&self) -> i64 {
+        let Some(inner) = &self.inner else {
+            return 0;
+        };
+        let Some(parent) = &inner.parent else {
+            return 0;
+        };
+        let used = inner.counter.get_bytes_used();
+        let own = match &inner.reservation {
+            Some(reservation) => reservation.split(used).1,
+            None => used,
+        };
+        (parent.get_bytes_used() - own).max(0)
     }
 
     pub fn mem_limit(&self) -> u64 {
@@ -167,8 +258,15 @@ impl MemoryContext {
 
 impl Drop for MemoryContextInner {
     fn drop(&mut self) {
-        if let Some(p) = &self.parent {
-            p.add(-self.counter.get_bytes_used());
+        let used = self.counter.get_bytes_used();
+        if let Some(reservation) = &self.reservation {
+            let (reserved, shared) = reservation.split(used);
+            reservation.charged_to.add(-reserved);
+            if let Some(p) = &self.parent {
+                p.add(-shared);
+            }
+        } else if let Some(p) = &self.parent {
+            p.add(-used);
         }
     }
 }

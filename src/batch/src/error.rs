@@ -144,6 +144,14 @@ pub enum BatchError {
     OutOfMemory(u64),
 
     #[error(
+        "Not enough memory to run this query: a hash join holds {0} MB of rows that cannot be \
+         split into smaller parts, because too many rows share the same join key, and the query \
+         has no more memory available. Reduce the number of rows that share a join key, or \
+         materialize parts of the query."
+    )]
+    HashJoinKeyTooLarge(u64),
+
+    #[error(
         "Not enough spill files to run this query: {needed} more needed, \
          {limit} allowed for all batch queries on this node"
     )]
