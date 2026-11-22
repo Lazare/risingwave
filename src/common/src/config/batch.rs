@@ -76,6 +76,12 @@ pub struct BatchConfig {
     #[serde(default = "default::batch::query_memory_ratio")]
     pub query_memory_ratio: f64,
 
+    /// The share of the usable batch memory of a node that a single query may use when it cannot
+    /// run within `query_memory_ratio` even without parallelism. A query that needs more is
+    /// rejected.
+    #[serde(default = "default::batch::query_memory_max_ratio")]
+    pub query_memory_max_ratio: f64,
+
     /// The least memory, in MB, that a spillable operator (hash agg, hash join, sort) is given.
     /// The memory of a query is split evenly among its spillable operators, but never below this.
     #[serde(default = "default::batch::spillable_operator_min_memory_mb")]
@@ -141,6 +147,10 @@ pub mod default {
 
         pub fn query_memory_ratio() -> f64 {
             0.25
+        }
+
+        pub fn query_memory_max_ratio() -> f64 {
+            0.5
         }
 
         pub fn spillable_operator_min_memory_mb() -> usize {

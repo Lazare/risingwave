@@ -34,8 +34,9 @@ use risingwave_pb::task_service::stream_exchange_service_client::StreamExchangeS
 use risingwave_pb::task_service::task_service_client::TaskServiceClient;
 use risingwave_pb::task_service::{
     CancelTaskRequest, CancelTaskResponse, CreateTaskRequest, ExecuteRequest, FastInsertRequest,
-    FastInsertResponse, GetDataRequest, GetDataResponse, GetStreamRequest, GetStreamResponse,
-    IngestDmlRequest, IngestDmlResponse, PbPermits, TaskInfoResponse, permits,
+    FastInsertResponse, GetBatchLimitsRequest, GetBatchLimitsResponse, GetDataRequest,
+    GetDataResponse, GetStreamRequest, GetStreamResponse, IngestDmlRequest, IngestDmlResponse,
+    PbPermits, TaskInfoResponse, permits,
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -180,6 +181,16 @@ impl ComputeClient {
                 expr_context: Some(expr_context),
                 spillable_operator_instances,
             })
+            .await
+            .map_err(RpcError::from_compute_status)?
+            .into_inner())
+    }
+
+    pub async fn get_batch_limits(&self) -> Result<GetBatchLimitsResponse> {
+        Ok(self
+            .task_client
+            .clone()
+            .get_batch_limits(GetBatchLimitsRequest {})
             .await
             .map_err(RpcError::from_compute_status)?
             .into_inner())

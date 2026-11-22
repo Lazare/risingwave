@@ -388,6 +388,18 @@ impl BatchTaskExecution {
             serde_json::to_string_pretty(self.plan.get_root()?).unwrap()
         );
 
+        // Wait for the memory that the query reserves on this node, unless the task is cancelled
+        // in the meantime.
+        if let Some(query_memory) = self.context.query_memory() {
+            let mut shutdown_rx = self.shutdown_rx.clone();
+            tokio::select! {
+                _ = query_memory.admit() => {}
+                _ = shutdown_rx.cancelled() => {
+                    bail!("task {:?} cancelled while waiting for memory", self.task_id);
+                }
+            }
+        }
+
         let exec = expr_context_scope(
             expr_context.clone(),
             ExecutorBuilder::new(

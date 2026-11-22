@@ -25,10 +25,13 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
+use std::time::Instant;
 
 use parking_lot::Mutex;
 use risingwave_common::config::BatchConfig;
 use risingwave_common::memory::{MemCounter, MemoryContext};
+use risingwave_pb::task_service::GetBatchLimitsResponse;
+use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
 
 /// A query is reported when it leaves the node only if it used at least this much memory, or if
 /// one of its operators reached its limit.
@@ -37,8 +40,14 @@ const REPORT_MIN_PEAK_BYTES: i64 = 64 << 20;
 /// The memory limits of the queries of a node, derived from its batch memory limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueryMemoryLimits {
-    /// What a single query may use on the node. `u64::MAX` when the node has no batch limit.
+    /// The batch memory of the node that queries may really use. `u64::MAX` when the node has no
+    /// batch limit, in which case nothing below is enforced.
+    pub usable: u64,
+    /// What a single query may use on the node.
     pub query_limit: u64,
+    /// What a single query may use when its spillable operators cannot all get their minimum
+    /// within `query_limit`.
+    pub query_max_limit: u64,
     /// The least memory that a spillable operator is given.
     pub operator_min: u64,
 }
@@ -48,7 +57,9 @@ impl QueryMemoryLimits {
         let operator_min = (config.spillable_operator_min_memory_mb as u64) << 20;
         if batch_mem_limit == u64::MAX {
             return Self {
+                usable: u64::MAX,
                 query_limit: u64::MAX,
+                query_max_limit: u64::MAX,
                 operator_min,
             };
         }
@@ -60,10 +71,36 @@ impl QueryMemoryLimits {
             }
         };
         let usable = batch_mem_limit as f64 * ratio(config.memory_usable_ratio);
+        let query_limit = (usable * ratio(config.query_memory_ratio)) as u64;
         Self {
-            query_limit: (usable * ratio(config.query_memory_ratio)) as u64,
+            usable: usable as u64,
+            query_limit,
+            query_max_limit: ((usable * ratio(config.query_memory_max_ratio)) as u64)
+                .max(query_limit),
             operator_min,
         }
+    }
+
+    pub fn is_unlimited(&self) -> bool {
+        self.usable == u64::MAX
+    }
+
+    /// The least memory that a query running `instances` spillable operators needs.
+    pub fn min_memory(&self, instances: u32) -> u64 {
+        self.operator_min.saturating_mul(instances as u64)
+    }
+
+    /// The limit of a query that runs `instances` spillable operators.
+    ///
+    /// The frontend lowers the parallelism of a query until its operators all get their minimum
+    /// within `query_limit`. A query that still needs more without any parallelism is given what
+    /// it needs, up to `query_max_limit`.
+    pub fn query_limit(&self, instances: u32) -> u64 {
+        if self.is_unlimited() {
+            return u64::MAX;
+        }
+        self.min_memory(instances)
+            .clamp(self.query_limit, self.query_max_limit)
     }
 
     /// The limit of one spillable operator of a query that runs `instances` of them.
@@ -72,12 +109,34 @@ impl QueryMemoryLimits {
     /// properly, and never more than the query itself. With an unknown number of operators, only
     /// the limit of the query applies.
     pub fn operator_limit(&self, instances: u32) -> u64 {
-        if instances == 0 || self.query_limit == u64::MAX {
-            return self.query_limit;
+        let query_limit = self.query_limit(instances);
+        if instances == 0 || self.is_unlimited() {
+            return query_limit;
         }
-        (self.query_limit / instances as u64)
+        (query_limit / instances as u64)
             .max(self.operator_min)
-            .min(self.query_limit)
+            .min(query_limit)
+    }
+
+    /// The memory that a query reserves on the node before it starts: the minimum of its
+    /// spillable operators, within its limit. Queries without such operators reserve nothing.
+    pub fn reservation(&self, instances: u32) -> u64 {
+        if self.is_unlimited() {
+            return 0;
+        }
+        self.min_memory(instances).min(self.query_limit(instances))
+    }
+
+    pub fn to_protobuf(&self) -> GetBatchLimitsResponse {
+        if self.is_unlimited() {
+            return GetBatchLimitsResponse::default();
+        }
+        GetBatchLimitsResponse {
+            limited: true,
+            query_memory_bytes: self.query_limit,
+            query_memory_max_bytes: self.query_max_limit,
+            spillable_operator_min_memory_bytes: self.operator_min,
+        }
     }
 }
 
@@ -92,6 +151,8 @@ struct QueryMemoryStats {
     query_peak: AtomicI64,
     /// Whether the query as a whole reached its limit.
     query_at_limit: AtomicBool,
+    /// How long the query waited for its memory reservation.
+    queued_ms: AtomicU64,
 }
 
 /// Counts the memory of the whole query and records its peak.
@@ -161,6 +222,10 @@ pub struct QueryMemory {
     query_limit: u64,
     operator_limit: u64,
     spillable_operator_instances: u32,
+    /// The memory, in MB, that the query reserves on the node before it starts.
+    reservation_mb: u32,
+    /// The reservation, taken once for all the tasks of the query.
+    admission: OnceCell<Option<OwnedSemaphorePermit>>,
     stats: Arc<QueryMemoryStats>,
     registry: Weak<QueryMemoryRegistryInner>,
 }
@@ -186,6 +251,46 @@ impl QueryMemory {
     pub fn operator_limit(&self) -> u64 {
         self.operator_limit
     }
+
+    pub fn query_limit(&self) -> u64 {
+        self.query_limit
+    }
+
+    /// Waits until the memory that the query reserves is available on the node. Queries are
+    /// served in arrival order. All the tasks of a query share one reservation, held until the
+    /// query leaves the node.
+    ///
+    /// Cancel safe: when the task that waits is cancelled, another task of the query takes over.
+    pub async fn admit(&self) {
+        let Some(registry) = self.registry.upgrade() else {
+            return;
+        };
+        if self.reservation_mb == 0 {
+            return;
+        }
+        self.admission
+            .get_or_init(|| async {
+                let start = Instant::now();
+                let permit = registry
+                    .admission
+                    .clone()
+                    .acquire_many_owned(self.reservation_mb)
+                    .await
+                    .ok();
+                let queued_ms = start.elapsed().as_millis() as u64;
+                self.stats.queued_ms.store(queued_ms, Ordering::Relaxed);
+                if queued_ms >= 1000 {
+                    tracing::info!(
+                        query_id = self.query_id,
+                        queued_ms,
+                        reservation_mb = self.reservation_mb,
+                        "batch query waited for its memory reservation"
+                    );
+                }
+                permit
+            })
+            .await;
+    }
 }
 
 impl Drop for QueryMemory {
@@ -205,7 +310,12 @@ impl Drop for QueryMemory {
         let query_peak = stats.query_peak.load(Ordering::Relaxed);
         let operators_at_limit = stats.operators_at_limit.load(Ordering::Relaxed);
         let query_at_limit = stats.query_at_limit.load(Ordering::Relaxed);
-        if query_peak < REPORT_MIN_PEAK_BYTES && operators_at_limit == 0 && !query_at_limit {
+        let queued_ms = stats.queued_ms.load(Ordering::Relaxed);
+        if query_peak < REPORT_MIN_PEAK_BYTES
+            && operators_at_limit == 0
+            && !query_at_limit
+            && queued_ms < 1000
+        {
             return;
         }
         let mb = |bytes: u64| {
@@ -225,6 +335,8 @@ impl Drop for QueryMemory {
             operators = stats.operators.load(Ordering::Relaxed),
             operators_at_limit,
             spillable_operator_instances = self.spillable_operator_instances,
+            reservation_mb = self.reservation_mb,
+            queued_ms,
             "batch query memory"
         );
     }
@@ -233,6 +345,9 @@ impl Drop for QueryMemory {
 struct QueryMemoryRegistryInner {
     root: MemoryContext,
     limits: QueryMemoryLimits,
+    /// The usable batch memory of the node, in MB, that queries reserve before they start.
+    admission: Arc<Semaphore>,
+    admission_mb: usize,
     queries: Mutex<HashMap<String, Weak<QueryMemory>>>,
 }
 
@@ -247,14 +362,23 @@ impl QueryMemoryRegistry {
         let limits = QueryMemoryLimits::new(root.mem_limit(), config);
         tracing::info!(
             batch_mem_limit = root.mem_limit(),
+            usable = limits.usable,
             query_limit = limits.query_limit,
+            query_max_limit = limits.query_max_limit,
             operator_min = limits.operator_min,
             "batch query memory limits"
         );
+        let admission_mb = if limits.is_unlimited() {
+            0
+        } else {
+            ((limits.usable >> 20) as usize).min(Semaphore::MAX_PERMITS)
+        };
         Self {
             inner: Arc::new(QueryMemoryRegistryInner {
                 root,
                 limits,
+                admission: Arc::new(Semaphore::new(admission_mb)),
+                admission_mb,
                 queries: Mutex::new(HashMap::new()),
             }),
         }
@@ -285,11 +409,16 @@ impl QueryMemoryRegistry {
             context: MemoryContext::new_with_mem_limit(
                 Some(self.inner.root.clone()),
                 counter,
-                limits.query_limit,
+                limits.query_limit(spillable_operator_instances),
             ),
-            query_limit: limits.query_limit,
+            query_limit: limits.query_limit(spillable_operator_instances),
             operator_limit: limits.operator_limit(spillable_operator_instances),
             spillable_operator_instances,
+            // Never more than the whole semaphore, so that the query is eventually served.
+            reservation_mb: ((limits.reservation(spillable_operator_instances) >> 20) as usize)
+                .min(self.inner.admission_mb)
+                .min(u32::MAX as usize) as u32,
+            admission: OnceCell::new(),
             stats,
             registry: Arc::downgrade(&self.inner),
         });
@@ -409,5 +538,67 @@ mod tests {
         drop(other);
         assert_eq!(registry.len(), 0);
         assert_eq!(root.get_bytes_used(), 0);
+    }
+
+    #[test]
+    fn test_query_limit_without_parallelism() {
+        // Usable: 3600 MB. Normal share: 900 MB. Largest share: 1800 MB.
+        let (registry, _root) = registry(4000 * MB);
+        let limits = registry.limits();
+        assert_eq!(limits.query_max_limit, 1800 * MB);
+
+        // The minimums fit in the normal share.
+        assert_eq!(limits.query_limit(10), 900 * MB);
+        assert_eq!(limits.reservation(10), 640 * MB);
+        // They do not: the query gets what it needs, up to the largest share.
+        assert_eq!(limits.query_limit(20), 1280 * MB);
+        assert_eq!(limits.operator_limit(20), 64 * MB);
+        assert_eq!(limits.reservation(20), 1280 * MB);
+        assert_eq!(limits.query_limit(100), 1800 * MB);
+        assert_eq!(limits.reservation(100), 1800 * MB);
+        // A query without spillable operators reserves nothing.
+        assert_eq!(limits.reservation(0), 0);
+    }
+
+    #[tokio::test]
+    async fn test_admission_queue() {
+        // Usable: 3600 MB. Each of these queries reserves 20 x 64 = 1280 MB.
+        let (registry, _root) = registry(4000 * MB);
+        let q1 = registry.get_or_create("q1", 20);
+        let q2 = registry.get_or_create("q2", 20);
+        let q3 = registry.get_or_create("q3", 20);
+        let light = registry.get_or_create("light", 0);
+
+        q1.admit().await;
+        // A second task of the same query does not reserve again.
+        registry.get_or_create("q1", 20).admit().await;
+        q2.admit().await;
+        assert_eq!(
+            registry.inner.admission.available_permits(),
+            3600 - 2 * 1280
+        );
+
+        // The third query does not fit: it waits.
+        let waiter = {
+            let q3 = q3.clone();
+            tokio::spawn(async move { q3.admit().await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!waiter.is_finished());
+
+        // A query that reserves nothing is never queued.
+        light.admit().await;
+
+        // The reservation of a query is released when it leaves the node.
+        drop(q1);
+        waiter.await.unwrap();
+        assert_eq!(
+            registry.inner.admission.available_permits(),
+            3600 - 2 * 1280
+        );
+        assert!(q3.stats.queued_ms.load(Ordering::Relaxed) >= 50);
+
+        drop((q2, q3, light));
+        assert_eq!(registry.inner.admission.available_permits(), 3600);
     }
 }

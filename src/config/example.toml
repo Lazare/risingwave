@@ -170,6 +170,7 @@ redact_sql_option_keywords = ["credential", "key", "password", "private", "secre
 enable_spill = true
 memory_usable_ratio = 0.9
 query_memory_ratio = 0.25
+query_memory_max_ratio = 0.5
 spillable_operator_min_memory_mb = 64
 
 [batch.developer]
