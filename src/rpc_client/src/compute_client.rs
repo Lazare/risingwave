@@ -168,6 +168,7 @@ impl ComputeClient {
         task_id: TaskId,
         plan: PlanFragment,
         expr_context: ExprContext,
+        spillable_operator_instances: u32,
     ) -> Result<Streaming<TaskInfoResponse>> {
         Ok(self
             .task_client
@@ -177,6 +178,7 @@ impl ComputeClient {
                 plan: Some(plan),
                 tracing_context: TracingContext::from_current_span().to_protobuf(),
                 expr_context: Some(expr_context),
+                spillable_operator_instances,
             })
             .await
             .map_err(RpcError::from_compute_status)?

@@ -261,6 +261,25 @@ pub struct Query {
 }
 
 impl Query {
+    /// The number of instances of spillable operators (hash agg, hash join, sort) that the query
+    /// runs, over all stages and tasks. Compute nodes split the memory of the query among them.
+    pub fn spillable_operator_instances(&self) -> u32 {
+        fn count(node: &ExecutionPlanNode) -> u32 {
+            let own = matches!(
+                node.plan_node_type,
+                BatchPlanNodeType::BatchHashAgg
+                    | BatchPlanNodeType::BatchHashJoin
+                    | BatchPlanNodeType::BatchSort
+            ) as u32;
+            own + node.children.iter().map(count).sum::<u32>()
+        }
+        self.stage_graph
+            .stages
+            .values()
+            .map(|stage| count(&stage.root).saturating_mul(stage.parallelism.unwrap_or(1)))
+            .fold(0, u32::saturating_add)
+    }
+
     pub fn leaf_stages(&self) -> Vec<StageId> {
         let mut ret_leaf_stages = Vec::new();
         for stage_id in self.stage_graph.stages.keys() {

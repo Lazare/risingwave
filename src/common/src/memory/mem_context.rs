@@ -24,6 +24,10 @@ use crate::metrics::{LabelGuardedIntGauge, TrAdderGauge};
 pub trait MemCounter: Send + Sync + 'static {
     fn add(&self, bytes: i64);
     fn get_bytes_used(&self) -> i64;
+
+    /// Called when an allocation is refused because it would exceed the limit of the context that
+    /// owns this counter.
+    fn on_limit_exceeded(&self) {}
 }
 
 impl MemCounter for TrAdderGauge {
@@ -108,6 +112,7 @@ impl MemoryContext {
     pub fn add(&self, bytes: i64) -> bool {
         if let Some(inner) = &self.inner {
             if (inner.counter.get_bytes_used() + bytes) as u64 > inner.mem_limit {
+                inner.counter.on_limit_exceeded();
                 return false;
             }
             if let Some(parent) = &inner.parent {

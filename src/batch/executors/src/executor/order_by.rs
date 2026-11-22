@@ -97,7 +97,9 @@ impl BoxedExecutorBuilder for SortExecutor {
             Arc::new(column_orders),
             identity.clone(),
             source.context().get_config().developer.chunk_size,
-            source.context().create_executor_mem_context(identity),
+            source
+                .context()
+                .create_spillable_executor_mem_context(identity),
             if source.context().get_config().enable_spill {
                 Some(Disk)
             } else {

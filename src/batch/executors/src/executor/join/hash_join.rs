@@ -2348,7 +2348,9 @@ impl BoxedExecutorBuilder for HashJoinExecutor<()> {
             },
             spill_metrics: context.context().spill_metrics(),
             shutdown_rx: context.shutdown_rx().clone(),
-            mem_ctx: context.context().create_executor_mem_context(&identity),
+            mem_ctx: context
+                .context()
+                .create_spillable_executor_mem_context(&identity),
         }
         .dispatch())
     }

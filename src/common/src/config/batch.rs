@@ -64,6 +64,22 @@ pub struct BatchConfig {
     /// Enable the spill out to disk feature for batch queries.
     #[serde(default = "default::batch::enable_spill")]
     pub enable_spill: bool,
+
+    /// The share of the batch memory limit of a node that batch queries may really use. The rest
+    /// is a safety margin: the accounted memory is lower than the allocated one, and the batch
+    /// shares the process with other components.
+    #[serde(default = "default::batch::memory_usable_ratio")]
+    pub memory_usable_ratio: f64,
+
+    /// The share of the usable batch memory of a node that a single query may use on that node.
+    /// The spillable operators of a query that reaches it spill to disk.
+    #[serde(default = "default::batch::query_memory_ratio")]
+    pub query_memory_ratio: f64,
+
+    /// The least memory, in MB, that a spillable operator (hash agg, hash join, sort) is given.
+    /// The memory of a query is split evenly among its spillable operators, but never below this.
+    #[serde(default = "default::batch::spillable_operator_min_memory_mb")]
+    pub spillable_operator_min_memory_mb: usize,
 }
 
 /// The subsections `[batch.developer]`.
@@ -117,6 +133,18 @@ pub mod default {
 
         pub fn enable_spill() -> bool {
             true
+        }
+
+        pub fn memory_usable_ratio() -> f64 {
+            0.9
+        }
+
+        pub fn query_memory_ratio() -> f64 {
+            0.25
+        }
+
+        pub fn spillable_operator_min_memory_mb() -> usize {
+            64
         }
 
         pub fn statement_timeout_in_sec() -> u32 {

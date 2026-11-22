@@ -43,6 +43,9 @@ message CreateTaskRequest {
   reserved 3;
   map<string, string> tracing_context = 4;
   plan_common.ExprContext expr_context = 5;
+  // Number of instances of spillable operators (hash agg, hash join, sort) in the whole query,
+  // over all stages and tasks. Used to split the memory of the query among them. 0 if unknown.
+  uint32 spillable_operator_instances = 6;
 }
 
 message CancelTaskRequest {

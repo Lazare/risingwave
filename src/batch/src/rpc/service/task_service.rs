@@ -76,16 +76,22 @@ impl TaskService for BatchServiceImpl {
             plan,
             tracing_context,
             expr_context,
+            spillable_operator_instances,
         } = request.into_inner();
+        let task_id = task_id.expect("no task id found");
 
         let (state_tx, state_rx) = tokio::sync::mpsc::channel(TASK_STATUS_BUFFER_SIZE);
         let state_reporter = StateReporter::new_with_dist_sender(state_tx);
         let res = self
             .mgr
             .fire_task(
-                task_id.as_ref().expect("no task id found"),
+                &task_id,
                 plan.expect("no plan found").clone(),
-                ComputeNodeContext::create(self.env.clone()),
+                ComputeNodeContext::create(
+                    self.env.clone(),
+                    &task_id.query_id,
+                    spillable_operator_instances,
+                ),
                 state_reporter,
                 TracingContext::from_protobuf(&tracing_context),
                 expr_context.expect("no expression context found"),
@@ -251,7 +257,9 @@ impl BatchServiceImpl {
         let tracing_context = TracingContext::from_protobuf(&tracing_context);
         let expr_context = expr_context.expect("no expression context found");
 
-        let context = ComputeNodeContext::create(env.clone());
+        // The local execution mode does not tell how many spillable operators the query runs:
+        // only the limit of the query applies.
+        let context = ComputeNodeContext::create(env.clone(), &task_id.query_id, 0);
         trace!(
             "local execute request: plan:{:?} with task id:{:?}",
             plan, task_id
