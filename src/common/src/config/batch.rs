@@ -82,10 +82,17 @@ pub struct BatchConfig {
     #[serde(default = "default::batch::query_memory_max_ratio")]
     pub query_memory_max_ratio: f64,
 
-    /// The least memory, in MB, that a spillable operator (hash agg, hash join, sort) is given.
-    /// The memory of a query is split evenly among its spillable operators, but never below this.
+    /// The memory, in MB, reserved for each spillable operator (hash agg, hash join, sort) of a
+    /// query. The parallelism of a query is lowered until the reserved memory of its operators
+    /// fits in the memory of the query, and the query is rejected when it never does.
     #[serde(default = "default::batch::spillable_operator_min_memory_mb")]
     pub spillable_operator_min_memory_mb: usize,
+
+    /// The memory, in MB, that each spillable operator adds to the pool shared by the spillable
+    /// operators of its query, within the memory of the query. An operator may use more than its
+    /// reserved memory as long as the pool has room, and spills otherwise.
+    #[serde(default = "default::batch::spillable_operator_avg_memory_mb")]
+    pub spillable_operator_avg_memory_mb: usize,
 }
 
 /// The subsections `[batch.developer]`.
@@ -154,7 +161,11 @@ pub mod default {
         }
 
         pub fn spillable_operator_min_memory_mb() -> usize {
-            64
+            16
+        }
+
+        pub fn spillable_operator_avg_memory_mb() -> usize {
+            128
         }
 
         pub fn statement_timeout_in_sec() -> u32 {

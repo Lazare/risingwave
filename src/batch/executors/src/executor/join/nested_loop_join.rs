@@ -31,7 +31,7 @@ use crate::executor::join::{JoinType, concatenate, convert_row_to_chunk};
 use crate::executor::{
     BoxedDataChunkStream, BoxedExecutor, BoxedExecutorBuilder, Executor, ExecutorBuilder,
 };
-use crate::task::ShutdownToken;
+use crate::task::{ExecutorMemory, ShutdownToken};
 
 /// Nested loop join executor.
 ///
@@ -63,6 +63,8 @@ pub struct NestedLoopJoinExecutor {
 
     /// Memory context used for recording memory usage of executor.
     mem_context: MemoryContext,
+    /// Where the recorded memory is taken from.
+    memory: ExecutorMemory,
 
     shutdown_rx: ShutdownToken,
 }
@@ -90,6 +92,7 @@ impl NestedLoopJoinExecutor {
         let mut chunk_builder = DataChunkBuilder::new(data_types, self.chunk_size);
 
         // Cache the outputs of left child
+        let mut memory = self.memory;
         let left: Vec<DataChunk> = {
             let mut ret = Vec::with_capacity(1024);
             #[for_await]
@@ -99,6 +102,7 @@ impl NestedLoopJoinExecutor {
                 if !self.mem_context.add(c.estimated_heap_size() as i64) {
                     Err(BatchError::OutOfMemory(self.mem_context.mem_limit()))?;
                 }
+                memory.settle().await?;
                 ret.push(c);
             }
             ret
@@ -176,7 +180,7 @@ impl BoxedExecutorBuilder for NestedLoopJoinExecutor {
             .collect();
 
         let identity = source.plan_node().get_identity().clone();
-        let mem_context = source.context().create_executor_mem_context(&identity);
+        let mem_context = source.context().create_executor_memory(&identity);
 
         Ok(Box::new(NestedLoopJoinExecutor::new(
             join_expr,
@@ -201,9 +205,11 @@ impl NestedLoopJoinExecutor {
         right_child: BoxedExecutor,
         identity: String,
         chunk_size: usize,
-        mem_context: MemoryContext,
+        memory: impl Into<ExecutorMemory>,
         shutdown_rx: ShutdownToken,
     ) -> Self {
+        let memory = memory.into();
+        let mem_context = memory.meter();
         // TODO(Bowen): Merge this with derive schema in Logical Join (#790).
         let original_schema = match join_type {
             JoinType::LeftSemi | JoinType::LeftAnti => left_child.schema().clone(),
@@ -233,6 +239,7 @@ impl NestedLoopJoinExecutor {
             identity,
             chunk_size,
             mem_context,
+            memory,
             shutdown_rx,
         }
     }

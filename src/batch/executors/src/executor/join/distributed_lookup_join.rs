@@ -18,11 +18,10 @@ use std::mem::swap;
 use anyhow::anyhow;
 use futures::pin_mut;
 use itertools::Itertools;
-use risingwave_batch::task::ShutdownToken;
+use risingwave_batch::task::{ExecutorMemory, ShutdownToken};
 use risingwave_common::bitmap::Bitmap;
 use risingwave_common::catalog::{ColumnDesc, ColumnId, Field, Schema};
 use risingwave_common::hash::{HashKey, HashKeyDispatcher, VnodeCountCompat};
-use risingwave_common::memory::MemoryContext;
 use risingwave_common::row::OwnedRow;
 use risingwave_common::types::{DataType, Datum};
 use risingwave_common::util::chunk_coalesce::DataChunkBuilder;
@@ -219,7 +218,7 @@ impl BoxedExecutorBuilder for DistributedLookupJoinExecutorBuilder {
                 asof_desc,
                 identity: identity.clone(),
                 shutdown_rx: source.shutdown_rx().clone(),
-                mem_ctx: source.context().create_executor_mem_context(&identity),
+                memory: source.context().create_executor_memory(&identity),
             }
             .dispatch())
         })
@@ -244,7 +243,7 @@ struct DistributedLookupJoinExecutorArgs<S: StateStore> {
     asof_desc: Option<AsOfDesc>,
     identity: String,
     shutdown_rx: ShutdownToken,
-    mem_ctx: MemoryContext,
+    memory: ExecutorMemory,
 }
 
 impl<S: StateStore> HashKeyDispatcher for DistributedLookupJoinExecutorArgs<S> {
@@ -269,7 +268,8 @@ impl<S: StateStore> HashKeyDispatcher for DistributedLookupJoinExecutorArgs<S> {
             asof_desc: self.asof_desc,
             identity: self.identity,
             shutdown_rx: self.shutdown_rx,
-            mem_ctx: self.mem_ctx,
+            mem_ctx: self.memory.meter(),
+            memory: self.memory,
             _phantom: PhantomData,
         }))
     }

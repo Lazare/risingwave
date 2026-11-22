@@ -17,6 +17,7 @@ use std::iter;
 use std::iter::empty;
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use futures_async_stream::try_stream;
@@ -92,11 +93,86 @@ pub struct HashJoinExecutor<K> {
     spill_metrics: Arc<BatchSpillMetrics>,
     /// The upper bound of memory usage for this executor.
     memory_upper_bound: Option<u64>,
+    /// How many times the input of this executor was spilled and partitioned: 0 for the executor
+    /// of the plan, 1 for the executors that process its partitions, and so on.
+    spill_depth: usize,
 
     shutdown_rx: ShutdownToken,
 
     mem_ctx: MemoryContext,
     _phantom: PhantomData<K>,
+}
+
+/// Beyond this number of nested partitionings, partitioning again is considered useless.
+const MAX_SPILL_DEPTH: usize = 6;
+
+/// How long a join that cannot spill waits for other operators of its query to release memory.
+const MEMORY_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+const MEMORY_WAIT_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Tells whether all the build rows read so far share one join key. Partitioning such rows by
+/// their key leaves them all in one partition, so spilling them again does not help.
+struct SingleBuildKey<K> {
+    key: Option<K>,
+    checked_chunks: usize,
+    single: bool,
+}
+
+impl<K: HashKey> SingleBuildKey<K> {
+    fn new() -> Self {
+        Self {
+            key: None,
+            checked_chunks: 0,
+            single: true,
+        }
+    }
+
+    /// Checks the chunks added to `build_side` since the last call.
+    fn check(&mut self, build_side: &[DataChunk], build_key_idxs: &[usize]) -> bool {
+        if !self.single {
+            return false;
+        }
+        for chunk in &build_side[self.checked_chunks..] {
+            for key in K::build_many(build_key_idxs, chunk)
+                .into_iter()
+                .filter_by_bitmap(chunk.visibility())
+            {
+                match &self.key {
+                    None => self.key = Some(key),
+                    Some(first) if *first != key => {
+                        self.single = false;
+                        return false;
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+        self.checked_chunks = build_side.len();
+        true
+    }
+}
+
+/// Takes `bytes` from the memory of the query for a join that cannot reduce its memory by
+/// spilling. Waits for other operators of the query to release memory, as long as some of them
+/// hold memory that they can release.
+async fn wait_for_memory(
+    mem_ctx: &MemoryContext,
+    bytes: i64,
+    shutdown_rx: &ShutdownToken,
+) -> Result<()> {
+    let start = Instant::now();
+    loop {
+        if mem_ctx.add(bytes) {
+            return Ok(());
+        }
+        if mem_ctx.parent_bytes_used_by_others() == 0 || start.elapsed() >= MEMORY_WAIT_TIMEOUT {
+            return Err(BatchError::HashJoinKeyTooLarge(
+                (mem_ctx.get_bytes_used().max(0) as u64) >> 20,
+            ));
+        }
+        shutdown_rx.check()?;
+        tokio::time::sleep(MEMORY_WAIT_INTERVAL).await;
+    }
 }
 
 impl<K: HashKey> Executor for HashJoinExecutor<K> {
@@ -491,6 +567,9 @@ impl<K: HashKey> HashJoinExecutor<K> {
 
         let mut build_side = Vec::new_in(self.mem_ctx.global_allocator());
         let mut build_row_count = 0;
+        // Whether the last chunk of `build_side` was refused by the memory context.
+        let mut last_build_chunk_untracked = false;
+        let mut single_build_key = SingleBuildKey::<K>::new();
         let mut build_side_stream = self.build_side_source.execute();
         #[for_await]
         for build_chunk in &mut build_side_stream {
@@ -501,11 +580,23 @@ impl<K: HashKey> HashJoinExecutor<K> {
                 // push build_chunk to build_side before checking memory limit, otherwise we will lose that chunk when spilling.
                 build_side.push(build_chunk);
                 if !self.mem_ctx.add(chunk_estimated_heap_size as i64) && check_memory {
-                    if self.spill_backend.is_some() {
-                        need_to_spill = true;
-                        break;
-                    } else {
+                    if self.spill_backend.is_none() {
                         Err(BatchError::OutOfMemory(self.mem_ctx.mem_limit()))?;
+                    }
+                    if self.spill_depth >= MAX_SPILL_DEPTH
+                        || single_build_key.check(&build_side, &self.build_key_idxs)
+                    {
+                        // Spilling would not split these rows: they must fit in memory.
+                        wait_for_memory(
+                            &self.mem_ctx,
+                            chunk_estimated_heap_size as i64,
+                            &self.shutdown_rx,
+                        )
+                        .await?;
+                    } else {
+                        need_to_spill = true;
+                        last_build_chunk_untracked = true;
+                        break;
                     }
                 }
             }
@@ -538,11 +629,20 @@ impl<K: HashKey> HashJoinExecutor<K> {
                         let build_key_size = build_key.estimated_heap_size() as i64;
                         mem_added_by_hash_table += build_key_size;
                         if !self.mem_ctx.add(build_key_size) && check_memory {
-                            if self.spill_backend.is_some() {
+                            if self.spill_backend.is_none() {
+                                Err(BatchError::OutOfMemory(self.mem_ctx.mem_limit()))?;
+                            }
+                            if self.spill_depth >= MAX_SPILL_DEPTH
+                                || single_build_key.check(&build_side, &self.build_key_idxs)
+                            {
+                                // Spilling would not split these rows: they must fit in memory.
+                                wait_for_memory(&self.mem_ctx, build_key_size, &self.shutdown_rx)
+                                    .await?;
+                            } else {
+                                // The refused key is not tracked by the memory context.
+                                mem_added_by_hash_table -= build_key_size;
                                 need_to_spill = true;
                                 break;
-                            } else {
-                                Err(BatchError::OutOfMemory(self.mem_ctx.mem_limit()))?;
                             }
                         }
                         next_build_row_with_same_key[row_id] = hash_map.insert(build_key, row_id);
@@ -579,9 +679,12 @@ impl<K: HashKey> HashJoinExecutor<K> {
             drop(next_build_row_with_same_key);
 
             // Spill buffered build side chunks
-            for chunk in build_side {
+            let tracked_chunks = build_side.len() - last_build_chunk_untracked as usize;
+            for (chunk_id, chunk) in build_side.into_iter().enumerate() {
                 // Release the memory occupied by the buffered chunks
-                self.mem_ctx.add(-(chunk.estimated_heap_size() as i64));
+                if chunk_id < tracked_chunks {
+                    self.mem_ctx.add(-(chunk.estimated_heap_size() as i64));
+                }
                 let hash_codes = chunk.get_hash_values(
                     self.build_key_idxs.as_slice(),
                     join_spill_manager.spill_build_hasher,
@@ -664,6 +767,7 @@ impl<K: HashKey> HashJoinExecutor<K> {
                     self.spill_backend.clone(),
                     self.spill_metrics.clone(),
                     Some(partition_size),
+                    self.spill_depth + 1,
                     self.shutdown_rx.clone(),
                     self.mem_ctx.clone(),
                 );
@@ -673,12 +777,20 @@ impl<K: HashKey> HashJoinExecutor<K> {
                     sub_hash_join_executor.identity, self.identity
                 );
 
+                let mem_used_before = self.mem_ctx.get_bytes_used();
                 let sub_hash_join_executor = Box::new(sub_hash_join_executor).execute();
 
                 #[for_await]
                 for chunk in sub_hash_join_executor {
                     let chunk = chunk?;
                     yield chunk;
+                }
+
+                // The sub executor shares the memory context of this one, and does not release
+                // by itself what it tracked for the build side that it kept in memory.
+                let mem_left_over = self.mem_ctx.get_bytes_used() - mem_used_before;
+                if mem_left_over > 0 {
+                    self.mem_ctx.add(-mem_left_over);
                 }
 
                 // Clear files of the current partition.
@@ -2439,6 +2551,7 @@ impl<K> HashJoinExecutor<K> {
             spill_backend,
             spill_metrics,
             None,
+            0,
             shutdown_rx,
             mem_ctx,
         )
@@ -2460,6 +2573,7 @@ impl<K> HashJoinExecutor<K> {
         spill_backend: Option<SpillBackend>,
         spill_metrics: Arc<BatchSpillMetrics>,
         memory_upper_bound: Option<u64>,
+        spill_depth: usize,
         shutdown_rx: ShutdownToken,
         mem_ctx: MemoryContext,
     ) -> Self {
@@ -2500,6 +2614,7 @@ impl<K> HashJoinExecutor<K> {
             spill_backend,
             spill_metrics,
             memory_upper_bound,
+            spill_depth,
             mem_ctx,
             _phantom: PhantomData,
         }
@@ -4069,6 +4184,123 @@ mod tests {
         );
 
         assert_eq!(matched, Some(RowId::new(0, 1)));
+    }
+
+    /// Builds a join of `(key, key)` rows with a memory limit of 512 KB that spills to disk.
+    fn create_hot_key_join(
+        probe_keys: Vec<Vec<i32>>,
+        build_keys: Vec<Vec<i32>>,
+        mem_ctx: MemoryContext,
+    ) -> BoxedExecutor {
+        use risingwave_common::array::{Array, I32Array};
+        let schema = Schema {
+            fields: vec![
+                Field::unnamed(DataType::Int32),
+                Field::unnamed(DataType::Int32),
+            ],
+        };
+        let chunk_of = |keys: Vec<i32>| {
+            let len = keys.len();
+            let col: I32Array = keys.iter().map(|k| Some(*k)).collect();
+            DataChunk::new(vec![col.clone().into_ref(), col.into_ref()], len)
+        };
+        let mut probe = MockExecutor::new(schema.clone());
+        probe_keys.into_iter().for_each(|k| probe.add(chunk_of(k)));
+        let mut build = MockExecutor::new(schema);
+        build_keys.into_iter().for_each(|k| build.add(chunk_of(k)));
+        Box::new(HashJoinExecutor::<Key32>::new(
+            JoinType::Inner,
+            vec![0, 1, 2, 3],
+            Box::new(probe),
+            Box::new(build),
+            vec![0],
+            vec![0],
+            vec![false],
+            None,
+            "HashJoinExecutor".to_owned(),
+            CHUNK_SIZE,
+            None,
+            Some(SpillBackend::Disk),
+            BatchSpillMetrics::for_test(),
+            ShutdownToken::empty(),
+            mem_ctx,
+        ))
+    }
+
+    async fn count_rows(executor: BoxedExecutor) -> Result<usize> {
+        let mut stream = executor.execute();
+        let mut rows = 0;
+        while let Some(chunk) = stream.next().await {
+            rows += chunk?.cardinality();
+        }
+        Ok(rows)
+    }
+
+    /// 300k build rows that share one join key cannot be split by spilling: the join must stop
+    /// spilling them again and again, and fail when it cannot get the memory to hold them.
+    #[tokio::test]
+    async fn test_spill_stops_on_hot_build_key() {
+        let mem_ctx = MemoryContext::new_with_mem_limit(
+            None,
+            LabelGuardedIntGauge::test_int_gauge::<4>(),
+            512 * 1024,
+        );
+        let join = create_hot_key_join(vec![vec![7]], vec![vec![7; 1000]; 300], mem_ctx);
+        let error = count_rows(join).await.unwrap_err();
+        assert!(
+            matches!(error, crate::error::BatchError::HashJoinKeyTooLarge(_)),
+            "{error:?}"
+        );
+    }
+
+    /// The same join succeeds when the query can lend it the memory that it needs, beyond what
+    /// is reserved for it.
+    #[tokio::test]
+    async fn test_hot_build_key_takes_memory_from_the_pool() {
+        let query = MemoryContext::root(LabelGuardedIntGauge::test_int_gauge::<4>(), u64::MAX);
+        let pool = MemoryContext::new_with_mem_limit(
+            Some(query.clone()),
+            LabelGuardedIntGauge::test_int_gauge::<4>(),
+            64 << 20,
+        );
+        // Another operator of the query holds the whole pool for a short while.
+        assert!(pool.add(64 << 20));
+        let release = {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                pool.add(-(64 << 20));
+            })
+        };
+        let mem_ctx = MemoryContext::new_with_reservation(
+            pool.clone(),
+            query.clone(),
+            512 * 1024,
+            LabelGuardedIntGauge::test_int_gauge::<4>(),
+        );
+        let mut build_keys = vec![vec![7; 1000]; 300];
+        build_keys.push((1000..2000).collect());
+        let join = create_hot_key_join(vec![vec![7, 1500]], build_keys, mem_ctx);
+        assert_eq!(count_rows(join).await.unwrap(), 300_001);
+        release.await.unwrap();
+        assert_eq!(pool.get_bytes_used(), 0);
+        assert_eq!(query.get_bytes_used(), 0);
+    }
+
+    /// The memory tracked for the partitions of a spilled join is released as they are done.
+    #[tokio::test]
+    async fn test_spilled_partitions_release_their_memory() {
+        let mem_ctx = MemoryContext::new_with_mem_limit(
+            None,
+            LabelGuardedIntGauge::test_int_gauge::<4>(),
+            512 * 1024,
+        );
+        let build_keys = (0..100)
+            .map(|c| (c * 1000..(c + 1) * 1000).collect())
+            .collect();
+        let join = create_hot_key_join(vec![vec![5, 99_999]], build_keys, mem_ctx.clone());
+        assert_eq!(count_rows(join).await.unwrap(), 2);
+        assert_eq!(mem_ctx.get_bytes_used(), 0);
     }
 
     #[tokio::test]

@@ -44,7 +44,7 @@ use crate::optimizer::{
 };
 use crate::planner::Planner;
 use crate::scheduler::batch_limits::batch_limits;
-use crate::scheduler::plan_fragmenter::Query;
+use crate::scheduler::plan_fragmenter::{Query, move_stateful_operators_out_of_root_stage};
 use crate::scheduler::{
     BatchPlanFragmenter, DistributedQueryStream, ExecutionContext, ExecutionContextRef,
     LocalQueryExecution, LocalQueryStream,
@@ -482,6 +482,11 @@ pub fn gen_batch_plan_fragmenter(
             )
         })
         .flatten();
+    let plan = if query_mode == QueryMode::Distributed {
+        move_stateful_operators_out_of_root_stage(plan)
+    } else {
+        plan
+    };
     let plan_fragmenter = BatchPlanFragmenter::new_with_limits(
         worker_node_manager_reader,
         session.env().catalog_reader().clone(),

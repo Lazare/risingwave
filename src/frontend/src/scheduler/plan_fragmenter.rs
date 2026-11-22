@@ -196,6 +196,40 @@ impl Default for QueryId {
     }
 }
 
+/// Moves the operators of the root stage that hold rows in memory to a compute node.
+///
+/// The root stage of a distributed query runs in the frontend, where the memory limits of batch
+/// queries on compute nodes do not apply. When it contains such operators, an exchange is added
+/// on top of the plan: the operators then run in a stage of their own on a compute node, and the
+/// root stage only forwards their output.
+pub fn move_stateful_operators_out_of_root_stage(plan: PlanRef) -> PlanRef {
+    use BatchPlanNodeType::*;
+
+    /// Visits the nodes of the root stage. Returns `false` when one of them may have to run in
+    /// the frontend.
+    fn visit(node: &PlanRef, stateful: &mut bool) -> bool {
+        match node.node_type() {
+            // The boundary of the root stage.
+            BatchExchange => return true,
+            BatchHashJoin | BatchHashAgg | BatchSort | BatchNestedLoopJoin | BatchTopN
+            | BatchGroupTopN => *stateful = true,
+            BatchSimpleAgg | BatchSortAgg | BatchProject | BatchFilter | BatchLimit
+            | BatchUnion | BatchHopWindow | BatchExpand | BatchProjectSet | BatchOverWindow
+            | BatchMaxOneRow | BatchValues => {}
+            _ => return false,
+        }
+        node.inputs().iter().all(|input| visit(input, stateful))
+    }
+
+    let mut stateful = false;
+    if visit(&plan, &mut stateful) && stateful {
+        let order = crate::optimizer::plan_node::batch::BatchPlanNodeMetadata::order(&plan).clone();
+        crate::optimizer::plan_node::BatchExchange::new(plan, order, Distribution::Single).into()
+    } else {
+        plan
+    }
+}
+
 impl BatchPlanFragmenter {
     pub fn new(
         worker_node_manager: WorkerNodeSelector,
