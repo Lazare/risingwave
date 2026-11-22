@@ -218,10 +218,10 @@ impl Drop for QueryMemory {
         tracing::info!(
             query_id = self.query_id,
             query_peak_mb = query_peak >> 20,
-            query_limit_mb = mb(self.query_limit),
+            query_limit_mb = %mb(self.query_limit),
             query_at_limit,
             max_operator_peak_mb = stats.max_operator_peak.load(Ordering::Relaxed) >> 20,
-            operator_limit_mb = mb(self.operator_limit),
+            operator_limit_mb = %mb(self.operator_limit),
             operators = stats.operators.load(Ordering::Relaxed),
             operators_at_limit,
             spillable_operator_instances = self.spillable_operator_instances,
