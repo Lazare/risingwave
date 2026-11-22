@@ -649,9 +649,7 @@ impl<K: HashKey + Send + Sync> HashAggExecutor<K> {
                 let agg_state_row = OwnedRow::from_iter(agg_datums.into_iter());
                 // The partition must be the one that the input rows of this group are spilled to,
                 // so hash the group key values the same way as `get_hash_values` does below.
-                let hash_code = (&key_row)
-                    .hash(agg_spill_manager.spill_build_hasher)
-                    .value();
+                let hash_code = key_row.hash(agg_spill_manager.spill_build_hasher).value();
                 agg_spill_manager
                     .write_agg_state_row(key_row.chain(agg_state_row), hash_code)
                     .await?;

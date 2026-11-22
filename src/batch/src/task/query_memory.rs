@@ -127,7 +127,7 @@ impl QueryMemoryLimits {
         self.min_memory(instances).min(self.query_limit(instances))
     }
 
-    pub fn to_protobuf(&self) -> GetBatchLimitsResponse {
+    pub fn to_protobuf(self) -> GetBatchLimitsResponse {
         if self.is_unlimited() {
             return GetBatchLimitsResponse::default();
         }
