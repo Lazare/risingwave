@@ -164,6 +164,11 @@ Enabled with `[meta.developer] enable_selective_barrier = true` (off by default)
 - A graph containing cross-database snapshot backfill, or a table that receives a sink
   (`sink into table`), always receives full barriers.
 - While a job is being created, barriers are full.
+- A CDC table is created as soon as its job starts, while its backfill goes on reading the
+  snapshot of the upstream table. The backfill executor reads the snapshot only in an epoch
+  opened by a barrier that releases its fragment, and rings at every barrier until the snapshot
+  is read entirely, so the table and its descendants stay awake during the backfill. Not done for
+  the parallelized CDC backfill.
 - `FLUSH` uses two barriers, so that data released by a fragment waking up at the first one is
   committed by the second.
 - A gated DML executor keeps the data of an epoch in memory until the next barrier; a very large
