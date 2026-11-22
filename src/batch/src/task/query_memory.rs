@@ -23,7 +23,7 @@
 //! when the query leaves the node, to tell whether the limits should be raised or lowered.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Instant;
 
@@ -31,7 +31,7 @@ use parking_lot::Mutex;
 use risingwave_common::config::BatchConfig;
 use risingwave_common::memory::{MemCounter, MemoryContext};
 use risingwave_pb::task_service::GetBatchLimitsResponse;
-use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// A query is reported when it leaves the node only if it used at least this much memory, or if
 /// one of its operators reached its limit.
@@ -224,8 +224,10 @@ pub struct QueryMemory {
     spillable_operator_instances: u32,
     /// The memory, in MB, that the query reserves on the node before it starts.
     reservation_mb: u32,
-    /// The reservation, taken once for all the tasks of the query.
-    admission: OnceCell<Option<OwnedSemaphorePermit>>,
+    /// The reservation, shared by all the tasks of the query that are running.
+    reservation: tokio::sync::Mutex<Option<OwnedSemaphorePermit>>,
+    /// The tasks of the query that are running on the node.
+    running_tasks: AtomicUsize,
     stats: Arc<QueryMemoryStats>,
     registry: Weak<QueryMemoryRegistryInner>,
 }
@@ -257,39 +259,67 @@ impl QueryMemory {
     }
 
     /// Waits until the memory that the query reserves is available on the node. Queries are
-    /// served in arrival order. All the tasks of a query share one reservation, held until the
-    /// query leaves the node.
+    /// served in arrival order. The tasks of a query share one reservation, held for as long as
+    /// one of them holds the returned guard.
     ///
     /// Cancel safe: when the task that waits is cancelled, another task of the query takes over.
-    pub async fn admit(&self) {
+    pub async fn admit(self: &Arc<Self>) -> AdmissionGuard {
+        let admitted = || AdmissionGuard {
+            query: Some(self.clone()),
+        };
         let Some(registry) = self.registry.upgrade() else {
-            return;
+            return AdmissionGuard { query: None };
         };
         if self.reservation_mb == 0 {
+            return AdmissionGuard { query: None };
+        }
+        let mut reservation = self.reservation.lock().await;
+        if reservation.is_none() {
+            let start = Instant::now();
+            *reservation = registry
+                .admission
+                .clone()
+                .acquire_many_owned(self.reservation_mb)
+                .await
+                .ok();
+            let queued_ms = start.elapsed().as_millis() as u64;
+            self.stats.queued_ms.fetch_add(queued_ms, Ordering::Relaxed);
+            if queued_ms >= 1000 {
+                tracing::info!(
+                    query_id = self.query_id,
+                    queued_ms,
+                    reservation_mb = self.reservation_mb,
+                    "batch query waited for its memory reservation"
+                );
+            }
+        }
+        // Counted while the reservation is locked, so that it cannot be released in between.
+        self.running_tasks.fetch_add(1, Ordering::SeqCst);
+        admitted()
+    }
+}
+
+/// Held by a task of a query while it runs. The memory reservation of the query is released
+/// when its last running task ends.
+pub struct AdmissionGuard {
+    /// `None` when the query reserves nothing.
+    query: Option<Arc<QueryMemory>>,
+}
+
+impl Drop for AdmissionGuard {
+    fn drop(&mut self) {
+        let Some(query) = &self.query else {
+            return;
+        };
+        if query.running_tasks.fetch_sub(1, Ordering::SeqCst) != 1 {
             return;
         }
-        self.admission
-            .get_or_init(|| async {
-                let start = Instant::now();
-                let permit = registry
-                    .admission
-                    .clone()
-                    .acquire_many_owned(self.reservation_mb)
-                    .await
-                    .ok();
-                let queued_ms = start.elapsed().as_millis() as u64;
-                self.stats.queued_ms.store(queued_ms, Ordering::Relaxed);
-                if queued_ms >= 1000 {
-                    tracing::info!(
-                        query_id = self.query_id,
-                        queued_ms,
-                        reservation_mb = self.reservation_mb,
-                        "batch query waited for its memory reservation"
-                    );
-                }
-                permit
-            })
-            .await;
+        // When the lock is taken, a task of the query is being admitted: it keeps the reservation.
+        if let Ok(mut reservation) = query.reservation.try_lock()
+            && query.running_tasks.load(Ordering::SeqCst) == 0
+        {
+            *reservation = None;
+        }
     }
 }
 
@@ -418,7 +448,8 @@ impl QueryMemoryRegistry {
             reservation_mb: ((limits.reservation(spillable_operator_instances) >> 20) as usize)
                 .min(self.inner.admission_mb)
                 .min(u32::MAX as usize) as u32,
-            admission: OnceCell::new(),
+            reservation: tokio::sync::Mutex::new(None),
+            running_tasks: AtomicUsize::new(0),
             stats,
             registry: Arc::downgrade(&self.inner),
         });
@@ -569,10 +600,10 @@ mod tests {
         let q3 = registry.get_or_create("q3", 20);
         let light = registry.get_or_create("light", 0);
 
-        q1.admit().await;
+        let g1 = q1.admit().await;
         // A second task of the same query does not reserve again.
-        registry.get_or_create("q1", 20).admit().await;
-        q2.admit().await;
+        let g1_bis = registry.get_or_create("q1", 20).admit().await;
+        let g2 = q2.admit().await;
         assert_eq!(
             registry.inner.admission.available_permits(),
             3600 - 2 * 1280
@@ -587,18 +618,30 @@ mod tests {
         assert!(!waiter.is_finished());
 
         // A query that reserves nothing is never queued.
-        light.admit().await;
+        let _light = light.admit().await;
 
-        // The reservation of a query is released when it leaves the node.
-        drop(q1);
-        waiter.await.unwrap();
+        // The reservation of a query is kept while one of its tasks runs, and released when the
+        // last one ends, even though the query itself is still known to the node.
+        drop(g1);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!waiter.is_finished());
+        drop(g1_bis);
+        let g3 = waiter.await.unwrap();
         assert_eq!(
             registry.inner.admission.available_permits(),
             3600 - 2 * 1280
         );
         assert!(q3.stats.queued_ms.load(Ordering::Relaxed) >= 50);
 
-        drop((q2, q3, light));
+        // A later task of a query whose reservation was released reserves again.
+        drop(g2);
+        let g1 = q1.admit().await;
+        assert_eq!(
+            registry.inner.admission.available_permits(),
+            3600 - 2 * 1280
+        );
+
+        drop((g1, g3));
         assert_eq!(registry.inner.admission.available_permits(), 3600);
     }
 }
