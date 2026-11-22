@@ -168,6 +168,11 @@ impl GraphView {
             if mask.contains(FragmentTypeFlag::Dml) {
                 ringing.insert(fragment_id);
             }
+            // A CDC backfill reads the snapshot of the upstream table on its own, long after the
+            // table is created. It rings at every barrier until the snapshot is read entirely.
+            if mask.contains(FragmentTypeFlag::StreamCdcScan) {
+                ringing.insert(fragment_id);
+            }
             if mask.contains(FragmentTypeFlag::CdcFilter) {
                 // A `CdcFilter` receives data from the shared CDC source at any time, so it never
                 // sleeps. Without a state table, it cannot hold rows and must always be released.
@@ -1065,6 +1070,46 @@ mod tests {
         state.plan_command(fragments.iter().copied(), true);
         let plan = state.plan(&fragments, true, true, 0);
         assert_eq!(plan.info.cdc_routes.len(), 1);
+    }
+
+    /// A CDC backfill reads the snapshot on its own while its `CdcFilter` sleeps: its ring keeps
+    /// its fragment and the descendants awake, without waking the `CdcFilter`.
+    #[test]
+    fn test_cdc_backfill_ring() {
+        let mut graph = cdc_graph();
+        let NodeBody::CdcFilter(filter) = graph[1].nodes.node_body.as_mut().unwrap() else {
+            unreachable!()
+        };
+        filter.search_condition = Some(table_name_condition("public.a"));
+        // The backfill is in a fragment of its own, without DML executor.
+        let mut mask = FragmentTypeMask::empty();
+        mask.add(FragmentTypeFlag::StreamCdcScan);
+        graph[3].fragment_type_mask = mask;
+        let fragments: Vec<_> = graph.iter().collect();
+        let mut state = SelectiveBarrierState::default();
+
+        state.plan(&fragments, true, true, 0);
+        let plan = state.plan(&fragments, true, true, 0);
+        assert_eq!(woken(&plan, &CDC_ALL), ids(&[10, 12, 14]));
+
+        // Not released yet: the backfill holds its snapshot.
+        assert!(state.on_ring([13.into()]));
+        let plan = state.plan(&fragments, true, true, 0);
+        assert_eq!(woken(&plan, &CDC_ALL), ids(&[10, 12, 13, 14, 15]));
+        assert!(plan.info.released_fragment_ids.contains(&13));
+
+        // It rings at every barrier while the snapshot is read, and stays released.
+        assert!(!state.on_ring([13.into()]));
+        let plan = state.plan(&fragments, true, true, 0);
+        assert_eq!(woken(&plan, &CDC_ALL), ids(&[10, 12, 13, 14, 15]));
+        assert!(plan.info.released_fragment_ids.contains(&13));
+
+        // Once the snapshot is read it stops ringing: it stays awake for the barrier that
+        // closes its last released epoch, then falls asleep.
+        let plan = state.plan(&fragments, true, true, 0);
+        assert_eq!(woken(&plan, &CDC_ALL), ids(&[10, 12, 13, 14, 15]));
+        let plan = state.plan(&fragments, true, true, 0);
+        assert_eq!(woken(&plan, &CDC_ALL), ids(&[10, 12, 14]));
     }
 
     #[test]
