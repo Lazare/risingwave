@@ -47,6 +47,7 @@ use crate::risingwave_common::hash::NullBitmap;
 use crate::spill::spill_op::SpillBackend::Disk;
 use crate::spill::spill_op::{
     DEFAULT_SPILL_PARTITION_NUM, SPILL_AT_LEAST_MEMORY, SpillBackend, SpillBuildHasher, SpillOp,
+    SpillWriter,
 };
 use crate::task::ShutdownToken;
 
@@ -247,8 +248,8 @@ struct RightNonEquiJoinState {
 pub struct JoinSpillManager {
     op: SpillOp,
     partition_num: usize,
-    probe_side_writers: Vec<opendal::Writer>,
-    build_side_writers: Vec<opendal::Writer>,
+    probe_side_writers: Vec<SpillWriter>,
+    build_side_writers: Vec<SpillWriter>,
     probe_side_chunk_builders: Vec<DataChunkBuilder>,
     build_side_chunk_builders: Vec<DataChunkBuilder>,
     spill_build_hasher: SpillBuildHasher,
@@ -306,6 +307,7 @@ impl JoinSpillManager {
     }
 
     pub async fn init_writers(&mut self) -> Result<()> {
+        self.op.reserve_files(self.partition_num * 2).await?;
         for i in 0..self.partition_num {
             let join_probe_side_partition_file_name = format!("join-probe-side-p{}", i);
             let w = self

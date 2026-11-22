@@ -143,6 +143,12 @@ pub enum BatchError {
     #[error("Not enough memory to run this query, batch memory limit is {0} bytes")]
     OutOfMemory(u64),
 
+    #[error(
+        "Not enough spill files to run this query: {needed} more needed, \
+         {limit} allowed for all batch queries on this node"
+    )]
+    SpillFileLimit { needed: usize, limit: usize },
+
     #[error("Failed to spill out to disk")]
     Spill(
         #[from]
