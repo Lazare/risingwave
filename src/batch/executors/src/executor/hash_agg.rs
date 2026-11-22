@@ -171,7 +171,9 @@ impl BoxedExecutorBuilder for HashAggExecutorBuilder {
             source.task_id.clone(),
             identity.clone(),
             source.context().get_config().developer.chunk_size,
-            source.context().create_executor_mem_context(identity),
+            source
+                .context()
+                .create_spillable_executor_mem_context(identity),
             if source.context().get_config().enable_spill {
                 Some(Disk)
             } else {
