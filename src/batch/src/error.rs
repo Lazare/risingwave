@@ -152,6 +152,13 @@ pub enum BatchError {
     HashJoinKeyTooLarge(u64),
 
     #[error(
+        "Not enough memory to run this query: an operator that cannot spill to disk needs {0} MB, \
+         the batch memory of the node is exhausted, and no other running query can release \
+         some. Simplify the query or materialize parts of it."
+    )]
+    NoMemoryLeft(u64),
+
+    #[error(
         "Not enough spill files to run this query: {needed} more needed, \
          {limit} allowed for all batch queries on this node"
     )]

@@ -28,7 +28,7 @@ use risingwave_storage::StateStoreImpl;
 
 use crate::error::Result;
 use crate::monitor::{BatchMetrics, BatchMetricsInner, BatchSpillMetrics};
-use crate::task::query_memory::QueryMemory;
+use crate::task::query_memory::{ExecutorMemory, QueryMemory};
 use crate::task::{BatchEnvironment, TaskOutput, TaskOutputId};
 use crate::worker_manager::worker_node_manager::WorkerNodeManagerRef;
 
@@ -72,6 +72,12 @@ pub trait BatchTaskContext: Send + Sync + 'static {
     /// spilling is enabled, the context is bounded to the part of the operator in its query.
     fn create_spillable_executor_mem_context(&self, executor_id: &str) -> MemoryContext {
         self.create_executor_mem_context(executor_id)
+    }
+
+    /// Creates the memory of an operator that cannot spill to disk. Where queries are bounded,
+    /// it takes its memory from the pool of the query, then from the memory left on the node.
+    fn create_executor_memory(&self, executor_id: &str) -> ExecutorMemory {
+        ExecutorMemory::unmanaged(self.create_executor_mem_context(executor_id))
     }
 
     /// The memory of the query that the task belongs to, where queries are bounded.
@@ -153,6 +159,15 @@ impl BatchTaskContext for ComputeNodeContext {
                 query_memory.spillable_operator_context()
             }
             _ => self.create_executor_mem_context(executor_id),
+        }
+    }
+
+    fn create_executor_memory(&self, executor_id: &str) -> ExecutorMemory {
+        match &self.query_memory {
+            Some(query_memory) => {
+                query_memory.executor_memory(MemoryContext::root(TrAdderAtomic::new(0), u64::MAX))
+            }
+            None => ExecutorMemory::unmanaged(self.create_executor_mem_context(executor_id)),
         }
     }
 

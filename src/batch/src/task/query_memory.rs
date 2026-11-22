@@ -25,16 +25,18 @@
 //! The peaks are recorded with one atomic operation per accounted allocation, and written once
 //! when the query leaves the node, to tell whether the limits should be raised or lowered.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use risingwave_common::config::BatchConfig;
 use risingwave_common::memory::{MemCounter, MemoryContext};
 use risingwave_pb::task_service::GetBatchLimitsResponse;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::Notify;
+
+use crate::error::{BatchError, Result};
 
 /// A query is reported when it leaves the node only if it used at least this much memory, or if
 /// one of its operators reached its limit.
@@ -173,6 +175,11 @@ struct QueryMemoryStats {
     query_at_limit: AtomicBool,
     /// How long the query waited for its memory reservation.
     queued_ms: AtomicU64,
+    /// The most memory that the operators of the query that cannot spill held outside the pool
+    /// of the query, and how long they waited for it.
+    overflow_peak: AtomicI64,
+    overflow: AtomicI64,
+    overflow_wait_ms: AtomicU64,
 }
 
 /// Counts the memory of the whole query and records its peak.
@@ -248,6 +255,205 @@ impl Drop for OperatorCounter {
     }
 }
 
+/// The batch memory of the node, in MB, that queries take before they use it.
+///
+/// A query reserves the pool of its spillable operators before it starts: queries wait for it in
+/// arrival order, and may only reserve the usable part of the memory. The operators that cannot
+/// spill take what they need beyond the pool of their query while they run, up to the whole
+/// memory, and are served before the queries that wait to start.
+struct MemoryBudget {
+    usable_mb: u64,
+    total_mb: u64,
+    state: Mutex<BudgetState>,
+    notify: Notify,
+}
+
+#[derive(Default)]
+struct BudgetState {
+    taken_mb: u64,
+    /// Tickets of the queries that wait to start, in arrival order.
+    queue: VecDeque<u64>,
+    next_ticket: u64,
+    /// Operators that wait for memory beyond the pool of their query.
+    overflow_waiters: usize,
+    /// Queries that run tasks, and those among them with an operator that waits for memory.
+    active_queries: usize,
+    blocked_queries: usize,
+}
+
+/// Memory taken from a [`MemoryBudget`], given back on drop.
+struct BudgetPermit {
+    budget: Arc<MemoryBudget>,
+    mb: u64,
+}
+
+impl Drop for BudgetPermit {
+    fn drop(&mut self) {
+        self.budget.release(self.mb);
+    }
+}
+
+/// Removes a query from the queue when it stops waiting, served or not.
+struct QueueTicket<'a> {
+    budget: &'a MemoryBudget,
+    ticket: u64,
+}
+
+impl Drop for QueueTicket<'_> {
+    fn drop(&mut self) {
+        self.budget.state.lock().queue.retain(|t| *t != self.ticket);
+        self.budget.notify.notify_waiters();
+    }
+}
+
+/// Marks an operator, and its query, as waiting for memory beyond the pool of the query.
+struct OverflowWaiter<'a> {
+    budget: &'a MemoryBudget,
+    query_waiters: &'a AtomicUsize,
+}
+
+impl Drop for OverflowWaiter<'_> {
+    fn drop(&mut self) {
+        {
+            let mut state = self.budget.state.lock();
+            state.overflow_waiters -= 1;
+            if self.query_waiters.fetch_sub(1, Ordering::SeqCst) == 1 {
+                state.blocked_queries -= 1;
+            }
+        }
+        self.budget.notify.notify_waiters();
+    }
+}
+
+impl MemoryBudget {
+    fn new(usable_mb: u64, total_mb: u64) -> Self {
+        Self {
+            usable_mb,
+            total_mb: total_mb.max(usable_mb),
+            state: Mutex::new(BudgetState::default()),
+            notify: Notify::new(),
+        }
+    }
+
+    #[cfg(test)]
+    fn available_mb(&self) -> u64 {
+        self.usable_mb - self.state.lock().taken_mb
+    }
+
+    fn release(&self, mb: u64) {
+        self.state.lock().taken_mb -= mb;
+        self.notify.notify_waiters();
+    }
+
+    fn set_active(&self, active: bool) {
+        {
+            let mut state = self.state.lock();
+            if active {
+                state.active_queries += 1;
+            } else {
+                state.active_queries -= 1;
+            }
+        }
+        // The operators that wait must check again whether another query can still release memory.
+        self.notify.notify_waiters();
+    }
+
+    /// Reserves `mb` for a query that starts. Waits for its turn. Cancel safe.
+    async fn reserve(self: &Arc<Self>, mb: u64) -> BudgetPermit {
+        let mb = mb.min(self.usable_mb);
+        let ticket = {
+            let mut state = self.state.lock();
+            let ticket = state.next_ticket;
+            state.next_ticket += 1;
+            state.queue.push_back(ticket);
+            ticket
+        };
+        let _ticket = QueueTicket {
+            budget: self,
+            ticket,
+        };
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let mut state = self.state.lock();
+                if state.queue.front() == Some(&ticket)
+                    && state.overflow_waiters == 0
+                    && state.taken_mb + mb <= self.usable_mb
+                {
+                    state.taken_mb += mb;
+                    return BudgetPermit {
+                        budget: self.clone(),
+                        mb,
+                    };
+                }
+            }
+            notified.await;
+        }
+    }
+
+    /// Takes `mb` for an operator of a running query, beyond the pool of the query.
+    ///
+    /// `try_pool` is tried first, each time memory may have been released. Then the memory of
+    /// the node that nobody took. When there is none, waits for another query to release some,
+    /// and fails when no other query runs that is not waiting itself. Cancel safe.
+    async fn take_overflow(
+        self: &Arc<Self>,
+        mb: u64,
+        query_waiters: &AtomicUsize,
+        mut try_pool: impl FnMut() -> bool,
+    ) -> std::result::Result<Option<BudgetPermit>, ()> {
+        let mut waiter = None;
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if try_pool() {
+                return Ok(None);
+            }
+            let stuck = {
+                let mut state = self.state.lock();
+                if state.taken_mb + mb <= self.total_mb {
+                    state.taken_mb += mb;
+                    return Ok(Some(BudgetPermit {
+                        budget: self.clone(),
+                        mb,
+                    }));
+                }
+                if waiter.is_none() {
+                    state.overflow_waiters += 1;
+                    if query_waiters.fetch_add(1, Ordering::SeqCst) == 0 {
+                        state.blocked_queries += 1;
+                    }
+                    waiter = Some(OverflowWaiter {
+                        budget: self,
+                        query_waiters,
+                    });
+                }
+                state.active_queries <= state.blocked_queries
+            };
+            if stuck {
+                return Err(());
+            }
+            // The pool of the query is not watched: check it again from time to time.
+            let _ = tokio::time::timeout(Duration::from_secs(1), notified).await;
+        }
+    }
+}
+
+/// The reservation of a query that runs tasks on the node.
+struct ActiveQuery {
+    budget: Arc<MemoryBudget>,
+    _permit: Option<BudgetPermit>,
+}
+
+impl Drop for ActiveQuery {
+    fn drop(&mut self) {
+        self.budget.set_active(false);
+    }
+}
+
 /// The memory of one query on this node, shared by all its tasks.
 pub struct QueryMemory {
     query_id: String,
@@ -262,7 +468,9 @@ pub struct QueryMemory {
     /// The memory, in MB, that the query reserves on the node before it starts.
     reservation_mb: u32,
     /// The reservation, shared by all the tasks of the query that are running.
-    reservation: tokio::sync::Mutex<Option<OwnedSemaphorePermit>>,
+    reservation: tokio::sync::Mutex<Option<ActiveQuery>>,
+    /// The operators of the query that wait for memory beyond its pool.
+    overflow_waiters: AtomicUsize,
     /// The tasks of the query that are running on the node.
     running_tasks: AtomicUsize,
     stats: Arc<QueryMemoryStats>,
@@ -293,6 +501,34 @@ impl QueryMemory {
         )
     }
 
+    /// The memory of an operator that cannot spill, counted in `meter`.
+    pub fn executor_memory(self: &Arc<Self>, meter: MemoryContext) -> ExecutorMemory {
+        let Some(registry) = self.registry.upgrade() else {
+            return ExecutorMemory::unmanaged(meter);
+        };
+        if registry.limits.is_unlimited() {
+            return ExecutorMemory::unmanaged(meter);
+        }
+        ExecutorMemory {
+            meter,
+            managed: Some(ManagedMemory {
+                query: self.clone(),
+                budget: registry.budget.clone(),
+                settled: 0,
+                pool: MemoryContext::new(
+                    Some(self.shared_pool.clone()),
+                    PlainCounter(AtomicI64::new(0)),
+                ),
+                overflow: MemoryContext::new(
+                    Some(registry.root.clone()),
+                    PlainCounter(AtomicI64::new(0)),
+                ),
+                overflow_bytes: 0,
+                overflow_permits: Vec::new(),
+            }),
+        }
+    }
+
     pub fn operator_pool(&self) -> u64 {
         self.operator_pool
     }
@@ -317,18 +553,22 @@ impl QueryMemory {
         let Some(registry) = self.registry.upgrade() else {
             return AdmissionGuard { query: None };
         };
-        if self.reservation_mb == 0 {
+        if registry.limits.is_unlimited() {
             return AdmissionGuard { query: None };
         }
         let mut reservation = self.reservation.lock().await;
         if reservation.is_none() {
             let start = Instant::now();
-            *reservation = registry
-                .admission
-                .clone()
-                .acquire_many_owned(self.reservation_mb)
-                .await
-                .ok();
+            let permit = if self.reservation_mb == 0 {
+                None
+            } else {
+                Some(registry.budget.reserve(self.reservation_mb as u64).await)
+            };
+            registry.budget.set_active(true);
+            *reservation = Some(ActiveQuery {
+                budget: registry.budget.clone(),
+                _permit: permit,
+            });
             let queued_ms = start.elapsed().as_millis() as u64;
             self.stats.queued_ms.fetch_add(queued_ms, Ordering::Relaxed);
             if queued_ms >= 1000 {
@@ -343,6 +583,149 @@ impl QueryMemory {
         // Counted while the reservation is locked, so that it cannot be released in between.
         self.running_tasks.fetch_add(1, Ordering::SeqCst);
         admitted()
+    }
+}
+
+/// The memory of an operator that cannot spill to disk.
+///
+/// The operator counts what it uses in [`meter`](Self::meter), which never refuses, and calls
+/// [`settle`](Self::settle) each time it has taken a chunk in: the memory is then taken from the
+/// pool of the query, and beyond it from the memory of the node that no query reserved. When
+/// there is none left, the operator waits for another query to release some.
+pub struct ExecutorMemory {
+    meter: MemoryContext,
+    managed: Option<ManagedMemory>,
+}
+
+struct ManagedMemory {
+    query: Arc<QueryMemory>,
+    budget: Arc<MemoryBudget>,
+    /// What was settled so far, and where it was taken from.
+    settled: i64,
+    pool: MemoryContext,
+    overflow: MemoryContext,
+    overflow_bytes: i64,
+    overflow_permits: Vec<BudgetPermit>,
+}
+
+struct PlainCounter(AtomicI64);
+
+impl MemCounter for PlainCounter {
+    fn add(&self, bytes: i64) {
+        self.0.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    fn get_bytes_used(&self) -> i64 {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+impl From<MemoryContext> for ExecutorMemory {
+    fn from(mem_context: MemoryContext) -> Self {
+        Self::unmanaged(mem_context)
+    }
+}
+
+impl ExecutorMemory {
+    /// The operator counts its memory in `mem_context`, whose limits are the only ones applied.
+    pub fn unmanaged(mem_context: MemoryContext) -> Self {
+        Self {
+            meter: mem_context,
+            managed: None,
+        }
+    }
+
+    /// The context in which the operator counts the memory that it uses.
+    pub fn meter(&self) -> MemoryContext {
+        self.meter.clone()
+    }
+
+    /// Takes the memory that the operator counted since the last call, or gives back what it
+    /// released.
+    pub async fn settle(&mut self) -> Result<()> {
+        let Some(managed) = &mut self.managed else {
+            return Ok(());
+        };
+        let diff = self.meter.get_bytes_used() - managed.settled;
+        if diff > 0 {
+            managed.grow(diff).await?;
+        } else if diff < 0 {
+            managed.shrink(-diff);
+        }
+        managed.settled += diff;
+        Ok(())
+    }
+}
+
+impl ManagedMemory {
+    async fn grow(&mut self, bytes: i64) -> Result<()> {
+        // Once the operator went beyond the pool, it stays there until it has given it all back,
+        // so that what is released is always the memory taken last.
+        if self.overflow_bytes == 0 && self.pool.add(bytes) {
+            return Ok(());
+        }
+        const MB: i64 = 1 << 20;
+        let held_mb: u64 = self.overflow_permits.iter().map(|p| p.mb).sum();
+        let needed_mb = ((self.overflow_bytes + bytes + MB - 1) / MB) as u64;
+        if needed_mb > held_mb {
+            let start = Instant::now();
+            let pool = &self.pool;
+            let from_pool = self.overflow_bytes == 0;
+            let taken = self
+                .budget
+                .take_overflow(needed_mb - held_mb, &self.query.overflow_waiters, || {
+                    from_pool && pool.add(bytes)
+                })
+                .await;
+            let stats = &self.query.stats;
+            stats
+                .overflow_wait_ms
+                .fetch_add(start.elapsed().as_millis() as u64, Ordering::Relaxed);
+            match taken {
+                Ok(None) => return Ok(()),
+                Ok(Some(permit)) => self.overflow_permits.push(permit),
+                Err(()) => {
+                    return Err(BatchError::NoMemoryLeft(
+                        ((self.settled + bytes) >> 20) as u64,
+                    ));
+                }
+            }
+        }
+        // Counted for the node only: the limit of the query does not apply.
+        self.overflow.add(bytes);
+        self.overflow_bytes += bytes;
+        let stats = &self.query.stats;
+        let overflow = stats.overflow.fetch_add(bytes, Ordering::Relaxed) + bytes;
+        stats.overflow_peak.fetch_max(overflow, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn shrink(&mut self, bytes: i64) {
+        let from_overflow = bytes.min(self.overflow_bytes);
+        if from_overflow > 0 {
+            self.overflow.add(-from_overflow);
+            self.overflow_bytes -= from_overflow;
+            self.query
+                .stats
+                .overflow
+                .fetch_sub(from_overflow, Ordering::Relaxed);
+            if self.overflow_bytes == 0 {
+                self.overflow_permits.clear();
+            }
+        }
+        if bytes > from_overflow {
+            self.pool.add(-(bytes - from_overflow));
+        }
+    }
+}
+
+impl Drop for ManagedMemory {
+    fn drop(&mut self) {
+        // The contexts give back what they hold when they are dropped.
+        self.query
+            .stats
+            .overflow
+            .fetch_sub(self.overflow_bytes, Ordering::Relaxed);
     }
 }
 
@@ -388,10 +771,12 @@ impl Drop for QueryMemory {
         let operators_at_limit = stats.operators_at_limit.load(Ordering::Relaxed);
         let query_at_limit = stats.query_at_limit.load(Ordering::Relaxed);
         let queued_ms = stats.queued_ms.load(Ordering::Relaxed);
+        let overflow_peak = stats.overflow_peak.load(Ordering::Relaxed);
         if query_peak < REPORT_MIN_PEAK_BYTES
             && operators_at_limit == 0
             && !query_at_limit
             && queued_ms < 1000
+            && overflow_peak == 0
         {
             return;
         }
@@ -415,6 +800,8 @@ impl Drop for QueryMemory {
             spillable_operator_instances = self.spillable_operator_instances,
             reservation_mb = self.reservation_mb,
             queued_ms,
+            overflow_peak_mb = overflow_peak >> 20,
+            overflow_wait_ms = stats.overflow_wait_ms.load(Ordering::Relaxed),
             "batch query memory"
         );
     }
@@ -423,9 +810,7 @@ impl Drop for QueryMemory {
 struct QueryMemoryRegistryInner {
     root: MemoryContext,
     limits: QueryMemoryLimits,
-    /// The usable batch memory of the node, in MB, that queries reserve before they start.
-    admission: Arc<Semaphore>,
-    admission_mb: usize,
+    budget: Arc<MemoryBudget>,
     queries: Mutex<HashMap<String, Weak<QueryMemory>>>,
 }
 
@@ -447,17 +832,16 @@ impl QueryMemoryRegistry {
             operator_avg = limits.operator_avg,
             "batch query memory limits"
         );
-        let admission_mb = if limits.is_unlimited() {
-            0
+        let budget = if limits.is_unlimited() {
+            MemoryBudget::new(0, 0)
         } else {
-            ((limits.usable >> 20) as usize).min(Semaphore::MAX_PERMITS)
+            MemoryBudget::new(limits.usable >> 20, root.mem_limit() >> 20)
         };
         Self {
             inner: Arc::new(QueryMemoryRegistryInner {
                 root,
                 limits,
-                admission: Arc::new(Semaphore::new(admission_mb)),
-                admission_mb,
+                budget: Arc::new(budget),
                 queries: Mutex::new(HashMap::new()),
             }),
         }
@@ -493,8 +877,9 @@ impl QueryMemoryRegistry {
         let shared_pool = MemoryContext::new_with_mem_limit(
             Some(context.clone()),
             SharedPoolCounter(AtomicI64::new(0)),
-            operator_pool
-                .saturating_sub(operator_reserved.saturating_mul(spillable_operator_instances as u64)),
+            operator_pool.saturating_sub(
+                operator_reserved.saturating_mul(spillable_operator_instances as u64),
+            ),
         );
         let query = Arc::new(QueryMemory {
             query_id: query_id.to_owned(),
@@ -505,10 +890,11 @@ impl QueryMemoryRegistry {
             operator_reserved,
             spillable_operator_instances,
             // Never more than the whole semaphore, so that the query is eventually served.
-            reservation_mb: ((limits.reservation(spillable_operator_instances) >> 20) as usize)
-                .min(self.inner.admission_mb)
-                .min(u32::MAX as usize) as u32,
+            reservation_mb: (limits.reservation(spillable_operator_instances) >> 20)
+                .min(self.inner.budget.usable_mb)
+                .min(u32::MAX as u64) as u32,
             reservation: tokio::sync::Mutex::new(None),
+            overflow_waiters: AtomicUsize::new(0),
             running_tasks: AtomicUsize::new(0),
             stats,
             registry: Arc::downgrade(&self.inner),
@@ -674,10 +1060,7 @@ mod tests {
         // A second task of the same query does not reserve again.
         let g1_bis = registry.get_or_create("q1", 60).admit().await;
         let g2 = q2.admit().await;
-        assert_eq!(
-            registry.inner.admission.available_permits(),
-            3600 - 2 * 1800
-        );
+        assert_eq!(registry.inner.budget.available_mb(), 3600 - 2 * 1800);
 
         // The third query does not fit: it waits.
         let waiter = {
@@ -697,21 +1080,144 @@ mod tests {
         assert!(!waiter.is_finished());
         drop(g1_bis);
         let g3 = waiter.await.unwrap();
-        assert_eq!(
-            registry.inner.admission.available_permits(),
-            3600 - 2 * 1800
-        );
+        assert_eq!(registry.inner.budget.available_mb(), 3600 - 2 * 1800);
         assert!(q3.stats.queued_ms.load(Ordering::Relaxed) >= 50);
 
         // A later task of a query whose reservation was released reserves again.
         drop(g2);
         let g1 = q1.admit().await;
-        assert_eq!(
-            registry.inner.admission.available_permits(),
-            3600 - 2 * 1800
-        );
+        assert_eq!(registry.inner.budget.available_mb(), 3600 - 2 * 1800);
 
         drop((g1, g3));
-        assert_eq!(registry.inner.admission.available_permits(), 3600);
+        assert_eq!(registry.inner.budget.available_mb(), 3600);
+    }
+    fn meter() -> MemoryContext {
+        MemoryContext::root(TrAdderAtomic::new(0), u64::MAX)
+    }
+
+    #[tokio::test]
+    async fn test_executor_memory_overflows_the_pool() {
+        // Batch memory: 4000 MB, of which 3600 MB can be reserved by queries.
+        // 4 operators: a pool of 256 MB, of which 192 MB are shared.
+        let (registry, root) = registry(4000 * MB);
+        let query = registry.get_or_create("q", 4);
+        let _guard = query.admit().await;
+        let budget = registry.inner.budget.clone();
+        assert_eq!(budget.available_mb(), 3600 - 256);
+
+        let mut memory = query.executor_memory(meter());
+        let meter = memory.meter();
+        // Taken from the pool of the query first.
+        meter.add(100 * MB as i64);
+        memory.settle().await.unwrap();
+        assert_eq!(query.context().get_bytes_used(), 100 * MB as i64);
+        assert_eq!(budget.available_mb(), 3600 - 256);
+        // Then from the memory that no query reserved, beyond the limit of the query.
+        meter.add(3000 * MB as i64);
+        memory.settle().await.unwrap();
+        assert_eq!(query.context().get_bytes_used(), 100 * MB as i64);
+        assert_eq!(root.get_bytes_used(), 3100 * MB as i64);
+        assert_eq!(budget.available_mb(), 3600 - 256 - 3000);
+        // Up to the whole batch memory, never beyond: no other query can release any.
+        meter.add(800 * MB as i64);
+        let error = memory.settle().await.unwrap_err();
+        assert!(matches!(error, BatchError::NoMemoryLeft(_)), "{error:?}");
+        meter.add(-(800 * MB as i64));
+        meter.add(744 * MB as i64);
+        memory.settle().await.unwrap();
+        assert_eq!(root.get_bytes_used(), 3844 * MB as i64);
+
+        // What is released goes back to the node first, then to the pool.
+        meter.add(-(3744 * MB as i64));
+        memory.settle().await.unwrap();
+        assert_eq!(budget.available_mb(), 3600 - 256);
+        assert_eq!(root.get_bytes_used(), 100 * MB as i64);
+        meter.add(50 * MB as i64);
+        memory.settle().await.unwrap();
+        meter.add(4000 * MB as i64);
+        assert!(memory.settle().await.is_err());
+        drop(memory);
+        assert_eq!(root.get_bytes_used(), 0);
+        assert_eq!(budget.available_mb(), 3600 - 256);
+        assert_eq!(
+            query.stats.overflow_peak.load(Ordering::Relaxed),
+            3744 * MB as i64
+        );
+        assert_eq!(query.stats.overflow.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn test_executor_memory_waits_for_other_queries() {
+        let (registry, root) = registry(4000 * MB);
+        let budget = registry.inner.budget.clone();
+        let q1 = registry.get_or_create("q1", 4);
+        let q2 = registry.get_or_create("q2", 4);
+        let q3 = registry.get_or_create("q3", 4);
+        let g1 = q1.admit().await;
+        let _g2 = q2.admit().await;
+
+        // The first query takes most of the batch memory.
+        let mut m1 = q1.executor_memory(meter());
+        m1.meter().add(3000 * MB as i64);
+        m1.settle().await.unwrap();
+
+        // The second one cannot get what it needs: it waits for the first one.
+        let mut m2 = q2.executor_memory(meter());
+        m2.meter().add(1000 * MB as i64);
+        let waiter = tokio::spawn(async move {
+            m2.settle().await.unwrap();
+            m2
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!waiter.is_finished());
+
+        // A query that wants to start waits behind the operator, although its pool would fit.
+        let starter = {
+            let q3 = q3.clone();
+            tokio::spawn(async move { q3.admit().await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!starter.is_finished());
+
+        // The first query ends: the operator is served, then the query that waited to start.
+        drop(m1);
+        drop(g1);
+        let m2 = waiter.await.unwrap();
+        let _g3 = starter.await.unwrap();
+        assert_eq!(root.get_bytes_used(), 1000 * MB as i64);
+        assert!(q2.stats.overflow_wait_ms.load(Ordering::Relaxed) >= 50);
+        drop(m2);
+        assert_eq!(budget.available_mb(), 3600 - 2 * 256);
+    }
+
+    #[tokio::test]
+    async fn test_executor_memory_fails_when_every_query_waits() {
+        let (registry, _root) = registry(4000 * MB);
+        let q1 = registry.get_or_create("q1", 4);
+        let q2 = registry.get_or_create("q2", 4);
+        let _g1 = q1.admit().await;
+        let _g2 = q2.admit().await;
+
+        let mut m1 = q1.executor_memory(meter());
+        m1.meter().add(1500 * MB as i64);
+        m1.settle().await.unwrap();
+        let mut m2 = q2.executor_memory(meter());
+        m2.meter().add(1500 * MB as i64);
+        m2.settle().await.unwrap();
+
+        // The first query waits for the second one...
+        m1.meter().add(1000 * MB as i64);
+        let waiter = tokio::spawn(async move {
+            m1.settle().await.unwrap();
+            m1
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!waiter.is_finished());
+        // ... which cannot wait for the first one in turn: it fails, and the first one goes on.
+        m2.meter().add(1000 * MB as i64);
+        let error = m2.settle().await.unwrap_err();
+        assert!(matches!(error, BatchError::NoMemoryLeft(_)), "{error:?}");
+        drop(m2);
+        waiter.await.unwrap();
     }
 }

@@ -4295,7 +4295,9 @@ mod tests {
             LabelGuardedIntGauge::test_int_gauge::<4>(),
             512 * 1024,
         );
-        let build_keys = (0..100).map(|c| (c * 1000..(c + 1) * 1000).collect()).collect();
+        let build_keys = (0..100)
+            .map(|c| (c * 1000..(c + 1) * 1000).collect())
+            .collect();
         let join = create_hot_key_join(vec![vec![5, 99_999]], build_keys, mem_ctx.clone());
         assert_eq!(count_rows(join).await.unwrap(), 2);
         assert_eq!(mem_ctx.get_bytes_used(), 0);
