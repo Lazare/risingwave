@@ -33,7 +33,7 @@ use super::BatchTaskContext;
 use crate::error::Result;
 use crate::monitor::BatchManagerMetrics;
 use crate::rpc::service::exchange::GrpcExchangeWriter;
-use crate::task::query_memory::{QueryMemory, QueryMemoryRegistry};
+use crate::task::query_memory::{QueryMemory, QueryMemoryLimits, QueryMemoryRegistry};
 use crate::task::{BatchTaskExecution, StateReporter, TaskId, TaskOutput, TaskOutputId};
 
 pub mod await_tree_key {
@@ -110,6 +110,11 @@ impl BatchManager {
 
     pub fn memory_context_ref(&self) -> MemoryContext {
         self.mem_context.clone()
+    }
+
+    /// The memory limits that this node applies to batch queries.
+    pub fn query_memory_limits(&self) -> QueryMemoryLimits {
+        self.query_memories.limits()
     }
 
     /// The memory of the given query on this node, shared by all its tasks.

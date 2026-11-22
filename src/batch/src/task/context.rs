@@ -74,6 +74,11 @@ pub trait BatchTaskContext: Send + Sync + 'static {
         self.create_executor_mem_context(executor_id)
     }
 
+    /// The memory of the query that the task belongs to, where queries are bounded.
+    fn query_memory(&self) -> Option<Arc<QueryMemory>> {
+        None
+    }
+
     fn worker_node_manager(&self) -> Option<WorkerNodeManagerRef>;
 
     /// Get metrics reader for reading channel delta stats and other metrics.
@@ -149,6 +154,10 @@ impl BatchTaskContext for ComputeNodeContext {
             }
             _ => self.create_executor_mem_context(executor_id),
         }
+    }
+
+    fn query_memory(&self) -> Option<Arc<QueryMemory>> {
+        self.query_memory.clone()
     }
 
     fn worker_node_manager(&self) -> Option<WorkerNodeManagerRef> {

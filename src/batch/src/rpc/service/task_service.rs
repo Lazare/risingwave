@@ -26,9 +26,10 @@ use risingwave_pb::batch_plan::TaskOutputId;
 use risingwave_pb::task_service::task_service_server::TaskService;
 use risingwave_pb::task_service::{
     CancelTaskRequest, CancelTaskResponse, CreateTaskRequest, ExecuteRequest, FastInsertRequest,
-    FastInsertResponse, GetDataResponse, IngestDmlAckResponse, IngestDmlInitRequest,
-    IngestDmlInitResponse, IngestDmlPayloadRequest, IngestDmlRequest, IngestDmlResponse,
-    TaskInfoResponse, fast_insert_response, ingest_dml_request, ingest_dml_response,
+    FastInsertResponse, GetBatchLimitsRequest, GetBatchLimitsResponse, GetDataResponse,
+    IngestDmlAckResponse, IngestDmlInitRequest, IngestDmlInitResponse, IngestDmlPayloadRequest,
+    IngestDmlRequest, IngestDmlResponse, TaskInfoResponse, fast_insert_response,
+    ingest_dml_request, ingest_dml_response,
 };
 use thiserror_ext::AsReport;
 use tokio_stream::wrappers::ReceiverStream;
@@ -111,6 +112,13 @@ impl TaskService for BatchServiceImpl {
                 Err(e.into())
             }
         }
+    }
+
+    async fn get_batch_limits(
+        &self,
+        _request: Request<GetBatchLimitsRequest>,
+    ) -> Result<Response<GetBatchLimitsResponse>, Status> {
+        Ok(Response::new(self.mgr.query_memory_limits().to_protobuf()))
     }
 
     async fn cancel_task(

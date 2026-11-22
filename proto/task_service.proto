@@ -48,6 +48,22 @@ message CreateTaskRequest {
   uint32 spillable_operator_instances = 6;
 }
 
+message GetBatchLimitsRequest {}
+
+// The memory limits that a compute node applies to batch queries. Frontends use them to choose
+// the parallelism of a query.
+message GetBatchLimitsResponse {
+  // False when the node does not bound the memory of batch queries.
+  bool limited = 1;
+  // What a single query may use on the node.
+  uint64 query_memory_bytes = 2;
+  // What a single query may use on the node when it cannot run within `query_memory_bytes`
+  // even without parallelism.
+  uint64 query_memory_max_bytes = 3;
+  // The least memory that each spillable operator (hash agg, hash join, sort) needs.
+  uint64 spillable_operator_min_memory_bytes = 4;
+}
+
 message CancelTaskRequest {
   batch_plan.TaskId task_id = 1;
 }
@@ -144,6 +160,7 @@ message ExecuteRequest {
 
 service TaskService {
   rpc CreateTask(CreateTaskRequest) returns (stream TaskInfoResponse);
+  rpc GetBatchLimits(GetBatchLimitsRequest) returns (GetBatchLimitsResponse);
   // Cancel an already-died (self execution-failure, previous aborted, completed) task will still succeed.
   rpc CancelTask(CancelTaskRequest) returns (CancelTaskResponse);
   rpc Execute(ExecuteRequest) returns (stream GetDataResponse);
