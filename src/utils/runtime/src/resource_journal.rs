@@ -146,18 +146,20 @@ impl Snapshot {
     }
 
     fn log(&self) {
-        let mb = |bytes: Option<u64>| bytes.map(|b| b >> 20);
+        // Unknown values are written as `-`.
+        let show = |v: Option<u64>| v.map_or_else(|| "-".to_owned(), |v| v.to_string());
+        let mb = |bytes: Option<u64>| show(bytes.map(|b| b >> 20));
         let ratio = self.max_ratio();
         macro_rules! emit {
             ($macro:ident) => {
                 tracing::$macro!(
-                    rss_mb = ?mb(self.rss_bytes),
-                    cgroup_memory_mb = ?mb(self.cgroup_memory_bytes),
-                    cgroup_memory_limit_mb = ?mb(self.cgroup_memory_limit_bytes),
-                    system_memory_mb = ?mb(self.system_memory_bytes),
-                    system_memory_available_mb = ?mb(self.system_memory_available_bytes),
-                    open_fds = ?self.open_fds,
-                    nofile_soft_limit = ?self.nofile_soft_limit,
+                    rss_mb = %mb(self.rss_bytes),
+                    cgroup_memory_mb = %mb(self.cgroup_memory_bytes),
+                    cgroup_memory_limit_mb = %mb(self.cgroup_memory_limit_bytes),
+                    system_memory_mb = %mb(self.system_memory_bytes),
+                    system_memory_available_mb = %mb(self.system_memory_available_bytes),
+                    open_fds = %show(self.open_fds),
+                    nofile_soft_limit = %show(self.nofile_soft_limit),
                     max_usage_ratio = format_args!("{ratio:.2}"),
                     "resource journal"
                 )
