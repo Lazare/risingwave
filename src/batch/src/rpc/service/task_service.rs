@@ -25,11 +25,12 @@ use risingwave_dml::error::DmlError;
 use risingwave_pb::batch_plan::TaskOutputId;
 use risingwave_pb::task_service::task_service_server::TaskService;
 use risingwave_pb::task_service::{
-    CancelTaskRequest, CancelTaskResponse, CreateTaskRequest, ExecuteRequest, FastInsertRequest,
-    FastInsertResponse, GetBatchLimitsRequest, GetBatchLimitsResponse, GetDataResponse,
-    IngestDmlAckResponse, IngestDmlInitRequest, IngestDmlInitResponse, IngestDmlPayloadRequest,
-    IngestDmlRequest, IngestDmlResponse, TaskInfoResponse, fast_insert_response,
-    ingest_dml_request, ingest_dml_response,
+    AdmitQueryRequest, AdmitQueryResponse, CancelTaskRequest, CancelTaskResponse,
+    CreateTaskRequest, ExecuteRequest, FastInsertRequest, FastInsertResponse,
+    GetBatchLimitsRequest, GetBatchLimitsResponse, GetDataResponse, IngestDmlAckResponse,
+    IngestDmlInitRequest, IngestDmlInitResponse, IngestDmlPayloadRequest, IngestDmlRequest,
+    IngestDmlResponse, TaskInfoResponse, fast_insert_response, ingest_dml_request,
+    ingest_dml_response,
 };
 use thiserror_ext::AsReport;
 use tokio_stream::wrappers::ReceiverStream;
@@ -61,6 +62,7 @@ pub type IngestDmlResponseResult = Result<IngestDmlResponse, Status>;
 
 #[async_trait::async_trait]
 impl TaskService for BatchServiceImpl {
+    type AdmitQueryStream = ReceiverStream<Result<AdmitQueryResponse, Status>>;
     type CreateTaskStream = ReceiverStream<TaskInfoResponseResult>;
     type ExecuteStream = ReceiverStream<GetDataResponseResult>;
     type IngestDmlStream = ReceiverStream<IngestDmlResponseResult>;
@@ -119,6 +121,36 @@ impl TaskService for BatchServiceImpl {
         _request: Request<GetBatchLimitsRequest>,
     ) -> Result<Response<GetBatchLimitsResponse>, Status> {
         Ok(Response::new(self.mgr.query_memory_limits().to_protobuf()))
+    }
+
+    async fn admit_query(
+        &self,
+        request: Request<AdmitQueryRequest>,
+    ) -> Result<Response<Self::AdmitQueryStream>, Status> {
+        let AdmitQueryRequest {
+            query_id,
+            spillable_operator_instances,
+        } = request.into_inner();
+        let query_memory = self
+            .mgr
+            .query_memory(&query_id, spillable_operator_instances);
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        self.mgr.runtime().spawn(async move {
+            let start = std::time::Instant::now();
+            // The frontend gives up on the query, or ends it, by dropping the stream.
+            let guard = tokio::select! {
+                guard = query_memory.admit() => guard,
+                _ = tx.closed() => return,
+            };
+            let queued_ms = start.elapsed().as_millis() as u64;
+            // The reservation of the query is kept until the frontend drops the stream, so that
+            // the query does not queue again between two of its stages.
+            if tx.send(Ok(AdmitQueryResponse { queued_ms })).await.is_ok() {
+                tx.closed().await;
+            }
+            drop(guard);
+        });
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
 
     async fn cancel_task(

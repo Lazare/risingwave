@@ -211,6 +211,13 @@ pub struct StorageConfig {
     #[serde(default = "default::storage::time_travel_version_cache_capacity")]
     pub time_travel_version_cache_capacity: u64,
 
+    /// Whether a batch query may read a snapshot that the compute node no longer keeps among its
+    /// recent versions (see `max_cached_recent_versions_number`) by fetching an old version from
+    /// the meta node. Such reads are extremely slow for the operators that read key by key, so by
+    /// default the query fails instead, with an error telling that it took too long.
+    #[serde(default = "default::storage::batch_read_stale_snapshot_from_meta")]
+    pub batch_read_stale_snapshot_from_meta: bool,
+
     #[serde(default = "default::storage::table_change_log_cache_capacity")]
     pub table_change_log_cache_capacity: u64,
 
@@ -1169,6 +1176,10 @@ pub mod default {
 
         pub fn time_travel_version_cache_capacity() -> u64 {
             10
+        }
+
+        pub fn batch_read_stale_snapshot_from_meta() -> bool {
+            false
         }
 
         pub fn table_change_log_cache_capacity() -> u64 {

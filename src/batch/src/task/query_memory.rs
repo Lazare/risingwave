@@ -42,6 +42,9 @@ use crate::error::{BatchError, Result};
 /// one of its operators reached its limit.
 const REPORT_MIN_PEAK_BYTES: i64 = 64 << 20;
 
+/// A wait for memory is reported in the logs each time it has lasted this much longer.
+const LONG_WAIT_REPORT_INTERVAL: Duration = Duration::from_secs(30);
+
 /// The memory limits of the queries of a node, derived from its batch memory limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueryMemoryLimits {
@@ -345,6 +348,21 @@ impl MemoryBudget {
         self.notify.notify_waiters();
     }
 
+    /// The state of the budget, for the logs of the waits that last.
+    fn describe(&self) -> String {
+        let state = self.state.lock();
+        format!(
+            "taken_mb={} usable_mb={} total_mb={} queued_queries={} overflow_waiters={} active_queries={} blocked_queries={}",
+            state.taken_mb,
+            self.usable_mb,
+            self.total_mb,
+            state.queue.len(),
+            state.overflow_waiters,
+            state.active_queries,
+            state.blocked_queries
+        )
+    }
+
     fn set_active(&self, active: bool) {
         {
             let mut state = self.state.lock();
@@ -372,6 +390,8 @@ impl MemoryBudget {
             budget: self,
             ticket,
         };
+        let start = Instant::now();
+        let mut next_report = LONG_WAIT_REPORT_INTERVAL;
         loop {
             let notified = self.notify.notified();
             tokio::pin!(notified);
@@ -389,7 +409,16 @@ impl MemoryBudget {
                     };
                 }
             }
-            notified.await;
+            let _ = tokio::time::timeout(LONG_WAIT_REPORT_INTERVAL, notified).await;
+            if start.elapsed() >= next_report {
+                next_report = start.elapsed() + LONG_WAIT_REPORT_INTERVAL;
+                tracing::warn!(
+                    waited_secs = start.elapsed().as_secs(),
+                    reservation_mb = mb,
+                    budget = self.describe(),
+                    "batch query still waits for its memory reservation"
+                );
+            }
         }
     }
 
@@ -405,7 +434,18 @@ impl MemoryBudget {
         mut try_pool: impl FnMut() -> bool,
     ) -> std::result::Result<Option<BudgetPermit>, ()> {
         let mut waiter = None;
+        let start = Instant::now();
+        let mut next_report = LONG_WAIT_REPORT_INTERVAL;
         loop {
+            if start.elapsed() >= next_report {
+                next_report = start.elapsed() + LONG_WAIT_REPORT_INTERVAL;
+                tracing::warn!(
+                    waited_secs = start.elapsed().as_secs(),
+                    needed_mb = mb,
+                    budget = self.describe(),
+                    "batch operator still waits for memory beyond the pool of its query"
+                );
+            }
             let notified = self.notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
@@ -923,6 +963,7 @@ mod tests {
         let config = BatchConfig {
             memory_usable_ratio: 0.9,
             query_memory_ratio: 0.25,
+            query_memory_max_ratio: 0.5,
             spillable_operator_min_memory_mb: 16,
             spillable_operator_avg_memory_mb: 64,
             ..Default::default()
