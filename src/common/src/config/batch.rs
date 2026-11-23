@@ -153,19 +153,19 @@ pub mod default {
         }
 
         pub fn query_memory_ratio() -> f64 {
-            0.25
+            0.3
         }
 
         pub fn query_memory_max_ratio() -> f64 {
-            0.5
+            0.7
         }
 
         pub fn spillable_operator_min_memory_mb() -> usize {
-            16
+            8
         }
 
         pub fn spillable_operator_avg_memory_mb() -> usize {
-            128
+            64
         }
 
         pub fn statement_timeout_in_sec() -> u32 {
