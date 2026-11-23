@@ -44,6 +44,7 @@ use crate::executor::backfill::cdc::upstream_table::snapshot::{
 use crate::executor::backfill::utils::{get_cdc_chunk_last_offset, mapping_chunk, mapping_message};
 use crate::executor::prelude::*;
 use crate::executor::source::get_infinite_backoff_strategy;
+use crate::task::LocalBarrierManager;
 use crate::task::cdc_progress::CdcProgressReporter;
 pub struct ParallelizedCdcBackfillExecutor<S: StateStore> {
     actor_ctx: ActorContextRef,
@@ -70,6 +71,9 @@ pub struct ParallelizedCdcBackfillExecutor<S: StateStore> {
     properties: BTreeMap<String, String>,
 
     progress: Option<CdcProgressReporter>,
+
+    /// Used to ring meta while the snapshot is being read and selective barriers are enabled.
+    pending_input_reporter: Option<LocalBarrierManager>,
 }
 
 impl<S: StateStore> ParallelizedCdcBackfillExecutor<S> {
@@ -98,7 +102,20 @@ impl<S: StateStore> ParallelizedCdcBackfillExecutor<S> {
             state_table,
             properties,
             progress,
+            pending_input_reporter: None,
         }
+    }
+
+    /// Enable the snapshot gate required by selective barriers, ringing meta through the given
+    /// barrier manager. See `docs/dev/src/design/selective-barriers.md`.
+    ///
+    /// Meta does not know that a CDC table is being backfilled: the table is created as soon as
+    /// its job starts. The snapshot of a split is therefore only read in an epoch opened by a
+    /// barrier that releases this fragment, and the executor rings at every barrier until all
+    /// its splits are read, so that the fragment and its descendants stay awake.
+    pub fn with_pending_input_reporter(mut self, barrier_manager: LocalBarrierManager) -> Self {
+        self.pending_input_reporter = Some(barrier_manager);
+        self
     }
 
     #[try_stream(ok = Message, error = StreamExecutorError)]
@@ -149,6 +166,21 @@ impl<S: StateStore> ParallelizedCdcBackfillExecutor<S> {
             handle_toast_columns,
         )
         .boxed();
+        // Selective barriers: whether the snapshot must not be read in the epoch opened by the
+        // given barrier, because this barrier does not release the fragment. Rings meta so that
+        // a next barrier releases it.
+        let gate_fragment_id = self.actor_ctx.fragment_id;
+        let pending_input_reporter = self.pending_input_reporter.clone();
+        let hold_snapshot = |barrier: &Barrier| -> bool {
+            let Some(reporter) = &pending_input_reporter else {
+                return false;
+            };
+            if barrier.selective.is_none() {
+                return false;
+            }
+            reporter.report_pending_input(gate_fragment_id);
+            !barrier.is_fragment_released(gate_fragment_id)
+        };
         let mut next_reset_barrier = Some(first_barrier);
         let mut is_reset = false;
         let mut state_impl = ParallelizedCdcBackfillState::new(self.state_table);
@@ -198,6 +230,7 @@ impl<S: StateStore> ParallelizedCdcBackfillExecutor<S> {
             assert_consecutive_splits(&actor_snapshot_splits);
 
             let mut is_snapshot_paused = reset_barrier.is_pause_on_startup();
+            let mut selective_hold = hold_snapshot(&reset_barrier);
             let barrier_epoch = reset_barrier.epoch;
             yield Message::Barrier(reset_barrier);
             if !is_reset {
@@ -288,6 +321,9 @@ impl<S: StateStore> ParallelizedCdcBackfillExecutor<S> {
                                     next_reset_barrier = Some(barrier);
                                     continue 'with_cdc_table_snapshot_splits;
                                 }
+                                if next_split_idx < actor_snapshot_splits.len() {
+                                    selective_hold = hold_snapshot(&barrier);
+                                }
                                 yield Message::Barrier(barrier);
                             }
                             Message::Chunk(chunk) => {
@@ -376,7 +412,7 @@ impl<S: StateStore> ParallelizedCdcBackfillExecutor<S> {
                         .map(Either::Right)
                 );
                 let (right_snapshot, snapshot_valve) = pausable(right_snapshot);
-                if is_snapshot_paused {
+                if is_snapshot_paused || selective_hold {
                     snapshot_valve.pause();
                 }
                 let mut backfill_stream =
@@ -451,6 +487,14 @@ impl<S: StateStore> ParallelizedCdcBackfillExecutor<S> {
                                             generation.expect("should have set generation when having progress to report"),
                                             split_range,
                                         );
+                                    }
+                                    // No snapshot row is read between this point and the
+                                    // barrier yielded below.
+                                    selective_hold = hold_snapshot(&barrier);
+                                    if is_snapshot_paused || selective_hold {
+                                        snapshot_valve.pause();
+                                    } else {
+                                        snapshot_valve.resume();
                                     }
                                     // emit barrier and continue to consume the backfill stream
                                     yield Message::Barrier(barrier);
