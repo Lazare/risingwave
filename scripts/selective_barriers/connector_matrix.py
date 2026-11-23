@@ -609,6 +609,10 @@ def sink_subscription():
     """Subscription: the change log of a table that sleeps between two bursts."""
     rw("create table m_sub (id int primary key, v int)")
     rw("create subscription m_sub_s from m_sub with (retention = '1D')")
+    # `since begin()` starts at the creation time of the subscription, which is taken after the
+    # barrier that creates it: a row written in the epoch opened by that barrier is before it.
+    # Start a new epoch first (with or without selective barriers).
+    rw("flush")
     rw("insert into m_sub values (1, 1), (2, 2)")
     rw("flush")
     slept = idle()

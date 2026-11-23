@@ -98,10 +98,12 @@ CHECKS = [
         (select k, v from sb_into except select k, v from sb_b)
         union all
         (select k, v from sb_b except select k, v from sb_into)) d"""),
-    ("sb_into_g", """select count(*) from (
-        (select c, s from sb_into_g except select count(*), sum(v) from sb_b)
-        union all
-        (select count(*), sum(v) from sb_b except select c, s from sb_into_g)) d"""),
+    # Compared as scalars: a set operation over a single-row aggregate is not reliable when its
+    # result is empty.
+    ("sb_into_g", """select case when
+        (select c from sb_into_g) = (select count(*) from sb_b)
+        and coalesce((select s from sb_into_g), 0) = coalesce((select sum(v) from sb_b), 0)
+        then 0 else 1 end"""),
     ("sb_c_only", """select count(*) from (
         (select g, m from sb_c_only except select g, max(v) from sb_c group by g)
         union all
