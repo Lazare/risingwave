@@ -120,10 +120,12 @@ async fn test_batch_query_wait_epoch_ignores_unrelated_versions() {
         .unwrap();
 }
 
-/// A batch query whose snapshot is older than the versions that the node keeps fails with an
-/// explicit error, instead of fetching the version from the meta node for each of its reads.
+/// The snapshot of a batch query keeps the version that it reads: it stays readable after the
+/// node dropped that version from its recent ones. A snapshot created too late for the same
+/// epoch fails with an explicit error, instead of fetching the version from the meta node for
+/// each of its reads.
 #[tokio::test]
-async fn test_batch_query_fails_on_snapshot_older_than_recent_versions() {
+async fn test_batch_query_snapshot_older_than_recent_versions() {
     use risingwave_storage::store::ReadOptions;
 
     let table_id = TableId::new(233);
@@ -132,23 +134,24 @@ async fn test_batch_query_fails_on_snapshot_older_than_recent_versions() {
     let storage = &test_env.storage;
     let version = storage.get_pinned_version();
     let query_epoch = version.table_committed_epoch(table_id).unwrap();
-    let snapshot = storage
-        .new_read_snapshot(
-            HummockReadEpoch::BatchQueryCommitted(query_epoch, version.id),
+    let read_epoch = HummockReadEpoch::BatchQueryCommitted(query_epoch, version.id);
+    let new_snapshot = || {
+        storage.new_read_snapshot(
+            read_epoch,
             NewReadSnapshotOptions {
                 table_id,
                 table_option: TableOption::default(),
             },
         )
-        .await
-        .unwrap();
+    };
     let key_range = || {
         prefixed_range_with_vnode(
             (Bound::<Bytes>::Unbounded, Bound::<Bytes>::Unbounded),
             VirtualNode::ZERO,
         )
     };
-    snapshot
+    let early_snapshot = new_snapshot().await.unwrap();
+    early_snapshot
         .iter(key_range(), ReadOptions::default())
         .await
         .expect("the snapshot is readable while the node keeps its version");
@@ -173,11 +176,20 @@ async fn test_batch_query_fails_on_snapshot_older_than_recent_versions() {
             .await;
     }
 
-    let error = snapshot
+    // The snapshot created in time, and its clones, still read their version.
+    early_snapshot
+        .clone()
+        .iter(key_range(), ReadOptions::default())
+        .await
+        .expect("the snapshot keeps the version that it reads");
+
+    // A snapshot created now finds no version to read.
+    let late_snapshot = new_snapshot().await.unwrap();
+    let error = late_snapshot
         .iter(key_range(), ReadOptions::default())
         .await
         .err()
-        .expect("the snapshot is no longer kept by the node");
+        .expect("the node no longer keeps the version of the epoch");
     let message = format!("{error} {error:?}");
     assert!(message.contains("the query took too long"), "{message}");
 }

@@ -450,6 +450,13 @@ impl HummockStorageReadSnapshot {
         epoch: u64,
         table_id: TableId,
     ) -> StorageResult<PinnedVersion> {
+        // The version that the snapshot of a batch query took when it was created.
+        if let Some(version) = &self.batch_query_version
+            && table_id == self.table_id
+            && matches!(self.epoch, HummockReadEpoch::BatchQueryCommitted(e, _) if e == epoch)
+        {
+            return Ok(version.clone());
+        }
         match self
             .recent_versions
             .load()
@@ -731,6 +738,10 @@ pub struct HummockStorageReadSnapshot {
     /// See `StorageOpts::batch_read_stale_snapshot_from_meta`.
     batch_read_stale_snapshot_from_meta: bool,
     max_cached_recent_versions_number: usize,
+    /// The version that a batch query reads, taken when the snapshot is created. The snapshot
+    /// and its clones keep it for as long as they live, so that the query can still read it
+    /// after the node dropped it from its recent versions.
+    batch_query_version: Option<PinnedVersion>,
 }
 
 impl StateStoreGet for HummockStorageReadSnapshot {
@@ -1011,6 +1022,13 @@ impl StateStore for HummockStorage {
         options: NewReadSnapshotOptions,
     ) -> StorageResult<Self::ReadSnapshot> {
         self.try_wait_epoch_impl(epoch, options.table_id).await?;
+        let batch_query_version = match epoch {
+            HummockReadEpoch::BatchQueryCommitted(epoch, _) => self
+                .recent_versions
+                .load()
+                .get_safe_version(options.table_id, epoch),
+            _ => None,
+        };
         Ok(HummockStorageReadSnapshot {
             epoch,
             table_id: options.table_id,
@@ -1029,6 +1047,7 @@ impl StateStore for HummockStorage {
                 .context
                 .storage_opts
                 .max_cached_recent_versions_number,
+            batch_query_version,
         })
     }
 
