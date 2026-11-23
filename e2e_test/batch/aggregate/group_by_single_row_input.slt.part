@@ -1,0 +1,63 @@
+# GROUP BY, DISTINCT and EXCEPT over an input that has at most one row (an aggregation without
+# group key): when no row is left, the result is empty, not one row of NULLs.
+
+statement ok
+SET RW_IMPLICIT_FLUSH TO true;
+
+statement ok
+create table group_by_single_row_t (v1 int, v2 int);
+
+query I
+select cnt from (select count(*) cnt from group_by_single_row_t) t where cnt > 5 group by cnt;
+----
+
+query I
+select distinct cnt from (select count(*) cnt from group_by_single_row_t) t where cnt > 5;
+----
+
+query II
+select cnt, s from (select count(*) cnt, sum(v1) s from group_by_single_row_t) t where cnt > 5 group by cnt, s;
+----
+
+query II
+select count(*), sum(v1) from group_by_single_row_t except select 0::bigint, null::bigint;
+----
+
+query II
+select count(*), sum(v1) from group_by_single_row_t except select 1::bigint, 1::bigint;
+----
+0 NULL
+
+statement ok
+create materialized view group_by_single_row_mv as
+select cnt, s from (select count(*) cnt, sum(v1) s from group_by_single_row_t) t where cnt > 1 group by cnt, s;
+
+query II
+select * from group_by_single_row_mv;
+----
+
+statement ok
+insert into group_by_single_row_t values (1, 1), (2, 2), (3, 3);
+
+query II
+select * from group_by_single_row_mv;
+----
+3 6
+
+query II
+select cnt, s from (select count(*) cnt, sum(v1) s from group_by_single_row_t) t where cnt > 1 group by cnt, s;
+----
+3 6
+
+statement ok
+delete from group_by_single_row_t where v1 > 1;
+
+query II
+select * from group_by_single_row_mv;
+----
+
+statement ok
+drop materialized view group_by_single_row_mv;
+
+statement ok
+drop table group_by_single_row_t;
