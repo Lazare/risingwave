@@ -64,6 +64,23 @@ message GetBatchLimitsResponse {
   uint64 spillable_operator_min_memory_bytes = 4;
 }
 
+// Asks a compute node to admit a batch query before the frontend picks the snapshot that the
+// query reads: the query waits here for the memory that it reserves on the node, and only then
+// starts to depend on the versions that the node keeps.
+message AdmitQueryRequest {
+  string query_id = 1;
+  // Number of spillable operators (hash agg, hash join, sort) that the query runs, summed over
+  // all its stages and tasks.
+  uint32 spillable_operator_instances = 2;
+}
+
+// Sent once, when the query is admitted. The stream then stays open, and the node keeps the
+// reservation of the query, until the frontend drops it.
+message AdmitQueryResponse {
+  // How long the query waited for its turn on the node.
+  uint64 queued_ms = 1;
+}
+
 message CancelTaskRequest {
   batch_plan.TaskId task_id = 1;
 }
@@ -161,6 +178,7 @@ message ExecuteRequest {
 service TaskService {
   rpc CreateTask(CreateTaskRequest) returns (stream TaskInfoResponse);
   rpc GetBatchLimits(GetBatchLimitsRequest) returns (GetBatchLimitsResponse);
+  rpc AdmitQuery(AdmitQueryRequest) returns (stream AdmitQueryResponse);
   // Cancel an already-died (self execution-failure, previous aborted, completed) task will still succeed.
   rpc CancelTask(CancelTaskRequest) returns (CancelTaskResponse);
   rpc Execute(ExecuteRequest) returns (stream GetDataResponse);

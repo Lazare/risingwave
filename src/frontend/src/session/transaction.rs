@@ -210,6 +210,17 @@ impl SessionImpl {
         self.txn_ctx().snapshot = None;
     }
 
+    /// Drops the snapshot that the frontend pinned for an implicit transaction, so that the next
+    /// read picks a fresh one. The snapshot of an explicit transaction is kept: its reads must
+    /// stay consistent with each other.
+    pub fn unpin_implicit_snapshot(&self) {
+        if let State::Implicit(ctx) = &mut *self.txn.lock()
+            && matches!(ctx.snapshot, Some(ReadSnapshot::FrontendPinned { .. }))
+        {
+            ctx.snapshot = None;
+        }
+    }
+
     /// Acquires and pins a snapshot for the current transaction.
     ///
     /// If a snapshot is already acquired, returns it directly.
