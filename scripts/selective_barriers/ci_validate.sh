@@ -7,6 +7,7 @@
 #   build                 build the binaries and start a cluster once
 #   matrix <profile>      source connectors and sinks (connector_matrix.py)
 #   streaming             streaming SLT with selective barriers on
+#   batch                 batch SLT with selective barriers on
 #   sink-into-table       SLT of sinks into tables with selective barriers on
 #   sink-chaos            crash/restart test of decoupled sinks
 #   suite                 SLT and chaos tests with the feature off, on, and on with
@@ -135,6 +136,17 @@ step_streaming() {
   return $rc
 }
 
+step_batch() {
+  local rc=0 log="$OUT/slt-batch.log"
+  fresh selbar-on || return 1
+  ./risedev slt -p $PORT -d dev './e2e_test/batch/**/*.slt' >"$log" 2>&1 || rc=1
+  echo "ok=$(grep -a -c '\[OK\]' "$log") failed=$(grep -a -c '\[FAILED\]' "$log")"
+  [[ $rc -eq 0 ]] || sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -a -A25 '^failed to run' | cut -c1-300 | head -80
+  save_logs batch
+  no_panic || rc=1
+  return $rc
+}
+
 step_sink_into_table() {
   local rc=0 log="$OUT/slt-sink-into-table.log"
   fresh selbar-on || return 1
@@ -174,6 +186,7 @@ case "$step" in
   build) step_build ;;
   matrix) step_matrix "${1:?profile}" ;;
   streaming) step_streaming ;;
+  batch) step_batch ;;
   sink-into-table) step_sink_into_table ;;
   sink-chaos) step_sink_chaos ;;
   suite) step_suite ;;

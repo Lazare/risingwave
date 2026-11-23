@@ -177,6 +177,11 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: scripts/selective_barriers/ci_validate.sh streaming
 
+      - name: Batch SLT, selective barriers on
+        id: batch
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: scripts/selective_barriers/ci_validate.sh batch
+
       - name: Summary
         if: ${{ always() }}
         run: |
@@ -193,6 +198,7 @@ jobs:
             echo "| Decoupled sink chaos | ${{ steps.sink_chaos.outcome }} |"
             echo "| Suite with chaos | ${{ steps.suite.outcome }} |"
             echo "| Streaming SLT | ${{ steps.streaming.outcome }} |"
+            echo "| Batch SLT | ${{ steps.batch.outcome }} |"
             for f in "$OUT"/matrix-*.log; do
               [ -f "$f" ] || continue
               echo ""
