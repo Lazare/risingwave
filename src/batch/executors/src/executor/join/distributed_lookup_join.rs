@@ -186,13 +186,17 @@ impl BoxedExecutorBuilder for DistributedLookupJoinExecutorBuilder {
 
         dispatch_state_store!(source.context().state_store(), state_store, {
             let table = BatchTable::new_partial(state_store, column_ids, vnodes, table_desc);
+            let query_epoch = distributed_lookup_join_node
+                .query_epoch
+                .ok_or_else(|| anyhow!("query_epoch not set in distributed lookup join"))?;
+            // The join looks its inner side up for as long as the query runs, starting when its
+            // outer side sends its first rows: keep the version that the query reads.
+            table.pin_batch_query_snapshot(query_epoch.into()).await?;
             let inner_side_builder = InnerSideExecutorBuilder::new(
                 outer_side_key_types,
                 inner_side_key_types.clone(),
                 lookup_prefix_len,
-                distributed_lookup_join_node
-                    .query_epoch
-                    .ok_or_else(|| anyhow!("query_epoch not set in distributed lookup join"))?,
+                query_epoch,
                 vec![],
                 table,
                 chunk_size,
