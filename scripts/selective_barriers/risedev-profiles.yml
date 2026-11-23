@@ -1,0 +1,71 @@
+# RiseDev profiles of the selective barrier tests (`scripts/selective_barriers`), all with
+# persistent storage (sqlite meta store and fs object store) so that restarts recover state.
+# RiseDev reads user profiles from `risedev-profiles.user.yml` at the repository root: append
+# this file to it, or copy it there.
+
+# Selective barriers off.
+selbar:
+  env:
+    RUST_LOG: "info,risingwave_meta::barrier::checkpoint::selective=debug"
+  steps:
+    - use: opendal
+      engine: fs
+    - use: sqlite
+    - use: meta-node
+      meta-backend: sqlite
+    - use: compute-node
+      parallelism: 4
+    - use: frontend
+      port: 4577
+    - use: compactor
+
+# Selective barriers on.
+selbar-on:
+  config-path: scripts/selective_barriers/selective-on.toml
+  env:
+    RUST_LOG: "info,risingwave_meta::barrier::checkpoint::selective=debug"
+  steps:
+    - use: opendal
+      engine: fs
+    - use: sqlite
+    - use: meta-node
+      meta-backend: sqlite
+    - use: compute-node
+      parallelism: 4
+    - use: frontend
+      port: 4577
+    - use: compactor
+
+# Selective barriers on, a checkpoint every 30 barriers of 100 ms.
+selbar-on-cf30:
+  config-path: scripts/selective_barriers/selective-on-cf30.toml
+  env:
+    RUST_LOG: "info,risingwave_meta::barrier::checkpoint::selective=debug"
+  steps:
+    - use: opendal
+      engine: fs
+    - use: sqlite
+    - use: meta-node
+      meta-backend: sqlite
+    - use: compute-node
+      parallelism: 4
+    - use: frontend
+      port: 4577
+    - use: compactor
+
+# Selective barriers off, a checkpoint every 30 barriers of 100 ms.
+selbar-cf30:
+  config-path: scripts/selective_barriers/selective-off-cf30.toml
+  env:
+    RUST_LOG: "info,risingwave_meta::barrier::checkpoint::selective=debug"
+  steps:
+    - use: opendal
+      engine: fs
+    - use: sqlite
+    - use: meta-node
+      meta-backend: sqlite
+    - use: compute-node
+      parallelism: 4
+    - use: frontend
+      port: 4577
+    - use: compactor

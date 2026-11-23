@@ -1,0 +1,5 @@
+# Same barrier settings as `selective-on-cf30.toml` with selective barriers off, to tell apart
+# what comes from `checkpoint_frequency > 1` and what comes from selective barriers.
+[system]
+barrier_interval_ms = 100
+checkpoint_frequency = 30

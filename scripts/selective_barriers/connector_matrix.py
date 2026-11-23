@@ -589,7 +589,8 @@ def sink_into_table():
     rw("insert into m_sit_other values (1, 1)")
     eventually("another table", lambda: rw("select c from m_sit_other_mv"), "1", 30)
     # The target table (2 fragments, one of them its DML), its view and the sink stay awake.
-    if slept is None or before is None or slept < before - 4 or slept == 0:
+    # Without selective barriers nothing sleeps and the log has no plan: nothing to compare.
+    if before and (slept is None or slept < before - 4 or slept == 0):
         raise CheckFailed(f"sleeping fragments: {before} before the sink, {slept} with it")
     rw("drop sink m_sit_sink")
     after_drop = idle()
