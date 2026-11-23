@@ -649,19 +649,27 @@ impl LocalInstanceUnsyncData {
             assert!(self.sealed_data.is_empty());
             assert!(latest_epoch_data.is_empty());
             assert!(!latest_epoch_data.has_spilled);
-            if cfg!(debug_assertions) {
-                panic!(
-                    "sync epoch exceeds latest epoch, and the current instance should have been archived, table_id = {}, latest_epoch_data = {}, epoch = {}",
-                    self.table_id,
-                    latest_epoch_data.epoch(),
-                    epoch
+            // The actor that stops at a barrier destroys its instance before it collects the
+            // barrier, and the sync of that barrier removes the instance. Under selective
+            // barrier injection that barrier does not sync a table that slept before it, e.g.
+            // when the job of the table is replaced or rescheduled while it sleeps: the
+            // destroyed instance then stays at the epoch it sealed into until the table is
+            // synced again. It holds no data and will not advance: let this sync remove it.
+            if !self.is_destroyed {
+                if cfg!(debug_assertions) {
+                    panic!(
+                        "sync epoch exceeds latest epoch, and the current instance should have been archived, table_id = {}, latest_epoch_data = {}, epoch = {}",
+                        self.table_id,
+                        latest_epoch_data.epoch(),
+                        epoch
+                    );
+                }
+                warn!(
+                    instance_id = self.instance_id,
+                    table_id = %self.table_id,
+                    "sync epoch exceeds latest epoch, and the current instance should have be archived"
                 );
             }
-            warn!(
-                instance_id = self.instance_id,
-                table_id = %self.table_id,
-                "sync epoch exceeds latest epoch, and the current instance should have be archived"
-            );
             self.current_epoch_data = None;
         }
         ret
@@ -1037,6 +1045,24 @@ impl UnsyncData {
                 "cannot destroy an instance for twice"
             );
             instance_data.is_destroyed = true;
+            // A destroyed instance is removed by the next sync of its table, usually the one of
+            // the barrier that stops its actor, and so is the table once its job is dropped.
+            // Under selective barrier injection that barrier does not sync a table that slept
+            // before it, and nothing syncs a dropped table afterwards. An instance without
+            // data left to sync has nothing to wait for: remove it now.
+            if instance_data.is_finished()
+                && instance_data
+                    .current_epoch_data
+                    .as_ref()
+                    .is_none_or(|data| data.is_empty() && !data.has_spilled)
+            {
+                let table_id = *table_id;
+                table_data.instance_data.remove(&instance_id);
+                self.instance_table_id.remove(&instance_id);
+                if table_data.is_empty() {
+                    self.table_data.remove(&table_id);
+                }
+            }
         }
     }
 
@@ -2334,6 +2360,154 @@ pub(crate) mod tests {
             &HashMap::from_iter([(SLEEPY_INSTANCE_ID, vec![imm.batch_id()])]),
             synced.uploaded_ssts[0].imm_ids()
         );
+    }
+
+    /// Selective barriers: the job of a table is replaced while the table sleeps. The barrier of
+    /// the command wakes the table up but does not sync it: the instance of the stopped actor,
+    /// which sealed into the new epoch before being destroyed, is still there when the table is
+    /// synced at the next barrier, next to the instance of the new actor.
+    #[tokio::test]
+    async fn test_uploader_instance_destroyed_while_table_wakes_up() {
+        const SLEEPY_TABLE_ID: TableId = TableId::new(235);
+        const OLD_INSTANCE_ID: LocalInstanceId = TEST_LOCAL_INSTANCE_ID + 1;
+        const NEW_INSTANCE_ID: LocalInstanceId = TEST_LOCAL_INSTANCE_ID + 2;
+        let both = HashSet::from_iter([TEST_TABLE_ID, SLEEPY_TABLE_ID]);
+        let only_test = HashSet::from_iter([TEST_TABLE_ID]);
+
+        let mut uploader = test_uploader(dummy_success_upload_future);
+        let mut sst_collector = UploadedSstCollector::default();
+        let epoch1 = INITIAL_EPOCH.next_epoch();
+        let epoch2 = epoch1.next_epoch();
+        let epoch3 = epoch2.next_epoch();
+        let epoch4 = epoch3.next_epoch();
+        let epoch5 = epoch4.next_epoch();
+        let epoch6 = epoch5.next_epoch();
+
+        // Barrier 1 and 2: both tables are woken.
+        uploader.start_epoch(epoch1, both.clone());
+        uploader.init_instance(TEST_LOCAL_INSTANCE_ID, TEST_TABLE_ID, epoch1);
+        uploader.init_instance(OLD_INSTANCE_ID, SLEEPY_TABLE_ID, epoch1);
+        uploader.start_epoch(epoch2, both.clone());
+        uploader.local_seal_epoch_for_test(TEST_LOCAL_INSTANCE_ID, epoch1);
+        uploader.local_seal_epoch_for_test(OLD_INSTANCE_ID, epoch1);
+        let (sync_tx, sync_rx) = oneshot::channel();
+        uploader.start_single_epoch_sync(epoch1, sync_tx, both.clone());
+        assert_uploader_pending(&mut uploader).await;
+        assert!(sync_rx.await.unwrap().unwrap().uploaded_ssts.is_empty());
+
+        // Barrier 3: the sleepy table falls asleep.
+        uploader.start_epoch(epoch3, only_test.clone());
+        uploader.abandon_epoch(epoch2, HashSet::from_iter([SLEEPY_TABLE_ID]));
+        uploader.local_seal_epoch_for_test(TEST_LOCAL_INSTANCE_ID, epoch2);
+        let (sync_tx, sync_rx) = oneshot::channel();
+        uploader.start_single_epoch_sync(epoch2, sync_tx, only_test.clone());
+        assert_uploader_pending(&mut uploader).await;
+        assert!(sync_rx.await.unwrap().unwrap().uploaded_ssts.is_empty());
+
+        // Barrier 4 replaces the job of the sleepy table. The actor that stops jumps from epoch
+        // 2 to epoch 4 and destroys its instance, the new actor starts at epoch 4. Epoch 3 is
+        // only synced for the table that was woken by barrier 3.
+        uploader.start_epoch(epoch4, both.clone());
+        uploader.local_seal_epoch_for_test(TEST_LOCAL_INSTANCE_ID, epoch3);
+        uploader.local_seal_epoch(OLD_INSTANCE_ID, epoch4, SealCurrentEpochOptions::for_test());
+        uploader.may_destroy_instance(OLD_INSTANCE_ID);
+        uploader.init_instance(NEW_INSTANCE_ID, SLEEPY_TABLE_ID, epoch4);
+        let (sync_tx, sync_rx) = oneshot::channel();
+        uploader.start_single_epoch_sync(epoch3, sync_tx, only_test.clone());
+        assert_uploader_pending(&mut uploader).await;
+        assert!(sync_rx.await.unwrap().unwrap().uploaded_ssts.is_empty());
+
+        // Barrier 5: both tables seal epoch 4, the new actor with data. The destroyed instance
+        // never sealed epoch 4.
+        uploader.start_epoch(epoch5, both.clone());
+        let (imm, tracker) = gen_imm_inner_with_unlimit(SLEEPY_TABLE_ID, epoch4, 0);
+        uploader.add_imm(NEW_INSTANCE_ID, (imm.clone(), tracker));
+        uploader.local_seal_epoch_for_test(TEST_LOCAL_INSTANCE_ID, epoch4);
+        uploader.local_seal_epoch_for_test(NEW_INSTANCE_ID, epoch4);
+        let (sync_tx, sync_rx) = oneshot::channel();
+        uploader.start_single_epoch_sync(epoch4, sync_tx, both.clone());
+        sst_collector.next(&mut uploader).await;
+        let synced = sync_rx.await.unwrap().unwrap();
+        assert_eq!(1, synced.uploaded_ssts.len());
+        assert_eq!(
+            &HashMap::from_iter([(NEW_INSTANCE_ID, vec![imm.batch_id()])]),
+            synced.uploaded_ssts[0].imm_ids()
+        );
+
+        // Barrier 6: the destroyed instance is gone, the tables keep syncing.
+        uploader.start_epoch(epoch6, both.clone());
+        uploader.local_seal_epoch_for_test(TEST_LOCAL_INSTANCE_ID, epoch5);
+        uploader.local_seal_epoch_for_test(NEW_INSTANCE_ID, epoch5);
+        let (sync_tx, sync_rx) = oneshot::channel();
+        uploader.start_single_epoch_sync(epoch5, sync_tx, both.clone());
+        assert_uploader_pending(&mut uploader).await;
+        assert!(sync_rx.await.unwrap().unwrap().uploaded_ssts.is_empty());
+    }
+
+    /// Selective barriers: a table is dropped while it sleeps. The barrier of the command does
+    /// not sync the table, and no later barrier will: the table must not stay in the uploader.
+    #[tokio::test]
+    async fn test_uploader_table_dropped_while_asleep() {
+        const SLEEPY_TABLE_ID: TableId = TableId::new(235);
+        const SLEEPY_INSTANCE_ID: LocalInstanceId = TEST_LOCAL_INSTANCE_ID + 1;
+        let both = HashSet::from_iter([TEST_TABLE_ID, SLEEPY_TABLE_ID]);
+        let only_test = HashSet::from_iter([TEST_TABLE_ID]);
+
+        let mut uploader = test_uploader(dummy_success_upload_future);
+        let epoch1 = INITIAL_EPOCH.next_epoch();
+        let epoch2 = epoch1.next_epoch();
+        let epoch3 = epoch2.next_epoch();
+        let epoch4 = epoch3.next_epoch();
+
+        // Barrier 1 and 2: both tables are woken.
+        uploader.start_epoch(epoch1, both.clone());
+        uploader.init_instance(TEST_LOCAL_INSTANCE_ID, TEST_TABLE_ID, epoch1);
+        uploader.init_instance(SLEEPY_INSTANCE_ID, SLEEPY_TABLE_ID, epoch1);
+        uploader.start_epoch(epoch2, both.clone());
+        uploader.local_seal_epoch_for_test(TEST_LOCAL_INSTANCE_ID, epoch1);
+        uploader.local_seal_epoch_for_test(SLEEPY_INSTANCE_ID, epoch1);
+        let (sync_tx, sync_rx) = oneshot::channel();
+        uploader.start_single_epoch_sync(epoch1, sync_tx, both.clone());
+        assert_uploader_pending(&mut uploader).await;
+        assert!(sync_rx.await.unwrap().unwrap().uploaded_ssts.is_empty());
+
+        // Barrier 3: the sleepy table falls asleep.
+        uploader.start_epoch(epoch3, only_test.clone());
+        uploader.abandon_epoch(epoch2, HashSet::from_iter([SLEEPY_TABLE_ID]));
+        uploader.local_seal_epoch_for_test(TEST_LOCAL_INSTANCE_ID, epoch2);
+        let (sync_tx, sync_rx) = oneshot::channel();
+        uploader.start_single_epoch_sync(epoch2, sync_tx, only_test.clone());
+        assert_uploader_pending(&mut uploader).await;
+        assert!(sync_rx.await.unwrap().unwrap().uploaded_ssts.is_empty());
+
+        // Barrier 4 drops the sleepy table: its actor seals into epoch 4, which the table does
+        // not start, and destroys its instance.
+        uploader.start_epoch(epoch4, only_test.clone());
+        uploader.local_seal_epoch_for_test(TEST_LOCAL_INSTANCE_ID, epoch3);
+        uploader.local_seal_epoch(
+            SLEEPY_INSTANCE_ID,
+            epoch4,
+            SealCurrentEpochOptions::for_test(),
+        );
+        assert!(
+            uploader
+                .data()
+                .unsync_data
+                .table_data
+                .contains_key(&SLEEPY_TABLE_ID)
+        );
+        uploader.may_destroy_instance(SLEEPY_INSTANCE_ID);
+        let unsync_data = &uploader.data().unsync_data;
+        assert!(!unsync_data.table_data.contains_key(&SLEEPY_TABLE_ID));
+        assert!(
+            !unsync_data
+                .instance_table_id
+                .contains_key(&SLEEPY_INSTANCE_ID)
+        );
+        let (sync_tx, sync_rx) = oneshot::channel();
+        uploader.start_single_epoch_sync(epoch3, sync_tx, only_test.clone());
+        assert_uploader_pending(&mut uploader).await;
+        assert!(sync_rx.await.unwrap().unwrap().uploaded_ssts.is_empty());
     }
 
     /// Selective barriers with `checkpoint_frequency > 1`: a table falls asleep right after a
