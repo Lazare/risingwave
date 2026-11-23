@@ -675,6 +675,12 @@ impl ExecutorMemory {
         }
     }
 
+    /// Whether the memory is bounded by the node: when it is not, [`settle`](Self::settle) never
+    /// waits nor fails.
+    pub fn is_managed(&self) -> bool {
+        self.managed.is_some()
+    }
+
     /// The context in which the operator counts the memory that it uses.
     pub fn meter(&self) -> MemoryContext {
         self.meter.clone()
