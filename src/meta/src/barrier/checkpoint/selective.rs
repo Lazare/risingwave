@@ -111,6 +111,7 @@ impl GraphView {
         let mut ringing = HashSet::new();
         let mut always_awake = HashSet::new();
         let mut now_periods = HashMap::new();
+        let mut spontaneous_fragments = HashSet::new();
         let mut unsupported = false;
         for fragment in fragments {
             let fragment_id = fragment.fragment_id;
@@ -119,6 +120,15 @@ impl GraphView {
             let mut connector_source = false;
             let mut gated_cdc_filter = false;
             let mut cdc_table_name = None;
+            // Whether an operator of the fragment may emit data or write state on its own.
+            let mut spontaneous = false;
+            visit_stream_node(&fragment.nodes, |node| {
+                if let Some(body) = &node.node_body
+                    && !is_input_driven(body)
+                {
+                    spontaneous = true;
+                }
+            });
             visit_stream_node(&fragment.nodes, |node| match &node.node_body {
                 Some(NodeBody::Merge(merge)) => {
                     downstreams
@@ -159,7 +169,12 @@ impl GraphView {
                     FragmentTypeFlag::StreamCdcScan,
                     FragmentTypeFlag::CdcFilter,
                 ]);
-            if is_dml_table {
+            if spontaneous {
+                // Safe by default: such a fragment receives and is released by every barrier,
+                // so that its descendants receive every barrier too.
+                always_awake.insert(fragment_id);
+                spontaneous_fragments.insert(fragment_id);
+            } else if is_dml_table {
                 gated_origins.insert(fragment_id);
             }
             if connector_source {
@@ -178,7 +193,7 @@ impl GraphView {
                 // sleeps. Without a state table, it cannot hold rows and must always be released.
                 always_awake.insert(fragment_id);
                 cdc_filters.insert(fragment_id, cdc_table_name);
-                if gated_cdc_filter {
+                if gated_cdc_filter && !spontaneous {
                     awake_gated.insert(fragment_id);
                     ringing.insert(fragment_id);
                 }
@@ -188,7 +203,9 @@ impl GraphView {
             }
             if mask.contains(FragmentTypeFlag::Now) {
                 always_awake.insert(fragment_id);
-                now_periods.insert(fragment_id, now_fragment_period_ms(&fragment.nodes));
+                if !spontaneous {
+                    now_periods.insert(fragment_id, now_fragment_period_ms(&fragment.nodes));
+                }
             }
         }
         let mut silent_roots = HashSet::new();
@@ -197,11 +214,13 @@ impl GraphView {
                 always_awake.insert(fragment_id);
                 // Its downstream fragments receive every barrier anyway, and each decides itself
                 // when its own descendants must wake up.
-                if downstreams.get(&fragment_id).is_some_and(|downstreams| {
-                    downstreams
-                        .iter()
-                        .all(|downstream| cdc_filters.contains_key(downstream))
-                }) {
+                if !spontaneous_fragments.contains(&fragment_id)
+                    && downstreams.get(&fragment_id).is_some_and(|downstreams| {
+                        downstreams
+                            .iter()
+                            .all(|downstream| cdc_filters.contains_key(downstream))
+                    })
+                {
                     silent_roots.insert(fragment_id);
                 }
             }
@@ -210,10 +229,24 @@ impl GraphView {
         // `CdcFilter` (design D1), which then no longer needs to receive every barrier.
         let mut cdc_routes = vec![];
         for source_fragment_id in silent_roots.intersection(&connector_sources) {
+            // The source holds the rows of a table for one `CdcFilter` only, and broadcasts the
+            // rows it emits to all of them: two `CdcFilter` of the same upstream table (two
+            // tables created from it) are not routed and keep receiving every barrier.
+            let mut filters_per_table: HashMap<&str, usize> = HashMap::new();
+            for fragment_id in &downstreams[source_fragment_id] {
+                if let Some(table_name) = &cdc_filters[fragment_id] {
+                    *filters_per_table.entry(table_name.as_str()).or_default() += 1;
+                }
+            }
             for fragment_id in &downstreams[source_fragment_id] {
                 let Some(table_name) = &cdc_filters[fragment_id] else {
                     continue;
                 };
+                if spontaneous_fragments.contains(fragment_id)
+                    || filters_per_table[table_name.as_str()] > 1
+                {
+                    continue;
+                }
                 always_awake.remove(fragment_id);
                 awake_gated.remove(fragment_id);
                 ringing.insert(*fragment_id);
@@ -449,6 +482,87 @@ impl SelectiveBarrierState {
             released_fragment_ids: vec![],
             cdc_routes: vec![],
         }
+    }
+}
+
+/// Whether an operator only emits data, emits watermarks and writes its state as a consequence
+/// of the messages it received from its input during the current epoch. Only fragments made of
+/// such operators may sleep: an operator that acts on its own (timer, background read, buffer
+/// emitted in a later epoch, output or state write at every barrier) would write into an epoch
+/// that its sleeping tables abandon, or before the epoch jump of a wake-up.
+///
+/// The match is exhaustive on purpose: a new operator must be classified here, and must be
+/// classified as not input driven until it has been checked.
+fn is_input_driven(body: &NodeBody) -> bool {
+    match body {
+        // Stateless or stateful operators that only react to their input.
+        NodeBody::Project(_)
+        | NodeBody::Filter(_)
+        | NodeBody::StatelessSimpleAgg(_)
+        | NodeBody::HashAgg(_)
+        | NodeBody::AppendOnlyTopN(_)
+        | NodeBody::HashJoin(_)
+        | NodeBody::TopN(_)
+        | NodeBody::HopWindow(_)
+        | NodeBody::Merge(_)
+        | NodeBody::Exchange(_)
+        | NodeBody::BatchPlan(_)
+        | NodeBody::LookupUnion(_)
+        | NodeBody::Union(_)
+        | NodeBody::Expand(_)
+        | NodeBody::DynamicFilter(_)
+        | NodeBody::ProjectSet(_)
+        | NodeBody::GroupTopN(_)
+        | NodeBody::Sort(_)
+        | NodeBody::RowIdGen(_)
+        | NodeBody::AppendOnlyGroupTopN(_)
+        | NodeBody::TemporalJoin(_)
+        | NodeBody::AppendOnlyDedup(_)
+        | NodeBody::NoOp(_)
+        | NodeBody::EowcOverWindow(_)
+        | NodeBody::OverWindow(_)
+        | NodeBody::Changelog(_)
+        | NodeBody::LocalApproxPercentile(_)
+        | NodeBody::AsOfJoin(_)
+        | NodeBody::MaterializedExprs(_)
+        | NodeBody::EowcGapFill(_)
+        | NodeBody::GapFill(_) => true,
+        // A refreshable table rewrites itself from a background stream during a refresh.
+        NodeBody::Materialize(materialize) => materialize.refresh_progress_table.is_none(),
+        // Emits its current output at every barrier when asked to.
+        NodeBody::SimpleAgg(agg) => !agg.must_output_per_barrier,
+        // A backfill only works while its job is being created, when barriers are full.
+        NodeBody::StreamScan(_) => true,
+        // The backfill of a CDC table goes on after the table is created: it only reads the
+        // snapshot in an epoch opened by a barrier that releases its fragment, and rings.
+        NodeBody::StreamCdcScan(_) => true,
+        // Origins and operators with dedicated rules in `GraphView::new`.
+        NodeBody::Source(_)
+        | NodeBody::Dml(_)
+        | NodeBody::Now(_)
+        | NodeBody::Values(_)
+        | NodeBody::BarrierRecv(_)
+        | NodeBody::CdcFilter(_)
+        | NodeBody::Sink(_)
+        | NodeBody::UpstreamSinkUnion(_) => true,
+        // Refreshes the global watermark in the background while idle, then emits and persists it.
+        NodeBody::WatermarkFilter(_) => false,
+        // Delta join: the lookup writes the arrangement of an epoch after the barrier that ends
+        // it.
+        NodeBody::Lookup(_) | NodeBody::Arrange(_) | NodeBody::DeltaIndexJoin(_) => false,
+        // Emits its output and rewrites its row count at every barrier.
+        NodeBody::GlobalApproxPercentile(_) | NodeBody::RowMerge(_) => false,
+        // Emits the rows read back from its log store whenever its downstream is ready.
+        NodeBody::SyncLogStore(_) => false,
+        // Read external systems or a snapshot on their own, or not checked yet.
+        NodeBody::StreamFsFetch(_)
+        | NodeBody::SourceBackfill(_)
+        | NodeBody::LocalityProvider(_)
+        | NodeBody::VectorIndexWrite(_)
+        | NodeBody::VectorIndexLookupJoin(_)
+        | NodeBody::IcebergWithPkIndexWriter(_)
+        | NodeBody::IcebergWithPkIndexPositionDeleteMerger(_)
+        | NodeBody::CompactionResolver(_) => false,
     }
 }
 
@@ -1070,6 +1184,56 @@ mod tests {
         state.plan_command(fragments.iter().copied(), true);
         let plan = state.plan(&fragments, true, true, 0);
         assert_eq!(plan.info.cdc_routes.len(), 1);
+    }
+
+    /// Two tables created from the same upstream table: the source can hold rows for one
+    /// `CdcFilter` only, so none of them is routed and both tables stay awake.
+    #[test]
+    fn test_cdc_routes_of_a_table_consumed_twice() {
+        let mut graph = cdc_graph();
+        for fragment in [1, 2] {
+            let NodeBody::CdcFilter(filter) = graph[fragment].nodes.node_body.as_mut().unwrap()
+            else {
+                unreachable!()
+            };
+            filter.search_condition = Some(table_name_condition("public.a"));
+        }
+        let fragments: Vec<_> = graph.iter().collect();
+        let mut state = SelectiveBarrierState::default();
+        let plan = state.plan(&fragments, true, true, 0);
+        assert!(plan.info.cdc_routes.is_empty());
+        let plan = state.plan(&fragments, true, true, 0);
+        assert!(woken(&plan, &CDC_ALL).is_superset(&ids(&[10, 11, 12])));
+    }
+
+    /// A fragment with an operator that acts on its own never sleeps, and neither do its
+    /// descendants; the rest of the graph still sleeps.
+    #[test]
+    fn test_spontaneous_operator_stays_awake() {
+        let with_node = |fragment: &mut InflightFragmentInfo, body: NodeBody| {
+            let inner = std::mem::take(&mut fragment.nodes);
+            fragment.nodes = StreamNode {
+                node_body: Some(body),
+                input: vec![inner],
+                ..Default::default()
+            };
+        };
+
+        // A DML table with a watermark filter (1): the view on it (3) and the join (4) stay
+        // awake, the other table (2) and its temporal filter (6) sleep.
+        let mut graph = graph();
+        with_node(&mut graph[0], NodeBody::WatermarkFilter(Box::default()));
+        let fragments: Vec<_> = graph.iter().collect();
+        let all: Vec<u32> = graph.iter().map(|f| f.fragment_id.as_raw_id()).collect();
+        let mut state = SelectiveBarrierState::default();
+        let plan = state.plan(&fragments, true, true, 0);
+        assert!(plan.full);
+        let plan = state.plan(&fragments, true, true, 0);
+        assert!(!plan.full);
+        let woken_ids = woken(&plan, &all);
+        assert!(woken_ids.is_superset(&ids(&[1, 3, 4])));
+        assert!(!woken_ids.contains(&2));
+        assert!(plan.info.released_fragment_ids.contains(&1));
     }
 
     /// A CDC backfill reads the snapshot on its own while its `CdcFilter` sleeps: its ring keeps

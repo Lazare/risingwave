@@ -161,14 +161,26 @@ Enabled with `[meta.developer] enable_selective_barrier = true` (off by default)
   values and sinks receive every barrier, and so do their descendants.
 - A `CdcFilter` whose table name has the form `a.b.c` (legacy SQL Server tables, rewritten by the
   executor) is not routed: it receives every barrier and its table never sleeps.
+- Two tables created from the same upstream table of a shared CDC source are not routed either:
+  the source holds the rows of an upstream table for one `CdcFilter` only, and broadcasts what it
+  emits to all of them.
 - A graph containing cross-database snapshot backfill, or a table that receives a sink
   (`sink into table`), always receives full barriers.
 - While a job is being created, barriers are full.
 - A CDC table is created as soon as its job starts, while its backfill goes on reading the
   snapshot of the upstream table. The backfill executor reads the snapshot only in an epoch
   opened by a barrier that releases its fragment, and rings at every barrier until the snapshot
-  is read entirely, so the table and its descendants stay awake during the backfill. Not done for
-  the parallelized CDC backfill.
+  is read entirely, so the table and its descendants stay awake during the backfill. The
+  parallelized backfill (`backfill.parallelism`) does the same for its splits.
+- A fragment may sleep only if all its operators are input driven: they emit data, emit
+  watermarks and write state only as a consequence of the messages received from their input
+  during the current epoch. `is_input_driven` (`barrier/checkpoint/selective.rs`) classifies
+  every operator, with an exhaustive match so that a new operator has to be classified. A
+  fragment with any other operator receives and is released by every barrier, and so do its
+  descendants: watermark filter (background refresh of the global watermark), delta join
+  (`Lookup`, `Arrange`), global approximate percentile and the simple aggregation that outputs
+  at every barrier, unaligned join (`SyncLogStore`), refreshable table, source backfill, file
+  fetch, locality provider, vector index, Iceberg writer with primary key index.
 - `FLUSH` uses two barriers, so that data released by a fragment waking up at the first one is
   committed by the second.
 - A gated DML executor keeps the data of an epoch in memory until the next barrier; a very large
