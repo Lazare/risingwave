@@ -147,11 +147,20 @@ impl GraphView {
                         .as_ref()
                         .and_then(routable_cdc_table_name);
                 }
-                // Every table has this operator to receive sinks into the table. It merges
-                // several upstream fragments outside of the merge executor, which does not
-                // support sleeping upstreams yet: only a table without such sink is supported.
-                Some(NodeBody::UpstreamSinkUnion(union)) if !union.init_upstreams.is_empty() => {
-                    unsupported = true;
+                // Every table has this operator to receive sinks into the table. It reads the
+                // fragments of these sinks without a merge node: they are upstreams of the
+                // table like the others. The operator does not support a sleeping upstream, so
+                // these fragments receive every barrier (as every sink fragment does), and so
+                // do the table and its descendants.
+                Some(NodeBody::UpstreamSinkUnion(union)) => {
+                    for upstream in &union.init_upstreams {
+                        always_awake.insert(upstream.upstream_fragment_id);
+                        downstreams
+                            .entry(upstream.upstream_fragment_id)
+                            .or_default()
+                            .push(fragment_id);
+                        *upstream_count.entry(fragment_id).or_default() += 1;
+                    }
                 }
                 _ => {}
             });
@@ -179,6 +188,11 @@ impl GraphView {
             }
             if connector_source {
                 connector_sources.insert(fragment_id);
+                // A connector source reads its external system at any time. The planner gives it
+                // a fragment of its own, without upstream, which is always awake as a root; do
+                // not rely on it: with an upstream fragment, the fragment would otherwise sleep
+                // with it while the source keeps emitting.
+                always_awake.insert(fragment_id);
             }
             if mask.contains(FragmentTypeFlag::Dml) {
                 ringing.insert(fragment_id);
@@ -257,7 +271,7 @@ impl GraphView {
                 });
             }
         }
-        // A gated origin with an upstream (e.g. a table fed by a sink) is not supported.
+        // A gated origin cannot also be a fragment that every barrier releases.
         if gated_origins
             .iter()
             .any(|fragment_id| always_awake.contains(fragment_id))
@@ -713,7 +727,9 @@ fn date_trunc_period_ms(expr: &ExprNode) -> Option<u64> {
 mod tests {
     use risingwave_common::catalog::FragmentTypeMask;
     use risingwave_meta_model::fragment::DistributionType;
-    use risingwave_pb::stream_plan::{MergeNode, SourceNode, StreamNode};
+    use risingwave_pb::stream_plan::{
+        MergeNode, SourceNode, StreamNode, UpstreamSinkInfo, UpstreamSinkUnionNode,
+    };
 
     use super::*;
     use crate::controller::fragment::InflightActorInfo;
@@ -854,6 +870,42 @@ mod tests {
         // Then they sleep again.
         let plan = state.plan(&fragments, true, true, 0);
         assert_eq!(woken(&plan, &ALL), ids(&[5, 6]));
+    }
+
+    /// A connector source in a fragment that also has an upstream fragment (not a root): the
+    /// fragment and its descendants receive every barrier, even while the upstream sleeps.
+    #[test]
+    fn test_connector_source_with_upstream_stays_awake() {
+        use FragmentTypeFlag::*;
+        let connector_source = StreamNode {
+            node_body: Some(NodeBody::Source(Box::new(SourceNode {
+                source_inner: Some(Default::default()),
+            }))),
+            ..Default::default()
+        };
+        let graph = vec![
+            fragment(1, &[Source, Dml, Mview], vec![], 1, 1, 11),
+            fragment(2, &[Source, Mview], vec![merge(1), connector_source], 2, 1, 12),
+            fragment(3, &[Mview], vec![merge(2)], 3, 1, 13),
+            fragment(4, &[Mview], vec![merge(1)], 4, 1, 14),
+        ];
+        let fragments: Vec<_> = graph.iter().collect();
+        let mut state = SelectiveBarrierState::default();
+        let plan = state.plan(&fragments, true, true, 0);
+        assert!(plan.full);
+        for _ in 0..3 {
+            let plan = state.plan(&fragments, true, true, 0);
+            assert!(!plan.full);
+            assert_eq!(woken(&plan, &[1, 2, 3, 4]), ids(&[2, 3]));
+            assert_eq!(
+                plan.info
+                    .released_fragment_ids
+                    .iter()
+                    .copied()
+                    .collect::<HashSet<_>>(),
+                ids(&[2])
+            );
+        }
     }
 
     #[test]
@@ -1044,6 +1096,73 @@ mod tests {
         for _ in 0..3 {
             assert!(state.plan(&fragments, true, true, 0).full);
         }
+    }
+
+    /// A table (3, with its DML fragment 4) fed by a sink (2) that reads another table (1): the
+    /// sink is an upstream of the table although no merge node says so. The table and its
+    /// descendant (5) receive every barrier with the sink, the rest of the graph sleeps.
+    #[test]
+    fn test_sink_into_table() {
+        use FragmentTypeFlag::*;
+        let sink_union = |upstreams: &[u32]| StreamNode {
+            node_body: Some(NodeBody::UpstreamSinkUnion(Box::new(UpstreamSinkUnionNode {
+                init_upstreams: upstreams
+                    .iter()
+                    .map(|upstream| UpstreamSinkInfo {
+                        upstream_fragment_id: (*upstream).into(),
+                        ..Default::default()
+                    })
+                    .collect(),
+            }))),
+            ..Default::default()
+        };
+        const ALL: [u32; 7] = [1, 2, 3, 4, 5, 6, 7];
+        let graph = |upstreams: &[u32]| {
+            vec![
+                fragment(1, &[Source, Dml, Mview], vec![], 1, 1, 11),
+                fragment(2, &[Sink], vec![merge(1)], 2, 1, 12),
+                fragment(3, &[Mview], vec![merge(4), sink_union(upstreams)], 3, 1, 13),
+                fragment(4, &[Source, Dml], vec![], 4, 1, 14),
+                fragment(5, &[Mview], vec![merge(3)], 5, 1, 15),
+                fragment(6, &[Source, Dml, Mview], vec![], 6, 1, 16),
+                fragment(7, &[Mview], vec![merge(6)], 7, 1, 17),
+            ]
+        };
+
+        let with_sink = graph(&[2]);
+        let fragments: Vec<_> = with_sink.iter().collect();
+        let mut state = SelectiveBarrierState::default();
+        assert!(state.plan(&fragments, true, true, 0).full);
+        for _ in 0..3 {
+            let plan = state.plan(&fragments, true, true, 0);
+            assert!(!plan.full);
+            assert_eq!(woken(&plan, &ALL), ids(&[2, 3, 5]));
+        }
+        // DML on the target table: only its DML fragment wakes up in addition.
+        state.on_ring([4.into()]);
+        let plan = state.plan(&fragments, true, true, 0);
+        assert_eq!(woken(&plan, &ALL), ids(&[2, 3, 4, 5]));
+        // The source table of the sink rings: the sink is already awake.
+        state.on_ring([1.into()]);
+        let plan = state.plan(&fragments, true, true, 0);
+        assert_eq!(woken(&plan, &ALL), ids(&[1, 2, 3, 4, 5]));
+
+        // The fragment that feeds the table stays awake even without the sink flag.
+        let mut unflagged = graph(&[2]);
+        unflagged[1].fragment_type_mask = FragmentTypeMask::empty();
+        let fragments: Vec<_> = unflagged.iter().collect();
+        let mut state = SelectiveBarrierState::default();
+        assert!(state.plan(&fragments, true, true, 0).full);
+        let plan = state.plan(&fragments, true, true, 0);
+        assert_eq!(woken(&plan, &ALL), ids(&[2, 3, 5]));
+
+        // Once the sink is dropped, the table sleeps like any other table.
+        let without_sink = graph(&[]);
+        let fragments: Vec<_> = without_sink.iter().collect();
+        let mut state = SelectiveBarrierState::default();
+        assert!(state.plan(&fragments, true, true, 0).full);
+        let plan = state.plan(&fragments, true, true, 0);
+        assert_eq!(woken(&plan, &ALL), ids(&[2]));
     }
 
     fn cdc_filter(upstream: u32, gated: bool) -> StreamNode {
