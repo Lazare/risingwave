@@ -456,7 +456,29 @@ impl HummockStorageReadSnapshot {
             .get_safe_version(table_id, epoch)
         {
             Some(version) => Ok(version),
-            None => self.get_time_travel_version(epoch, table_id).await,
+            None => {
+                // The table has moved on since the snapshot was taken, and the node dropped the
+                // versions in between. A batch query in this state has run for too long: fetching
+                // the version from the meta node for each of its reads would make it crawl.
+                if matches!(self.epoch, HummockReadEpoch::BatchQueryCommitted(_, _))
+                    && !self.batch_read_stale_snapshot_from_meta
+                    && self
+                        .recent_versions
+                        .load()
+                        .latest_version()
+                        .state_table_info
+                        .info()
+                        .contains_key(&table_id)
+                {
+                    return Err(HummockError::batch_snapshot_too_old(
+                        table_id,
+                        epoch,
+                        self.max_cached_recent_versions_number,
+                    )
+                    .into());
+                }
+                self.get_time_travel_version(epoch, table_id).await
+            }
         }
     }
 
@@ -706,6 +728,9 @@ pub struct HummockStorageReadSnapshot {
     backup_reader: BackupReaderRef,
     hummock_meta_client: Arc<dyn HummockMetaClient>,
     simple_time_travel_version_cache: Arc<SimpleTimeTravelVersionCache>,
+    /// See `StorageOpts::batch_read_stale_snapshot_from_meta`.
+    batch_read_stale_snapshot_from_meta: bool,
+    max_cached_recent_versions_number: usize,
 }
 
 impl StateStoreGet for HummockStorageReadSnapshot {
@@ -996,6 +1021,14 @@ impl StateStore for HummockStorage {
             backup_reader: self.backup_reader.clone(),
             hummock_meta_client: self.hummock_meta_client.clone(),
             simple_time_travel_version_cache: self.simple_time_travel_version_cache.clone(),
+            batch_read_stale_snapshot_from_meta: self
+                .context
+                .storage_opts
+                .batch_read_stale_snapshot_from_meta,
+            max_cached_recent_versions_number: self
+                .context
+                .storage_opts
+                .max_cached_recent_versions_number,
         })
     }
 
