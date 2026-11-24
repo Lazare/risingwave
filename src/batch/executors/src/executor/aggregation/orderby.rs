@@ -15,17 +15,19 @@
 use std::ops::Range;
 
 use anyhow::Context;
-use risingwave_common::array::{Op, RowRef, StreamChunk};
+use risingwave_common::array::{ListValue, Op, RowRef, StreamChunk, StructValue};
 use risingwave_common::row::{OwnedRow, Row, RowExt};
-use risingwave_common::types::{DataType, Datum};
+use risingwave_common::types::{
+    DataType, Datum, ListType, ScalarImpl, ScalarRefImpl, StructType, ToOwnedDatum,
+};
 use risingwave_common::util::chunk_coalesce::DataChunkBuilder;
 use risingwave_common::util::memcmp_encoding;
 use risingwave_common::util::sort_util::{ColumnOrder, OrderType};
 use risingwave_common_estimate_size::EstimateSize;
-use risingwave_expr::Result;
 use risingwave_expr::aggregate::{
     AggStateDyn, AggregateFunction, AggregateState, BoxedAggregateFunction,
 };
+use risingwave_expr::{ExprError, Result};
 
 /// `ProjectionOrderBy` is a wrapper of `AggregateFunction` that sorts rows by given columns and
 /// then projects columns.
@@ -35,6 +37,20 @@ pub struct ProjectionOrderBy {
     arg_indices: Vec<usize>,
     order_col_indices: Vec<usize>,
     order_types: Vec<OrderType>,
+    kept_rows: KeptRows,
+    /// Type of the encoded state: a list of `struct<order key, arguments...>`.
+    encoded_state_type: DataType,
+}
+
+/// The ordered rows that the inner aggregate function needs to compute its result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeptRows {
+    /// All the rows.
+    All,
+    /// Only the first row in the order, e.g. for `first_value`.
+    First,
+    /// Only the last row in the order, e.g. for `last_value`.
+    Last,
 }
 
 #[derive(Debug)]
@@ -59,18 +75,24 @@ impl ProjectionOrderBy {
         arg_types: Vec<DataType>,
         arg_indices: Vec<usize>,
         column_orders: Vec<ColumnOrder>,
+        kept_rows: KeptRows,
         inner: BoxedAggregateFunction,
     ) -> Self {
         let (order_col_indices, order_types) = column_orders
             .into_iter()
             .map(|c| (c.column_index, c.order_type))
             .unzip();
+        let encoded_row_type =
+            StructType::unnamed(std::iter::once(DataType::Bytea).chain(arg_types.iter().cloned()));
+        let encoded_state_type = ListType::new(encoded_row_type.into()).into();
         Self {
             inner,
             arg_types,
             arg_indices,
             order_col_indices,
             order_types,
+            kept_rows,
+            encoded_state_type,
         }
     }
 
@@ -78,12 +100,42 @@ impl ProjectionOrderBy {
         let key =
             memcmp_encoding::encode_row(row.project(&self.order_col_indices), &self.order_types)
                 .context("failed to encode row")?;
+        // When a single row is kept, skip the rows that cannot replace it. Rows with equal keys
+        // have no defined order, so either of them can be kept.
+        let replaced = match (self.kept_rows, state.unordered_values.first()) {
+            (KeptRows::All, _) | (_, None) => false,
+            (KeptRows::First, Some((kept_key, _))) => {
+                if key[..] >= kept_key[..] {
+                    return Ok(());
+                }
+                true
+            }
+            (KeptRows::Last, Some((kept_key, _))) => {
+                if key[..] < kept_key[..] {
+                    return Ok(());
+                }
+                true
+            }
+        };
         let projected_row = row.project(&self.arg_indices).to_owned_row();
-
-        state.unordered_values_estimated_heap_size +=
-            key.len() + projected_row.estimated_heap_size();
-        state.unordered_values.push((key.into(), projected_row));
+        self.push_entry(state, key.into(), projected_row, replaced);
         Ok(())
+    }
+
+    /// Adds an entry to the state, or replaces the single kept entry if `replaced` is true.
+    fn push_entry(&self, state: &mut State, key: OrderKey, row: OwnedRow, replaced: bool) {
+        let entry_size = key.len() + row.estimated_heap_size();
+        if replaced {
+            state.unordered_values[0] = (key, row);
+            state.unordered_values_estimated_heap_size = entry_size;
+        } else {
+            state.unordered_values.push((key, row));
+            state.unordered_values_estimated_heap_size += entry_size;
+        }
+    }
+
+    fn encoded_row_type(&self) -> &DataType {
+        self.encoded_state_type.as_list_elem()
     }
 }
 
@@ -102,7 +154,9 @@ impl AggregateFunction for ProjectionOrderBy {
 
     async fn update(&self, state: &mut AggregateState, input: &StreamChunk) -> Result<()> {
         let state = state.downcast_mut::<State>();
-        state.unordered_values.reserve(input.cardinality());
+        if self.kept_rows == KeptRows::All {
+            state.unordered_values.reserve(input.cardinality());
+        }
         for (op, row) in input.rows() {
             assert_eq!(op, Op::Insert, "only support append");
             self.push_row(state, row)?;
@@ -117,7 +171,9 @@ impl AggregateFunction for ProjectionOrderBy {
         range: Range<usize>,
     ) -> Result<()> {
         let state = state.downcast_mut::<State>();
-        state.unordered_values.reserve(range.len());
+        if self.kept_rows == KeptRows::All {
+            state.unordered_values.reserve(range.len());
+        }
         for (op, row) in input.rows_in(range) {
             assert_eq!(op, Op::Insert, "only support append");
             self.push_row(state, row)?;
@@ -145,12 +201,55 @@ impl AggregateFunction for ProjectionOrderBy {
         }
         self.inner.get_result(&inner_state).await
     }
+
+    /// Encodes the kept rows as a list of `struct<order key, arguments...>`, so that the batch
+    /// hash aggregation can spill the state to disk.
+    fn encode_state(&self, state: &AggregateState) -> Result<Datum> {
+        let state = state.downcast_ref::<State>();
+        let rows = state.unordered_values.iter().map(|(key, row)| {
+            let fields = std::iter::once(Some(ScalarImpl::Bytea(key.clone())))
+                .chain(row.iter().map(|datum| datum.to_owned_datum()))
+                .collect();
+            Some(ScalarImpl::Struct(StructValue::new(fields)))
+        });
+        let list = ListValue::from_datum_iter(self.encoded_row_type(), rows);
+        Ok(Some(list.into()))
+    }
+
+    fn decode_state(&self, datum: Datum) -> Result<AggregateState> {
+        let mut state = State {
+            unordered_values: vec![],
+            unordered_values_estimated_heap_size: 0,
+        };
+        let list = match datum {
+            Some(ScalarImpl::List(list)) => list,
+            _ => return Err(ExprError::InvalidState("expect a list of rows".into())),
+        };
+        state.unordered_values.reserve_exact(list.len());
+        for row in list.iter() {
+            let Some(ScalarRefImpl::Struct(row)) = row else {
+                return Err(ExprError::InvalidState("expect a struct".into()));
+            };
+            let mut fields = row.iter_fields_ref();
+            let Some(Some(ScalarRefImpl::Bytea(key))) = fields.next() else {
+                return Err(ExprError::InvalidState("expect an order key".into()));
+            };
+            let row = OwnedRow::new(fields.map(|datum| datum.to_owned_datum()).collect());
+            self.push_entry(&mut state, key.into(), row, false);
+        }
+        Ok(AggregateState::Any(Box::new(state)))
+    }
+
+    fn encoded_state_type(&self) -> DataType {
+        self.encoded_state_type.clone()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use risingwave_common::array::{ListValue, StreamChunk};
     use risingwave_common::test_prelude::StreamChunkTestExt;
+    use risingwave_common::types::ScalarImpl;
     use risingwave_expr::aggregate::AggCall;
 
     use super::super::build;
@@ -174,6 +273,80 @@ mod tests {
             agg.get_result(&state).await.unwrap(),
             Some(ListValue::from_iter([789, 456, 123, 321]).into())
         );
+    }
+
+    /// Encodes and decodes the state between two chunks, as the batch hash aggregation does when
+    /// it spills to disk.
+    #[tokio::test]
+    async fn encode_and_decode_state() {
+        let chunk1 = StreamChunk::from_pretty(
+            " i    i
+            + 123  3
+            + 456  2
+            + 789  .",
+        );
+        let chunk2 = StreamChunk::from_pretty(
+            " i    i
+            + 321  9
+            + .    1",
+        );
+        for (pretty, expected) in [
+            (
+                "(array_agg:int4[] $0:int4 orderby $1:asc)",
+                Some(
+                    ListValue::from_iter([None, Some(456), Some(123), Some(321), Some(789)]).into(),
+                ),
+            ),
+            ("(first_value:int4 $0:int4 orderby $1:asc)", None),
+            (
+                "(first_value:int4 $0:int4 orderby $1:desc)",
+                Some(789.into()),
+            ),
+            ("(last_value:int4 $0:int4 orderby $1:asc)", Some(789.into())),
+            ("(last_value:int4 $0:int4 orderby $1:desc)", None),
+        ] {
+            let agg = build(&AggCall::from_pretty(pretty)).unwrap();
+            let state_type = agg.encoded_state_type();
+
+            // A state without any row can be encoded as well.
+            let empty = agg.encode_state(&agg.create_state().unwrap()).unwrap();
+            let mut state = agg.decode_state(empty).unwrap();
+
+            agg.update(&mut state, &chunk1).await.unwrap();
+            let encoded = agg.encode_state(&state).unwrap();
+            // The encoded state must fit in an array of the declared type.
+            let mut builder = state_type.create_array_builder(1);
+            builder.append(&encoded);
+            let mut state = agg.decode_state(builder.finish().datum_at(0)).unwrap();
+            agg.update(&mut state, &chunk2).await.unwrap();
+
+            assert_eq!(agg.get_result(&state).await.unwrap(), expected, "{pretty}");
+        }
+    }
+
+    /// `first_value` and `last_value` only keep one row per group.
+    #[tokio::test]
+    async fn first_last_value_keep_one_row() {
+        let chunk = StreamChunk::from_pretty(
+            " i    i
+            + 123  3
+            + 456  2
+            + 789  2
+            + 321  9",
+        );
+        for pretty in [
+            "(first_value:int4 $0:int4 orderby $1:asc)",
+            "(last_value:int4 $0:int4 orderby $1:asc)",
+        ] {
+            let agg = build(&AggCall::from_pretty(pretty)).unwrap();
+            let mut state = agg.create_state().unwrap();
+            agg.update(&mut state, &chunk).await.unwrap();
+            agg.update(&mut state, &chunk).await.unwrap();
+            let Some(ScalarImpl::List(rows)) = agg.encode_state(&state).unwrap() else {
+                panic!("expect a list");
+            };
+            assert_eq!(rows.len(), 1, "{pretty}");
+        }
     }
 
     #[tokio::test]
