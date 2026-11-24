@@ -1,0 +1,378 @@
+# Build a multi-arch (linux/amd64 + linux/arm64) RisingWave image on GitHub runners
+# and push it under a single tag. Manual trigger only.
+#
+# To run: gh workflow run 'Build Multi-Arch Image' --ref <branch> -f tag=<tag>
+#
+# Nothing is cross-compiled or emulated: for each architecture, the binary is compiled
+# and its image (`docker/Dockerfile.prebuilt`) is built and started on a runner of that
+# architecture. The two images are pushed by digest, then joined under one tag.
+#
+# Destination, configurable in the repository settings:
+# - variable `IMAGE_REPOSITORY`: full repository, e.g. `registry.example.com/team/risingwave`.
+#   Defaults to `ghcr.io/<owner>/risingwave`.
+# - secrets `REGISTRY_USERNAME` / `REGISTRY_PASSWORD`: credentials for that registry.
+#   Not needed for ghcr.io, where the workflow token is used.
+name: Build Multi-Arch Image
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Image tag (default: <branch>-<short sha>)'
+        required: false
+        type: string
+        default: ''
+      amd64_target_cpu:
+        description: 'CPU baseline of the amd64 binary (-Ctarget-cpu)'
+        required: false
+        type: string
+        default: x86-64-v3
+      jobs:
+        description: 'Parallel cargo jobs (lower it if the build is OOM-killed)'
+        required: false
+        type: string
+        default: '3'
+      runner_amd64:
+        description: 'Runner label for the amd64 build'
+        required: false
+        type: string
+        default: ubuntu-24.04
+      runner_arm64:
+        description: 'Runner label for the arm64 build'
+        required: false
+        type: string
+        default: ubuntu-24.04-arm
+
+env:
+  # Always the `production` profile (thin LTO), as for the official images.
+  CARGO_PROFILE: production
+
+jobs:
+  build-binary:
+    name: Build risingwave (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ${{ inputs.runner_amd64 }}
+          - arch: arm64
+            runner: ${{ inputs.runner_arm64 }}
+    runs-on: ${{ matrix.runner }}
+    # GitHub-hosted runners kill a job after 6 hours.
+    timeout-minutes: 355
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_BUILD_JOBS: ${{ inputs.jobs }}
+      # Same optimizations as `production`, only without debug info: it keeps the
+      # memory use and the binary size within what a hosted runner can handle.
+      CARGO_PROFILE_PRODUCTION_DEBUG: '0'
+      CARGO_PROFILE_PRODUCTION_SPLIT_DEBUGINFO: 'off'
+      ENABLE_BUILD_DASHBOARD: '1'
+      # The dashboard is built by the build script of `risingwave_meta_dashboard`. The type
+      # check of `next build` needs more than the default heap of Node.js (about 2 GB).
+      NODE_OPTIONS: '--max-old-space-size=6144'
+      OPENSSL_STATIC: '1'
+      GIT_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check the runner architecture
+        run: |
+          case "$(uname -m)" in
+            x86_64) actual=amd64 ;;
+            aarch64) actual=arm64 ;;
+            *) actual="$(uname -m)" ;;
+          esac
+          if [[ "$actual" != "${{ matrix.arch }}" ]]; then
+            echo "::error::Runner '${{ matrix.runner }}' is $actual, expected ${{ matrix.arch }}"
+            exit 1
+          fi
+
+      - name: Free disk space and add swap
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/share/swift
+          sudo docker image prune --all --force || true
+          # Linking with thin LTO and compiling the largest crates can exceed the
+          # runner memory; swap turns an OOM kill into a slowdown.
+          sudo fallocate -l 16G /swapfile-build
+          sudo chmod 600 /swapfile-build
+          sudo mkswap /swapfile-build
+          sudo swapon /swapfile-build
+          df -h /
+          free -h
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          # `libprotobuf-dev` provides the well-known `google/protobuf/*.proto` files. It is only
+          # recommended by `protobuf-compiler`, so it must be listed explicitly here.
+          sudo apt-get -y install --no-install-recommends \
+            build-essential pkg-config make cmake lld protobuf-compiler libprotobuf-dev \
+            curl git unzip \
+            libssl-dev libsasl2-dev python3.12 python3.12-dev libblas-dev liblapack-dev libomp-dev
+
+      - name: Install Rust toolchain
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- --no-modify-path --default-toolchain none -y
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          # The toolchain version comes from the `rust-toolchain` file.
+          rustup toolchain install --profile minimal
+          rustup component add rustfmt
+          rustup show
+
+      # Node.js and pnpm are needed to embed the dashboard into the meta node.
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: dashboard/.node-version
+      - name: Install pnpm
+        run: npm install --global "$(jq -r .packageManager dashboard/package.json)"
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-registry-${{ matrix.arch }}-
+
+      - name: Build risingwave
+        env:
+          AMD64_TARGET_CPU: ${{ inputs.amd64_target_cpu }}
+        run: |
+          if [[ "${{ matrix.arch }}" == "amd64" && -n "$AMD64_TARGET_CPU" ]]; then
+            export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-Ctarget-cpu=$AMD64_TARGET_CPU"
+          fi
+          cargo fetch
+          cargo build -p risingwave_cmd_all --profile "$CARGO_PROFILE" \
+            --features rw-static-link --features udf --features datafusion
+
+      - name: Collect artifacts
+        run: |
+          out="dist/${{ matrix.arch }}"
+          mkdir -p "$out"
+          cp "target/$CARGO_PROFILE/risingwave" "$out/risingwave"
+          strip --strip-debug "$out/risingwave"
+          jeprof=$(ls target/"$CARGO_PROFILE"/build/tikv-jemalloc-sys-*/out/build/bin/jeprof | head -n 1)
+          cp "$jeprof" "$out/jeprof"
+          DEST_DIR="$PWD/$out/adbc" TMP_DIR="$RUNNER_TEMP" \
+            bash src/risedevtool/scripts/download_adbc_snowflake_driver.sh
+          "$out/risingwave" --version
+          du -sh "$out"/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: risingwave-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 3
+
+  build-connector-node:
+    name: Build connector node
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Build connector node
+        working-directory: java
+        run: mvn -B package -Dmaven.test.skip=true -Dno-build-rust
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist/connector-node
+          tar -zxf java/connector-node/assembly/target/risingwave-connector-1.0.0.tar.gz \
+            -C dist/connector-node
+          du -sh dist/connector-node
+      - uses: actions/upload-artifact@v4
+        with:
+          name: connector-node
+          path: dist/
+          if-no-files-found: error
+          retention-days: 3
+
+  resolve-image:
+    name: Resolve image name
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      repository: ${{ steps.resolve.outputs.repository }}
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - id: resolve
+        env:
+          IMAGE_REPOSITORY: ${{ vars.IMAGE_REPOSITORY }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ -z "$IMAGE_REPOSITORY" ]]; then
+            IMAGE_REPOSITORY="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/risingwave"
+          fi
+          tag="$INPUT_TAG"
+          if [[ -z "$tag" ]]; then
+            # Slashes are not allowed in a tag.
+            tag="${GITHUB_REF_NAME//\//-}-${GITHUB_SHA::7}"
+          fi
+          if [[ ! "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo "::error::Invalid image tag: $tag"
+            exit 1
+          fi
+          echo "repository=$IMAGE_REPOSITORY" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Image: $IMAGE_REPOSITORY:$tag"
+
+  # Built on a runner of the target architecture, like the binary: no emulation.
+  build-image:
+    name: Build image (${{ matrix.arch }})
+    needs: [resolve-image, build-binary, build-connector-node]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ${{ inputs.runner_amd64 }}
+          - arch: arm64
+            runner: ${{ inputs.runner_arm64 }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE_REPOSITORY: ${{ needs.resolve-image.outputs.repository }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: risingwave-${{ matrix.arch }}
+          path: context
+      - uses: actions/download-artifact@v4
+        with:
+          name: connector-node
+          path: context
+
+      - name: Show build context
+        run: |
+          ls -l context "context/${{ matrix.arch }}"
+          du -sh context/*
+
+      - name: Log in to the registry
+        env:
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          registry="${IMAGE_REPOSITORY%%/*}"
+          if [[ -n "$REGISTRY_USERNAME" ]]; then
+            echo "$REGISTRY_PASSWORD" | docker login "$registry" -u "$REGISTRY_USERNAME" --password-stdin
+          elif [[ "$registry" == "ghcr.io" ]]; then
+            echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          else
+            echo "::error::Set the REGISTRY_USERNAME and REGISTRY_PASSWORD secrets to push to $registry"
+            exit 1
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Check that the image starts
+        run: |
+          docker buildx build -f docker/Dockerfile.prebuilt --load -t risingwave-smoke context
+          arch=$(docker image inspect --format '{{.Architecture}}' risingwave-smoke)
+          if [[ "$arch" != "${{ matrix.arch }}" ]]; then
+            echo "::error::Image architecture is $arch, expected ${{ matrix.arch }}"
+            exit 1
+          fi
+          container_id=$(docker run -d risingwave-smoke playground)
+          sleep 15
+          container_status=$(docker inspect --format='{{.State.Status}}' "$container_id")
+          docker logs "$container_id" 2>&1 | tail -n 50
+          if [[ "$container_status" != "running" ]]; then
+            echo "::error::docker run failed with status $container_status"
+            exit 1
+          fi
+          docker rm -f "$container_id"
+
+      # Pushed by digest only, so that no per-architecture tag is left in the registry.
+      - name: Push the image by digest
+        run: |
+          docker buildx build -f docker/Dockerfile.prebuilt \
+            --provenance=false \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --output "type=image,name=$IMAGE_REPOSITORY,push-by-digest=true,name-canonical=true,push=true" \
+            --metadata-file "$RUNNER_TEMP/metadata.json" \
+            context
+          mkdir -p digests
+          jq -r '."containerimage.digest"' "$RUNNER_TEMP/metadata.json" > "digests/${{ matrix.arch }}"
+          cat "digests/${{ matrix.arch }}"
+          grep -q '^sha256:' "digests/${{ matrix.arch }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: digests/
+          if-no-files-found: error
+          retention-days: 3
+
+  push-manifest:
+    name: Join both images under one tag
+    needs: [resolve-image, build-image]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE_REPOSITORY: ${{ needs.resolve-image.outputs.repository }}
+      IMAGE: ${{ needs.resolve-image.outputs.repository }}:${{ needs.resolve-image.outputs.tag }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          path: digests
+          merge-multiple: true
+
+      - name: Log in to the registry
+        env:
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          registry="${IMAGE_REPOSITORY%%/*}"
+          if [[ -n "$REGISTRY_USERNAME" ]]; then
+            echo "$REGISTRY_PASSWORD" | docker login "$registry" -u "$REGISTRY_USERNAME" --password-stdin
+          elif [[ "$registry" == "ghcr.io" ]]; then
+            echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          else
+            echo "::error::Set the REGISTRY_USERNAME and REGISTRY_PASSWORD secrets to push to $registry"
+            exit 1
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Create and push the manifest list
+        run: |
+          docker buildx imagetools create -t "$IMAGE" \
+            "$IMAGE_REPOSITORY@$(cat digests/amd64)" \
+            "$IMAGE_REPOSITORY@$(cat digests/arm64)"
+          docker buildx imagetools inspect "$IMAGE" | tee "$RUNNER_TEMP/inspect.txt"
+          # Fail if one of the two platforms is missing from the pushed tag.
+          grep -q 'linux/amd64' "$RUNNER_TEMP/inspect.txt"
+          grep -q 'linux/arm64' "$RUNNER_TEMP/inspect.txt"
+          {
+            echo "### Image pushed"
+            echo
+            echo "\`$IMAGE\` (linux/amd64, linux/arm64), built from \`$GITHUB_SHA\` with profile \`$CARGO_PROFILE\`."
+          } >> "$GITHUB_STEP_SUMMARY"
