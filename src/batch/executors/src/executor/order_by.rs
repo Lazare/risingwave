@@ -38,7 +38,7 @@ use crate::executor::merge_sort::MergeSortExecutor;
 use crate::monitor::BatchSpillMetrics;
 use crate::spill::spill_op::SpillBackend::Disk;
 use crate::spill::spill_op::{
-    DEFAULT_SPILL_PARTITION_NUM, SPILL_AT_LEAST_MEMORY, SpillBackend, SpillOp,
+    DEFAULT_SPILL_PARTITION_NUM, SPILL_AT_LEAST_MEMORY, SpillBackend, SpillOp, SpillWriter,
 };
 
 /// Sort Executor
@@ -97,7 +97,9 @@ impl BoxedExecutorBuilder for SortExecutor {
             Arc::new(column_orders),
             identity.clone(),
             source.context().get_config().developer.chunk_size,
-            source.context().create_executor_mem_context(identity),
+            source
+                .context()
+                .create_spillable_executor_mem_context(identity),
             if source.context().get_config().enable_spill {
                 Some(Disk)
             } else {
@@ -319,7 +321,7 @@ struct SortSpillManager {
     op: SpillOp,
     partition_num: usize,
     round_robin_idx: usize,
-    input_writers: Vec<opendal::Writer>,
+    input_writers: Vec<SpillWriter>,
     input_chunk_builders: Vec<DataChunkBuilder>,
     child_data_types: Vec<DataType>,
     spill_chunk_size: usize,
@@ -353,6 +355,7 @@ impl SortSpillManager {
     }
 
     async fn init_writers(&mut self) -> Result<()> {
+        self.op.reserve_files(self.partition_num).await?;
         for i in 0..self.partition_num {
             let partition_file_name = format!("input-chunks-p{}", i);
             let w = self.op.writer_with(&partition_file_name).await?;

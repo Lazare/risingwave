@@ -308,7 +308,18 @@ pub struct BatchTableInner<S: StateStore, SD: ValueRowSerde> {
     table_option: TableOption,
 
     read_prefix_len_hint: usize,
+
+    /// The snapshot of the batch query that reads this table, with its epoch. It is created by
+    /// the first read, or by [`BatchTableInner::pin_batch_query_snapshot`], and kept by the table
+    /// and its clones: it holds the storage version that the query reads, which the node would
+    /// otherwise drop from its recent versions while a long query is still running.
+    batch_query_snapshot: BatchQuerySnapshot<S>,
 }
+
+/// The epoch of a batch query and the snapshot that reads a table at this epoch, shared by the
+/// clones of the table.
+type BatchQuerySnapshot<S> =
+    Arc<parking_lot::Mutex<Option<(u64, <S as StateStore>::ReadSnapshot)>>>;
 
 /// `BatchTable` will use [`EitherSerde`] as default so that we can support both versioned and
 /// non-versioned tables with the same type.
@@ -524,6 +535,7 @@ impl<S: StateStore> BatchTableInner<S, EitherSerde> {
             distribution,
             table_option,
             read_prefix_len_hint,
+            batch_query_snapshot: Default::default(),
         }
     }
 }
@@ -563,6 +575,49 @@ impl<S: StateStore, SD: ValueRowSerde> BatchTableInner<S, SD> {
         self.distribution.vnodes()
     }
 }
+impl<S: StateStore, SD: ValueRowSerde> BatchTableInner<S, SD> {
+    /// Returns the snapshot that reads the table at `epoch`. The snapshot of a batch query is
+    /// created once and kept, see `batch_query_snapshot`.
+    async fn read_snapshot(&self, epoch: HummockReadEpoch) -> StorageResult<S::ReadSnapshot> {
+        let batch_query_epoch = match epoch {
+            HummockReadEpoch::BatchQueryCommitted(epoch, _) => Some(epoch),
+            _ => None,
+        };
+        if let Some(epoch) = batch_query_epoch
+            && let Some((kept_epoch, snapshot)) = &*self.batch_query_snapshot.lock()
+            && *kept_epoch == epoch
+        {
+            return Ok(snapshot.clone());
+        }
+        let snapshot = self
+            .store
+            .new_read_snapshot(
+                epoch,
+                NewReadSnapshotOptions {
+                    table_id: self.table_id,
+                    table_option: self.table_option,
+                },
+            )
+            .await?;
+        if let Some(epoch) = batch_query_epoch {
+            *self.batch_query_snapshot.lock() = Some((epoch, snapshot.clone()));
+        }
+        Ok(snapshot)
+    }
+
+    /// Makes the table keep the snapshot of the batch query that reads it at `epoch`, before its
+    /// first read. To be called when the executor that reads the table is built: its first read
+    /// may come long after, once the node no longer keeps the version of the snapshot.
+    ///
+    /// Does nothing for the reads that are not the ones of a batch query on committed data.
+    pub async fn pin_batch_query_snapshot(&self, epoch: HummockReadEpoch) -> StorageResult<()> {
+        if matches!(epoch, HummockReadEpoch::BatchQueryCommitted(_, _)) {
+            self.read_snapshot(epoch).await?;
+        }
+        Ok(())
+    }
+}
+
 /// Point get
 impl<S: StateStore, SD: ValueRowSerde> BatchTableInner<S, SD> {
     /// Get a single row by point get
@@ -598,16 +653,7 @@ impl<S: StateStore, SD: ValueRowSerde> BatchTableInner<S, SD> {
             cache_policy: CachePolicy::Fill(Hint::Normal),
             ..Default::default()
         };
-        let read_snapshot = self
-            .store
-            .new_read_snapshot(
-                wait_epoch,
-                NewReadSnapshotOptions {
-                    table_id: self.table_id,
-                    table_option: self.table_option,
-                },
-            )
-            .await?;
+        let read_snapshot = self.read_snapshot(wait_epoch).await?;
         match read_snapshot
             .on_key_value(serialized_pk, read_options, move |key, value| {
                 let row = self.row_serde.deserialize(value)?;
@@ -821,16 +867,7 @@ impl<S: StateStore, SD: ValueRowSerde> BatchTableInner<S, SD> {
             None => self.distribution.vnodes().iter_vnodes().collect_vec(),
         };
 
-        let read_snapshot = self
-            .store
-            .new_read_snapshot(
-                wait_epoch,
-                NewReadSnapshotOptions {
-                    table_id: self.table_id,
-                    table_option: self.table_option,
-                },
-            )
-            .await?;
+        let read_snapshot = self.read_snapshot(wait_epoch).await?;
 
         build_vnode_stream(
             |vnode| {
@@ -1200,17 +1237,7 @@ impl<S: StateStore, SD: ValueRowSerde> BatchTableInner<S, SD> {
                 None
             };
 
-        let snapshot = Arc::new(
-            self.store
-                .new_read_snapshot(
-                    epoch,
-                    NewReadSnapshotOptions {
-                        table_id: self.table_id,
-                        table_option: self.table_option,
-                    },
-                )
-                .await?,
-        );
+        let snapshot = Arc::new(self.read_snapshot(epoch).await?);
         let (table_key_range, read_options, pk_serializer) = self.vnode_read_context(
             prefix_hint,
             (start_key.as_ref(), end_key.as_ref()),

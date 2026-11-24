@@ -18,11 +18,10 @@ use std::mem::swap;
 use anyhow::anyhow;
 use futures::pin_mut;
 use itertools::Itertools;
-use risingwave_batch::task::ShutdownToken;
+use risingwave_batch::task::{ExecutorMemory, ShutdownToken};
 use risingwave_common::bitmap::Bitmap;
 use risingwave_common::catalog::{ColumnDesc, ColumnId, Field, Schema};
 use risingwave_common::hash::{HashKey, HashKeyDispatcher, VnodeCountCompat};
-use risingwave_common::memory::MemoryContext;
 use risingwave_common::row::OwnedRow;
 use risingwave_common::types::{DataType, Datum};
 use risingwave_common::util::chunk_coalesce::DataChunkBuilder;
@@ -187,13 +186,17 @@ impl BoxedExecutorBuilder for DistributedLookupJoinExecutorBuilder {
 
         dispatch_state_store!(source.context().state_store(), state_store, {
             let table = BatchTable::new_partial(state_store, column_ids, vnodes, table_desc);
+            let query_epoch = distributed_lookup_join_node
+                .query_epoch
+                .ok_or_else(|| anyhow!("query_epoch not set in distributed lookup join"))?;
+            // The join looks its inner side up for as long as the query runs, starting when its
+            // outer side sends its first rows: keep the version that the query reads.
+            table.pin_batch_query_snapshot(query_epoch.into()).await?;
             let inner_side_builder = InnerSideExecutorBuilder::new(
                 outer_side_key_types,
                 inner_side_key_types.clone(),
                 lookup_prefix_len,
-                distributed_lookup_join_node
-                    .query_epoch
-                    .ok_or_else(|| anyhow!("query_epoch not set in distributed lookup join"))?,
+                query_epoch,
                 vec![],
                 table,
                 chunk_size,
@@ -219,7 +222,7 @@ impl BoxedExecutorBuilder for DistributedLookupJoinExecutorBuilder {
                 asof_desc,
                 identity: identity.clone(),
                 shutdown_rx: source.shutdown_rx().clone(),
-                mem_ctx: source.context().create_executor_mem_context(&identity),
+                memory: source.context().create_executor_memory(&identity),
             }
             .dispatch())
         })
@@ -244,7 +247,7 @@ struct DistributedLookupJoinExecutorArgs<S: StateStore> {
     asof_desc: Option<AsOfDesc>,
     identity: String,
     shutdown_rx: ShutdownToken,
-    mem_ctx: MemoryContext,
+    memory: ExecutorMemory,
 }
 
 impl<S: StateStore> HashKeyDispatcher for DistributedLookupJoinExecutorArgs<S> {
@@ -269,7 +272,8 @@ impl<S: StateStore> HashKeyDispatcher for DistributedLookupJoinExecutorArgs<S> {
             asof_desc: self.asof_desc,
             identity: self.identity,
             shutdown_rx: self.shutdown_rx,
-            mem_ctx: self.mem_ctx,
+            mem_ctx: self.memory.meter(),
+            memory: self.memory,
             _phantom: PhantomData,
         }))
     }

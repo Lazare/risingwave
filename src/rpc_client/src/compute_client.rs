@@ -33,9 +33,11 @@ use risingwave_pb::task_service::batch_exchange_service_client::BatchExchangeSer
 use risingwave_pb::task_service::stream_exchange_service_client::StreamExchangeServiceClient;
 use risingwave_pb::task_service::task_service_client::TaskServiceClient;
 use risingwave_pb::task_service::{
-    CancelTaskRequest, CancelTaskResponse, CreateTaskRequest, ExecuteRequest, FastInsertRequest,
-    FastInsertResponse, GetDataRequest, GetDataResponse, GetStreamRequest, GetStreamResponse,
-    IngestDmlRequest, IngestDmlResponse, PbPermits, TaskInfoResponse, permits,
+    AdmitQueryRequest, AdmitQueryResponse, CancelTaskRequest, CancelTaskResponse,
+    CreateTaskRequest, ExecuteRequest, FastInsertRequest, FastInsertResponse,
+    GetBatchLimitsRequest, GetBatchLimitsResponse, GetDataRequest, GetDataResponse,
+    GetStreamRequest, GetStreamResponse, IngestDmlRequest, IngestDmlResponse, PbPermits,
+    TaskInfoResponse, permits,
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -168,6 +170,7 @@ impl ComputeClient {
         task_id: TaskId,
         plan: PlanFragment,
         expr_context: ExprContext,
+        spillable_operator_instances: u32,
     ) -> Result<Streaming<TaskInfoResponse>> {
         Ok(self
             .task_client
@@ -177,6 +180,37 @@ impl ComputeClient {
                 plan: Some(plan),
                 tracing_context: TracingContext::from_current_span().to_protobuf(),
                 expr_context: Some(expr_context),
+                spillable_operator_instances,
+            })
+            .await
+            .map_err(RpcError::from_compute_status)?
+            .into_inner())
+    }
+
+    pub async fn get_batch_limits(&self) -> Result<GetBatchLimitsResponse> {
+        Ok(self
+            .task_client
+            .clone()
+            .get_batch_limits(GetBatchLimitsRequest {})
+            .await
+            .map_err(RpcError::from_compute_status)?
+            .into_inner())
+    }
+
+    /// Asks the node to admit a batch query. The returned stream yields one message once the
+    /// query is admitted, and must be kept until the query ends: the node holds the memory
+    /// reservation of the query for as long as the stream is open.
+    pub async fn admit_query(
+        &self,
+        query_id: String,
+        spillable_operator_instances: u32,
+    ) -> Result<Streaming<AdmitQueryResponse>> {
+        Ok(self
+            .task_client
+            .clone()
+            .admit_query(AdmitQueryRequest {
+                query_id,
+                spillable_operator_instances,
             })
             .await
             .map_err(RpcError::from_compute_status)?

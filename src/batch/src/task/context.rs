@@ -28,6 +28,7 @@ use risingwave_storage::StateStoreImpl;
 
 use crate::error::Result;
 use crate::monitor::{BatchMetrics, BatchMetricsInner, BatchSpillMetrics};
+use crate::task::query_memory::{ExecutorMemory, QueryMemory};
 use crate::task::{BatchEnvironment, TaskOutput, TaskOutputId};
 use crate::worker_manager::worker_node_manager::WorkerNodeManagerRef;
 
@@ -67,6 +68,23 @@ pub trait BatchTaskContext: Send + Sync + 'static {
 
     fn create_executor_mem_context(&self, executor_id: &str) -> MemoryContext;
 
+    /// Creates the memory context of an operator that spills to disk when it lacks memory. Where
+    /// spilling is enabled, the context is bounded to the part of the operator in its query.
+    fn create_spillable_executor_mem_context(&self, executor_id: &str) -> MemoryContext {
+        self.create_executor_mem_context(executor_id)
+    }
+
+    /// Creates the memory of an operator that cannot spill to disk. Where queries are bounded,
+    /// it takes its memory from the pool of the query, then from the memory left on the node.
+    fn create_executor_memory(&self, executor_id: &str) -> ExecutorMemory {
+        ExecutorMemory::unmanaged(self.create_executor_mem_context(executor_id))
+    }
+
+    /// The memory of the query that the task belongs to, where queries are bounded.
+    fn query_memory(&self) -> Option<Arc<QueryMemory>> {
+        None
+    }
+
     fn worker_node_manager(&self) -> Option<WorkerNodeManagerRef>;
 
     /// Get metrics reader for reading channel delta stats and other metrics.
@@ -81,6 +99,9 @@ pub struct ComputeNodeContext {
     batch_metrics: BatchMetrics,
 
     mem_context: MemoryContext,
+
+    /// The memory of the query that the task belongs to. `None` in tests.
+    query_memory: Option<Arc<QueryMemory>>,
 }
 
 impl BatchTaskContext for ComputeNodeContext {
@@ -131,6 +152,29 @@ impl BatchTaskContext for ComputeNodeContext {
         MemoryContext::new(Some(self.mem_context.clone()), counter)
     }
 
+    fn create_spillable_executor_mem_context(&self, executor_id: &str) -> MemoryContext {
+        match &self.query_memory {
+            // Without spilling, the operator would fail at its part instead of spilling.
+            Some(query_memory) if self.env.config().enable_spill => {
+                query_memory.spillable_operator_context()
+            }
+            _ => self.create_executor_mem_context(executor_id),
+        }
+    }
+
+    fn create_executor_memory(&self, executor_id: &str) -> ExecutorMemory {
+        match &self.query_memory {
+            Some(query_memory) => {
+                query_memory.executor_memory(MemoryContext::root(TrAdderAtomic::new(0), u64::MAX))
+            }
+            None => ExecutorMemory::unmanaged(self.create_executor_mem_context(executor_id)),
+        }
+    }
+
+    fn query_memory(&self) -> Option<Arc<QueryMemory>> {
+        self.query_memory.clone()
+    }
+
     fn worker_node_manager(&self) -> Option<WorkerNodeManagerRef> {
         None
     }
@@ -146,11 +190,21 @@ impl ComputeNodeContext {
             env: BatchEnvironment::for_test(),
             batch_metrics: BatchMetricsInner::for_test(),
             mem_context: MemoryContext::none(),
+            query_memory: None,
         })
     }
 
-    pub fn create(env: BatchEnvironment) -> Arc<dyn BatchTaskContext> {
-        let mem_context = env.task_manager().memory_context_ref();
+    /// Creates the context of a task of the given query, which runs
+    /// `spillable_operator_instances` spillable operators in total (0 if unknown).
+    pub fn create(
+        env: BatchEnvironment,
+        query_id: &str,
+        spillable_operator_instances: u32,
+    ) -> Arc<dyn BatchTaskContext> {
+        let query_memory = env
+            .task_manager()
+            .query_memory(query_id, spillable_operator_instances);
+        let mem_context = query_memory.context();
         let batch_metrics = Arc::new(BatchMetricsInner::new(
             env.task_manager().metrics(),
             env.executor_metrics(),
@@ -160,6 +214,7 @@ impl ComputeNodeContext {
             env,
             batch_metrics,
             mem_context,
+            query_memory: Some(query_memory),
         })
     }
 }
