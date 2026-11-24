@@ -97,6 +97,8 @@ impl StreamNode for StreamNow {
                     interval: Some(Datum::Some((*interval).into()).to_protobuf()),
                 }),
             }),
+            // Filled by meta when the job is created with snapshot backfill.
+            snapshot_backfill_epoch: None,
         }))
     }
 }

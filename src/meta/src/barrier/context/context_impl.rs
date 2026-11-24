@@ -856,9 +856,11 @@ impl PostCollectCommand {
                             .fill_snapshot_backfill_epoch(
                                 info.stream_job_fragments.fragments.iter().filter_map(
                                     |(fragment_id, fragment)| {
+                                        // `Now` nodes get the snapshot epoch of the job as well.
                                         if fragment.fragment_type_mask.contains_any([
                                             FragmentTypeFlag::SnapshotBackfillStreamScan,
                                             FragmentTypeFlag::CrossDbSnapshotBackfillStreamScan,
+                                            FragmentTypeFlag::Now,
                                         ]) {
                                             Some(*fragment_id as _)
                                         } else {

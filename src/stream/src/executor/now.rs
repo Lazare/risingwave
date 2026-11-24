@@ -12,10 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::cmp::max;
+
 use itertools::Itertools;
 use risingwave_common::array::Op;
 use risingwave_common::row;
 use risingwave_common::types::{DefaultOrdered, Interval, Timestamptz, ToDatumRef};
+use risingwave_common::util::epoch::Epoch;
 use risingwave_expr::capture_context;
 use risingwave_expr::expr::{
     EvalErrorReport, InputRefExpression, LiteralExpression, NonStrictExpression,
@@ -33,6 +36,13 @@ pub struct NowExecutor<S: StateStore> {
     data_types: Vec<DataType>,
 
     mode: NowMode,
+    /// Snapshot epoch of the job when it is created with snapshot backfill. The barriers of the
+    /// snapshot phase carry fake epochs, lower than this one: `now()` is then evaluated at the
+    /// snapshot epoch, which is the time the snapshot data is read at. Otherwise `now()` would
+    /// start near the zero of the epoch time and jump to the real time at the end of the
+    /// snapshot, making a downstream dynamic filter retract most of the rows it has just let
+    /// through.
+    snapshot_backfill_epoch: Option<u64>,
     eval_error_report: ActorEvalErrorReport,
 
     /// Receiver of barrier channel.
@@ -66,6 +76,7 @@ impl<S: StateStore> NowExecutor<S> {
     pub fn new(
         data_types: Vec<DataType>,
         mode: NowMode,
+        snapshot_backfill_epoch: Option<u64>,
         eval_error_report: ActorEvalErrorReport,
         barrier_receiver: UnboundedReceiver<Barrier>,
         state_table: StateTable<S>,
@@ -74,6 +85,7 @@ impl<S: StateStore> NowExecutor<S> {
         Self {
             data_types,
             mode,
+            snapshot_backfill_epoch,
             eval_error_report,
             barrier_receiver,
             state_table,
@@ -86,6 +98,7 @@ impl<S: StateStore> NowExecutor<S> {
         let Self {
             data_types,
             mode,
+            snapshot_backfill_epoch,
             eval_error_report,
             barrier_receiver,
             mut state_table,
@@ -140,6 +153,11 @@ impl<S: StateStore> NowExecutor<S> {
             }
             for barrier in barriers {
                 let curr_epoch = barrier.get_curr_epoch();
+                // A fake epoch of the snapshot phase is replaced with the snapshot epoch.
+                let curr_epoch = match snapshot_backfill_epoch {
+                    Some(snapshot_epoch) => max(curr_epoch, Epoch(snapshot_epoch)),
+                    None => curr_epoch,
+                };
                 let new_timestamp = curr_epoch.as_timestamptz();
                 let pause_mutation =
                     barrier
@@ -348,6 +366,77 @@ mod tests {
     use super::*;
     use crate::common::table::test_utils::gen_pbtable;
     use crate::executor::test_utils::StreamExecutorTestExt;
+
+    /// During the snapshot phase of a snapshot backfill job, the barriers carry fake epochs:
+    /// `now()` stays at the snapshot epoch, then follows the real epochs.
+    #[tokio::test]
+    async fn test_now_snapshot_backfill_epoch() -> StreamExecutorResult<()> {
+        let state_store = create_state_store();
+        let snapshot_epoch = test_epoch(1000);
+        let (tx, mut now) = create_executor_inner(
+            NowMode::UpdateCurrent,
+            &state_store,
+            None,
+            Some(snapshot_epoch),
+        )
+        .await;
+
+        // Fake epochs of the snapshot phase.
+        tx.send(Barrier::new_test_barrier(test_epoch(1))).unwrap();
+        now.next_unwrap_ready_barrier()?;
+        assert_eq!(
+            now.next_unwrap_ready_chunk()?.compact_vis(),
+            StreamChunk::from_pretty(
+                " TZ
+                + 2021-04-01T00:00:01.000Z"
+            )
+        );
+        now.next_unwrap_ready_watermark()?;
+
+        tx.send(Barrier::with_prev_epoch_for_test(
+            test_epoch(2),
+            test_epoch(1),
+        ))
+        .unwrap();
+        now.next_unwrap_ready_barrier()?;
+        assert_eq!(
+            now.next_unwrap_ready_chunk()?.compact_vis(),
+            StreamChunk::from_pretty(
+                " TZ
+                - 2021-04-01T00:00:01.000Z
+                + 2021-04-01T00:00:01.000Z"
+            )
+        );
+        now.next_unwrap_ready_watermark()?;
+
+        // Last barrier of the snapshot phase, then a real epoch.
+        tx.send(Barrier::with_prev_epoch_for_test(
+            snapshot_epoch,
+            test_epoch(2),
+        ))
+        .unwrap();
+        now.next_unwrap_ready_barrier()?;
+        now.next_unwrap_ready_chunk()?;
+        now.next_unwrap_ready_watermark()?;
+
+        tx.send(Barrier::with_prev_epoch_for_test(
+            test_epoch(1005),
+            snapshot_epoch,
+        ))
+        .unwrap();
+        now.next_unwrap_ready_barrier()?;
+        assert_eq!(
+            now.next_unwrap_ready_chunk()?.compact_vis(),
+            StreamChunk::from_pretty(
+                " TZ
+                - 2021-04-01T00:00:01.000Z
+                + 2021-04-01T00:00:01.005Z"
+            )
+        );
+        now.next_unwrap_ready_watermark()?;
+
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_now() -> StreamExecutorResult<()> {
@@ -1095,6 +1184,15 @@ mod tests {
         state_store: &MemoryStateStore,
         progress_ratio: Option<f32>,
     ) -> (UnboundedSender<Barrier>, BoxedMessageStream) {
+        create_executor_inner(mode, state_store, progress_ratio, None).await
+    }
+
+    async fn create_executor_inner(
+        mode: NowMode,
+        state_store: &MemoryStateStore,
+        progress_ratio: Option<f32>,
+        snapshot_backfill_epoch: Option<u64>,
+    ) -> (UnboundedSender<Barrier>, BoxedMessageStream) {
         let table_id = TableId::new(1);
         let column_descs = vec![ColumnDesc::unnamed(ColumnId::new(0), DataType::Timestamptz)];
         let state_table = StateTable::from_table_catalog(
@@ -1113,6 +1211,7 @@ mod tests {
         let now_executor = NowExecutor::new(
             vec![DataType::Timestamptz],
             mode,
+            snapshot_backfill_epoch,
             eval_error_report,
             barrier_receiver,
             state_table,
