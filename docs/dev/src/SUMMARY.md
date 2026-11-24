@@ -38,6 +38,7 @@
 - [Streaming Engine](./design/streaming-overview.md)
     - [Asynchronous Projection](./design/async-projection.md)
     - [Checkpoint](./design/checkpoint.md)
+    - [Selective Barriers](./design/selective-barriers.md)
     - [Aggregation](./design/aggregation.md)
     - [AI Decisions](./design/ai-decide.md)
     - [MView on Top of MView](./design/mv-on-mv.md)
