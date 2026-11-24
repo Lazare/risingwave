@@ -36,10 +36,12 @@
 
 - [Architecture Design](./design/architecture-design.md)
 - [Streaming Engine](./design/streaming-overview.md)
+    - [Asynchronous Projection](./design/async-projection.md)
     - [Checkpoint](./design/checkpoint.md)
     - [Selective Barriers](./design/selective-barriers.md)
     - [Sink Groups](./design/sink-group.md)
     - [Aggregation](./design/aggregation.md)
+    - [AI Decisions](./design/ai-decide.md)
     - [MView on Top of MView](./design/mv-on-mv.md)
     - [Backfill](./design/backfill.md)
     - [Streaming Parallelism Configuration](./design/streaming-parallelism.md)
