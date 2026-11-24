@@ -1,3 +1,7 @@
 # Cluster configuration for testing selective barriers.
 [meta.developer]
 enable_selective_barrier = true
+
+# Embedded Python functions are off by default; the UDF tests of `ci_validate.sh udf` need them.
+[udf]
+enable_embedded_python_udf = true
