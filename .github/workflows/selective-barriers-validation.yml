@@ -78,6 +78,26 @@ jobs:
           java-version: '21'
           cache: maven
 
+      # Maven Central often refuses the shared addresses of hosted runners (HTTP 429), and a
+      # branch that never ran has no Maven cache. Its mirror on Google Cloud Storage has no such
+      # limit.
+      - name: Use a mirror of Maven Central
+        run: |
+          mkdir -p ~/.m2
+          cat > ~/.m2/settings.xml <<'XML'
+          <settings>
+            <mirrors>
+              <mirror>
+                <id>google-maven-central</id>
+                <name>Mirror of Maven Central on Google Cloud Storage</name>
+                <url>https://maven-central.storage-download.googleapis.com/maven2/</url>
+                <mirrorOf>central</mirrorOf>
+              </mirror>
+            </mirrors>
+          </settings>
+          XML
+          cat ~/.m2/settings.xml
+
       - name: Install Rust toolchain
         run: |
           if ! command -v rustup >/dev/null; then
