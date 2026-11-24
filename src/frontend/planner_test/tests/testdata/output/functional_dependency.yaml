@@ -82,3 +82,56 @@
     └─StreamExchange { dist: HashShard(t1.v2) }
       └─StreamProject { exprs: [t1.v2, t1.v1] }
         └─StreamTableScan { table: t1, columns: [t1.v1, t1.v2], stream_scan_type: ArrangementBackfill, stream_key: [t1.v1], pk: [v1], dist: UpstreamHashShard(t1.v1) }
+- name: group by over an input with at most one row keeps a group key
+  sql: |
+    create table t1 (v1 int, v2 int);
+    select cnt from (select count(*) cnt from t1) t where cnt > 5 group by cnt;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashAgg { group_key: [sum0(count)], aggs: [] }
+      └─BatchExchange { order: [], dist: HashShard(sum0(count)) }
+        └─BatchFilter { predicate: (sum0(count) > 5:Int32) }
+          └─BatchSimpleAgg { aggs: [sum0(count)] }
+            └─BatchExchange { order: [], dist: Single }
+              └─BatchSimpleAgg { aggs: [count] }
+                └─BatchScan { table: t1, columns: [], distribution: SomeShard }
+  stream_plan: |-
+    StreamMaterialize { columns: [cnt], stream_key: [cnt], pk_columns: [cnt], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [sum0(count)], noop_update_hint: true }
+      └─StreamHashAgg { group_key: [sum0(count)], aggs: [count] }
+        └─StreamExchange { dist: HashShard(sum0(count)) }
+          └─StreamFilter { predicate: (sum0(count) > 5:Int32) }
+            └─StreamProject { exprs: [sum0(count)] }
+              └─StreamSimpleAgg [append_only] { aggs: [sum0(count), count] }
+                └─StreamExchange { dist: Single }
+                  └─StreamStatelessSimpleAgg { aggs: [count] }
+                    └─StreamTableScan { table: t1, columns: [t1._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t1._row_id], pk: [_row_id], dist: UpstreamHashShard(t1._row_id) }
+- name: group by two columns over an input with at most one row keeps one group key
+  sql: |
+    create table t1 (v1 int, v2 int);
+    select cnt, s from (select count(*) cnt, sum(v1) s from t1) t where cnt > 5 group by cnt, s;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashAgg { group_key: [sum0(count)], aggs: [internal_last_seen_value(sum(sum(t1.v1)))] }
+      └─BatchExchange { order: [], dist: HashShard(sum0(count)) }
+        └─BatchFilter { predicate: (sum0(count) > 5:Int32) }
+          └─BatchSimpleAgg { aggs: [sum0(count), sum(sum(t1.v1))] }
+            └─BatchExchange { order: [], dist: Single }
+              └─BatchSimpleAgg { aggs: [count, sum(t1.v1)] }
+                └─BatchScan { table: t1, columns: [t1.v1], distribution: SomeShard }
+- name: except over an input with at most one row keeps a group key
+  sql: |
+    create table t1 (v1 int, v2 int);
+    select count(*), sum(v1) from t1 except select 1::bigint, 1::bigint;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashAgg { group_key: [sum0(count)], aggs: [internal_last_seen_value(sum(sum(t1.v1)))] }
+      └─BatchExchange { order: [], dist: HashShard(sum0(count)) }
+        └─BatchHashJoin { type: LeftAnti, predicate: sum0(count) IS NOT DISTINCT FROM $expr10005 AND sum(sum(t1.v1)) IS NOT DISTINCT FROM $expr10006, output: all }
+          ├─BatchExchange { order: [], dist: HashShard(sum0(count), sum(sum(t1.v1))) }
+          │ └─BatchSimpleAgg { aggs: [sum0(count), sum(sum(t1.v1))] }
+          │   └─BatchExchange { order: [], dist: Single }
+          │     └─BatchSimpleAgg { aggs: [count, sum(t1.v1)] }
+          │       └─BatchScan { table: t1, columns: [t1.v1], distribution: SomeShard }
+          └─BatchExchange { order: [], dist: HashShard($expr10005, $expr10006) }
+            └─BatchValues { rows: [[1:Int64, 1:Int64]] }
