@@ -1,0 +1,179 @@
+# Checks that every `fork/*` branch stands alone on top of the upstream tag: it builds and
+# passes the unit tests of the main crates without the other branches. A last job rebuilds the
+# integration branch with `scripts/fork/rebuild-integration.sh` to check that the branches
+# still merge without conflict.
+#
+# The end-to-end validation runs on the integration branch (`selective-barriers-validation.yml`).
+#
+# To run it, push a commit that holds this file to a branch named `check/<anything>`; the
+# `fork/*` branches are read from the repository, so push them first.
+name: Fork Branches Check
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: 'Upstream tag that the fork branches start from'
+        required: false
+        type: string
+        default: 'v3.1.2'
+  push:
+    branches:
+      - 'check/**'
+
+concurrency:
+  group: fork-branches-check-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BASE: ${{ inputs.base || 'v3.1.2' }}
+
+jobs:
+  branch:
+    name: fork/${{ matrix.branch }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        branch:
+          - fix-snapshot-backfill
+          - fix-batch-hash-agg-spill
+          - optimizer
+          - selective-barriers
+          - pg-cdc-native-engine
+          - postgres-sink-group
+          - sink-append-only-force-compaction
+          - udf-volatility
+          - batch-resource-governance
+          - resource-journal-and-nofile-limit
+          - license
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_BUILD_JOBS: '3'
+      # Without debug info the test binaries fit the disk and the memory of a hosted runner.
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: fork/${{ matrix.branch }}
+          fetch-depth: 0
+
+      - name: Check that the branch starts from the tag
+        run: |
+          git fetch --quiet origin "refs/tags/$BASE:refs/tags/$BASE"
+          test "$(git merge-base HEAD "$BASE")" = "$(git rev-parse "$BASE^{commit}")"
+          git log --oneline "$BASE..HEAD"
+
+      - name: Free disk space and add swap
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/share/swift
+          sudo docker image prune --all --force || true
+          sudo fallocate -l 16G /swapfile-build
+          sudo chmod 600 /swapfile-build
+          sudo mkswap /swapfile-build
+          sudo swapon /swapfile-build
+          df -h /
+          free -h
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install --no-install-recommends \
+            build-essential pkg-config make cmake lld protobuf-compiler libprotobuf-dev \
+            curl git unzip \
+            libssl-dev libsasl2-dev python3.12 python3.12-dev libblas-dev liblapack-dev libomp-dev
+
+      - name: Install Rust toolchain
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- --no-modify-path --default-toolchain none -y
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install --profile minimal
+          rustup show
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-amd64-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-registry-amd64-
+
+      - name: Install cargo-nextest
+        run: |
+          curl -L --proto '=https' --tlsv1.2 -sSf \
+            https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+          cargo binstall -y --locked cargo-nextest
+
+      # `--locked`: a branch that needs a dependency must carry its own lines of `Cargo.lock`.
+      - name: Library tests
+        id: lib
+        run: |
+          cargo nextest run --locked --no-fail-fast --lib \
+            -p risingwave_meta -p risingwave_stream -p risingwave_storage \
+            -p risingwave_batch -p risingwave_batch_executors -p risingwave_frontend \
+            -p risingwave_connector -p risingwave_common -p risingwave_expr \
+            -p risingwave_license -p risingwave_rt
+
+      - name: Planner tests
+        id: planner
+        if: ${{ !cancelled() }}
+        run: cargo nextest run --locked --no-fail-fast -p risingwave_planner_test
+
+      - name: Storage integration tests
+        id: hummock
+        if: ${{ !cancelled() }}
+        run: cargo nextest run --locked --no-fail-fast -p risingwave_hummock_test --features test
+
+      - name: Build the all-in-one binary
+        id: binary
+        if: ${{ !cancelled() }}
+        run: cargo build --locked -p risingwave_cmd_all
+
+      - name: Summary
+        if: ${{ always() }}
+        run: |
+          {
+            echo "## fork/${{ matrix.branch }}"
+            echo ""
+            echo "| Step | Result |"
+            echo "|---|---|"
+            echo "| Library tests | ${{ steps.lib.outcome }} |"
+            echo "| Planner tests | ${{ steps.planner.outcome }} |"
+            echo "| Storage integration tests | ${{ steps.hummock.outcome }} |"
+            echo "| All-in-one binary | ${{ steps.binary.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  rebuild:
+    name: Rebuild the integration branch
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Merge the fork branches on top of the tag
+        run: |
+          git config user.name "fork-branches-check"
+          git config user.email "fork-branches-check@users.noreply.github.com"
+          git fetch --quiet origin "refs/tags/$BASE:refs/tags/$BASE"
+          scripts/fork/rebuild-integration.sh "$BASE" rebuilt origin
+          {
+            echo "## Integration branch rebuilt from $BASE"
+            echo ""
+            echo '```'
+            git log --first-parent --oneline "$BASE..rebuilt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
