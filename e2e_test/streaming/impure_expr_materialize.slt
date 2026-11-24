@@ -39,5 +39,136 @@ skipif madsim
 statement ok
 drop function rand_series(int);
 
+# A user-defined function is impure by default (i.e. `VOLATILE`).
+skipif madsim
+statement ok
+create function is_even_volatile(n int) returns boolean language javascript as $$
+export function is_even_volatile(n) {
+    return n % 2 === 0;
+}
+$$;
+
+skipif madsim
+statement error using an impure expression \(user-defined function `is_even_volatile`\) in WHERE or HAVING
+create materialized view mv_volatile_udf_filter as
+select * from t where is_even_volatile(a);
+
+# `STABLE` is not enough to be considered pure.
+skipif madsim
+statement ok
+create function is_even_stable(n int) returns boolean language javascript stable as $$
+export function is_even_stable(n) {
+    return n % 2 === 0;
+}
+$$;
+
+skipif madsim
+statement error using an impure expression \(user-defined function `is_even_stable`\) in WHERE or HAVING
+create materialized view mv_stable_udf_filter as
+select * from t where is_even_stable(a);
+
+# A user-defined function declared as `IMMUTABLE` is pure, thus allowed on retract streams.
+skipif madsim
+statement ok
+create function is_even(n int) returns boolean language javascript immutable as $$
+export function is_even(n) {
+    return n % 2 === 0;
+}
+$$;
+
+skipif madsim
+query TT
+select name, volatility from rw_functions where name like 'is_even%' order by name;
+----
+is_even IMMUTABLE
+is_even_stable STABLE
+is_even_volatile NULL
+
+skipif madsim
+statement ok
+create materialized view mv_immutable_udf_filter as
+select * from t where is_even(a);
+
+# But impure arguments still make the whole expression impure.
+skipif madsim
+statement error using an impure expression \(RANDOM\) in WHERE or HAVING
+create materialized view mv_immutable_udf_impure_arg as
+select * from t where is_even((random() * 10)::int);
+
+skipif madsim
+statement ok
+create function series(n int) returns table (x int) language javascript immutable as $$
+export function* series(n) {
+    for (let i = 0; i < n; i++) {
+        yield i;
+    }
+}
+$$;
+
+skipif madsim
+statement ok
+create materialized view mv_immutable_udtf_select_list as
+select a, series(a) from t;
+
+skipif madsim
+statement ok
+insert into t values (1), (2), (3);
+
+skipif madsim
+statement ok
+flush;
+
+skipif madsim
+query I
+select * from mv_immutable_udf_filter;
+----
+2
+
+skipif madsim
+statement ok
+delete from t where a = 2;
+
+skipif madsim
+statement ok
+flush;
+
+skipif madsim
+query I
+select * from mv_immutable_udf_filter;
+----
+
+skipif madsim
+query II rowsort
+select * from mv_immutable_udtf_select_list;
+----
+1 0
+3 0
+3 1
+3 2
+
+skipif madsim
+statement ok
+drop materialized view mv_immutable_udf_filter;
+
+skipif madsim
+statement ok
+drop materialized view mv_immutable_udtf_select_list;
+
+skipif madsim
+statement ok
+drop function is_even_volatile(int);
+
+skipif madsim
+statement ok
+drop function is_even_stable(int);
+
+skipif madsim
+statement ok
+drop function is_even(int);
+
+skipif madsim
+statement ok
+drop function series(int);
+
 statement ok
 drop table t;

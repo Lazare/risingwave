@@ -368,6 +368,9 @@ message Function {
   // Cluster version (tracked by git commit) when created
   optional string created_at_cluster_version = 23;
 
+  // The volatility declared by the user, i.e., `IMMUTABLE | STABLE | VOLATILE`.
+  expr.UdfVolatility volatility = 24;
+
   oneof kind {
     ScalarFunction scalar = 11;
     TableFunction table = 12;
