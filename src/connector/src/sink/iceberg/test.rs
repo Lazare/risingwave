@@ -1023,7 +1023,10 @@ fn test_alter_allows_legacy_copy_on_write_compaction_type() {
     IcebergSink::validate_alter_config_change(&values, &alter_props).unwrap();
 }
 
+// DISABLED (full-premium build): the default/empty license now unlocks all
+// features, so the license check no longer fails. Kept for reference.
 #[test]
+#[ignore = "full-premium build: features are no longer gated by the license"]
 fn test_alter_merge_on_read_compaction_checks_explicit_type_license() {
     use crate::sink::Sink;
     use crate::sink::iceberg::IcebergSink;
