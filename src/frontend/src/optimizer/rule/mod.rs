@@ -203,6 +203,10 @@ mod min_max_on_index_rule;
 pub use min_max_on_index_rule::*;
 mod always_false_filter_rule;
 pub use always_false_filter_rule::*;
+mod contradictory_null_filter_rule;
+pub use contradictory_null_filter_rule::*;
+mod empty_relation_propagate_rule;
+pub use empty_relation_propagate_rule::*;
 mod join_project_transpose_rule;
 pub use join_project_transpose_rule::*;
 mod limit_push_down_rule;
@@ -341,6 +345,8 @@ macro_rules! for_all_rules {
             , { RewriteLikeExprRule }
             , { MinMaxOnIndexRule }
             , { AlwaysFalseFilterRule }
+            , { ContradictoryNullFilterRule }
+            , { EmptyRelationPropagateRule }
             , { BushyTreeJoinOrderingRule }
             , { StreamProjectMergeRule }
             , { StreamProjectSplitRule }

@@ -655,13 +655,7 @@
     create table t2 (v1 int, v2 int);
     create materialized view t3 as select v1, count(v2) as v2 from t2 group by v1;
     select * from (select * from t1 where false) as t1_s join (select * from t3 where false) as t3_s on t1_s.v2 = t3_s.v1;
-  batch_plan: |-
-    BatchExchange { order: [], dist: Single }
-    └─BatchHashJoin { type: Inner, predicate: t1.v2 = t3.v1, output: all }
-      ├─BatchExchange { order: [], dist: HashShard(t1.v2) }
-      │ └─BatchValues { rows: [] }
-      └─BatchExchange { order: [], dist: HashShard(t3.v1) }
-        └─BatchValues { rows: [] }
+  batch_plan: 'BatchValues { rows: [] }'
 - name: Able to join on `IS NOT DISTINCT FROM` on unequal but implicitly castable types
   sql: |
     create table t1 (v1 int);

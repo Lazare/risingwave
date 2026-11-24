@@ -47,3 +47,24 @@
     explain (verbose) create index mv_idx on t1(v2, v1);
   expected_outputs:
     - explain_output
+# The input of these aggregations has at most one row, so its key is empty. The group key must
+# not become empty: an aggregation without group key returns a row on an empty input.
+- name: group by over an input with at most one row keeps a group key
+  sql: |
+    create table t1 (v1 int, v2 int);
+    select cnt from (select count(*) cnt from t1) t where cnt > 5 group by cnt;
+  expected_outputs:
+    - batch_plan
+    - stream_plan
+- name: group by two columns over an input with at most one row keeps one group key
+  sql: |
+    create table t1 (v1 int, v2 int);
+    select cnt, s from (select count(*) cnt, sum(v1) s from t1) t where cnt > 5 group by cnt, s;
+  expected_outputs:
+    - batch_plan
+- name: except over an input with at most one row keeps a group key
+  sql: |
+    create table t1 (v1 int, v2 int);
+    select count(*), sum(v1) from t1 except select 1::bigint, 1::bigint;
+  expected_outputs:
+    - batch_plan
