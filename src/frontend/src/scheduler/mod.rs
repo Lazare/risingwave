@@ -26,6 +26,7 @@ use crate::session::SessionImpl;
 
 mod distributed;
 pub use distributed::*;
+pub mod batch_limits;
 pub mod plan_fragmenter;
 pub use plan_fragmenter::BatchPlanFragmenter;
 mod snapshot;

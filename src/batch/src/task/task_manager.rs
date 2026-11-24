@@ -33,6 +33,7 @@ use super::BatchTaskContext;
 use crate::error::Result;
 use crate::monitor::BatchManagerMetrics;
 use crate::rpc::service::exchange::GrpcExchangeWriter;
+use crate::task::query_memory::{QueryMemory, QueryMemoryLimits, QueryMemoryRegistry};
 use crate::task::{BatchTaskExecution, StateReporter, TaskId, TaskOutput, TaskOutputId};
 
 pub mod await_tree_key {
@@ -55,6 +56,9 @@ pub struct BatchManager {
 
     /// Memory context used for batch tasks in cn.
     mem_context: MemoryContext,
+
+    /// Memory of the queries that run tasks on this node.
+    query_memories: QueryMemoryRegistry,
 
     /// Metrics for batch manager.
     metrics: Arc<BatchManagerMetrics>,
@@ -83,11 +87,13 @@ impl BatchManager {
         };
 
         let mem_context = MemoryContext::root(metrics.batch_total_mem.clone(), mem_limit);
+        let query_memories = QueryMemoryRegistry::new(mem_context.clone(), &config);
         BatchManager {
             tasks: Arc::new(Mutex::new(HashMap::new())),
             runtime: Arc::new(runtime.into()),
             config,
             metrics,
+            query_memories,
             mem_context,
             await_tree_reg: await_tree_config.map(await_tree::Registry::new),
         }
@@ -104,6 +110,21 @@ impl BatchManager {
 
     pub fn memory_context_ref(&self) -> MemoryContext {
         self.mem_context.clone()
+    }
+
+    /// The memory limits that this node applies to batch queries.
+    pub fn query_memory_limits(&self) -> QueryMemoryLimits {
+        self.query_memories.limits()
+    }
+
+    /// The memory of the given query on this node, shared by all its tasks.
+    pub fn query_memory(
+        &self,
+        query_id: &str,
+        spillable_operator_instances: u32,
+    ) -> Arc<QueryMemory> {
+        self.query_memories
+            .get_or_create(query_id, spillable_operator_instances)
     }
 
     pub async fn fire_task(

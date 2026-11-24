@@ -168,6 +168,11 @@ frontend_compute_runtime_worker_threads = ""
 mask_worker_temporary_secs = 30
 redact_sql_option_keywords = ["credential", "key", "password", "private", "secret", "token"]
 enable_spill = true
+memory_usable_ratio = 0.9
+query_memory_ratio = 0.3
+query_memory_max_ratio = 0.7
+spillable_operator_min_memory_mb = 8
+spillable_operator_avg_memory_mb = 64
 
 [batch.developer]
 connector_message_buffer_size = 16
@@ -321,6 +326,7 @@ compactor_max_overlap_sst_count = 64
 compactor_max_preload_meta_file_count = 32
 vector_file_block_size_kb = 1024
 time_travel_version_cache_capacity = 10
+batch_read_stale_snapshot_from_meta = false
 table_change_log_cache_capacity = 60
 iceberg_compaction_memory_limit_mb = ""
 iceberg_compaction_enable_validate = false

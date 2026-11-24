@@ -17,6 +17,7 @@ use std::fmt::{Debug, Formatter};
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 use futures::Stream;
 use pgwire::pg_server::{BoxedError, Session, SessionId};
@@ -27,20 +28,38 @@ use risingwave_common::array::DataChunk;
 use risingwave_common::session_config::QueryMode;
 use risingwave_pb::batch_plan::TaskOutputId;
 use risingwave_pb::common::HostAddress;
+use risingwave_pb::task_service::AdmitQueryResponse;
 use risingwave_rpc_client::ComputeClientPoolRef;
+use risingwave_rpc_client::error::RpcError;
 use tokio::sync::OwnedSemaphorePermit;
+use tonic::Streaming;
 
 use super::QueryExecution;
 use super::stats::DistributedQueryMetrics;
 use crate::catalog::catalog_service::CatalogReader;
 use crate::scheduler::plan_fragmenter::{Query, QueryId};
-use crate::scheduler::{ExecutionContextRef, SchedulerResult};
+use crate::scheduler::{ExecutionContextRef, SchedulerError, SchedulerResult};
+
+/// The admission of a query on the compute nodes: each node keeps the memory reservation of the
+/// query for as long as its stream is open, that is until this is dropped.
+#[derive(Default)]
+pub struct QueryAdmission {
+    _streams: Vec<Streaming<AdmitQueryResponse>>,
+    /// How long the query waited for its turn.
+    waited: Duration,
+}
+
+/// A query that waited at least this long for its turn reads a snapshot taken after the wait,
+/// even when its transaction had already pinned one.
+const REFRESH_SNAPSHOT_AFTER_WAIT: Duration = Duration::from_secs(1);
 
 pub struct DistributedQueryStream {
     chunk_rx: tokio::sync::mpsc::Receiver<SchedulerResult<DataChunk>>,
     // Used for cleaning up `QueryExecution` after all data are polled.
     query_id: QueryId,
     query_execution_info: QueryExecutionInfoRef,
+    /// Released when the stream is dropped, that is when the query ends for its client.
+    _admission: QueryAdmission,
 }
 
 impl DistributedQueryStream {
@@ -191,6 +210,15 @@ impl QueryManager {
         context: ExecutionContextRef,
         mut query: Query,
     ) -> SchedulerResult<DistributedQueryStream> {
+        // Wait for the turn of the query on the compute nodes before pinning the snapshot: the
+        // time spent in their queues must not age the data that the query reads.
+        let admission = self.admit_query(&context, &query).await?;
+        if admission.waited >= REFRESH_SNAPSHOT_AFTER_WAIT {
+            // The optimizer pins the snapshot early for a query that calls `now()`: the value of
+            // `now()` is kept, but the data must be the one of the time the query starts to run.
+            context.session().unpin_implicit_snapshot();
+        }
+
         // TODO: if there's no table scan, we don't need to acquire snapshot.
         let pinned_snapshot = context.session().pinned_snapshot();
         pinned_snapshot.fill_batch_query_epoch(&mut query)?;
@@ -239,7 +267,94 @@ impl QueryManager {
                     .query_manager()
                     .delete_query(&query_id);
             })?;
-        Ok(query_result_fetcher.stream_from_channel())
+        Ok(query_result_fetcher.stream_from_channel(admission))
+    }
+
+    /// Asks every serving compute node to admit the query, and waits until all of them did.
+    ///
+    /// A node admits a query when the memory that its spillable operators reserve is available,
+    /// in arrival order. Nodes are asked one after the other in the order of their ids, so that
+    /// two queries never wait for each other. Queries without such operators do not wait.
+    async fn admit_query(
+        &self,
+        context: &ExecutionContextRef,
+        query: &Query,
+    ) -> SchedulerResult<QueryAdmission> {
+        let spillable_operator_instances = query.spillable_operator_instances();
+        if spillable_operator_instances == 0 {
+            return Ok(QueryAdmission::default());
+        }
+        let mut workers = self.worker_node_manager.list_serving_worker_nodes();
+        workers.sort_by_key(|worker| worker.id);
+
+        let start = Instant::now();
+        let admit = async {
+            let mut streams = Vec::with_capacity(workers.len());
+            for worker in &workers {
+                let client = self.compute_client_pool.get(worker).await?;
+                let mut stream = match client
+                    .admit_query(query.query_id.id.clone(), spillable_operator_instances)
+                    .await
+                {
+                    Ok(stream) => stream,
+                    // A node that does not know the request yet admits the query when it
+                    // receives its tasks.
+                    Err(RpcError::GrpcStatus(status))
+                        if status.inner().code() == tonic::Code::Unimplemented =>
+                    {
+                        continue;
+                    }
+                    Err(e) => return Err(e.into()),
+                };
+                match stream.message().await {
+                    Ok(Some(_)) => streams.push(stream),
+                    Ok(None) => {
+                        return Err(SchedulerError::Internal(anyhow::anyhow!(
+                            "compute node {} closed the admission of query {:?}",
+                            worker.id,
+                            query.query_id
+                        )));
+                    }
+                    Err(status) => return Err(RpcError::from_compute_status(status).into()),
+                }
+            }
+            SchedulerResult::Ok(streams)
+        };
+
+        let mut cancelled = context.session().reset_cancel_query_flag();
+        let timeout = async {
+            match context.timeout() {
+                Some(timeout) => tokio::time::sleep(timeout).await,
+                None => std::future::pending().await,
+            }
+        };
+        let streams = tokio::select! {
+            streams = admit => streams?,
+            _ = cancelled.cancelled() => {
+                return Err(SchedulerError::QueryCancelled(
+                    "cancelled while waiting for its memory reservation on the compute nodes"
+                        .to_owned(),
+                ));
+            }
+            _ = timeout => {
+                return Err(SchedulerError::QueryCancelled(format!(
+                    "timeout after {} seconds, spent waiting for its memory reservation on the compute nodes: too many queries run at the same time",
+                    context.timeout().unwrap_or_default().as_secs()
+                )));
+            }
+        };
+        let waited = start.elapsed();
+        if waited.as_secs() >= 10 {
+            tracing::warn!(
+                query_id = query.query_id.id,
+                waited_secs = waited.as_secs(),
+                "batch query waited for its memory reservation on the compute nodes"
+            );
+        }
+        Ok(QueryAdmission {
+            _streams: streams,
+            waited,
+        })
     }
 
     pub fn cancel_queries_in_session(&self, session_id: SessionId) {
@@ -275,11 +390,12 @@ impl QueryResultFetcher {
         }
     }
 
-    fn stream_from_channel(self) -> DistributedQueryStream {
+    fn stream_from_channel(self, admission: QueryAdmission) -> DistributedQueryStream {
         DistributedQueryStream {
             chunk_rx: self.chunk_rx,
             query_id: self.query_id,
             query_execution_info: self.query_execution_info,
+            _admission: admission,
         }
     }
 }

@@ -97,7 +97,7 @@ impl WorkerNodeManager {
             .collect()
     }
 
-    fn list_serving_worker_nodes(&self) -> Vec<WorkerNode> {
+    pub fn list_serving_worker_nodes(&self) -> Vec<WorkerNode> {
         self.list_compute_nodes()
             .into_iter()
             .filter(|w| w.property.as_ref().is_some_and(|p| p.is_serving))

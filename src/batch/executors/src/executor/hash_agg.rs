@@ -45,6 +45,7 @@ use crate::monitor::BatchSpillMetrics;
 use crate::spill::spill_op::SpillBackend::Disk;
 use crate::spill::spill_op::{
     DEFAULT_SPILL_PARTITION_NUM, SPILL_AT_LEAST_MEMORY, SpillBackend, SpillBuildHasher, SpillOp,
+    SpillWriter,
 };
 use crate::task::{ShutdownToken, TaskId};
 
@@ -170,7 +171,9 @@ impl BoxedExecutorBuilder for HashAggExecutorBuilder {
             source.task_id.clone(),
             identity.clone(),
             source.context().get_config().developer.chunk_size,
-            source.context().create_executor_mem_context(identity),
+            source
+                .context()
+                .create_spillable_executor_mem_context(identity),
             if source.context().get_config().enable_spill {
                 Some(Disk)
             } else {
@@ -304,9 +307,9 @@ impl<K: HashKey + Send + Sync> Executor for HashAggExecutor<K> {
 pub struct AggSpillManager {
     op: SpillOp,
     partition_num: usize,
-    agg_state_writers: Vec<opendal::Writer>,
+    agg_state_writers: Vec<SpillWriter>,
     agg_state_chunk_builder: Vec<DataChunkBuilder>,
-    input_writers: Vec<opendal::Writer>,
+    input_writers: Vec<SpillWriter>,
     input_chunk_builders: Vec<DataChunkBuilder>,
     spill_build_hasher: SpillBuildHasher,
     group_key_types: Vec<DataType>,
@@ -353,6 +356,7 @@ impl AggSpillManager {
     }
 
     async fn init_writers(&mut self) -> Result<()> {
+        self.op.reserve_files(self.partition_num * 2).await?;
         for i in 0..self.partition_num {
             let agg_state_partition_file_name = format!("agg-state-p{}", i);
             let w = self.op.writer_with(&agg_state_partition_file_name).await?;
