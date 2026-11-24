@@ -1,6 +1,8 @@
 # Validation of selective barriers (`docs/dev/src/design/selective-barriers.md`) on a GitHub
-# runner: a dev build (debug assertions on) started by risedev, with Postgres, a Kafka API
-# (Redpanda) and MySQL in containers, then the tests of `scripts/selective_barriers`.
+# runner: a dev build (debug assertions on, embedded UDF runtimes) started by risedev, with
+# Postgres, a Kafka API (Redpanda) and MySQL in containers, then the tests of
+# `scripts/selective_barriers`, the streaming, batch and UDF SLT. A second job runs the unit
+# tests of the main crates.
 #
 # It builds no image. To run it:
 # - push the commit to validate to a branch named `validate/<anything>`, or
@@ -154,9 +156,17 @@ jobs:
 
       - name: Configure risedev
         run: |
-          printf 'RISEDEV_CONFIGURED=true\nENABLE_BUILD_RUST=true\nENABLE_BUILD_RW_CONNECTOR=true\n' \
+          # ENABLE_UDF builds the embedded UDF runtimes (JavaScript, Python, WASM).
+          printf 'RISEDEV_CONFIGURED=true\nENABLE_BUILD_RUST=true\nENABLE_BUILD_RW_CONNECTOR=true\nENABLE_UDF=true\n' \
             > risedev-components.user.env
           cp scripts/selective_barriers/risedev-profiles.yml risedev-profiles.user.yml
+
+      - name: Build the WASM module of the UDF tests
+        working-directory: e2e_test/udf/embedded_wasm
+        run: |
+          rustup target add wasm32-wasip1
+          cargo build --release
+          ls -l target/wasm32-wasip1/release/udf.wasm
 
       - name: Build and start once
         id: build
@@ -212,6 +222,11 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: scripts/selective_barriers/ci_validate.sh batch
 
+      - name: User-defined functions and their volatility (SLT)
+        id: udf
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: scripts/selective_barriers/ci_validate.sh udf
+
       - name: Summary
         if: ${{ always() }}
         run: |
@@ -229,6 +244,7 @@ jobs:
             echo "| Suite with chaos | ${{ steps.suite.outcome }} |"
             echo "| Streaming SLT | ${{ steps.streaming.outcome }} |"
             echo "| Batch SLT | ${{ steps.batch.outcome }} |"
+            echo "| User-defined functions (SLT) | ${{ steps.udf.outcome }} |"
             for f in "$OUT"/matrix-*.log; do
               [ -f "$f" ] || continue
               echo ""
@@ -247,3 +263,96 @@ jobs:
           path: selbar-out/
           if-no-files-found: warn
           retention-days: 14
+
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_BUILD_JOBS: '3'
+      # Without debug info the test binaries fit the disk and the memory of a hosted runner.
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Free disk space and add swap
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/share/swift
+          sudo docker image prune --all --force || true
+          sudo fallocate -l 16G /swapfile-build
+          sudo chmod 600 /swapfile-build
+          sudo mkswap /swapfile-build
+          sudo swapon /swapfile-build
+          df -h /
+          free -h
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install --no-install-recommends \
+            build-essential pkg-config make cmake lld protobuf-compiler libprotobuf-dev \
+            curl git unzip \
+            libssl-dev libsasl2-dev python3.12 python3.12-dev libblas-dev liblapack-dev libomp-dev
+
+      - name: Install Rust toolchain
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- --no-modify-path --default-toolchain none -y
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install --profile minimal
+          rustup show
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-amd64-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-registry-amd64-
+
+      - name: Install cargo-nextest
+        run: |
+          curl -L --proto '=https' --tlsv1.2 -sSf \
+            https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+          cargo binstall -y --locked cargo-nextest
+
+      # The library tests of the crates that hold the engine: meta (barrier scheduler), stream,
+      # storage, batch, frontend, connectors and common.
+      - name: Library tests
+        id: lib
+        run: |
+          cargo nextest run --no-fail-fast --lib \
+            -p risingwave_meta -p risingwave_stream -p risingwave_storage \
+            -p risingwave_batch -p risingwave_batch_executors -p risingwave_frontend \
+            -p risingwave_connector -p risingwave_common
+
+      - name: Planner tests
+        id: planner
+        if: ${{ !cancelled() }}
+        run: cargo nextest run --no-fail-fast -p risingwave_planner_test
+
+      - name: Storage integration tests
+        id: hummock
+        if: ${{ !cancelled() }}
+        run: cargo nextest run --no-fail-fast -p risingwave_hummock_test --features test
+
+      - name: Summary
+        if: ${{ always() }}
+        run: |
+          {
+            echo "## Unit tests"
+            echo ""
+            echo "| Step | Result |"
+            echo "|---|---|"
+            echo "| Library tests | ${{ steps.lib.outcome }} |"
+            echo "| Planner tests | ${{ steps.planner.outcome }} |"
+            echo "| Storage integration tests | ${{ steps.hummock.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
