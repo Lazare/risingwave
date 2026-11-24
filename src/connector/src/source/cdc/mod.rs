@@ -15,6 +15,7 @@
 pub mod enumerator;
 pub mod external;
 pub mod jni_source;
+pub mod native;
 pub mod source;
 pub mod split;
 
