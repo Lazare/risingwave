@@ -45,7 +45,9 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::time::Instant;
 
 use super::executor_core::StreamSourceCore;
-use super::{barrier_to_message_stream, get_split_offset_col_idx, prune_additional_cols};
+use super::{
+    CdcRouter, barrier_to_message_stream, get_split_offset_col_idx, prune_additional_cols,
+};
 use crate::executor::UpdateMutation;
 use crate::executor::prelude::*;
 use crate::executor::source::reader_stream::{SourceReaderEventWithState, StreamReaderBuilder};
@@ -120,6 +122,10 @@ pub struct SourceExecutor<S: StateStore> {
 
     /// Local barrier manager for reporting source load finished events
     barrier_manager: LocalBarrierManager,
+
+    /// Shared CDC source with selective barriers: per-table gate (design D1), with the data types
+    /// of the output chunks.
+    cdc_router: Option<(CdcRouter, Vec<DataType>)>,
 }
 
 impl<S: StateStore> SourceExecutor<S> {
@@ -144,7 +150,17 @@ impl<S: StateStore> SourceExecutor<S> {
             rate_limit_rps,
             is_shared_non_cdc,
             barrier_manager,
+            cdc_router: None,
         }
+    }
+
+    /// Shared CDC source: route rows per table and hold the rows of sleeping tables (design D1
+    /// in `docs/dev/src/design/selective-barriers.md`). Inactive until a barrier carries routes
+    /// for this source.
+    pub fn with_cdc_router(mut self, output_data_types: Vec<DataType>) -> Self {
+        let router = CdcRouter::new(self.actor_ctx.fragment_id, self.barrier_manager.clone());
+        self.cdc_router = Some((router, output_data_types));
+        self
     }
 
     fn stream_reader_builder(&self, source_desc: SourceDesc) -> StreamReaderBuilder {
@@ -706,6 +722,11 @@ impl<S: StateStore> SourceExecutor<S> {
 
         // init in-memory split states with persisted state if any
         core.init_split_state(boot_state.clone());
+        if let Some((router, data_types)) = &mut self.cdc_router {
+            router
+                .load(core.split_state_store.state_table(), data_types)
+                .await?;
+        }
 
         // Return the ownership of `stream_source_core` to the source executor.
         self.stream_source_core = core;
@@ -1020,6 +1041,9 @@ impl<S: StateStore> SourceExecutor<S> {
                         }
                     }
 
+                    if let Some((router, _)) = &mut self.cdc_router {
+                        router.on_barrier(&barrier);
+                    }
                     let updated_splits = self.persist_state_and_clear_cache(epoch).await?;
 
                     self.maybe_report_cdc_source_offset(
@@ -1045,6 +1069,16 @@ impl<S: StateStore> SourceExecutor<S> {
                             to_apply_mutation,
                         )
                         .await?;
+                    }
+                    // Held rows that this barrier releases, emitted in the new epoch.
+                    if let Some((router, data_types)) = &mut self.cdc_router {
+                        let chunks = router.release(
+                            self.stream_source_core.split_state_store.state_table_mut(),
+                            data_types,
+                        );
+                        for chunk in chunks {
+                            yield Message::Chunk(chunk);
+                        }
                     }
                 }
                 Either::Left(_) => {
@@ -1125,8 +1159,14 @@ impl<S: StateStore> SourceExecutor<S> {
                         } else {
                             vec![split_idx, offset_idx]
                         };
-                    let chunk =
+                    let mut chunk =
                         prune_additional_cols(&chunk, &to_remove_col_indices, &source_desc.columns);
+                    if let Some((router, _)) = &mut self.cdc_router {
+                        chunk = router.route(
+                            chunk,
+                            self.stream_source_core.split_state_store.state_table_mut(),
+                        );
+                    }
                     yield Message::Chunk(chunk);
                     self.try_flush_data().await?;
                 }

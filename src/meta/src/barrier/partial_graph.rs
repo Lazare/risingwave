@@ -24,9 +24,9 @@ use educe::Educe;
 use itertools::Itertools;
 use risingwave_common::util::epoch::EpochPair;
 use risingwave_pb::common::WorkerNode;
-use risingwave_pb::id::{ActorId, PartialGraphId, TableId, WorkerId};
-use risingwave_pb::stream_plan::IcebergPkIndexCompactionContext;
+use risingwave_pb::id::{ActorId, FragmentId, PartialGraphId, TableId, WorkerId};
 use risingwave_pb::stream_plan::barrier_mutation::Mutation;
+use risingwave_pb::stream_plan::{IcebergPkIndexCompactionContext, PbSelectiveBarrierInfo};
 use risingwave_pb::stream_service::BarrierCompleteResponse;
 use risingwave_pb::stream_service::streaming_control_stream_response::{
     ResetPartialGraphResponse, Response,
@@ -52,6 +52,8 @@ pub(super) struct PartialGraphBarrierInfo {
     pub(super) barrier_info: BarrierInfo,
     pub(super) notifier: Option<CollectionNotifier>,
     pub(super) table_ids_to_commit: HashSet<TableId>,
+    /// Set when the barrier is injected selectively (see `docs/dev/src/design/selective-barriers.md`).
+    pub(super) selective: Option<PbSelectiveBarrierInfo>,
 }
 
 impl PartialGraphBarrierInfo {
@@ -67,7 +69,13 @@ impl PartialGraphBarrierInfo {
             barrier_info,
             notifier: notifier.map(NotifierStarter::add_notify),
             table_ids_to_commit,
+            selective: None,
         }
+    }
+
+    pub(super) fn with_selective(mut self, selective: Option<PbSelectiveBarrierInfo>) -> Self {
+        self.selective = selective;
+        self
     }
 
     pub(super) fn elapsed_secs(&self) -> f64 {
@@ -270,6 +278,9 @@ impl CollectedBarrierTempRef {
                     PartialGraphEvent::Reset(resps) => PartialGraphEvent::Reset(resps),
                     PartialGraphEvent::Initialized => PartialGraphEvent::Initialized,
                     PartialGraphEvent::Error(worker_id) => PartialGraphEvent::Error(worker_id),
+                    PartialGraphEvent::PendingInput(fragment_ids) => {
+                        PartialGraphEvent::PendingInput(fragment_ids)
+                    }
                 };
                 PartialGraphManagerEvent::PartialGraph(partial_graph_id, event)
             }
@@ -292,6 +303,8 @@ pub(super) enum PartialGraphEvent<'a> {
     Reset(HashMap<WorkerId, ResetPartialGraphResponse>),
     Initialized,
     Error(WorkerId),
+    /// Selective barriers: fragments of the graph hold input data and wait for a barrier.
+    PendingInput(Vec<FragmentId>),
 }
 
 pub(super) enum WorkerEvent {
@@ -508,6 +521,7 @@ impl PartialGraphManager {
             table_ids_to_sync,
             nodes_to_sync_table,
             new_actors,
+            info.selective.clone(),
         )?;
         let PartialGraphStatus::Running(state) = graph else {
             panic!("should not inject barrier on non-running status: {graph:?}")
@@ -657,6 +671,7 @@ impl PartialGraphRecoverer<'_> {
             table_ids_to_sync,
             node_actors.keys().copied(),
             Some(new_actors),
+            None,
         )?;
         self.manager
             .graphs
@@ -775,6 +790,18 @@ impl PartialGraphManager {
                                 return PartialGraphManagerEvent::PartialGraph(
                                     partial_graph_id,
                                     event,
+                                );
+                            }
+                        }
+                        Response::ReportPendingInput(resp) => {
+                            // A ring may arrive after the graph was reset or removed: ignore it,
+                            // the next barriers after a recovery are delivered to all fragments.
+                            if let Some(PartialGraphStatus::Running(_)) =
+                                self.graphs.get(&resp.partial_graph_id)
+                            {
+                                return PartialGraphManagerEvent::PartialGraph(
+                                    resp.partial_graph_id,
+                                    PartialGraphEvent::PendingInput(resp.fragment_ids),
                                 );
                             }
                         }

@@ -772,6 +772,11 @@ impl<C: GlobalBarrierWorkerContext> GlobalBarrierWorker<C> {
                                             &mut self.partial_graph_manager,
                                         )?;
                                     }
+                                    PartialGraphEvent::PendingInput(fragment_ids) => {
+                                        if let Some(database_id) = self.checkpoint_control.on_pending_input(partial_graph_id, fragment_ids) {
+                                            self.periodic_barriers.request_intermediate_barrier(database_id);
+                                        }
+                                    }
                                 }
                             }
                         };
@@ -1247,6 +1252,9 @@ impl<C: GlobalBarrierWorkerContext> GlobalBarrierWorker<C> {
                             match event {
                                 PartialGraphEvent::BarrierCollected(_) => {
                                     unreachable!("no barrier collected event on initializing")
+                                }
+                                PartialGraphEvent::PendingInput(_) => {
+                                    // Barriers after recovery are delivered to all fragments.
                                 }
                                 PartialGraphEvent::Reset(_) => {
                                     // Reset responses only carry diagnostic root errors. Recovery

@@ -1,0 +1,165 @@
+# Consistency of materialized views when only part of the streaming graph receives
+# changes. This test is a regression guard for selective barrier injection, where
+# fragments whose inputs did not change may skip barriers: every view must keep
+# matching its batch recomputation, whatever subset of tables is modified.
+
+statement ok
+create table sb_a (k int primary key, g int, v int);
+
+statement ok
+create table sb_b (k int primary key, g int, v int);
+
+statement ok
+create table sb_c (k int primary key, g int, v int);
+
+statement ok
+create table sb_ev (k int primary key, ts timestamptz);
+
+statement ok
+create materialized view sb_a_by_g as select g, count(*) as c, sum(v) as s from sb_a group by g;
+
+statement ok
+create materialized view sb_a_total as select count(*) as c, sum(v) as s from sb_a;
+
+statement ok
+create materialized view sb_b_by_g as select g, count(*) as c, sum(v) as s from sb_b group by g;
+
+statement ok
+create materialized view sb_ab as select a.k, a.v as va, b.v as vb from sb_a a join sb_b b on a.k = b.k;
+
+# Fan-in: a view on a view and a table.
+statement ok
+create materialized view sb_abc as select ab.k, ab.va, ab.vb, c.v as vc from sb_ab ab join sb_c c on ab.k = c.k;
+
+statement ok
+create materialized view sb_abc_g as select k % 3 as g, count(*) as c, sum(va + vb + vc) as s from sb_abc group by k % 3;
+
+statement ok
+create materialized view sb_c_only as select g, max(v) as m from sb_c group by g;
+
+statement ok
+create materialized view sb_ev_past as select k from sb_ev where ts < now();
+
+statement ok
+create sink sb_sink as select * from sb_abc_g with (connector = 'blackhole');
+
+statement ok
+create index sb_c_idx on sb_c(v);
+
+# Step 1: all tables change.
+statement ok
+insert into sb_a select g, g % 5, g from generate_series(1, 300) g;
+
+statement ok
+insert into sb_b select g, g % 7, g * 2 from generate_series(1, 300) g;
+
+statement ok
+insert into sb_c select g, g % 4, g * 3 from generate_series(1, 300) g;
+
+statement ok
+insert into sb_ev values (1, now() - interval '10 days'), (2, now() + interval '10 days');
+
+include ./check.slt.part
+
+# Step 2: only sb_c changes. sb_a, sb_b and their views stay idle.
+statement ok
+update sb_c set v = v + 1 where k % 2 = 0;
+
+statement ok
+delete from sb_c where k % 10 = 0;
+
+include ./check.slt.part
+
+# Step 3: only sb_a changes, with inserts, updates and deletes.
+statement ok
+insert into sb_a select g, g % 5, g from generate_series(301, 400) g;
+
+statement ok
+update sb_a set v = -v where k % 3 = 0;
+
+statement ok
+delete from sb_a where k % 11 = 0;
+
+include ./check.slt.part
+
+# Step 4: nothing changes for a while.
+sleep 3s
+
+include ./check.slt.part
+
+# Step 5: only sb_ev changes.
+statement ok
+insert into sb_ev values (3, now() - interval '1 day'), (4, now() + interval '1 day');
+
+include ./check.slt.part
+
+# Step 6: a new view is created on an idle table while another table changes.
+statement ok
+create materialized view sb_b_max as select max(v) as m from sb_b;
+
+statement ok
+update sb_c set v = v + 1;
+
+query T
+select (select m from sb_b_max) = (select max(v) from sb_b);
+----
+t
+
+include ./check.slt.part
+
+# Step 7: several small changes on different tables in a row.
+statement ok
+insert into sb_b values (1000, 1, 1);
+
+statement ok
+insert into sb_c values (1000, 1, 1);
+
+statement ok
+insert into sb_a values (1000, 1, 1);
+
+include ./check.slt.part
+
+statement ok
+drop sink sb_sink;
+
+statement ok
+drop materialized view sb_b_max;
+
+statement ok
+drop materialized view sb_abc_g;
+
+statement ok
+drop materialized view sb_abc;
+
+statement ok
+drop materialized view sb_ab;
+
+statement ok
+drop materialized view sb_c_only;
+
+statement ok
+drop materialized view sb_a_total;
+
+statement ok
+drop materialized view sb_a_by_g;
+
+statement ok
+drop materialized view sb_b_by_g;
+
+statement ok
+drop materialized view sb_ev_past;
+
+statement ok
+drop index sb_c_idx;
+
+statement ok
+drop table sb_a;
+
+statement ok
+drop table sb_b;
+
+statement ok
+drop table sb_c;
+
+statement ok
+drop table sb_ev;

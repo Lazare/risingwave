@@ -255,6 +255,9 @@ pub struct MetaOpts {
     /// l0 picker whether to select trivial move task
     pub enable_trivial_move: bool,
 
+    /// Deliver periodic barriers only to the fragments whose inputs may have changed.
+    pub enable_selective_barrier: bool,
+
     /// l0 multi level picker whether to check the overlap accuracy between sub levels
     pub enable_check_task_level_overlap: bool,
     pub enable_dropped_column_reclaim: bool,
@@ -404,6 +407,7 @@ impl MetaOpts {
             cached_traces_num: 1,
             cached_traces_memory_limit_bytes: usize::MAX,
             enable_trivial_move: true,
+            enable_selective_barrier: false,
             enable_check_task_level_overlap: true,
             enable_dropped_column_reclaim: false,
             object_store_config: ObjectStoreConfig::default(),

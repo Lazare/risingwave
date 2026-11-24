@@ -45,6 +45,7 @@ use crate::barrier::checkpoint::recovery::{
     DatabaseRecoveringState, DatabaseStatusAction, EnterInitializing, EnterRunning,
     RecoveringStateAction,
 };
+use crate::barrier::checkpoint::selective::SelectiveBarrierState;
 use crate::barrier::checkpoint::state::{ApplyCommandInfo, BarrierWorkerState};
 use crate::barrier::complete_task::{BarrierCompleteOutput, CompleteBarrierTask};
 use crate::barrier::info::{InflightDatabaseInfo, SharedActorInfos};
@@ -52,7 +53,7 @@ use crate::barrier::notifier::Notifier;
 use crate::barrier::partial_graph::{CollectedBarrier, PartialGraphManager, PartialGraphStat};
 use crate::barrier::progress::TrackingJob;
 use crate::barrier::rpc::{from_partial_graph_id, to_partial_graph_id};
-use crate::barrier::schedule::{NewBarrier, PeriodicBarriers};
+use crate::barrier::schedule::{NewBarrier, PeriodicBarriers, allows_intermediate_barrier};
 use crate::barrier::utils::{BarrierItemCollector, collect_independent_job_commit_epoch_info};
 use crate::barrier::{
     BackfillProgress, Command, CreateStreamingJobType, FragmentBackfillProgress, Reschedule,
@@ -381,6 +382,14 @@ impl CheckpointControl {
                 // Skip new barrier with no explicit command when the database should pause inject additional barrier
                 return Ok(());
             }
+            if new_barrier.intermediate
+                && !allows_intermediate_barrier(
+                    partial_graph_manager.pending_barrier_num(database.partial_graph_id),
+                )
+            {
+                // The database is late: an intermediate barrier would only add to the backlog.
+                return Ok(());
+            }
             database.handle_new_barrier(
                 new_barrier,
                 partial_graph_manager,
@@ -587,6 +596,30 @@ impl CheckpointControl {
         }
     }
 
+    /// Selective barriers: fragments of a database hold input data and wait for a barrier.
+    /// Returns the database when one of them is not released, i.e. its data waits for the next
+    /// barrier.
+    pub(crate) fn on_pending_input(
+        &mut self,
+        partial_graph_id: PartialGraphId,
+        fragment_ids: Vec<FragmentId>,
+    ) -> Option<DatabaseId> {
+        let (database_id, independent_job_id) = from_partial_graph_id(partial_graph_id);
+        if independent_job_id.is_some() {
+            return None;
+        }
+        if let Some(DatabaseCheckpointControlStatus::Running(database)) =
+            self.databases.get_mut(&database_id)
+        {
+            database
+                .selective
+                .on_ring(fragment_ids)
+                .then_some(database_id)
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn on_partial_graph_initialized(
         &mut self,
         partial_graph_id: PartialGraphId,
@@ -762,6 +795,10 @@ pub(in crate::barrier) struct DatabaseCheckpointControl {
 
     pub(super) database_info: InflightDatabaseInfo,
     pub independent_checkpoint_job_controls: HashMap<JobId, IndependentCheckpointJobControl>,
+
+    /// Selective barrier scheduler state. Reset on recovery, since a new
+    /// `DatabaseCheckpointControl` is created.
+    pub(super) selective: SelectiveBarrierState,
 }
 
 impl DatabaseCheckpointControl {
@@ -776,6 +813,7 @@ impl DatabaseCheckpointControl {
             last_committed_barrier_time: None,
             database_info: InflightDatabaseInfo::empty(database_id, shared_actor_infos),
             independent_checkpoint_job_controls: Default::default(),
+            selective: Default::default(),
         }
     }
 
@@ -796,6 +834,7 @@ impl DatabaseCheckpointControl {
             last_committed_barrier_time: None,
             database_info,
             independent_checkpoint_job_controls,
+            selective: Default::default(),
         }
     }
 

@@ -1007,6 +1007,10 @@ for_all_wrapped_id_fields! (
         StreamingControlStreamResponse.ReportPartialGraphFailureResponse {
             partial_graph_id: PartialGraphId,
         }
+        StreamingControlStreamResponse.ReportPendingInputResponse {
+            partial_graph_id: PartialGraphId,
+            fragment_ids: FragmentId,
+        }
         StreamingControlStreamResponse.ResetPartialGraphResponse {
             partial_graph_id: PartialGraphId,
         }

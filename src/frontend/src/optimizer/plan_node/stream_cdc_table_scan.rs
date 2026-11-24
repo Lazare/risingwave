@@ -215,6 +215,7 @@ impl StreamCdcTableScan {
             node_body: Some(PbNodeBody::CdcFilter(Box::new(CdcFilterNode {
                 search_condition: Some(filter_expr.to_expr_proto()),
                 upstream_source_id,
+                state_table: None,
             }))),
         };
 

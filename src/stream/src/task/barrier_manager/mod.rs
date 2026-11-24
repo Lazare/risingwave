@@ -93,6 +93,10 @@ pub(super) enum LocalBarrierEvent {
         role: PbIcebergPkIndexSinkRole,
         metadata: Option<SinkMetadata>,
     },
+    /// Selective barriers: the fragment holds input data and waits for a barrier to release it.
+    ReportPendingInput {
+        fragment_id: FragmentId,
+    },
 }
 
 /// Can send [`LocalBarrierEvent`] to [`super::barrier_worker::managed_state::PartialGraphState::poll_next_event`]
@@ -137,6 +141,12 @@ impl LocalBarrierManager {
     fn send_event(&self, event: LocalBarrierEvent) {
         // ignore error, because the current barrier manager maybe a stale one
         let _ = self.barrier_event_sender.send(event);
+    }
+
+    /// Selective barriers: ring for the given fragment, which holds input data and needs the next
+    /// barrier to release it. See `docs/dev/src/design/selective-barriers.md`.
+    pub fn report_pending_input(&self, fragment_id: FragmentId) {
+        self.send_event(LocalBarrierEvent::ReportPendingInput { fragment_id });
     }
 
     /// When a [`crate::executor::StreamConsumer`] (typically [`crate::executor::DispatchExecutor`]) get a barrier, it should report
