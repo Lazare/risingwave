@@ -51,6 +51,7 @@ use risingwave_connector::schema::schema_registry::{
     SCHEMA_REGISTRY_RETRIES_MAX_KEY, SCHEMA_REGISTRY_USERNAME, SchemaRegistryConfig,
     name_strategy_from_str,
 };
+use risingwave_connector::source::cdc::native::{CDC_ENGINE_KEY, CdcEngine};
 use risingwave_connector::source::cdc::{
     CDC_BACKFILL_ENABLE_KEY, CDC_MONGODB_STRONG_SCHEMA_KEY, CDC_SHARING_MODE_KEY,
     CDC_SNAPSHOT_BACKFILL, CDC_SNAPSHOT_MODE_KEY, CDC_TRANSACTIONAL_KEY,
@@ -782,6 +783,42 @@ pub fn bind_connector_props(
             })?
         {
             Feature::CdcAutoSchemaChange.check_available()?;
+        }
+
+        let cdc_engine =
+            CdcEngine::from_option(with_properties.get(CDC_ENGINE_KEY).map(|v| v.as_str()))
+                .map_err(|e| ErrorCode::InvalidInputSyntax(e.to_string()))?;
+        if cdc_engine == CdcEngine::Native {
+            if with_properties.get_connector().as_deref() != Some(POSTGRES_CDC_CONNECTOR) {
+                return Err(ErrorCode::InvalidInputSyntax(format!(
+                    "'{}' = '{}' is only supported by the {} connector",
+                    CDC_ENGINE_KEY,
+                    CdcEngine::NATIVE,
+                    POSTGRES_CDC_CONNECTOR
+                ))
+                .into());
+            }
+            // The schema change events are not produced by the native engine yet.
+            if with_properties
+                .get(AUTO_SCHEMA_CHANGE_KEY)
+                .is_some_and(|v| v.eq_ignore_ascii_case("true"))
+            {
+                return Err(ErrorCode::NotSupported(
+                    format!(
+                        "'{}' is not supported with '{}' = '{}'",
+                        AUTO_SCHEMA_CHANGE_KEY,
+                        CDC_ENGINE_KEY,
+                        CdcEngine::NATIVE
+                    ),
+                    format!(
+                        "use '{}' = '{}' or disable '{}'",
+                        CDC_ENGINE_KEY,
+                        CdcEngine::DEBEZIUM,
+                        AUTO_SCHEMA_CHANGE_KEY
+                    ),
+                )
+                .into());
+            }
         }
 
         // set connector to backfill mode
