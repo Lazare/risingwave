@@ -1,0 +1,9 @@
+# Selective barriers with `checkpoint_frequency > 1` on a large graph: a checkpoint every 12
+# barriers of 250 ms, i.e. the same checkpoint window (3 s) as `selective-on-cf30.toml` with
+# fewer barriers, which a small machine can follow with more than a hundred fragments.
+[meta.developer]
+enable_selective_barrier = true
+
+[system]
+barrier_interval_ms = 250
+checkpoint_frequency = 12

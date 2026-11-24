@@ -1,0 +1,229 @@
+# Validation of selective barriers (`docs/dev/src/design/selective-barriers.md`) on a GitHub
+# runner: a dev build (debug assertions on) started by risedev, with Postgres, a Kafka API
+# (Redpanda) and MySQL in containers, then the tests of `scripts/selective_barriers`.
+#
+# It builds no image. To run it:
+# - push the commit to validate to a branch named `validate/<anything>`, or
+# - once this file is on the default branch: gh workflow run 'Selective Barriers Validation' --ref <branch>
+name: Selective Barriers Validation
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: 'Chaos rounds per test'
+        required: false
+        type: string
+        default: '8'
+  push:
+    branches:
+      - 'validate/**'
+
+concurrency:
+  group: selective-barriers-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Build and test
+    runs-on: ubuntu-24.04
+    # GitHub-hosted runners kill a job after 6 hours.
+    timeout-minutes: 350
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_BUILD_JOBS: '3'
+      # Debug assertions stay on; without debug info the build fits the disk and the memory of
+      # a hosted runner.
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      OUT: ${{ github.workspace }}/selbar-out
+      ROUNDS: ${{ inputs.rounds || '8' }}
+      PGHOST: localhost
+      PGPORT: '5433'
+      PGUSER: postgres
+      PGDATABASE: postgres
+      KAFKA_BROKER: localhost:9092
+      KAFKA_CONTAINER: sb-kafka
+      MYSQL_HOST: 127.0.0.1
+      MYSQL_CONTAINER: sb-mysql
+      MYSQL_PASSWORD: sbroot
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Free disk space and add swap
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/share/swift
+          sudo docker image prune --all --force || true
+          sudo fallocate -l 16G /swapfile-build
+          sudo chmod 600 /swapfile-build
+          sudo mkswap /swapfile-build
+          sudo swapon /swapfile-build
+          df -h /
+          free -h
+
+      - name: Install build and test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install --no-install-recommends \
+            build-essential pkg-config make cmake lld protobuf-compiler libprotobuf-dev \
+            curl git unzip tmux psmisc postgresql-client maven python3-psycopg2 \
+            libssl-dev libsasl2-dev python3.12 python3.12-dev libblas-dev liblapack-dev libomp-dev
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Install Rust toolchain
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- --no-modify-path --default-toolchain none -y
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          # The toolchain version comes from the `rust-toolchain` file.
+          rustup toolchain install --profile minimal
+          rustup component add rustfmt
+          rustup show
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-amd64-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-registry-amd64-
+
+      - name: Install risedev tools
+        run: |
+          curl -L --proto '=https' --tlsv1.2 -sSf \
+            https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+          cargo binstall -y --locked cargo-make@0.37.24 sqllogictest-bin@0.29.1
+
+      - name: Start Postgres, Kafka API and MySQL
+        run: |
+          docker run -d --name sb-postgres -p 5433:5432 -e POSTGRES_HOST_AUTH_METHOD=trust \
+            postgres:15 -c wal_level=logical -c max_replication_slots=50 -c max_wal_senders=50
+          docker run -d --name sb-kafka -p 9092:9092 redpandadata/redpanda:v24.2.7 \
+            redpanda start --smp 1 --memory 700M --reserve-memory 0M --overprovisioned \
+            --node-id 0 --check=false --kafka-addr 0.0.0.0:9092 \
+            --advertise-kafka-addr localhost:9092
+          docker run -d --name sb-mysql -p 3306:3306 -e MYSQL_ROOT_PASSWORD=sbroot \
+            -e MYSQL_DATABASE=sbdb mysql:8.0 --server-id=1 --log-bin=mysql-bin \
+            --binlog-format=ROW --binlog-row-image=FULL --gtid-mode=ON \
+            --enforce-gtid-consistency=ON --innodb-buffer-pool-size=128M --performance-schema=OFF
+          for i in $(seq 1 60); do
+            if psql -Atc "select 1" >/dev/null 2>&1 \
+              && docker exec sb-kafka rpk cluster info >/dev/null 2>&1 \
+              && docker exec sb-mysql mysql -uroot -psbroot sbdb -e "select 1" >/dev/null 2>&1; then
+              echo "services ready after $i tries"
+              break
+            fi
+            sleep 3
+          done
+          psql -Atc "show wal_level"
+          docker exec sb-kafka rpk cluster info
+          docker exec sb-mysql mysql -uroot -psbroot sbdb -e "select version()"
+
+      - name: Configure risedev
+        run: |
+          printf 'RISEDEV_CONFIGURED=true\nENABLE_BUILD_RUST=true\nENABLE_BUILD_RW_CONNECTOR=true\n' \
+            > risedev-components.user.env
+          cp scripts/selective_barriers/risedev-profiles.yml risedev-profiles.user.yml
+
+      - name: Build and start once
+        id: build
+        # The build of the connector node downloads from Maven Central, which sometimes
+        # refuses requests (HTTP 429). A retry reuses what is already built.
+        run: |
+          for attempt in 1 2 3 4; do
+            if scripts/selective_barriers/ci_validate.sh build; then
+              exit 0
+            fi
+            echo "::warning::build attempt $attempt failed"
+            sleep 120
+          done
+          exit 1
+
+      - name: Connectors and sinks, selective barriers on
+        id: matrix_on
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: scripts/selective_barriers/ci_validate.sh matrix selbar-on
+
+      - name: Connectors and sinks, selective barriers on, checkpoint_frequency = 12
+        id: matrix_on_cf12
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: scripts/selective_barriers/ci_validate.sh matrix selbar-on-cf12
+
+      - name: Connectors and sinks, selective barriers off, checkpoint_frequency = 12 (reference)
+        id: matrix_off_cf12
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: scripts/selective_barriers/ci_validate.sh matrix selbar-cf12
+
+      - name: Sinks into tables (SLT)
+        id: sink_into_table
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: scripts/selective_barriers/ci_validate.sh sink-into-table
+
+      - name: Decoupled sink chaos
+        id: sink_chaos
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: scripts/selective_barriers/ci_validate.sh sink-chaos
+
+      - name: Selective barrier suite with chaos (off, on, on with checkpoint_frequency = 30)
+        id: suite
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: scripts/selective_barriers/ci_validate.sh suite
+
+      - name: Streaming SLT, selective barriers on
+        id: streaming
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: scripts/selective_barriers/ci_validate.sh streaming
+
+      - name: Batch SLT, selective barriers on
+        id: batch
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: scripts/selective_barriers/ci_validate.sh batch
+
+      - name: Summary
+        if: ${{ always() }}
+        run: |
+          {
+            echo "## Selective barriers validation"
+            echo ""
+            echo "| Step | Result |"
+            echo "|---|---|"
+            echo "| Build and start | ${{ steps.build.outcome }} |"
+            echo "| Connectors and sinks, on | ${{ steps.matrix_on.outcome }} |"
+            echo "| Connectors and sinks, on, checkpoint_frequency = 12 | ${{ steps.matrix_on_cf12.outcome }} |"
+            echo "| Connectors and sinks, off, checkpoint_frequency = 12 (reference) | ${{ steps.matrix_off_cf12.outcome }} |"
+            echo "| Sinks into tables (SLT) | ${{ steps.sink_into_table.outcome }} |"
+            echo "| Decoupled sink chaos | ${{ steps.sink_chaos.outcome }} |"
+            echo "| Suite with chaos | ${{ steps.suite.outcome }} |"
+            echo "| Streaming SLT | ${{ steps.streaming.outcome }} |"
+            echo "| Batch SLT | ${{ steps.batch.outcome }} |"
+            for f in "$OUT"/matrix-*.log; do
+              [ -f "$f" ] || continue
+              echo ""
+              echo "### $(basename "$f")"
+              echo '```'
+              cut -c1-400 "$f"
+              echo '```'
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload outputs and logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: selective-barriers-validation
+          path: selbar-out/
+          if-no-files-found: warn
+          retention-days: 14

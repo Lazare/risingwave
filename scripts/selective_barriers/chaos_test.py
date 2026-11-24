@@ -59,6 +59,10 @@ SCHEMA = [
     "create materialized view sb_c_only as select g, max(v) as m from sb_c group by g",
     "create materialized view sb_ev_past as select k from sb_ev where ts < now()",
     "create sink sb_sink as select * from sb_abc_g with (connector = 'blackhole')",
+    # A table fed by a sink: the sink is an upstream of the table without a merge node.
+    "create table sb_into (k int primary key, v int)",
+    "create sink sb_into_sink into sb_into as select k, v from sb_b",
+    "create materialized view sb_into_g as select count(*) as c, sum(v) as s from sb_into",
     "create index sb_c_idx on sb_c(v)",
 ]
 
@@ -90,6 +94,16 @@ CHECKS = [
         (select a.k % 3, count(*), sum(a.v + b.v + c.v)
          from sb_a a join sb_b b on a.k = b.k join sb_c c on a.k = c.k group by a.k % 3
          except select g, c, s from sb_abc_g)) d"""),
+    ("sb_into", """select count(*) from (
+        (select k, v from sb_into except select k, v from sb_b)
+        union all
+        (select k, v from sb_b except select k, v from sb_into)) d"""),
+    # Compared as scalars: a set operation over a single-row aggregate is not reliable when its
+    # result is empty.
+    ("sb_into_g", """select case when
+        (select c from sb_into_g) = (select count(*) from sb_b)
+        and coalesce((select s from sb_into_g), 0) = coalesce((select sum(v) from sb_b), 0)
+        then 0 else 1 end"""),
     ("sb_c_only", """select count(*) from (
         (select g, m from sb_c_only except select g, max(v) from sb_c group by g)
         union all
@@ -232,15 +246,16 @@ def main():
     cluster = Cluster(args)
 
     if not args.no_setup:
-        for t in ["sb_sink"]:
+        for t in ["sb_sink", "sb_into_sink"]:
             try:
                 cluster.psql(f"drop sink if exists {t}")
             except SqlError:
                 pass
-        for t in ["sb_abc_g", "sb_abc", "sb_ab", "sb_c_only", "sb_a_total", "sb_a_by_g", "sb_b_by_g", "sb_ev_past"]:
+        for t in ["sb_abc_g", "sb_abc", "sb_ab", "sb_c_only", "sb_a_total", "sb_a_by_g", "sb_b_by_g", "sb_ev_past",
+                  "sb_into_g"]:
             cluster.psql(f"drop materialized view if exists {t}")
         cluster.psql("drop index if exists sb_c_idx")
-        for t in TABLES + ["sb_ev"]:
+        for t in TABLES + ["sb_ev", "sb_into"]:
             cluster.psql(f"drop table if exists {t}")
         for stmt in SCHEMA:
             cluster.psql(stmt)

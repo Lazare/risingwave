@@ -164,8 +164,12 @@ Enabled with `[meta.developer] enable_selective_barrier = true` (off by default)
 - Two tables created from the same upstream table of a shared CDC source are not routed either:
   the source holds the rows of an upstream table for one `CdcFilter` only, and broadcasts what it
   emits to all of them.
-- A graph containing cross-database snapshot backfill, or a table that receives a sink
-  (`sink into table`), always receives full barriers.
+- A graph containing cross-database snapshot backfill always receives full barriers.
+- A table that receives a sink (`sink into table`) is a descendant of that sink, although the
+  table reads it through `UpstreamSinkUnion` and not through a merge: the scheduler adds these
+  edges to its graph. The table and its descendants therefore receive every barrier as long as
+  the sink exists; the rest of the database sleeps as usual. `UpstreamSinkUnion` does not support
+  a sleeping upstream, so the fragments it reads are always awake, which sink fragments are anyway.
 - While a job is being created, barriers are full.
 - A CDC table is created as soon as its job starts, while its backfill goes on reading the
   snapshot of the upstream table. The backfill executor reads the snapshot only in an epoch
