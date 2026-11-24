@@ -140,22 +140,32 @@ jobs:
 
       - name: Build and start once
         id: build
-        run: scripts/selective_barriers/ci_validate.sh build
+        # The build of the connector node downloads from Maven Central, which sometimes
+        # refuses requests (HTTP 429). A retry reuses what is already built.
+        run: |
+          for attempt in 1 2 3 4; do
+            if scripts/selective_barriers/ci_validate.sh build; then
+              exit 0
+            fi
+            echo "::warning::build attempt $attempt failed"
+            sleep 120
+          done
+          exit 1
 
       - name: Connectors and sinks, selective barriers on
         id: matrix_on
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: scripts/selective_barriers/ci_validate.sh matrix selbar-on
 
-      - name: Connectors and sinks, selective barriers on, checkpoint_frequency = 30
-        id: matrix_on_cf30
+      - name: Connectors and sinks, selective barriers on, checkpoint_frequency = 12
+        id: matrix_on_cf12
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: scripts/selective_barriers/ci_validate.sh matrix selbar-on-cf30
+        run: scripts/selective_barriers/ci_validate.sh matrix selbar-on-cf12
 
-      - name: Connectors and sinks, selective barriers off, checkpoint_frequency = 30 (reference)
-        id: matrix_off_cf30
+      - name: Connectors and sinks, selective barriers off, checkpoint_frequency = 12 (reference)
+        id: matrix_off_cf12
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: scripts/selective_barriers/ci_validate.sh matrix selbar-cf30
+        run: scripts/selective_barriers/ci_validate.sh matrix selbar-cf12
 
       - name: Sinks into tables (SLT)
         id: sink_into_table
@@ -192,8 +202,8 @@ jobs:
             echo "|---|---|"
             echo "| Build and start | ${{ steps.build.outcome }} |"
             echo "| Connectors and sinks, on | ${{ steps.matrix_on.outcome }} |"
-            echo "| Connectors and sinks, on, checkpoint_frequency = 30 | ${{ steps.matrix_on_cf30.outcome }} |"
-            echo "| Connectors and sinks, off, checkpoint_frequency = 30 (reference) | ${{ steps.matrix_off_cf30.outcome }} |"
+            echo "| Connectors and sinks, on, checkpoint_frequency = 12 | ${{ steps.matrix_on_cf12.outcome }} |"
+            echo "| Connectors and sinks, off, checkpoint_frequency = 12 (reference) | ${{ steps.matrix_off_cf12.outcome }} |"
             echo "| Sinks into tables (SLT) | ${{ steps.sink_into_table.outcome }} |"
             echo "| Decoupled sink chaos | ${{ steps.sink_chaos.outcome }} |"
             echo "| Suite with chaos | ${{ steps.suite.outcome }} |"

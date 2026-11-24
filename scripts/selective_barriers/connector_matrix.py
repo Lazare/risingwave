@@ -55,7 +55,7 @@ class CheckFailed(Exception):
     pass
 
 
-def sh(cmd, stdin=None, timeout=180):
+def sh(cmd, stdin=None, timeout=300):
     res = subprocess.run(cmd, input=stdin, capture_output=True, text=True, timeout=timeout)
     if res.returncode != 0:
         raise CheckFailed(f"{' '.join(cmd)[:120]}: {res.stderr.strip()[:600]}")

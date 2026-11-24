@@ -53,9 +53,26 @@ selbar-on-cf30:
       port: 4577
     - use: compactor
 
-# Selective barriers off, a checkpoint every 30 barriers of 100 ms.
-selbar-cf30:
-  config-path: scripts/selective_barriers/selective-off-cf30.toml
+# Selective barriers on, a checkpoint every 12 barriers of 250 ms (large graphs).
+selbar-on-cf12:
+  config-path: scripts/selective_barriers/selective-on-cf12.toml
+  env:
+    RUST_LOG: "info,risingwave_meta::barrier::checkpoint::selective=debug"
+  steps:
+    - use: opendal
+      engine: fs
+    - use: sqlite
+    - use: meta-node
+      meta-backend: sqlite
+    - use: compute-node
+      parallelism: 4
+    - use: frontend
+      port: 4577
+    - use: compactor
+
+# Selective barriers off, a checkpoint every 12 barriers of 250 ms (reference).
+selbar-cf12:
+  config-path: scripts/selective_barriers/selective-off-cf12.toml
   env:
     RUST_LOG: "info,risingwave_meta::barrier::checkpoint::selective=debug"
   steps:
