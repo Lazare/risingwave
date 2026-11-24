@@ -38,7 +38,15 @@ impl Rule<Logical> for AggGroupBySimplifyRule {
         if !functional_dependency.is_key(&group_key) {
             return None;
         }
-        let minimized_group_key = functional_dependency.minimize_key(&group_key);
+        let mut minimized_group_key = functional_dependency.minimize_key(&group_key);
+        // The key of an input that has at most one row is empty. An aggregation without group
+        // key is not equivalent: on an empty input it returns one row, not zero. Keep one column
+        // of the group key.
+        if minimized_group_key.is_empty()
+            && let Some(first) = group_key.first()
+        {
+            minimized_group_key.push(*first);
+        }
         if minimized_group_key.len() < group_key.len() {
             let new_group_key = IndexSet::from(minimized_group_key);
             let new_group_key_len = new_group_key.len();

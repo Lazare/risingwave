@@ -487,6 +487,18 @@ static ALWAYS_FALSE_FILTER: LazyLock<OptimizationStage> = LazyLock::new(|| {
     )
 });
 
+static BATCH_PRUNE_EMPTY_RELATION: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Prune Empty Relation For Batch",
+        vec![
+            ContradictoryNullFilterRule::create(),
+            EmptyRelationPropagateRule::create(),
+        ],
+        // Must be bottom-up so that an empty relation is propagated to the top in one pass.
+        ApplyOrder::BottomUp,
+    )
+});
+
 static LIMIT_PUSH_DOWN: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Push Down Limit",
@@ -813,6 +825,10 @@ impl LogicalOptimizer {
             plan.optimize_by_rules(&CONVERT_DISTINCT_AGG_FOR_STREAM)?
         };
 
+        // Prune the aggregate calls that nobody reads before `UnifyFirstLastValueRule` packs the
+        // `first_value`/`last_value` calls into one row: a field of that row can no longer be
+        // pruned, so every packed column would be scanned and kept in the aggregation state.
+        plan = Self::column_pruning(plan, explain_trace, &ctx);
         plan = plan.optimize_by_rules(&SIMPLIFY_AGG)?;
 
         plan = plan.optimize_by_rules(&JOIN_COMMUTE)?;
@@ -920,6 +936,10 @@ impl LogicalOptimizer {
         // Convert distinct aggregates.
         plan = plan.optimize_by_rules(&CONVERT_DISTINCT_AGG_FOR_BATCH)?;
 
+        // Prune the aggregate calls that nobody reads before `UnifyFirstLastValueRule` packs the
+        // `first_value`/`last_value` calls into one row: a field of that row can no longer be
+        // pruned, so every packed column would be scanned and kept in the aggregation state.
+        plan = Self::column_pruning(plan, explain_trace, &ctx);
         plan = plan.optimize_by_rules(&SIMPLIFY_AGG)?;
 
         plan = plan.optimize_by_rules(&JOIN_COMMUTE)?;
@@ -932,6 +952,11 @@ impl LogicalOptimizer {
             let _ = ctx.total_rule_applied();
             plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
         }
+
+        // After the final predicate pushdown, contradictory conjuncts like
+        // `x IS NULL AND x IN (...)` have been merged into the same filter or scan. Remove the
+        // sub-plans that are proven to be empty. Only for batch queries.
+        plan = plan.optimize_by_rules(&BATCH_PRUNE_EMPTY_RELATION)?;
 
         // Materialize Iceberg intermediate scans after predicate pushdown and column pruning.
         plan = plan.optimize_by_rules(&MATERIALIZE_ICEBERG_SCAN)?;

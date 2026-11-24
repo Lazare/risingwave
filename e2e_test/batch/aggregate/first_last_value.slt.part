@@ -19,3 +19,58 @@ from t;
 
 statement ok
 drop table t;
+
+# Only some of the last_value calls of a deduplication view are read: the others are pruned
+# before the calls are unified into one row.
+statement ok
+create table t_events(id varchar, entity_id varchar, fact jsonb, created_at int, created_by varchar);
+
+statement ok
+insert into t_events values
+  ('e1', 'a', '{"n": 1}', 1, 'u1'),
+  ('e2', 'a', '{"n": 2}', 2, 'u2'),
+  ('e3', 'b', '{"n": 3}', 1, 'u3'),
+  ('e4', 'c', null, 5, null),
+  ('e5', 'c', '{"n": 5}', 3, 'u5');
+
+statement ok
+create view v_last as
+select entity_id,
+  last_value('set' order by created_at) as op,
+  last_value(id order by created_at) as id,
+  last_value(fact order by created_at) as fact,
+  last_value(created_at order by created_at) as created_at,
+  last_value(created_by order by created_at) as created_by
+from t_events group by entity_id;
+
+query T rowsort
+select entity_id from v_last where op = 'set';
+----
+a
+b
+c
+
+query TTT rowsort
+select entity_id, id, created_by from v_last where op = 'set';
+----
+a e2 u2
+b e3 u3
+c e4 NULL
+
+query TTTTIT rowsort
+select * from v_last;
+----
+a set e2 {"n": 2} 2 u2
+b set e3 {"n": 3} 1 u3
+c set e4 NULL 5 NULL
+
+query I
+select count(*) from (select * from v_last where id is null limit 10) t;
+----
+0
+
+statement ok
+drop view v_last;
+
+statement ok
+drop table t_events;
