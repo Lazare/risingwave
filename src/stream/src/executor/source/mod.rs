@@ -35,6 +35,8 @@ pub use executor_core::StreamSourceCore;
 
 mod reader_stream;
 
+mod cdc_router;
+pub use cdc_router::CdcRouter;
 mod source_executor;
 pub use source_executor::*;
 mod dummy_source_executor;

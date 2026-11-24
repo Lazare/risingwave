@@ -472,6 +472,13 @@ impl InflightDatabaseInfo {
         self.jobs.contains_key(&job_id)
     }
 
+    /// Whether every streaming job of the database is created (no backfill in progress).
+    pub(super) fn all_jobs_created(&self) -> bool {
+        self.jobs
+            .values()
+            .all(|job| matches!(job.status, CreateStreamingJobStatus::Created))
+    }
+
     pub(super) fn job_id_by_fragment(&self, fragment_id: FragmentId) -> Option<JobId> {
         self.fragment_location.get(&fragment_id).copied()
     }

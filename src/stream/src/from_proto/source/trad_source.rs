@@ -330,17 +330,24 @@ impl ExecutorBuilder for SourceExecutorBuilder {
                     }
                 } else {
                     let is_shared = source.info.as_ref().is_some_and(|info| info.is_shared());
-                    SourceExecutor::new(
+                    let is_cdc = source.with_properties.is_cdc_connector();
+                    let exec = SourceExecutor::new(
                         params.actor_context.clone(),
                         stream_source_core,
                         params.executor_stats.clone(),
                         barrier_receiver,
                         system_params,
                         source.rate_limit,
-                        is_shared && !source.with_properties.is_cdc_connector(),
+                        is_shared && !is_cdc,
                         params.local_barrier_manager.clone(),
-                    )
-                    .boxed()
+                    );
+                    if is_shared && is_cdc {
+                        // Selective barriers: per-table gate, active only if meta sends routes.
+                        exec.with_cdc_router(params.info.schema.data_types())
+                            .boxed()
+                    } else {
+                        exec.boxed()
+                    }
                 }
             };
 

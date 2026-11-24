@@ -252,6 +252,11 @@ where
     /// Flag to indicate whether the state table has called `commit`, but has not called
     /// `post_yield_barrier` on the `StateTablePostCommit` callback yet.
     on_post_commit: bool,
+
+    /// Whether anything was written (rows or watermark) since the last commit. With selective
+    /// barriers, a state table may skip epochs while its fragment sleeps, which is only valid if
+    /// nothing was written in the epoch being sealed.
+    written_in_epoch: bool,
 }
 
 /// `StateTable` will use `BasicSerde` as default
@@ -1079,6 +1084,7 @@ impl<S: StateStore, SD: ValueRowSerde, const IS_REPLICATED: bool>
             op_consistency_level: state_table_op_consistency_level,
             clean_watermark_index,
             on_post_commit: false,
+            written_in_epoch: false,
         }
     }
 }
@@ -1613,6 +1619,7 @@ where
     /// Insert a row into state table. Must provide a full row corresponding to the column desc of
     /// the table.
     pub fn insert(&mut self, value: impl Row) {
+        self.written_in_epoch = true;
         let pk_indices = &self.pk_indices;
         let pk = (&value).project(pk_indices);
 
@@ -1625,6 +1632,7 @@ where
     /// Delete a row from state table. Must provide a full row of old value corresponding to the
     /// column desc of the table.
     pub fn delete(&mut self, old_value: impl Row) {
+        self.written_in_epoch = true;
         let pk_indices = &self.pk_indices;
         let pk = (&old_value).project(pk_indices);
 
@@ -1636,6 +1644,7 @@ where
 
     /// Update a row. The old and new value should have the same pk.
     pub fn update(&mut self, old_value: impl Row, new_value: impl Row) {
+        self.written_in_epoch = true;
         let old_pk = (&old_value).project(self.pk_indices());
         let new_pk = (&new_value).project(self.pk_indices());
         debug_assert!(
@@ -1667,6 +1676,7 @@ where
     // allow(izip, which use zip instead of zip_eq)
     #[allow(clippy::disallowed_methods)]
     pub fn write_chunk(&mut self, chunk: StreamChunk) {
+        self.written_in_epoch = true;
         let chunk = if IS_REPLICATED {
             self.fill_non_output_indices(chunk)
         } else {
@@ -1705,6 +1715,7 @@ where
     ///
     /// * `watermark` - Latest watermark received.
     pub fn update_watermark(&mut self, watermark: ScalarImpl) {
+        self.written_in_epoch = true;
         trace!(table_id = %self.table_id, watermark = ?watermark, "update watermark");
         self.pending_watermark = Some(watermark);
     }
@@ -1765,10 +1776,20 @@ where
         switch_consistent_op: Option<StateTableOpConsistencyLevel>,
     ) -> StreamExecutorResult<StateTablePostCommit<'_, S, SD, IS_REPLICATED>> {
         assert!(!self.on_post_commit);
-        assert_eq!(
-            self.epoch.expect("should only be called after init").curr,
-            new_epoch.prev
-        );
+        let last_epoch = self.epoch.expect("should only be called after init").curr;
+        if last_epoch != new_epoch.prev {
+            // With selective barriers, a sleeping fragment does not receive barriers and wakes up
+            // with a newer `prev` epoch. This is only valid if nothing was written meanwhile,
+            // otherwise the data would be committed after epochs that were published without it.
+            assert!(
+                last_epoch < new_epoch.prev && !self.written_in_epoch,
+                "state table {} cannot jump from epoch {} to {:?}: written_in_epoch = {}",
+                self.table_id,
+                last_epoch,
+                new_epoch,
+                self.written_in_epoch
+            );
+        }
         if let Some(new_consistency_level) = switch_consistent_op {
             assert_ne!(self.op_consistency_level, new_consistency_level);
             self.op_consistency_level = new_consistency_level;
@@ -1789,6 +1810,7 @@ where
             ))
             .await?;
         self.epoch = Some(new_epoch);
+        self.written_in_epoch = false;
 
         self.on_post_commit = true;
         Ok(StateTablePostCommit { inner: self })

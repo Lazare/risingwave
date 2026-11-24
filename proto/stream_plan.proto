@@ -248,6 +248,36 @@ message Barrier {
   // The kind of the barrier.
   BarrierKind kind = 9;
   optional IcebergPkIndexCompactionContext iceberg_pk_index_compaction = 10;
+  // Set only when selective barriers are enabled: the barrier is not delivered to every fragment.
+  optional SelectiveBarrierInfo selective = 11;
+}
+
+// Describes which fragments take part in a selectively injected barrier.
+// See `docs/dev/src/design/selective-barriers.md`.
+message SelectiveBarrierInfo {
+  // Fragments that do not receive this barrier. Their actors emit nothing during the epoch.
+  // A merge whose upstream fragment is listed here must not wait for the barrier from it,
+  // and a dispatcher must not send the barrier to a downstream fragment listed here.
+  repeated uint32 sleeping_fragment_ids = 1;
+  // Fragments that receive this barrier but did not receive the previous one. Their actors
+  // and state tables observe an epoch jump: `prev` is newer than the last sealed epoch.
+  repeated uint32 waking_fragment_ids = 2;
+  // Fragments released by this barrier: they and their descendants are guaranteed to receive the
+  // next barrier too, so they may emit data during the epoch opened by this barrier. An origin
+  // that only emits on barriers (`Now`) advances only when it is released.
+  repeated uint32 released_fragment_ids = 3;
+  // Shared CDC sources that route rows per table (design D1): the `CdcFilter` fragment that
+  // receives the rows of each table. Sent with the first selective barrier after a reset of the
+  // scheduler (recovery or command); a source keeps the last routes it received. A source holds
+  // the rows of a table until a barrier releases its `CdcFilter` fragment.
+  repeated CdcRoute cdc_routes = 4;
+}
+
+message CdcRoute {
+  uint32 source_fragment_id = 1;
+  uint32 fragment_id = 2;
+  // Value of `_rw_table_name` of the rows of the table.
+  string table_name = 3;
 }
 
 message Watermark {
@@ -448,6 +478,10 @@ message ChangeLogNode {
 message CdcFilterNode {
   expr.ExprNode search_condition = 1;
   uint32 upstream_source_id = 2;
+  // Selective barriers: rows held while the downstream table sleeps, persisted so that they
+  // survive a recovery (the source has already committed their offset). Only set for tables
+  // created with `enable_selective_barrier`; without it the downstream table never sleeps.
+  optional catalog.Table state_table = 3;
 }
 
 // A materialized view is regarded as a table.

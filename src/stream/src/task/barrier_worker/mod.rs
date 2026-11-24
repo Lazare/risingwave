@@ -60,8 +60,8 @@ use risingwave_pb::stream_service::streaming_control_stream_request::{
     InitRequest, Request, ResetPartialGraphsRequest,
 };
 use risingwave_pb::stream_service::streaming_control_stream_response::{
-    InitResponse, ReportPartialGraphFailureResponse, ResetPartialGraphResponse, Response,
-    ShutdownResponse,
+    InitResponse, ReportPartialGraphFailureResponse, ReportPendingInputResponse,
+    ResetPartialGraphResponse, Response, ShutdownResponse,
 };
 use risingwave_pb::stream_service::{
     BarrierCompleteResponse, InjectBarrierRequest, PbScoredError, StreamingControlStreamRequest,
@@ -397,6 +397,17 @@ impl LocalBarrierWorker {
                                 self.ack_partial_graph_reset(partial_graph_id, Some(output));
                             }
                         }
+                        ManagedBarrierStateEvent::PendingInput {
+                            partial_graph_id,
+                            fragment_id,
+                        } => {
+                            self.control_stream_handle.send_response(Response::ReportPendingInput(
+                                ReportPendingInputResponse {
+                                    partial_graph_id,
+                                    fragment_ids: vec![fragment_id],
+                                },
+                            ));
+                        }
                         ManagedBarrierStateEvent::RegisterLocalUpstreamOutput{
                             actor_id,
                             upstream_actor_id,
@@ -617,7 +628,8 @@ impl LocalBarrierWorker {
                         }
                         ManagedBarrierStateEvent::ActorError { .. }
                         | ManagedBarrierStateEvent::PartialGraphsReset { .. }
-                        | ManagedBarrierStateEvent::RegisterLocalUpstreamOutput { .. } => {
+                        | ManagedBarrierStateEvent::RegisterLocalUpstreamOutput { .. }
+                        | ManagedBarrierStateEvent::PendingInput { .. } => {
                             unreachable!()
                         }
                     }
@@ -715,14 +727,24 @@ fn sync_epoch(
     state_store: &StateStoreImpl,
     barrier_sync_latency: LabelGuardedHistogram,
     prev_epoch: u64,
-    table_ids: HashSet<TableId>,
+    table_id_groups: Vec<HashSet<TableId>>,
 ) -> BoxFuture<'static, StreamResult<SyncResult>> {
     let timer = barrier_sync_latency.start_timer();
 
+    // Each group of tables started the same epochs since its last sync, as required by the
+    // uploader. There are several groups only with selective barriers.
+    let sync_table_epochs = if table_id_groups.is_empty() {
+        vec![(prev_epoch, HashSet::new())]
+    } else {
+        table_id_groups
+            .into_iter()
+            .map(|table_ids| (prev_epoch, table_ids))
+            .collect()
+    };
     let state_store = state_store.clone();
     let future = async move {
         dispatch_state_store!(state_store, hummock, {
-            hummock.sync(vec![(prev_epoch, table_ids)]).await
+            hummock.sync(sync_table_epochs).await
         })
     };
 

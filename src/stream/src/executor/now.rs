@@ -27,7 +27,7 @@ use tokio::time::Instant;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::executor::prelude::*;
-use crate::task::ActorEvalErrorReport;
+use crate::task::{ActorEvalErrorReport, FragmentId};
 
 pub struct NowExecutor<S: StateStore> {
     data_types: Vec<DataType>,
@@ -41,6 +41,10 @@ pub struct NowExecutor<S: StateStore> {
     state_table: StateTable<S>,
 
     progress_ratio: Option<f32>,
+
+    /// Fragment of this executor, used with selective barriers: the executor only advances on
+    /// barriers that release its fragment. `None` disables this behavior.
+    selective_fragment_id: Option<FragmentId>,
 }
 
 pub enum NowMode {
@@ -78,7 +82,17 @@ impl<S: StateStore> NowExecutor<S> {
             barrier_receiver,
             state_table,
             progress_ratio,
+            selective_fragment_id: None,
         }
+    }
+
+    /// Make the executor follow selective barriers (see
+    /// `docs/dev/src/design/selective-barriers.md`): while the last barrier is selective, the
+    /// executor only advances on barriers that release its fragment. Meta releases it when its
+    /// downstream may observe a change, e.g. when the rounded value of `now()` changes.
+    pub fn with_selective_fragment_id(mut self, fragment_id: FragmentId) -> Self {
+        self.selective_fragment_id = Some(fragment_id);
+        self
     }
 
     #[try_stream(ok = Message, error = StreamExecutorError)]
@@ -90,6 +104,7 @@ impl<S: StateStore> NowExecutor<S> {
             barrier_receiver,
             mut state_table,
             progress_ratio,
+            selective_fragment_id,
         } = self;
 
         info!("NowExecutor started. progress_ratio: {:?}", progress_ratio);
@@ -138,7 +153,13 @@ impl<S: StateStore> NowExecutor<S> {
                     barriers.len()
                 );
             }
+            // Whether the last barrier of the batch does not release this fragment, in which case
+            // the downstream may sleep and the executor must not advance.
+            let mut held_by_selective_barrier = false;
             for barrier in barriers {
+                held_by_selective_barrier = matches!(mode, NowMode::UpdateCurrent)
+                    && selective_fragment_id
+                        .is_some_and(|fragment_id| !barrier.is_fragment_released(fragment_id));
                 let curr_epoch = barrier.get_curr_epoch();
                 let new_timestamp = curr_epoch.as_timestamptz();
                 let pause_mutation =
@@ -210,8 +231,10 @@ impl<S: StateStore> NowExecutor<S> {
                 }
             }
 
-            // Do not yield any messages if paused.
-            if paused {
+            // Do not yield any messages if paused, or if the downstream may sleep. In the latter
+            // case, nothing is written either, so that the state stays consistent with what the
+            // downstream received.
+            if paused || held_by_selective_barrier {
                 continue;
             }
 
