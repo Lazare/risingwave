@@ -14,10 +14,14 @@ ARG TARGETARCH
 
 LABEL org.opencontainers.image.source https://github.com/risingwavelabs/risingwave
 
+# Require Ubuntu's CVE-2026-114938 fix while allowing newer security updates, as
+# `docker/Dockerfile` does. https://ubuntu.com/security/notices/USN-9156-1
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get -y install --no-install-recommends \
     ca-certificates openjdk-21-jre-headless python3.12 libpython3.12 libsasl2-2 openssl \
     libblas3 liblapack3 libomp5 \
+  && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' openjdk-21-jre-headless)" ge '21.0.13.1+2-1~24.04.1' \
+  && java -version \
   && rm -rf /var/lib/apt/lists/*
 
 COPY --chmod=755 ${TARGETARCH}/risingwave /risingwave/bin/risingwave
