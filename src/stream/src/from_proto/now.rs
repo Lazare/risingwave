@@ -79,6 +79,7 @@ impl ExecutorBuilder for NowExecutorBuilder {
         let exec = NowExecutor::new(
             params.info.schema.data_types(),
             mode,
+            node.snapshot_backfill_epoch,
             params.eval_error_report,
             barrier_receiver,
             state_table,
