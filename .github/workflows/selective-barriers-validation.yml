@@ -69,7 +69,7 @@ jobs:
           sudo apt-get update
           sudo apt-get -y install --no-install-recommends \
             build-essential pkg-config make cmake lld protobuf-compiler libprotobuf-dev \
-            curl git unzip tmux psmisc postgresql-client maven \
+            curl git unzip tmux psmisc postgresql-client maven python3-psycopg2 \
             libssl-dev libsasl2-dev python3.12 python3.12-dev libblas-dev liblapack-dev libomp-dev
 
       - uses: actions/setup-java@v4
