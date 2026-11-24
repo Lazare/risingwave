@@ -6,7 +6,8 @@
 # The end-to-end validation runs on the integration branch (`selective-barriers-validation.yml`).
 #
 # To run it, push a commit that holds this file to a branch named `check/<anything>`; the
-# `fork/*` branches are read from the repository, so push them first.
+# `fork/*` branches are read from the repository, so push them first. The tag is read from the
+# upstream repository.
 name: Fork Branches Check
 
 permissions:
@@ -30,6 +31,8 @@ concurrency:
 
 env:
   BASE: ${{ inputs.base || 'v3.1.2' }}
+  # The fork does not hold the upstream tags.
+  UPSTREAM: https://github.com/risingwavelabs/risingwave.git
 
 jobs:
   branch:
@@ -65,7 +68,7 @@ jobs:
 
       - name: Check that the branch starts from the tag
         run: |
-          git fetch --quiet origin "refs/tags/$BASE:refs/tags/$BASE"
+          git fetch --quiet "$UPSTREAM" "refs/tags/$BASE:refs/tags/$BASE"
           test "$(git merge-base HEAD "$BASE")" = "$(git rev-parse "$BASE^{commit}")"
           git log --oneline "$BASE..HEAD"
 
@@ -128,17 +131,17 @@ jobs:
 
       - name: Planner tests
         id: planner
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.lib.outcome != 'skipped' }}
         run: cargo nextest run --locked --no-fail-fast -p risingwave_planner_test
 
       - name: Storage integration tests
         id: hummock
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.lib.outcome != 'skipped' }}
         run: cargo nextest run --locked --no-fail-fast -p risingwave_hummock_test --features test
 
       - name: Build the all-in-one binary
         id: binary
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.lib.outcome != 'skipped' }}
         run: cargo build --locked -p risingwave_cmd_all
 
       - name: Summary
@@ -168,7 +171,7 @@ jobs:
         run: |
           git config user.name "fork-branches-check"
           git config user.email "fork-branches-check@users.noreply.github.com"
-          git fetch --quiet origin "refs/tags/$BASE:refs/tags/$BASE"
+          git fetch --quiet "$UPSTREAM" "refs/tags/$BASE:refs/tags/$BASE"
           scripts/fork/rebuild-integration.sh "$BASE" rebuilt origin
           {
             echo "## Integration branch rebuilt from $BASE"
