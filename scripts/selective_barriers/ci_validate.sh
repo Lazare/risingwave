@@ -8,6 +8,8 @@
 #   matrix <profile>      source connectors and sinks (connector_matrix.py)
 #   streaming             streaming SLT with selective barriers on
 #   batch                 batch SLT with selective barriers on
+#   udf                   SLT of embedded user-defined functions and of their volatility
+#                         (needs a build with ENABLE_UDF=true and the WASM test module)
 #   sink-into-table       SLT of sinks into tables with selective barriers on
 #   sink-chaos            crash/restart test of decoupled sinks
 #   suite                 SLT and chaos tests with the feature off, on, and on with
@@ -28,9 +30,10 @@ PORT=4577
 ROUNDS=${ROUNDS:-8}
 SEED=${SEED:-4242}
 
-# Streaming SLT files that fail for reasons unrelated to selective barriers on a plain dev
-# build: they need the UDF feature or the `zx` command, or run after one that does and find its
-# objects. Any other failure fails the step.
+# Streaming SLT files that fail for reasons unrelated to selective barriers: one needs the `zx`
+# command, the others run after a failed file and find its objects. Any other failure fails the
+# step. `impure_expr_materialize.slt` needs a build with ENABLE_UDF=true; the `udf` step runs
+# it on its own and requires it to pass.
 KNOWN_STREAMING_FAILURES="
 e2e_test/streaming/impure_expr_materialize.slt
 e2e_test/streaming/queryable_internal_state/group_agg.slt
@@ -147,6 +150,22 @@ step_batch() {
   return $rc
 }
 
+step_udf() {
+  local rc=0 log="$OUT/slt-udf.log"
+  fresh selbar-on || return 1
+  ./risedev slt -p $PORT -d dev \
+    './e2e_test/streaming/impure_expr_materialize.slt' \
+    './e2e_test/udf/tests/scalar/javascript.slt' \
+    './e2e_test/udf/tests/scalar/python.slt' \
+    './e2e_test/udf/tests/scalar/wasm.slt' \
+    './e2e_test/udf/tests/scalar/wasm_volatility.slt' >"$log" 2>&1 || rc=1
+  echo "ok=$(grep -a -c '\[OK\]' "$log") failed=$(grep -a -c '\[FAILED\]' "$log")"
+  [[ $rc -eq 0 ]] || sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -a -A25 '^failed to run' | cut -c1-300 | head -100
+  save_logs udf
+  no_panic || rc=1
+  return $rc
+}
+
 step_sink_into_table() {
   local rc=0 log="$OUT/slt-sink-into-table.log"
   fresh selbar-on || return 1
@@ -187,6 +206,7 @@ case "$step" in
   matrix) step_matrix "${1:?profile}" ;;
   streaming) step_streaming ;;
   batch) step_batch ;;
+  udf) step_udf ;;
   sink-into-table) step_sink_into_table ;;
   sink-chaos) step_sink_chaos ;;
   suite) step_suite ;;

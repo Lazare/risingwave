@@ -1,0 +1,64 @@
+# A WASM function declared IMMUTABLE is pure: it can be used where an impure expression is
+# rejected, such as a filter on a retractable stream. Needs the module built by
+# `cargo build --release` in `e2e_test/udf/embedded_wasm`.
+
+statement ok
+create table wasm_volatility_t (a int, b int);
+
+statement ok
+create function gcd(int, int) returns int
+immutable language wasm using link 'fs://e2e_test/udf/embedded_wasm/target/wasm32-wasip1/release/udf.wasm';
+
+statement ok
+create function int_42() returns int
+language wasm using link 'fs://e2e_test/udf/embedded_wasm/target/wasm32-wasip1/release/udf.wasm';
+
+query TT
+select name, volatility from rw_functions where name in ('gcd', 'int_42') order by name;
+----
+gcd IMMUTABLE
+int_42 NULL
+
+# Not declared: impure, as any user-defined function by default.
+statement error using an impure expression \(user-defined function `int_42`\) in WHERE or HAVING
+create materialized view wasm_volatility_impure as
+select * from wasm_volatility_t where a > int_42();
+
+statement ok
+create materialized view wasm_volatility_mv as
+select a, b, gcd(a, b) as g from wasm_volatility_t where gcd(a, b) > 1;
+
+statement ok
+insert into wasm_volatility_t values (25, 15), (7, 3), (12, 18);
+
+statement ok
+flush;
+
+query III rowsort
+select * from wasm_volatility_mv;
+----
+12 18 6
+25 15 5
+
+statement ok
+delete from wasm_volatility_t where a = 25;
+
+statement ok
+flush;
+
+query III rowsort
+select * from wasm_volatility_mv;
+----
+12 18 6
+
+statement ok
+drop materialized view wasm_volatility_mv;
+
+statement ok
+drop function gcd(int, int);
+
+statement ok
+drop function int_42();
+
+statement ok
+drop table wasm_volatility_t;
