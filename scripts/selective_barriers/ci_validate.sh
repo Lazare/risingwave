@@ -8,6 +8,10 @@
 #   matrix <profile>      source connectors and sinks (connector_matrix.py)
 #   streaming             streaming SLT with selective barriers on
 #   batch                 batch SLT with selective barriers on
+#   after-upgrade <profile>   restart the cluster of a previous `matrix <profile>` on the same
+#                         data with the binary of the current tree, and check every object
+#   udf                   SLT of embedded user-defined functions and of their volatility
+#                         (needs a build with ENABLE_UDF=true and the WASM test module)
 #   sink-into-table       SLT of sinks into tables with selective barriers on
 #   sink-chaos            crash/restart test of decoupled sinks
 #   suite                 SLT and chaos tests with the feature off, on, and on with
@@ -28,9 +32,10 @@ PORT=4577
 ROUNDS=${ROUNDS:-8}
 SEED=${SEED:-4242}
 
-# Streaming SLT files that fail for reasons unrelated to selective barriers on a plain dev
-# build: they need the UDF feature or the `zx` command, or run after one that does and find its
-# objects. Any other failure fails the step.
+# Streaming SLT files that fail for reasons unrelated to selective barriers: one needs the `zx`
+# command, the others run after a failed file and find its objects. Any other failure fails the
+# step. `impure_expr_materialize.slt` needs a build with ENABLE_UDF=true; the `udf` step runs
+# it on its own and requires it to pass.
 KNOWN_STREAMING_FAILURES="
 e2e_test/streaming/impure_expr_materialize.slt
 e2e_test/streaming/queryable_internal_state/group_agg.slt
@@ -94,13 +99,40 @@ step_matrix() {
   local profile=$1 rc=0
   fresh "$profile" || return 1
   drop_topics
-  local args=(--port $PORT)
-  [[ -n "${KAFKA_BROKER:-}" ]] && args+=(--kafka-broker "$KAFKA_BROKER" --kafka-container "${KAFKA_CONTAINER:-}")
-  [[ -n "${MYSQL_HOST:-}" ]] && args+=(--mysql-host "$MYSQL_HOST" --mysql-container "${MYSQL_CONTAINER:-}" --mysql-password "${MYSQL_PASSWORD:-}")
-  timeout 3000 python3 -I -u scripts/selective_barriers/connector_matrix.py "${args[@]}" 2>&1 \
+  matrix_args
+  timeout 3000 python3 -I -u scripts/selective_barriers/connector_matrix.py "${MATRIX_ARGS[@]}" 2>&1 \
     | tee "$OUT/matrix-$profile.log" | cut -c1-1200
   rc=${PIPESTATUS[0]}
   save_logs "matrix-$profile"
+  no_panic || rc=1
+  return $rc
+}
+
+matrix_args() {
+  MATRIX_ARGS=(--port $PORT)
+  [[ -n "${KAFKA_BROKER:-}" ]] && MATRIX_ARGS+=(--kafka-broker "$KAFKA_BROKER" --kafka-container "${KAFKA_CONTAINER:-}")
+  [[ -n "${MYSQL_HOST:-}" ]] && MATRIX_ARGS+=(--mysql-host "$MYSQL_HOST" --mysql-container "${MYSQL_CONTAINER:-}" --mysql-password "${MYSQL_PASSWORD:-}")
+  return 0
+}
+
+# The data of the previous run is kept: only the binaries change.
+step_after_upgrade() {
+  local profile=$1 rc=0 version
+  ./risedev k >/dev/null 2>&1 || true
+  tmux -L risedev kill-server >/dev/null 2>&1 || true
+  sleep 5
+  if ! ./risedev d "$profile" >"$OUT/dev-upgrade-$profile.log" 2>&1; then
+    echo "FAILED to restart profile $profile with the new binary"
+    tail -40 "$OUT/dev-upgrade-$profile.log"
+    return 1
+  fi
+  version=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+  echo "restarted on the existing data, expecting version $version"
+  matrix_args
+  timeout 1500 python3 -I -u scripts/selective_barriers/connector_matrix.py "${MATRIX_ARGS[@]}" \
+    --after-restart --expect-version "$version" 2>&1 | tee "$OUT/after-upgrade-$profile.log" | cut -c1-1200
+  rc=${PIPESTATUS[0]}
+  save_logs "after-upgrade-$profile"
   no_panic || rc=1
   return $rc
 }
@@ -147,6 +179,22 @@ step_batch() {
   return $rc
 }
 
+step_udf() {
+  local rc=0 log="$OUT/slt-udf.log"
+  fresh selbar-on || return 1
+  ./risedev slt -p $PORT -d dev \
+    './e2e_test/streaming/impure_expr_materialize.slt' \
+    './e2e_test/udf/tests/scalar/javascript.slt' \
+    './e2e_test/udf/tests/scalar/python.slt' \
+    './e2e_test/udf/tests/scalar/wasm.slt' \
+    './e2e_test/udf/tests/scalar/wasm_volatility.slt' >"$log" 2>&1 || rc=1
+  echo "ok=$(grep -a -c '\[OK\]' "$log") failed=$(grep -a -c '\[FAILED\]' "$log")"
+  [[ $rc -eq 0 ]] || sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -a -A25 '^failed to run' | cut -c1-300 | head -100
+  save_logs udf
+  no_panic || rc=1
+  return $rc
+}
+
 step_sink_into_table() {
   local rc=0 log="$OUT/slt-sink-into-table.log"
   fresh selbar-on || return 1
@@ -187,6 +235,8 @@ case "$step" in
   matrix) step_matrix "${1:?profile}" ;;
   streaming) step_streaming ;;
   batch) step_batch ;;
+  udf) step_udf ;;
+  after-upgrade) step_after_upgrade "${1:?profile}" ;;
   sink-into-table) step_sink_into_table ;;
   sink-chaos) step_sink_chaos ;;
   suite) step_suite ;;

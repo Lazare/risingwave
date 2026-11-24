@@ -22,6 +22,10 @@ periods, long enough for the fragments that may sleep to fall asleep, and checks
 read from RisingWave or from the external system converges to the expected value. At the end, the
 logs must show no panic and no recovery.
 
+With `--after-restart`, on a cluster where the scenarios ran and that was restarted on the same
+data (typically with the binary of a newer version), it checks instead that every object still
+works: each source still feeds its views and each sink still delivers.
+
 External systems are optional, a scenario is skipped without its system:
   - Postgres with `wal_level = logical`: PG* environment variables (PGHOST, PGPORT, PGUSER, ...)
   - Kafka API: --kafka-broker host:port and --kafka-container (docker container with `rpk`)
@@ -633,6 +637,24 @@ def sink_subscription():
     return f"sleeping fragments while idle: {slept}"
 
 
+WASM_MODULE = "e2e_test/udf/embedded_wasm/target/wasm32-wasip1/release/udf.wasm"
+
+
+def udf_wasm_immutable():
+    """WASM function declared IMMUTABLE in the filter of a materialized view."""
+    rw(f"""create function gcd(int, int) returns int
+      immutable language wasm using link 'fs://{WASM_MODULE}'""")
+    rw("create table m_udf (a int, b int)")
+    rw("create materialized view m_udf_mv as select a, b, gcd(a, b) as g from m_udf "
+       "where gcd(a, b) > 1")
+    rw("insert into m_udf values (25, 15), (7, 3)")
+    eventually("immutable udf", lambda: rw("select a, g from m_udf_mv"), "25|5", 30)
+    slept = idle()
+    rw("insert into m_udf values (12, 18)")
+    eventually("immutable udf after idle", lambda: rw("select sum(g) from m_udf_mv"), "11", 30)
+    return f"sleeping fragments while idle: {slept}"
+
+
 SCENARIOS = [
     ("source: datagen source", src_datagen_source, None),
     ("source: table with connector (datagen) + DML", src_datagen_table, None),
@@ -649,6 +671,125 @@ SCENARIOS = [
     ("sink: blackhole (log store or not, join)", sink_blackhole, None),
     ("sink: sink into table", sink_into_table, None),
     ("sink: subscription", sink_subscription, None),
+    ("udf: wasm function declared immutable", udf_wasm_immutable, "wasm"),
+]
+
+
+# --------------------------------------------------------------------------------------------
+# After a restart on the same data (e.g. with the binary of a newer version)
+# --------------------------------------------------------------------------------------------
+
+def count(sql, run=None):
+    return int((run or rw)(sql) or 0)
+
+
+def expect_growth(what, sql, change, delta=1, run=None, timeout=90):
+    """Apply `change` and wait until the count returned by `sql` has grown by `delta`."""
+    before = count(sql, run)
+    change()
+    eventually(what, lambda: count(sql, run), before + delta, timeout)
+
+
+def after_version():
+    version = rw("select version()")
+    if ARGS.expect_version and ARGS.expect_version not in version:
+        raise CheckFailed(f"expected version {ARGS.expect_version}, got {version}")
+    return version[:60]
+
+
+def after_tables():
+    expect_growth("table with connector", "select c from m_dgt_mv",
+                  lambda: rw("insert into m_dgt values (-100, 1)"))
+    expect_growth("file source table", "select count(*) from m_fs_tab",
+                  lambda: rw("insert into m_fs_tab values (9000, 'after')"))
+    expect_growth("join next to sinks", "select c from m_bh_mv",
+                  lambda: (rw("insert into m_bh values (9000, 1)"),
+                           rw("insert into m_bh2 values (9000, 1)")))
+
+
+def after_webhook():
+    def post():
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{ARGS.webhook_port}/webhook/dev/public/m_wh",
+            data=json.dumps({"v": 1}).encode(), headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=60).close()
+    expect_growth("webhook", "select c from m_wh_mv", post)
+
+
+def after_kafka():
+    rows = [{"id": i, "v": i} for i in range(9001, 9011)]
+    before = {name: count(sql) for name, sql in (
+        ("m_k_ns_mv", "select c from m_k_ns_mv"), ("m_k_sh_mv", "select c from m_k_sh_mv"),
+        ("m_k_sh_mv2", "select c from m_k_sh_mv2"), ("m_k_tab", "select count(*) from m_k_tab"))}
+    kafka_produce("m_k_plain", rows)
+    for name, sql in (("m_k_ns_mv", "select c from m_k_ns_mv"),
+                      ("m_k_sh_mv", "select c from m_k_sh_mv"),
+                      ("m_k_sh_mv2", "select c from m_k_sh_mv2"),
+                      ("m_k_tab", "select count(*) from m_k_tab")):
+        eventually(name, lambda sql=sql: count(sql), before[name] + 10)
+    expect_growth("kafka sink", "select count(*) from m_ks_up_back",
+                  lambda: rw("insert into m_ks values (9000, 9000)"))
+
+
+def after_postgres_cdc():
+    expect_growth("postgres cdc", "select count(*) from m_pgc_a",
+                  lambda: pg("insert into pgc_a values (9000, 1)"))
+    expect_growth("cdc to sink group", "select count(*) from m_grp_out",
+                  lambda: pg("insert into m_grp_in values (9000, 1)"), run=pg)
+    eventually("last sink", lambda: pg("select c from m_grp_last"),
+               pg("select count(*) from m_grp_in"))
+
+
+def after_mysql_cdc():
+    expect_growth("mysql cdc", "select count(*) from m_myc_a",
+                  lambda: mysql("insert into myc_a values (9000, 1)"))
+
+
+def after_postgres_sinks():
+    for t in ("m_pgs_t", "m_pgs_f"):
+        expect_growth(f"{t} upsert sink", f"select count(*) from {t}_up",
+                      lambda t=t: rw(f"insert into {t} values (9000, 9000)"), run=pg)
+        eventually(f"{t} append-only sink",
+                   lambda t=t: pg(f"select count(*) from {t}_ap where id = 9000"), "1")
+    expect_growth("jdbc sink", "select count(*) from m_jdbc_up",
+                  lambda: rw("insert into m_jdbc values (9000, 9000)"), run=pg)
+
+
+def after_sink_into_table():
+    expect_growth("sink into table", "select c from m_sit_mv",
+                  lambda: rw("insert into m_sit_src values (9000, 1)"))
+
+
+def after_subscription():
+    # Well before the epoch that will hold the row.
+    since = int(time.time() * 1000) - 10000
+    rw("insert into m_sub values (9000, 1)")
+    rw("flush")
+    out = sh(["psql", "-h", "localhost", "-p", str(ARGS.port), "-d", "dev", "-U", "root", "-X", "-q",
+              "-At", "-v", "ON_ERROR_STOP=1"],
+             stdin=f"declare m_cur_after subscription cursor for m_sub_s since {since};\n"
+                   "fetch 20 from m_cur_after;\n")
+    if "9000|1|Insert" not in out:
+        raise CheckFailed(f"subscription after restart: {out.strip()[:300]}")
+
+
+def after_udf():
+    expect_growth("immutable wasm udf", "select count(*) from m_udf_mv",
+                  lambda: rw("insert into m_udf values (36, 24)"))
+    eventually("udf value", lambda: rw("select g from m_udf_mv where a = 36"), "12", 30)
+
+
+AFTER_RESTART = [
+    ("version", after_version, None),
+    ("tables, file source table, join", after_tables, None),
+    ("webhook", after_webhook, None),
+    ("kafka sources and sink", after_kafka, "kafka"),
+    ("postgres cdc and sink group", after_postgres_cdc, "pg"),
+    ("mysql cdc", after_mysql_cdc, "mysql"),
+    ("postgres and jdbc sinks", after_postgres_sinks, "pg"),
+    ("sink into table", after_sink_into_table, None),
+    ("subscription", after_subscription, None),
+    ("immutable wasm udf", after_udf, "wasm"),
 ]
 
 
@@ -678,14 +819,19 @@ def main():
     parser.add_argument("--mysql-password", default="")
     parser.add_argument("--mysql-database", default="sbdb")
     parser.add_argument("--only", help="substring of the scenario names to run")
+    parser.add_argument("--after-restart", action="store_true",
+                        help="the scenarios already ran on this data and the cluster was restarted "
+                             "(e.g. upgraded): check that every object still works")
+    parser.add_argument("--expect-version", help="substring expected in `select version()`")
     ARGS = parser.parse_args()
     available = {
         "pg": bool(os.environ.get("PGHOST")),
         "kafka": bool(ARGS.kafka_broker and ARGS.kafka_container),
         "mysql": bool(ARGS.mysql_host and ARGS.mysql_container),
+        "wasm": os.path.exists(WASM_MODULE),
     }
     results = []
-    for name, fn, needs in SCENARIOS:
+    for name, fn, needs in AFTER_RESTART if ARGS.after_restart else SCENARIOS:
         if ARGS.only and ARGS.only not in name:
             continue
         if needs and not available[needs]:
