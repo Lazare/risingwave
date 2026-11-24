@@ -11,6 +11,8 @@
 #   scripts/fork/rebuild-integration.sh <tag> <integration branch> [remote]
 #
 # With a remote, the branches are read from it (`<remote>/fork/<name>`), otherwise locally.
+# Between two upstream versions there is no need to rebuild: commit on the `fork/*` branch
+# concerned and merge it again into the integration branch with `--no-ff`.
 # The fixes of upstream code come first, then the features, then the tooling.
 # `fork/ci-validation` tests every feature and is only meaningful once merged with them.
 set -euo pipefail
@@ -34,7 +36,7 @@ BRANCHES=(
 # In a function, so that the script is read entirely before it checks out another tree.
 main() {
   if [[ $# -lt 2 ]]; then
-    sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
   fi
   local base="$1" target="$2" prefix="${3:+$3/}" name
