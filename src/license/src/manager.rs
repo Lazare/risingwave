@@ -182,13 +182,17 @@ impl License {
 }
 
 impl Default for License {
-    /// The default license is a free license that never expires.
+    /// The default license unlocks all features with no resource limit and never expires.
     ///
     /// Used when `license_key` is unset or invalid.
+    ///
+    /// NOTE: This is a local build modification that disables enterprise license
+    /// enforcement. The RisingWave source is Apache-2.0 licensed, which permits this
+    /// modification for your own derivative work.
     fn default() -> Self {
         Self {
             sub: "default".to_owned(),
-            tier: Tier::Free,
+            tier: Tier::All,
             iss: Issuer::Prod,
             rwu_limit: None,
             exp: u64::MAX,
@@ -400,7 +404,7 @@ mod tests {
                 License {
                     sub: "default",
                     iss: Prod,
-                    tier: Free,
+                    tier: All,
                     rwu_limit: None,
                     exp: 18446744073709551615,
                 }
