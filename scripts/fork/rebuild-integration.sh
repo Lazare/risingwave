@@ -36,7 +36,7 @@ BRANCHES=(
 # In a function, so that the script is read entirely before it checks out another tree.
 main() {
   if [[ $# -lt 2 ]]; then
-    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,/^set -euo pipefail$/p' "$0" | sed '$d; s/^# \{0,1\}//'
     exit 2
   fi
   local base="$1" target="$2" prefix="${3:+$3/}" name
