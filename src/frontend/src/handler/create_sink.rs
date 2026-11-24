@@ -38,6 +38,7 @@ use risingwave_connector::sink::catalog::{SinkCatalog, SinkFormatDesc};
 use risingwave_connector::sink::file_sink::s3::SnowflakeSink;
 use risingwave_connector::sink::iceberg::{ICEBERG_SINK, IcebergConfig};
 use risingwave_connector::sink::kafka::KAFKA_SINK;
+use risingwave_connector::sink::sink_group::SINK_GROUP_KEY;
 use risingwave_connector::sink::snowflake_redshift::redshift::RedshiftSink;
 use risingwave_connector::sink::snowflake_redshift::snowflake::SnowflakeV2Sink;
 use risingwave_connector::sink::{
@@ -96,6 +97,7 @@ static SINK_ALLOWED_CONNECTION_CONNECTOR: LazyLock<HashSet<PbConnectionType>> =
             PbConnectionType::Kafka,
             PbConnectionType::Iceberg,
             PbConnectionType::Elasticsearch,
+            PbConnectionType::Postgres,
         }
     });
 
@@ -175,6 +177,22 @@ pub async fn gen_sink_plan(
     }
 
     ensure_connection_type_allowed(connection_type, &SINK_ALLOWED_CONNECTION_CONNECTOR)?;
+
+    // The group of a sink is derived from its connection: the sinks that reference the same
+    // Postgres connection share a connection pool and can be ordered with `sink_order`.
+    if resolved_with_options.contains_key(SINK_GROUP_KEY) {
+        return Err(RwError::from(ErrorCode::InvalidParameterValue(format!(
+            "option '{SINK_GROUP_KEY}' is reserved, use a connection instead"
+        ))));
+    }
+    if connection_type == PbConnectionType::Postgres
+        && let Some(connection_id) = connector_conn_ref
+    {
+        resolved_with_options.insert(
+            SINK_GROUP_KEY.to_owned(),
+            format!("connection-{connection_id}"),
+        );
+    }
 
     // if not using connection, we don't need to check connector match connection type
     if !matches!(connection_type, PbConnectionType::Unspecified) {

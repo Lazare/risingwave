@@ -21,7 +21,7 @@ use postgres_openssl::MakeTlsConnector;
 use risingwave_common::bail;
 use risingwave_common::catalog::{ColumnDesc, ColumnId};
 use risingwave_common::types::{DataType, ScalarImpl, StructType};
-use sea_schema::postgres::def::{ColumnType as SeaType, TableDef, TableInfo};
+use sea_schema::postgres::def::ColumnType as SeaType;
 use sea_schema::postgres::discovery::SchemaDiscovery;
 use sea_schema::sea_query::{Alias, IntoIden};
 use serde::Deserialize;
@@ -29,7 +29,6 @@ use serde_with::{DisplayFromStr, serde_as};
 use sqlx::postgres::{PgConnectOptions, PgSslMode};
 use sqlx::{PgPool, Row};
 use thiserror_ext::AsReport;
-use tokio_postgres::types::Kind as PgKind;
 use tokio_postgres::{Client as PgClient, NoTls};
 
 #[cfg(not(madsim))]
@@ -406,28 +405,6 @@ impl PostgresExternalTable {
         Ok(())
     }
 
-    async fn discover_schema(
-        config: &PgConnectionConfig,
-        schema: &str,
-        table: &str,
-    ) -> ConnectorResult<TableDef> {
-        let options = config.to_sqlx_connect_options();
-        let connection = PgPool::connect_with(options).await?;
-        let schema_discovery = SchemaDiscovery::new(connection, schema);
-        // fetch column schema and primary key
-        let empty_map = HashMap::new();
-        let table_schema = schema_discovery
-            .discover_table(
-                TableInfo {
-                    name: table.to_owned(),
-                    of_type: None,
-                },
-                &empty_map,
-            )
-            .await?;
-        Ok(table_schema)
-    }
-
     pub async fn connect(
         config: &PgConnectionConfig,
         schema: &str,
@@ -487,29 +464,6 @@ impl PostgresExternalTable {
             column_descs,
             pk_names,
         })
-    }
-
-    // return the mapping from column name to pg type, the pg type is used for writing data to postgres
-    pub async fn type_mapping(
-        config: &PgConnectionConfig,
-        schema: &str,
-        table: &str,
-        is_append_only: bool,
-    ) -> ConnectorResult<HashMap<String, tokio_postgres::types::Type>> {
-        tracing::debug!("connect to postgres external table to get type mapping");
-        let table_schema = Self::discover_schema(config, schema, table).await?;
-        let mut column_name_to_pg_type = HashMap::new();
-        for col in &table_schema.columns {
-            let pg_type = sea_type_to_pg_type(&col.col_type)?;
-            column_name_to_pg_type.insert(col.name.clone(), pg_type);
-        }
-        if !is_append_only && table_schema.primary_key_constraints.is_empty() {
-            return Err(anyhow!(
-                "Postgres table should define the primary key for non-append-only tables"
-            )
-            .into());
-        }
-        Ok(column_name_to_pg_type)
     }
 
     pub fn column_descs(&self) -> &Vec<ColumnDesc> {
@@ -782,94 +736,6 @@ fn parse_pgvector_dimension(type_name: &str) -> ConnectorResult<Option<usize>> {
     }
 
     Ok(Some(dim))
-}
-
-// Used for sink connector
-// We use `sea-schema` for table schema discovery.
-// So we have to map `sea-schema` pg types
-// to `tokio-postgres` pg types (which we use for query binding).
-fn sea_type_to_pg_type(sea_type: &SeaType) -> ConnectorResult<tokio_postgres::types::Type> {
-    use tokio_postgres::types::Type as PgType;
-    match sea_type {
-        SeaType::SmallInt => Ok(PgType::INT2),
-        SeaType::Integer => Ok(PgType::INT4),
-        SeaType::BigInt => Ok(PgType::INT8),
-        SeaType::Decimal(_) => Ok(PgType::NUMERIC),
-        SeaType::Numeric(_) => Ok(PgType::NUMERIC),
-        SeaType::Real => Ok(PgType::FLOAT4),
-        SeaType::DoublePrecision => Ok(PgType::FLOAT8),
-        SeaType::Varchar(_) => Ok(PgType::VARCHAR),
-        SeaType::Char(_) => Ok(PgType::CHAR),
-        SeaType::Text => Ok(PgType::TEXT),
-        SeaType::Bytea => Ok(PgType::BYTEA),
-        SeaType::Timestamp(_) => Ok(PgType::TIMESTAMP),
-        SeaType::TimestampWithTimeZone(_) => Ok(PgType::TIMESTAMPTZ),
-        SeaType::Date => Ok(PgType::DATE),
-        SeaType::Time(_) => Ok(PgType::TIME),
-        SeaType::TimeWithTimeZone(_) => Ok(PgType::TIMETZ),
-        SeaType::Interval(_) => Ok(PgType::INTERVAL),
-        SeaType::Boolean => Ok(PgType::BOOL),
-        SeaType::Point => Ok(PgType::POINT),
-        SeaType::Uuid => Ok(PgType::UUID),
-        SeaType::Json => Ok(PgType::JSON),
-        SeaType::JsonBinary => Ok(PgType::JSONB),
-        SeaType::Array(t) => {
-            let Some(t) = t.col_type.as_ref() else {
-                bail!("missing array type")
-            };
-            match t.as_ref() {
-                // RW only supports 1 level of nesting.
-                SeaType::SmallInt => Ok(PgType::INT2_ARRAY),
-                SeaType::Integer => Ok(PgType::INT4_ARRAY),
-                SeaType::BigInt => Ok(PgType::INT8_ARRAY),
-                SeaType::Decimal(_) => Ok(PgType::NUMERIC_ARRAY),
-                SeaType::Numeric(_) => Ok(PgType::NUMERIC_ARRAY),
-                SeaType::Real => Ok(PgType::FLOAT4_ARRAY),
-                SeaType::DoublePrecision => Ok(PgType::FLOAT8_ARRAY),
-                SeaType::Varchar(_) => Ok(PgType::VARCHAR_ARRAY),
-                SeaType::Char(_) => Ok(PgType::CHAR_ARRAY),
-                SeaType::Text => Ok(PgType::TEXT_ARRAY),
-                SeaType::Bytea => Ok(PgType::BYTEA_ARRAY),
-                SeaType::Timestamp(_) => Ok(PgType::TIMESTAMP_ARRAY),
-                SeaType::TimestampWithTimeZone(_) => Ok(PgType::TIMESTAMPTZ_ARRAY),
-                SeaType::Date => Ok(PgType::DATE_ARRAY),
-                SeaType::Time(_) => Ok(PgType::TIME_ARRAY),
-                SeaType::TimeWithTimeZone(_) => Ok(PgType::TIMETZ_ARRAY),
-                SeaType::Interval(_) => Ok(PgType::INTERVAL_ARRAY),
-                SeaType::Boolean => Ok(PgType::BOOL_ARRAY),
-                SeaType::Point => Ok(PgType::POINT_ARRAY),
-                SeaType::Uuid => Ok(PgType::UUID_ARRAY),
-                SeaType::Json => Ok(PgType::JSON_ARRAY),
-                SeaType::JsonBinary => Ok(PgType::JSONB_ARRAY),
-                SeaType::Array(_) => bail!("nested array type is not supported"),
-                SeaType::Unknown(name) => {
-                    // Treat as enum type
-                    Ok(PgType::new(
-                        name.clone(),
-                        0,
-                        PgKind::Array(PgType::new(
-                            name.clone(),
-                            0,
-                            PgKind::Enum(vec![]),
-                            "".into(),
-                        )),
-                        "".into(),
-                    ))
-                }
-                _ => bail!("unsupported array type: {:?}", t),
-            }
-        }
-        SeaType::Unknown(name) => {
-            // Treat as enum type
-            Ok(PgType::new(
-                name.clone(),
-                0,
-                PgKind::Enum(vec![]),
-                "".into(),
-            ))
-        }
-        _ => bail!("unsupported type: {:?}", sea_type),
-    }
 }
 
 #[cfg(test)]

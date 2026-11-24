@@ -275,6 +275,7 @@ impl BatchRefreshJobCheckpointControl {
                 database_resource_group.to_owned(),
                 distribution_type,
                 vnode_count,
+                None,
             )?;
 
             for fid in ensemble.component_fragments() {

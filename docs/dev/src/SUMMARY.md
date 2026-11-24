@@ -43,6 +43,7 @@
     - [AI Decisions](./design/ai-decide.md)
     - [MView on Top of MView](./design/mv-on-mv.md)
     - [Backfill](./design/backfill.md)
+    - [Sink Groups](./design/sink-group.md)
     - [Streaming Parallelism Configuration](./design/streaming-parallelism.md)
 - [State Store](./design/state-store-overview.md)
     - [Shared Buffer](./design/shared-buffer.md)
