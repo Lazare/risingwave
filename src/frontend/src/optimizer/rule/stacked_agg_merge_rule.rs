@@ -408,7 +408,7 @@ impl Rule<Logical> for StackedAggOverUnionMergeRule {
 
         let mut removed_aggregation = false;
         let mut branches = vec![];
-        for branch in union.inputs() {
+        for branch in union_plan.inputs() {
             let (inner_plan, to_inner) = through_projects(branch.clone());
             let inner = inner_plan
                 .as_logical_agg()
