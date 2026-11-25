@@ -1,8 +1,20 @@
 # Tests for the single read of a table that several branches of a union read in streaming plans
-# (`streaming_merge_union_scans`): `UnionScanMergeRule`.
+# (`streaming_merge_union_scans`): `UnionScanMergeRule`; and for the shared scan of a table that
+# several branches still read (`streaming_share_union_scans`): `UnionScanShareRule`.
 - id: setup
   sql: |
     set streaming_merge_union_scans = true;
+    create table t (k int primary key, a int, b int, x varchar, y varchar, flag boolean, ts timestamptz);
+    create table u (k int primary key, a int, c int);
+    create table w (k int, v int, ts timestamp, watermark for ts as ts - interval '1' second) append only;
+    create table h (r int primary key, k int, a int);
+    create table m (r int primary key, g int, v int);
+    create table j (r int primary key, kind varchar, f jsonb);
+  expected_outputs: []
+- id: setup_share
+  sql: |
+    set streaming_merge_union_scans = true;
+    set streaming_share_union_scans = true;
     create table t (k int primary key, a int, b int, x varchar, y varchar, flag boolean, ts timestamptz);
     create table u (k int primary key, a int, c int);
     create table w (k int, v int, ts timestamp, watermark for ts as ts - interval '1' second) append only;
@@ -173,7 +185,7 @@
   - stream_plan
 
 - name: a branch with a temporal filter, the other two are merged, the table is shared
-  before: [setup]
+  before: [setup_share]
   sql: |
     select k, a from t where a > 0
     union all
@@ -199,7 +211,7 @@
   expected_outputs:
   - optimized_logical_plan_for_stream
 - name: a branch with a join shares the scan of the other branch
-  before: [setup]
+  before: [setup_share]
   sql: |
     select t.k, t.a from t where t.a > 0
     union all
@@ -208,7 +220,7 @@
   - optimized_logical_plan_for_stream
   - stream_plan
 - name: a branch with a table function shares the scan of the other branch
-  before: [setup]
+  before: [setup_share]
   sql: |
     select k, unnest(array[a, b]) as v from t
     union all
@@ -245,7 +257,7 @@
   expected_outputs:
   - optimized_logical_plan_for_stream
 - name: a plain branch and a left join branch share the scan
-  before: [setup]
+  before: [setup_share]
   sql: |
     select t.k, coalesce(m.v, 0) as v from t left join m on t.k = m.g where t.x = 'a'
     union all
@@ -254,7 +266,7 @@
   - optimized_logical_plan_for_stream
   - stream_plan
 - name: two joins on different columns share the scans of both tables
-  before: [setup]
+  before: [setup_share]
   sql: |
     select t.k, m.v from t join m on t.a = m.g and m.v > 0
     union all
@@ -262,7 +274,7 @@
   expected_outputs:
   - optimized_logical_plan_for_stream
 - name: two table functions and a plain branch share the scan
-  before: [setup]
+  before: [setup_share]
   sql: |
     select x.key as v from j cross join jsonb_each_text(j.f -> 'a') as x where kind in ('e', 'p')
     union all
@@ -273,7 +285,7 @@
   - optimized_logical_plan_for_stream
   - stream_plan
 - name: an anti join in one branch shares the scan of the other branch
-  before: [setup]
+  before: [setup_share]
   sql: |
     select k, 'u' as st from u
     union all
@@ -281,7 +293,7 @@
   expected_outputs:
   - optimized_logical_plan_for_stream
 - name: kept - a self-join inside one branch only
-  before: [setup]
+  before: [setup_share]
   sql: |
     select t1.k, t2.a from t t1 join t t2 on t1.a = t2.k
     union all
@@ -289,11 +301,19 @@
   expected_outputs:
   - optimized_logical_plan_for_stream
 - name: kept - the shared join is already read once, the join above it is not merged
-  before: [setup]
+  before: [setup_share]
   sql: |
     with c as (select t.k, t.a, u.c from t join u on t.a = u.a)
     select k, a, null::int as v from c where c > 0
     union all
     select c.k, c.a, m.v from c left join m on c.c = m.g where c.a > 0;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: the shared scan is off by default - a branch with a join keeps its own scan
+  before: [setup]
+  sql: |
+    select t.k, t.a from t where t.a > 0
+    union all
+    select t.k, u.c from t join u on t.k = u.k;
   expected_outputs:
   - optimized_logical_plan_for_stream

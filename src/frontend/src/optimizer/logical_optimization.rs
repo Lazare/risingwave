@@ -253,10 +253,18 @@ static STREAM_SIMPLE_UNNESTING_AGG: LazyLock<OptimizationStage> = LazyLock::new(
 static STREAM_MERGE_UNION_SCANS: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Merge Union Scans For Stream",
-        // In this order: the branches that only filter and project a table are merged first, the
-        // scans of a table that remain in several branches are then shared.
-        vec![UnionScanMergeRule::create(), UnionScanShareRule::create()],
+        vec![UnionScanMergeRule::create()],
         // Bottom-up: the branches of a union are reduced before the union is looked at.
+        ApplyOrder::BottomUp,
+    )
+});
+
+// Rule `UnionScanShareRule` (`streaming_share_union_scans`).
+static STREAM_SHARE_UNION_SCANS: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Share Union Scans For Stream",
+        vec![UnionScanShareRule::create()],
+        // Bottom-up: the scans of an inner union are shared before the outer union is looked at.
         ApplyOrder::BottomUp,
     )
 });
@@ -1005,6 +1013,23 @@ impl LogicalOptimizer {
         {
             let applied_before = ctx.total_rule_applied();
             plan = plan.optimize_by_rules(&STREAM_MERGE_UNION_SCANS)?;
+            let applied = ctx.total_rule_applied() - applied_before;
+            if applied > 0 {
+                ctx.add_stream_prune_rule_applied(applied);
+                plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
+            }
+        }
+
+        // Rule `UnionScanShareRule`: read once, in a shared scan, a table that several branches of
+        // a union still scan after the merge above. The filters of the branches are then pushed
+        // into the shared scan, and the columns that no branch uses are pruned.
+        if ctx.session_ctx().config().streaming_share_union_scans()
+            && !ctx.is_stream_prune_baseline()
+        {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&STREAM_SHARE_UNION_SCANS)?;
             let applied = ctx.total_rule_applied() - applied_before;
             if applied > 0 {
                 ctx.add_stream_prune_rule_applied(applied);

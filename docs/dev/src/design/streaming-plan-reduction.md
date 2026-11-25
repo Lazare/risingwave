@@ -31,7 +31,7 @@ own rules.
 | 7 | Join common to the branches of a `UNION ALL` joined once above the union | done (prototype, branch of idea 3) |
 | 8 | Aggregate of a constant over a group | done (prototype, branch of idea 3) |
 | 9 | Leftovers of subquery decorrelation (domain re-scan, aggregation and null-safe join back) | aggregating subqueries done (prototype, branch `proto/streaming-simplify-subquery-unnesting`); laterals without a table not started |
-| US | Branches of a `UNION ALL` that read the same table read it once (`Expand` per branch) | done (prototype, branch `proto/plan-reduction-union-scans`); dominance under a top-1 not done |
+| US | Branches of a `UNION ALL` that read the same table read it once (`Expand` per branch); scans of other branches shared (`streaming_share_union_scans`) | done (prototype, branch `proto/plan-reduction-union-scans`); dominance under a top-1 not done |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -308,13 +308,15 @@ select b, y from t where p1              └─Expand(two copies of each row, fl
   `Now` at this stage), a scan `AS OF`, a table with a watermark (a column taken from different
   columns per branch would lose the watermark that the union derived), a shared sub-plan that
   holds `now()`, a source or such a table.
-- Shared (`UnionScanShareRule`, same variable, applied after the merge): a table that is still
+- Shared (`UnionScanShareRule`, its own variable `streaming_share_union_scans`, applied after
+  the merge): a table that is still
   scanned in at least two branches, below a join, a table function, an anti join or anything
   else, is scanned once in a new `Share`; each former scan becomes a filter and a projection of
   it with the predicate and columns of that scan, so every branch sees the same rows. The scans
   inside an existing shared sub-plan are left alone (already read once), and so are the scans
   of a table that only one branch reads (a self-join inside a branch). This removes scans and
-  backfills, not joins: the share adds a fragment boundary where the scan was inlined.
+  backfills, not joins: the share adds a fragment boundary where the scan was inlined, hence a
+  separate variable (measured on real views: many scans fewer, but more fragments).
 - Rows per branch: the `Expand` emits one copy per branch before the filter, a transient cost
   in the same fragment; nothing is kept in state.
 - Not done: merging branches with a join into one join (the copies of an `Expand` joined once,

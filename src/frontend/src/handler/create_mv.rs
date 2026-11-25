@@ -381,6 +381,8 @@ pub(crate) fn gen_create_mv_graph(
             || config.streaming_simplify_subquery_unnesting()
             // Rule `UnionScanMergeRule`.
             || config.streaming_merge_union_scans()
+            // Rule `UnionScanShareRule`.
+            || config.streaming_share_union_scans()
     };
     let baseline_args = prune_enabled.then(|| {
         (
