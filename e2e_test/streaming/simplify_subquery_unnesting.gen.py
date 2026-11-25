@@ -33,7 +33,7 @@ CASES = [
     ('count', 'scalar count',
      f"select p.id, (select count(*) from {R} r where r.pid = p.id) as c from {P} p"),
     ('sum_count', 'sum, count of a column and count of distinct values in two subqueries',
-     f"select p.id, (select sum(r.x) from {R} r where r.pid = p.id) as s, "
+     f"select p.id, coalesce((select sum(r.x) from {R} r where r.pid = p.id), 0) as s, "
      f"(select count(r.x) + count(distinct r.s) from {R} r where r.pid = p.id) as c from {P} p"),
     ('avg_bool', 'avg and bool_or',
      f"select p.id, (select avg(r.x) from {R} r where r.pid = p.id) as a, "
@@ -57,11 +57,11 @@ CASES = [
      f"select p.id, p.v, (select count(*) from {R} r where r.pid is not distinct from p.v) as c from {P} p"),
 ]
 
-# A streaming `sum` or `avg` keeps a value once all its inputs are retracted while its group
-# still holds rows, where the query returns `NULL`: in the general way, the group of the domain
-# value stays. These cases are compared with the query rather than with the materialized view
-# without the variable.
-EXACT = {'sum_count', 'avg_bool'}
+# A streaming `sum` returns 0, where the query returns NULL, once all the non-NULL values of its
+# group are retracted while the group still holds rows (with NULL values, or the padded row of
+# the domain in the general way): the sum of `sum_count` is wrapped in `coalesce(.., 0)`, and
+# `avg_bool` is compared with the query only.
+EXACT = {'avg_bool'}
 
 out = []
 def switch(on):

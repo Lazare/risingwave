@@ -94,7 +94,7 @@ create materialized view ssu_count_off as select p.id, (select count(*) from ssu
 # sum, count of a column and count of distinct values in two subqueries
 
 statement ok
-create materialized view ssu_sum_count_off as select p.id, (select sum(r.x) from ssu_r r where r.pid = p.id) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p;
+create materialized view ssu_sum_count_off as select p.id, coalesce((select sum(r.x) from ssu_r r where r.pid = p.id), 0) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p;
 
 # avg and bool_or
 
@@ -197,7 +197,7 @@ create materialized view ssu_count_on as select p.id, (select count(*) from ssu_
 # sum, count of a column and count of distinct values in two subqueries
 
 statement ok
-create materialized view ssu_sum_count_on as select p.id, (select sum(r.x) from ssu_r r where r.pid = p.id) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p;
+create materialized view ssu_sum_count_on as select p.id, coalesce((select sum(r.x) from ssu_r r where r.pid = p.id), 0) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p;
 
 # avg and bool_or
 
@@ -323,6 +323,14 @@ select
   (select count(*) from (select * from ssu_count_on except select * from ssu_count_off) x),
   (select count(*) from (select * from ssu_count_off except select * from ssu_count_on) y),
   (select count(*) from ssu_count_on) - (select count(*) from ssu_count_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssu_sum_count_on except select * from ssu_sum_count_off) x),
+  (select count(*) from (select * from ssu_sum_count_off except select * from ssu_sum_count_on) y),
+  (select count(*) from ssu_sum_count_on) - (select count(*) from ssu_sum_count_off);
 ----
 0 0 0
 
@@ -474,9 +482,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssu_sum_count_on except select * from (select p.id, (select sum(r.x) from ssu_r r where r.pid = p.id) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p) q) x),
-  (select count(*) from (select * from (select p.id, (select sum(r.x) from ssu_r r where r.pid = p.id) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p) q except select * from ssu_sum_count_on) y),
-  (select count(*) from ssu_sum_count_on) - (select count(*) from (select p.id, (select sum(r.x) from ssu_r r where r.pid = p.id) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p) q);
+  (select count(*) from (select * from ssu_sum_count_on except select * from (select p.id, coalesce((select sum(r.x) from ssu_r r where r.pid = p.id), 0) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p) q) x),
+  (select count(*) from (select * from (select p.id, coalesce((select sum(r.x) from ssu_r r where r.pid = p.id), 0) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p) q except select * from ssu_sum_count_on) y),
+  (select count(*) from ssu_sum_count_on) - (select count(*) from (select p.id, coalesce((select sum(r.x) from ssu_r r where r.pid = p.id), 0) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p) q);
 ----
 0 0 0
 
@@ -690,6 +698,14 @@ select
 
 query III
 select
+  (select count(*) from (select * from ssu_sum_count_on except select * from ssu_sum_count_off) x),
+  (select count(*) from (select * from ssu_sum_count_off except select * from ssu_sum_count_on) y),
+  (select count(*) from ssu_sum_count_on) - (select count(*) from ssu_sum_count_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from ssu_array_on except select * from ssu_array_off) x),
   (select count(*) from (select * from ssu_array_off except select * from ssu_array_on) y),
   (select count(*) from ssu_array_on) - (select count(*) from ssu_array_off);
@@ -836,9 +852,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssu_sum_count_on except select * from (select p.id, (select sum(r.x) from ssu_r r where r.pid = p.id) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p) q) x),
-  (select count(*) from (select * from (select p.id, (select sum(r.x) from ssu_r r where r.pid = p.id) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p) q except select * from ssu_sum_count_on) y),
-  (select count(*) from ssu_sum_count_on) - (select count(*) from (select p.id, (select sum(r.x) from ssu_r r where r.pid = p.id) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p) q);
+  (select count(*) from (select * from ssu_sum_count_on except select * from (select p.id, coalesce((select sum(r.x) from ssu_r r where r.pid = p.id), 0) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p) q) x),
+  (select count(*) from (select * from (select p.id, coalesce((select sum(r.x) from ssu_r r where r.pid = p.id), 0) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p) q except select * from ssu_sum_count_on) y),
+  (select count(*) from ssu_sum_count_on) - (select count(*) from (select p.id, coalesce((select sum(r.x) from ssu_r r where r.pid = p.id), 0) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p) q);
 ----
 0 0 0
 
@@ -1033,6 +1049,14 @@ select
 
 query III
 select
+  (select count(*) from (select * from ssu_sum_count_on except select * from ssu_sum_count_off) x),
+  (select count(*) from (select * from ssu_sum_count_off except select * from ssu_sum_count_on) y),
+  (select count(*) from ssu_sum_count_on) - (select count(*) from ssu_sum_count_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from ssu_array_on except select * from ssu_array_off) x),
   (select count(*) from (select * from ssu_array_off except select * from ssu_array_on) y),
   (select count(*) from ssu_array_on) - (select count(*) from ssu_array_off);
@@ -1179,9 +1203,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssu_sum_count_on except select * from (select p.id, (select sum(r.x) from ssu_r r where r.pid = p.id) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p) q) x),
-  (select count(*) from (select * from (select p.id, (select sum(r.x) from ssu_r r where r.pid = p.id) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p) q except select * from ssu_sum_count_on) y),
-  (select count(*) from ssu_sum_count_on) - (select count(*) from (select p.id, (select sum(r.x) from ssu_r r where r.pid = p.id) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p) q);
+  (select count(*) from (select * from ssu_sum_count_on except select * from (select p.id, coalesce((select sum(r.x) from ssu_r r where r.pid = p.id), 0) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p) q) x),
+  (select count(*) from (select * from (select p.id, coalesce((select sum(r.x) from ssu_r r where r.pid = p.id), 0) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p) q except select * from ssu_sum_count_on) y),
+  (select count(*) from ssu_sum_count_on) - (select count(*) from (select p.id, coalesce((select sum(r.x) from ssu_r r where r.pid = p.id), 0) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p) q);
 ----
 0 0 0
 
@@ -1346,6 +1370,14 @@ select
 
 query III
 select
+  (select count(*) from (select * from ssu_sum_count_on except select * from ssu_sum_count_off) x),
+  (select count(*) from (select * from ssu_sum_count_off except select * from ssu_sum_count_on) y),
+  (select count(*) from ssu_sum_count_on) - (select count(*) from ssu_sum_count_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from ssu_array_on except select * from ssu_array_off) x),
   (select count(*) from (select * from ssu_array_off except select * from ssu_array_on) y),
   (select count(*) from ssu_array_on) - (select count(*) from ssu_array_off);
@@ -1492,9 +1524,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssu_sum_count_on except select * from (select p.id, (select sum(r.x) from ssu_r r where r.pid = p.id) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p) q) x),
-  (select count(*) from (select * from (select p.id, (select sum(r.x) from ssu_r r where r.pid = p.id) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p) q except select * from ssu_sum_count_on) y),
-  (select count(*) from ssu_sum_count_on) - (select count(*) from (select p.id, (select sum(r.x) from ssu_r r where r.pid = p.id) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p) q);
+  (select count(*) from (select * from ssu_sum_count_on except select * from (select p.id, coalesce((select sum(r.x) from ssu_r r where r.pid = p.id), 0) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p) q) x),
+  (select count(*) from (select * from (select p.id, coalesce((select sum(r.x) from ssu_r r where r.pid = p.id), 0) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p) q except select * from ssu_sum_count_on) y),
+  (select count(*) from ssu_sum_count_on) - (select count(*) from (select p.id, coalesce((select sum(r.x) from ssu_r r where r.pid = p.id), 0) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p) q);
 ----
 0 0 0
 
@@ -1657,6 +1689,14 @@ select
 
 query III
 select
+  (select count(*) from (select * from ssu_sum_count_on except select * from ssu_sum_count_off) x),
+  (select count(*) from (select * from ssu_sum_count_off except select * from ssu_sum_count_on) y),
+  (select count(*) from ssu_sum_count_on) - (select count(*) from ssu_sum_count_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from ssu_array_on except select * from ssu_array_off) x),
   (select count(*) from (select * from ssu_array_off except select * from ssu_array_on) y),
   (select count(*) from ssu_array_on) - (select count(*) from ssu_array_off);
@@ -1803,9 +1843,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssu_sum_count_on except select * from (select p.id, (select sum(r.x) from ssu_r r where r.pid = p.id) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p) q) x),
-  (select count(*) from (select * from (select p.id, (select sum(r.x) from ssu_r r where r.pid = p.id) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p) q except select * from ssu_sum_count_on) y),
-  (select count(*) from ssu_sum_count_on) - (select count(*) from (select p.id, (select sum(r.x) from ssu_r r where r.pid = p.id) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p) q);
+  (select count(*) from (select * from ssu_sum_count_on except select * from (select p.id, coalesce((select sum(r.x) from ssu_r r where r.pid = p.id), 0) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p) q) x),
+  (select count(*) from (select * from (select p.id, coalesce((select sum(r.x) from ssu_r r where r.pid = p.id), 0) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p) q except select * from ssu_sum_count_on) y),
+  (select count(*) from ssu_sum_count_on) - (select count(*) from (select p.id, coalesce((select sum(r.x) from ssu_r r where r.pid = p.id), 0) as s, (select count(r.x) + count(distinct r.s) from ssu_r r where r.pid = p.id) as c from ssu_p p) q);
 ----
 0 0 0
 
