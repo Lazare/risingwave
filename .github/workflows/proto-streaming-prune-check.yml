@@ -5,7 +5,8 @@
 # - `planner`: regenerates the expected outputs of the planner tests and uploads the files that
 #   changed, then runs the unit tests of the frontend.
 # - `clippy`: lints the frontend.
-# - `e2e`: builds the node and runs the differential test of the pruning.
+# - `e2e`: one job per differential test (pruning, merge of lookups, union join, unnesting), each
+#   building its own node.
 #
 # The streaming SLT suite with and without the pruning takes hours: see
 # `proto-streaming-prune-suite.yml`.
@@ -181,9 +182,27 @@ jobs:
         run: cargo clippy --locked -p risingwave_frontend --all-targets -- -D warnings
 
   e2e:
-    name: Differential end-to-end test
+    # One job per differential test: each builds its node, so that a slow test does not push the
+    # others past the time limit of the job.
+    name: Differential test (${{ matrix.test.name }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - name: unnest
+            file: simplify_subquery_unnesting
+            minutes: 90
+          - name: union
+            file: factor_union_join
+            minutes: 90
+          - name: merge
+            file: merge_repeated_lookups
+            minutes: 150
+          - name: prune
+            file: prune_empty_relation
+            minutes: 210
     steps:
       - uses: actions/checkout@v5
 
@@ -246,55 +265,25 @@ jobs:
           tail -50 "$RUNNER_TEMP/e2e/node.log"
           exit 1
 
-      - name: Differential test of the unnesting of subqueries without a domain
-        if: ${{ hashFiles('e2e_test/streaming/simplify_subquery_unnesting.slt') != '' }}
-        timeout-minutes: 30
-        run: |
-          set -o pipefail
-          export PATH="$PWD/e2e_test/commands:$PATH"
-          sqllogictest -p 4566 -d dev './e2e_test/streaming/simplify_subquery_unnesting.slt' \
-            2>&1 | tee "$RUNNER_TEMP/e2e/differential-unnest.log"
-
-      - name: Differential test of the join factored out of a union
-        if: ${{ !cancelled() }}
-        timeout-minutes: 30
-        run: |
-          set -o pipefail
-          export PATH="$PWD/e2e_test/commands:$PATH"
-          sqllogictest -p 4566 -d dev './e2e_test/streaming/factor_union_join.slt' \
-            2>&1 | tee "$RUNNER_TEMP/e2e/differential-union.log"
-
-      - name: Differential test of the merge of repeated lookups
-        if: ${{ !cancelled() }}
-        timeout-minutes: 45
-        run: |
-          set -o pipefail
-          export PATH="$PWD/e2e_test/commands:$PATH"
-          sqllogictest -p 4566 -d dev './e2e_test/streaming/merge_repeated_lookups.slt' \
-            2>&1 | tee "$RUNNER_TEMP/e2e/differential-merge.log"
-
-      - name: Differential test of the pruning
-        id: differential
-        if: ${{ !cancelled() }}
-        timeout-minutes: 60
+      - name: Differential test
+        timeout-minutes: ${{ matrix.test.minutes }}
         run: |
           # Without `pipefail` the step would succeed whenever `tee` does.
           set -o pipefail
           export PATH="$PWD/e2e_test/commands:$PATH"
-          sqllogictest -p 4566 -d dev './e2e_test/streaming/prune_empty_relation.slt' \
+          sqllogictest -p 4566 -d dev './e2e_test/streaming/${{ matrix.test.file }}.slt' \
             2>&1 | tee "$RUNNER_TEMP/e2e/differential.log"
 
-      - name: Messages of the pruning in the node log
-        if: ${{ !cancelled() }}
+      - name: Panics and pruning messages in the node log
+        if: ${{ always() }}
         run: |
-          grep -a -c 'pruned the sub-plans proven empty' "$RUNNER_TEMP/e2e/node.log" || true
-          grep -a 'pruned the sub-plans proven empty' "$RUNNER_TEMP/e2e/node.log" | head -80 | cut -c1-420 || true
           grep -a -i 'panicked' "$RUNNER_TEMP/e2e/node.log" | head -20 || true
+          grep -a -c 'pruned the sub-plans proven empty' "$RUNNER_TEMP/e2e/node.log" || true
 
       - name: Upload the logs
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-differential
+          name: e2e-${{ matrix.test.name }}
           path: ${{ runner.temp }}/e2e
           if-no-files-found: warn
