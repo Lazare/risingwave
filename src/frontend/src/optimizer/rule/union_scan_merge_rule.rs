@@ -42,6 +42,7 @@
 
 use risingwave_common::catalog::TableId;
 use risingwave_common::types::DataType;
+use risingwave_common::util::iter_util::ZipEqFast;
 
 use super::prelude::{PlanRef, *};
 use super::repeated_lookup_merge_rule::{
@@ -180,7 +181,7 @@ impl Rule<Logical> for UnionScanMergeRule {
                         && branch
                             .exprs
                             .iter()
-                            .zip(&fields)
+                            .zip_eq_fast(fields.iter())
                             .all(|(expr, field)| expr.return_type() == field.data_type())
                 })
             })
