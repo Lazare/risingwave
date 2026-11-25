@@ -213,6 +213,14 @@ DOWNSTREAM = [
      f"select t.v1 as tv, a.c1 as c1, a.s1 as s1 from {T} t join per_agg_simple{{sfx}} a on t.v2 = a.c1 + 3"),
 ]
 
+# Queries whose materialized view with pruning is compared with the batch execution of the query
+# rather than with the materialized view without pruning.
+#
+# A streaming `sum` keeps `0` once all its inputs are retracted while its group still holds rows,
+# where the query returns `NULL`: the aggregation on a key, replaced with a projection, returns
+# the result of the query.
+EXACT = {'key_agg_filter'}
+
 out = []
 def switch(on):
     value = 'true' if on else 'false'
@@ -242,8 +250,11 @@ def compare_batch(name, sql):
 
 def compare_all(title):
     out.append(f"# {title}: with and without pruning, every materialized view holds the same rows.\n")
-    for name, _, _ in CASES + DOWNSTREAM:
-        compare(name)
+    for name, _, sql in CASES + DOWNSTREAM:
+        if name in EXACT:
+            compare_batch(name, sql)
+        else:
+            compare(name)
     out.append(f"# {title}: the materialized views that need the pruning hold the rows of their query.\n")
     for name, _, sql in ON_ONLY:
         compare_batch(name, sql)
@@ -348,6 +359,11 @@ query('I', "select count(*) from per_eq_eq_on", ["0"])
 query('I', "select count(*) from per_limit0_on", ["0"])
 query('II', "select c, m from per_agg_join_on", ["0 NULL"])
 query('I', "select count(*) from per_nn_is_null_on", ["0"])
+out.append("# The filtered sum of a row that does not pass the filter any more: the streaming aggregation\n"
+           "# keeps `0`, the projection that replaces it returns `NULL` as the query does.\n")
+query('II', "select cnt, total from per_key_agg_filter_off where id = 15", ["0 0"])
+query('II', "select cnt, total from per_key_agg_filter_on where id = 15", ["0 NULL"])
+query('II', f"select count(*) filter (where amt > 5), sum(amt) filter (where dim_id is not null) from {F} where id = 15", ["0 NULL"])
 
 out.append("# A `NOT NULL` column added later: the rows written before read its default value.\n")
 stmt(f"alter table {N} add column e int not null default 9")
