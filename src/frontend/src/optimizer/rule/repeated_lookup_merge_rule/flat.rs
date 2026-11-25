@@ -48,6 +48,8 @@
 
 use std::collections::HashSet;
 
+use risingwave_common::util::iter_util::ZipEqFast;
+
 use super::*;
 
 /// A plan whose output columns are known by their virtual columns.
@@ -281,7 +283,7 @@ impl Lifter {
         let other_columns: Vec<ExprImpl> = other
             .layout
             .iter()
-            .zip(other.plan.schema().fields())
+            .zip_eq_fast(other.plan.schema().fields())
             .map(|(&column, field)| InputRef::new(column, field.data_type()).into())
             .collect();
         let internal: Vec<ExprImpl> = if in_left {
