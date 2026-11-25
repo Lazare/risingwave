@@ -1,6 +1,7 @@
 # Reducing the streaming graph at planning time
 
-Working notes of the prototype branch `proto/streaming-prune-empty-relation`: what is done, what
+Working notes of the prototype branches `proto/streaming-prune-empty-relation` and
+`proto/streaming-merge-repeated-lookups` (idea 3, derived from the former): what is done, what
 is being done, and every idea that was considered, including those that are not pursued for now.
 Not listed in `SUMMARY.md` while this is a prototype.
 
@@ -21,10 +22,10 @@ own rules.
 | F | Redundant conjuncts and bounds, filters that are always true | done (prototype) |
 | G | Inner join with one row of constants becomes a filter and a projection | done (prototype) |
 | H | Report of the fragments saved when a materialized view is created | done (prototype) |
-| 4 | Stronger derivation of unique keys | in progress |
-| 1 | Elimination of an unused outer join on a unique key | in progress |
-| 2 | Elimination of an aggregation, `DISTINCT` or top-n on a key | in progress |
-| 3 | Elimination of a self-join on a key | selected, not started |
+| 4 | Stronger derivation of unique keys | done (prototype) |
+| 1 | Elimination of an unused outer join on a unique key | done (prototype) |
+| 2 | Elimination of an aggregation, `DISTINCT` or top-n on a key | done (prototype) |
+| 3 | Elimination of a self-join on a key | in progress: repeated lookups of a table done on the branch `proto/streaming-merge-repeated-lookups`, aggregations next |
 | 5 | Aggregation pushed below a join onto the unique side | selected, not started |
 | 6 | Merge of two stacked aggregations | selected, not started |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
@@ -150,8 +151,38 @@ input joined on their group key: one aggregation with a `FILTER` per call.
   - The work: the two joins are often not adjacent after join ordering, the columns of the kept
     read must be widened and carried through the joins in between, and inner joins can be
     handled in the multi-join form while left joins can not.
-- Both sides must be the same stream at the same epoch: not for temporal joins, nor for a side
-  behind a temporal filter or an emit-on-window-close delay.
+- **Done on the branch `proto/streaming-merge-repeated-lookups`** (derived from the prototype
+  branch, variable `streaming_merge_repeated_lookups`, rule `RepeatedLookupMergeRule`):
+  - The *lookup* is the side that is removed: a scan of a table under `Project`, `Filter` and
+    `Share` nodes only, joined (inner or left outer) on the *whole* key of the table with `=`,
+    on the simple types for which equal values are indistinguishable.
+  - An *instance* is another scan of the same table in the kept side. The analysis `carried`
+    follows it up through `Project`, `Filter`, inner, left outer, full outer, left semi and anti
+    joins, and tracks the columns that are *bound* to a column of the table: when such a column
+    is not `NULL`, the instance is matched (not padded by an outer join) and the column holds
+    the value of the matched row. The columns of the scan are bound, and so are the columns that
+    a filter or an inner join compares them with (`f.dim_id = d.id`).
+  - A lookup from bound columns finds the matched row of the instance. Its columns are computed
+    from that row; "found" is: the compared columns are not `NULL`, the row satisfies the filter
+    of the lookup, and the rest of the join condition holds. An inner lookup becomes a filter on
+    that, a left lookup a `CASE` on that.
+  - A left outer join does not bind the column of its left side: `f.dim_id` can hold a value
+    that has no row in `d`. But a second lookup from the same column searches for the same row.
+    The first join is then widened: its scan reads the rows that satisfy the filter of either
+    lookup (`OR`), and the columns of each lookup are guarded by its own filter. Requires the
+    condition of the first join to be exactly the equalities on the key.
+  - The kept scan is widened with the columns that the removed lookup needs, appended to the
+    output of every node on the way up, so that existing column references stay valid.
+  - Not followed yet: an instance below an aggregation, top-n, union or a shared sub-plan that
+    is more than a scan; a lookup written as `IS NOT DISTINCT FROM`; a key column compared with
+    a constant; a key of a type outside the simple types.
+- **Next for the aggregations**: `Agg(group k)` over the same input with different filters,
+  joined on `k` from the same column, becomes one aggregation with a `FILTER` per call and a
+  `count(*) FILTER` per former aggregation to tell whether its group existed.
+- **Also planned**: a report at the creation of a materialized view of the relations that are
+  still read several times, to find the next shapes worth handling.
+- Both sides must be the same stream at the same epoch: not for temporal joins (a scan `AS OF`
+  is never a lookup), nor for a side behind a temporal filter or an emit-on-window-close delay.
 - The work is matching two sub-plans up to a column mapping, looking through shared sub-plans.
 - Seen in the fusion paper of Amazon Athena (rule "JoinOnKeys"), PostgreSQL 18
   (`remove_useless_self_joins`), Materialize (`redundant_join`).
