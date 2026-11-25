@@ -277,54 +277,54 @@ pub struct SessionConfig {
     /// Remove from the plan of a new streaming job the sub-plans that are proven to never
     /// produce a row, e.g. below a filter such as `x IS NULL AND x = 1` or `'b' = 'a'`, so that
     /// their fragments, backfills and states are not created. Defaults to false.
-    #[parameter(default = false)]
+    #[parameter(default = false, flags = "SESSION_INIT")]
     streaming_prune_empty_relation: bool,
 
     /// Remove from the plan of a new streaming job the operators that the unique keys of their
     /// inputs make useless: an outer join whose optional side is not used and is unique on the
     /// join columns, an aggregation, top-n or dedup whose groups hold exactly one row. The
     /// result then relies on these keys being exact. Defaults to false.
-    #[parameter(default = false)]
+    #[parameter(default = false, flags = "SESSION_INIT")]
     streaming_simplify_on_unique_key: bool,
 
     /// Remove from the plan of a new streaming job a join that looks up, by its key, a row of a
     /// table that the other side of the join already carries: several joins of the same table on
     /// its key from the same columns become one. The result then relies on the key of the table
     /// being exact. Defaults to false.
-    #[parameter(default = false)]
+    #[parameter(default = false, flags = "SESSION_INIT")]
     streaming_merge_repeated_lookups: bool,
 
     /// In the plan of a new streaming job, join once, above a `UNION ALL`, the table that several
     /// of its branches join on the same columns: the table is scanned once and its join state is
     /// kept once. Defaults to false.
-    #[parameter(default = false)]
+    #[parameter(default = false, flags = "SESSION_INIT")]
     streaming_factor_union_join: bool,
 
     /// In the plan of a new streaming job, turn a correlated subquery that aggregates the rows
     /// equal to columns of the outer row (`EXISTS`, `count`, `min`, `ARRAY(...)`, ...) into a left
     /// join with the aggregation grouped by those columns, instead of re-reading the outer side to
     /// build the set of its distinct values. Defaults to false.
-    #[parameter(default = false)]
+    #[parameter(default = false, flags = "SESSION_INIT")]
     streaming_simplify_subquery_unnesting: bool,
 
     /// In the plan of a new streaming job, read once the table that several branches of a
     /// `UNION ALL` read, each with its own filter and projection: one scan, one copy of each row
     /// per branch, and the filter and projection of each branch applied to its copies. Defaults to
     /// false.
-    #[parameter(default = false)]
+    #[parameter(default = false, flags = "SESSION_INIT")]
     streaming_merge_union_scans: bool,
 
     /// In the plan of a new streaming job, merge an aggregation over another aggregation into one
     /// aggregation of the input of the inner one, when the outer one groups by inner group key
     /// columns and its aggregates can be computed from the input (`sum` of `sum`, `sum` of
     /// `count`, `min` of `min`, a dedup below a distinct count...). Defaults to false.
-    #[parameter(default = false)]
+    #[parameter(default = false, flags = "SESSION_INIT")]
     streaming_merge_stacked_aggregations: bool,
 
     /// In the plan of a new streaming job, share again, at the end of the optimization, the
     /// stateful sub-plans that became identical only after predicate pushdown, subquery unnesting
     /// and column pruning: they are computed once instead of once per copy. Defaults to false.
-    #[parameter(default = false)]
+    #[parameter(default = false, flags = "SESSION_INIT")]
     streaming_share_identical_subplans: bool,
 
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
