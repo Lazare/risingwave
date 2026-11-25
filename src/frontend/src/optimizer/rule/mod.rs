@@ -215,6 +215,8 @@ mod column_facts_simplify_rule;
 pub use column_facts_simplify_rule::*;
 mod constant_row_join_rule;
 pub use constant_row_join_rule::*;
+mod unique_key_simplify_rule;
+pub use unique_key_simplify_rule::*;
 mod join_project_transpose_rule;
 pub use join_project_transpose_rule::*;
 mod limit_push_down_rule;
@@ -359,6 +361,8 @@ macro_rules! for_all_rules {
             , { NeverTruePredicateRule }
             , { ColumnFactsSimplifyRule }
             , { ConstantRowJoinRule }
+            , { UnusedOuterJoinEliminateRule }
+            , { AggOnKeyEliminateRule }
             , { BushyTreeJoinOrderingRule }
             , { StreamProjectMergeRule }
             , { StreamProjectSplitRule }

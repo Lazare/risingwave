@@ -7,6 +7,7 @@ Usage: python3 e2e_test/streaming/prune_empty_relation.gen.py e2e_test/streaming
 import sys
 
 T, SS, R, N = 'per_t', 'per_s', 'per_r', 'per_n'
+F, D, E = 'per_f', 'per_d', 'per_e'  # with a primary key
 EMPTY_T = f"(select * from {T} where v1 = 1 and v1 = 2)"
 EMPTY_S = f"(select * from {SS} where w = 1 and w = 2)"
 
@@ -134,6 +135,61 @@ CASES = [
      f"select t.v1 as tv, n.a as na from {T} t join {N} n on t.v1 = n.b where n.a is null or n.c is null"),
     ('kept_nn_left', 'kept: is null on a not null column of the optional side of a left join',
      f"select t.v1 as tv, n.a as na from {T} t left join {N} n on t.v1 = n.b where n.a is null"),
+    # Unused outer join on a unique key.
+    ('uoj', 'unused left join on the primary key of the right side',
+     f"select f.id as fid, f.amt as amt from {F} f left join {D} d on f.dim_id = d.id"),
+    ('uoj_extra', 'unused left join with an extra condition',
+     f"select f.id as fid, f.amt as amt from {F} f left join {D} d on f.dim_id = d.id and d.grp > 1 and f.amt > 0"),
+    ('uoj_right', 'unused right join',
+     f"select f.id as fid, f.amt as amt from {D} d right join {F} f on f.dim_id = d.id"),
+    ('uoj_const', 'unused left join whose right key is bound by a constant',
+     f"select f.id as fid, f.amt as amt from {F} f left join {D} d on d.id = 2 and f.amt > d.grp"),
+    ('uoj_two', 'two left joins, only the unused one is removed',
+     f"select f.id as fid, e.code as code from {F} f left join {D} d on f.dim_id = d.id left join {E} e on f.amt = e.id"),
+    ('uoj_dedup', 'unused left join on a deduplicated right side',
+     f"select f.id as fid, f.amt as amt from {F} f left join (select * from (select *, row_number() over "
+     f"(partition by grp order by id) as rn from {D}) x where rn = 1) latest on f.dim_id = latest.grp"),
+    ('uoj_agg', 'unused left join on an aggregated right side',
+     f"select f.id as fid, f.amt as amt from {F} f left join (select grp, count(*) as cnt from {D} group by grp) g "
+     f"on f.dim_id = g.grp"),
+    ('uoj_under_agg', 'unused left join under an aggregation',
+     f"select f.dim_id as dim_id, sum(f.amt) as total from {F} f left join {D} d on f.dim_id = d.id group by f.dim_id"),
+    ('kept_uoj_used', 'kept: left join whose right side is used',
+     f"select f.id as fid, d.name as name from {F} f left join {D} d on f.dim_id = d.id"),
+    ('kept_uoj_anti', 'kept: left join whose right side is used in a filter above',
+     f"select f.id as fid, f.amt as amt from {F} f left join {D} d on f.dim_id = d.id where d.id is null"),
+    ('kept_uoj_not_key', 'kept: unused left join on a column that is not a key',
+     f"select f.id as fid, f.amt as amt from {F} f left join {D} d on f.dim_id = d.grp"),
+    ('kept_uoj_inner', 'kept: unused inner join',
+     f"select f.id as fid, f.amt as amt from {F} f join {D} d on f.dim_id = d.id"),
+    # Aggregation, distinct, top-n on a key.
+    ('key_agg', 'aggregation on the primary key',
+     f"select id, sum(amt) as total, count(*) as cnt, count(dim_id) as cnt_dim, min(label) as first_label, "
+     f"max(amt) as max_amt, sum(price) as total_price from {F} group by id"),
+    ('key_agg_filter', 'aggregation with filters on the primary key',
+     f"select id, count(*) filter (where amt > 5) as cnt, sum(amt) filter (where dim_id is not null) as total "
+     f"from {F} group by id"),
+    ('key_avg', 'average on the primary key', f"select id, avg(amt) as average from {F} group by id"),
+    ('key_agg_larger', 'aggregation on a group key larger than the primary key',
+     f"select id, dim_id, sum(amt) as total, bool_and(amt > 3) as all_big from {F} group by id, dim_id"),
+    ('key_distinct', 'distinct on columns that contain the primary key', f"select distinct id, amt from {F}"),
+    ('key_distinct_agg', 'distinct on the output of an aggregation',
+     f"select distinct grp, cnt from (select grp, count(*) as cnt from {D} group by grp) g"),
+    ('key_agg_join', 'aggregation above a left join with a unique right side',
+     f"select f.id as fid, d.name as name, sum(f.amt) as total from {F} f left join {D} d on f.dim_id = d.id "
+     f"group by f.id, d.name"),
+    ('key_top1', 'top-1 per primary key',
+     f"select id, amt from (select *, row_number() over (partition by id order by amt) as rn from {F}) x where rn = 1"),
+    ('key_top1_twice', 'top-1 over a top-1 on the same key',
+     f"with latest as (select * from (select *, row_number() over (partition by grp order by id desc) as rn "
+     f"from {D}) x where rn = 1) select grp, name from (select *, row_number() over (partition by grp order by name) "
+     f"as rn2 from latest) y where rn2 = 1"),
+    ('kept_key_agg', 'kept: aggregation on a column that is not a key',
+     f"select dim_id, sum(amt) as total, count(*) as cnt from {F} group by dim_id"),
+    ('kept_key_distinct', 'kept: distinct without the primary key', f"select distinct dim_id, amt from {F}"),
+    ('kept_key_array', 'kept: aggregate without a one-row form', f"select id, array_agg(amt) as amounts from {F} group by id"),
+    ('kept_key_join', 'kept: aggregation above an inner join that multiplies rows',
+     f"select f.id as fid, sum(d.id) as total from {F} f join {D} d on f.dim_id = d.grp group by f.id"),
 ]
 # Queries that streaming only accepts with the pruning (a join without equality): the
 # materialized view is compared with the batch execution of its query.
@@ -158,6 +214,11 @@ DOWNSTREAM = [
 ]
 
 out = []
+def switch(on):
+    value = 'true' if on else 'false'
+    stmt(f"set streaming_prune_empty_relation = {value}")
+    stmt(f"set streaming_simplify_on_unique_key = {value}")
+
 def stmt(sql):
     out.append(f"statement ok\n{sql};\n")
 def query(types, sql, rows):
@@ -187,9 +248,9 @@ def compare_all(title):
     for name, _, sql in ON_ONLY:
         compare_batch(name, sql)
 
-out.append("""# Differential test of `streaming_prune_empty_relation`: every query is materialized twice, with
-# and without the pruning of the sub-plans proven empty, and both materialized views must hold
-# the same rows after the backfill and after each round of changes.
+out.append("""# Differential test of `streaming_prune_empty_relation` and `streaming_simplify_on_unique_key`:
+# every query is materialized twice, with and without the pruning of its plan, and both
+# materialized views must hold the same rows after the backfill and after each round of changes.
 #
 # Generated by `python3 e2e_test/streaming/prune_empty_relation.gen.py <this file>`: edit the list
 # of queries there and regenerate rather than editing by hand.
@@ -199,17 +260,24 @@ stmt(f"create table {T} (v1 int, v2 int, v3 varchar, b boolean, ts timestamp)")
 stmt(f"create table {SS} (k int, w int)")
 stmt(f"create table {R} (k int, x int)")
 stmt(f"create table {N} (a int not null, b int, c int not null default 5)")
+stmt(f"create table {F} (id int primary key, dim_id int, amt int, label varchar, price decimal)")
+stmt(f"create table {D} (id int primary key, name varchar, grp int)")
+stmt(f"create table {E} (id int primary key, code varchar)")
 out.append("# Rows present before the materialized views are created: they go through the backfill.\n")
 stmt(f"insert into {T} values (1, 3, 'a', true, '2026-01-01 00:00:00'), (2, 4, 'b', false, '2026-01-02 00:00:00'), "
      f"(2, 7, null, null, null), (null, 3, 'c', true, '2026-01-03 00:00:00'), (6, null, 'a', false, '2026-01-04 00:00:00')")
 stmt(f"insert into {SS} values (1, 1), (2, 2), (2, null), (null, 5), (7, 1)")
 stmt(f"insert into {R} values (1, 10), (2, null), (5, 0)")
 stmt(f"insert into {N} (a, b) values (1, 1), (2, null), (3, 2)")
+stmt(f"insert into {D} values (1, 'one', 1), (2, 'two', 1), (3, 'three', 2), (4, null, null)")
+stmt(f"insert into {E} values (3, 'c'), (5, 'e')")
+stmt(f"insert into {F} values (10, 1, 5, 'x', 1.5), (11, 1, 7, 'y', 2.50), (12, 3, 3, null, null), "
+     f"(13, null, 9, 'z', 0), (14, 99, null, 'w', 7), (15, 2, 3, 'x', 1.50)")
 out.append("# A table rejects the rows that violate its `NOT NULL` constraints.\n")
 out.append(f"statement error null value in column\ninsert into {N} (a, b) values (null, 1);\n")
 
 for sfx in ('off', 'on'):
-    stmt(f"set streaming_prune_empty_relation = {'true' if sfx == 'on' else 'false'}")
+    switch(sfx == 'on')
     for name, comment, sql in CASES:
         out.append(f"# {comment}\n")
         stmt(f"create materialized view per_{name}_{sfx} as {sql}")
@@ -222,9 +290,9 @@ for name, comment, sql in ON_ONLY:
     stmt(f"create materialized view per_{name}_on as {sql}")
 
 out.append("# `LIMIT 0` is rejected in streaming without pruning, and empty with it.\n")
-stmt("set streaming_prune_empty_relation = false")
+switch(False)
 out.append(f"statement error LIMIT 0 in streaming mode\ncreate materialized view per_limit0_off as select v1, v2 from {T} order by v1 limit 0;\n")
-stmt("set streaming_prune_empty_relation = true")
+switch(True)
 stmt(f"create materialized view per_limit0_on as select v1, v2 from {T} order by v1 limit 0")
 
 compare_all("After the backfill")
@@ -246,6 +314,12 @@ stmt(f"insert into {T} values (1, 4, 'b', false, '2026-02-01 00:00:00'), (2, 3, 
 stmt(f"insert into {SS} values (1, 2), (3, 1), (5, null), (6, 2)")
 stmt(f"insert into {R} values (3, 1), (6, null), (1, -1)")
 stmt(f"insert into {N} values (4, 2, 6), (5, 6, 7), (6, null, 8)")
+stmt(f"insert into {D} values (5, 'five', 2), (99, 'far', 3)")
+stmt(f"insert into {E} values (7, 'g'), (9, null)")
+stmt(f"insert into {F} values (16, 5, 7, 'v', 3), (17, 4, 1, null, 2.25), (18, 1, 5, 'x', null)")
+out.append("# A row written again with an existing primary key replaces the previous one.\n")
+stmt(f"insert into {F} values (10, 2, 6, 'x2', 9)")
+stmt(f"insert into {D} values (3, 'trois', 1)")
 stmt(f"insert into {N} (a, b) select v1, v2 from {T} where v1 is not null and v2 is not null")
 compare_all("After the inserts")
 
@@ -260,6 +334,14 @@ stmt(f"update {R} set x = 5 where x is null")
 stmt(f"delete from {R} where k = 1")
 stmt(f"update {N} set b = b + 1, c = c + 1 where a = 1")
 stmt(f"delete from {N} where a = 2")
+stmt(f"update {F} set amt = amt + 2, dim_id = 3 where id = 11")
+stmt(f"update {F} set dim_id = null where id = 15")
+stmt(f"delete from {F} where id = 12")
+stmt(f"update {D} set grp = 2, name = 'uno' where id = 1")
+stmt(f"delete from {D} where id = 2")
+stmt(f"delete from {D} where id = 99")
+stmt(f"update {E} set code = 'cc' where id = 3")
+stmt(f"delete from {E} where id = 7")
 compare_all("After the updates and deletes")
 
 query('I', "select count(*) from per_eq_eq_on", ["0"])
@@ -270,9 +352,9 @@ query('I', "select count(*) from per_nn_is_null_on", ["0"])
 out.append("# A `NOT NULL` column added later: the rows written before read its default value.\n")
 stmt(f"alter table {N} add column e int not null default 9")
 ADDED = f"select a, e, e is null as missing from {N} where e is null or a = 1"
-stmt("set streaming_prune_empty_relation = false")
+switch(False)
 stmt(f"create materialized view per_nn_added_off as {ADDED}")
-stmt("set streaming_prune_empty_relation = true")
+switch(True)
 stmt(f"create materialized view per_nn_added_on as {ADDED}")
 compare('nn_added')
 stmt(f"insert into {N} (a, b, e) values (1, 1, 4), (7, 7, 7)")
@@ -291,11 +373,14 @@ stmt("drop materialized view per_nn_added_off")
 stmt("drop materialized view per_limit0_on")
 for name, _, _ in reversed(ON_ONLY):
     stmt(f"drop materialized view per_{name}_on")
+stmt(f"drop table {E}")
+stmt(f"drop table {D}")
+stmt(f"drop table {F}")
 stmt(f"drop table {N}")
 stmt(f"drop table {R}")
 stmt(f"drop table {SS}")
 stmt(f"drop table {T}")
-stmt("set streaming_prune_empty_relation = false")
+switch(False)
 
 open(sys.argv[1], 'w').write("\n".join(out))
 print(len(CASES) + len(DOWNSTREAM) + len(ON_ONLY), 'cases,', sum(1 for o in out if o.startswith(('statement', 'query'))), 'records')

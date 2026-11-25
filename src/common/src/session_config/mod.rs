@@ -280,6 +280,13 @@ pub struct SessionConfig {
     #[parameter(default = false)]
     streaming_prune_empty_relation: bool,
 
+    /// Remove from the plan of a new streaming job the operators that the unique keys of their
+    /// inputs make useless: an outer join whose optional side is not used and is unique on the
+    /// join columns, an aggregation, top-n or dedup whose groups hold exactly one row. The
+    /// result then relies on these keys being exact. Defaults to false.
+    #[parameter(default = false)]
+    streaming_simplify_on_unique_key: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,

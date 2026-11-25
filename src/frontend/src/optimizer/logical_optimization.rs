@@ -516,6 +516,18 @@ static STREAM_PRUNE_EMPTY_RELATION: LazyLock<OptimizationStage> = LazyLock::new(
     )
 });
 
+static STREAM_SIMPLIFY_ON_UNIQUE_KEY: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Simplify On Unique Key For Stream",
+        vec![
+            UnusedOuterJoinEliminateRule::create(),
+            AggOnKeyEliminateRule::create(),
+        ],
+        // Bottom-up: an operator removed below may give a key to the input of an operator above.
+        ApplyOrder::BottomUp,
+    )
+});
+
 static LIMIT_PUSH_DOWN: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Push Down Limit",
@@ -864,6 +876,28 @@ impl LogicalOptimizer {
             let applied_before = ctx.total_rule_applied();
             plan = plan.optimize_by_rules(&STREAM_PRUNE_EMPTY_RELATION)?;
             ctx.add_stream_prune_rule_applied(ctx.total_rule_applied() - applied_before);
+        }
+
+        // Remove the operators that the unique keys of their inputs make useless: an outer join
+        // that is not used and can not multiply rows, an aggregation whose groups hold one row.
+        // On demand only, as above. An operator that is removed may leave columns unused, which
+        // may in turn make a join below unused: prune the columns and try again.
+        if ctx
+            .session_ctx()
+            .config()
+            .streaming_simplify_on_unique_key()
+            && !ctx.is_stream_prune_baseline()
+        {
+            for _ in 0..3 {
+                let applied_before = ctx.total_rule_applied();
+                plan = plan.optimize_by_rules(&STREAM_SIMPLIFY_ON_UNIQUE_KEY)?;
+                let applied = ctx.total_rule_applied() - applied_before;
+                if applied == 0 {
+                    break;
+                }
+                ctx.add_stream_prune_rule_applied(applied);
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+            }
         }
 
         plan = plan.optimize_by_rules(&CONSTANT_OUTPUT_REMOVE)?;

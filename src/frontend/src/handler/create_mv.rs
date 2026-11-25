@@ -372,19 +372,19 @@ pub(crate) fn gen_create_mv_graph(
     }
 
     // Kept to plan the job again without pruning, see `report_stream_prune_savings`.
-    let baseline_args = handler_args
-        .session
-        .config()
-        .streaming_prune_empty_relation()
-        .then(|| {
-            (
-                handler_args.clone(),
-                query.clone(),
-                name.clone(),
-                columns.clone(),
-                emit_mode.clone(),
-            )
-        });
+    let prune_enabled = {
+        let config = handler_args.session.config();
+        config.streaming_prune_empty_relation() || config.streaming_simplify_on_unique_key()
+    };
+    let baseline_args = prune_enabled.then(|| {
+        (
+            handler_args.clone(),
+            query.clone(),
+            name.clone(),
+            columns.clone(),
+            emit_mode.clone(),
+        )
+    });
 
     let context = OptimizerContext::from_handler_args(handler_args);
     let has_order_by = !query.order.is_empty();
@@ -456,8 +456,8 @@ It only indicates the physical clustering of the data, which may improve the per
     ))
 }
 
-/// Plans a materialized view without the pruning of the sub-plans proven empty
-/// (`streaming_prune_empty_relation`), only to compare its fragment graph with the pruned one.
+/// Plans a materialized view without the pruning of its plan (`streaming_prune_empty_relation`,
+/// `streaming_simplify_on_unique_key`), only to compare its fragment graph with the pruned one.
 fn gen_create_mv_graph_without_pruning(
     handler_args: HandlerArgs,
     query: BoundQuery,
@@ -542,7 +542,7 @@ pub(crate) fn report_stream_prune_savings(
                 "pruned the sub-plans proven empty of a streaming job"
             );
             session.notice_to_user(format!(
-                "streaming_prune_empty_relation: {} fragment(s) instead of {} ({} saved), \
+                "streaming plan pruning: {} fragment(s) instead of {} ({} saved), \
                  {} operator(s) instead of {}, {} table scan(s) instead of {}",
                 pruned.fragments,
                 baseline.fragments,
@@ -566,7 +566,7 @@ pub(crate) fn report_stream_prune_savings(
                  pruning is rejected"
             );
             session.notice_to_user(format!(
-                "streaming_prune_empty_relation: {} fragment(s), {} operator(s), {} table scan(s); \
+                "streaming plan pruning: {} fragment(s), {} operator(s), {} table scan(s); \
                  the plan without pruning is rejected",
                 pruned.fragments, pruned.operators, pruned.table_scans,
             ));

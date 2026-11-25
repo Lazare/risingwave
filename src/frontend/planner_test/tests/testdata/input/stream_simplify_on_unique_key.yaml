@@ -1,0 +1,286 @@
+# Tests for the simplifications that rely on unique keys in streaming plans
+# (`streaming_simplify_on_unique_key`): `UnusedOuterJoinEliminateRule` and `AggOnKeyEliminateRule`.
+- id: setup
+  sql: |
+    set streaming_simplify_on_unique_key = true;
+    create table f (id int primary key, dim_id int, amt int, label varchar, price decimal);
+    create table d (id int primary key, name varchar, grp int);
+    create table e (id int primary key, code varchar);
+    create table nopk (a int, b int);
+  expected_outputs: []
+- id: setup_off
+  sql: |
+    create table f (id int primary key, dim_id int, amt int, label varchar, price decimal);
+    create table d (id int primary key, name varchar, grp int);
+  expected_outputs: []
+
+# The variable is off by default: nothing is removed.
+- name: off by default - unused left join is kept
+  before:
+  - setup_off
+  sql: |
+    select f.id, f.amt from f left join d on f.dim_id = d.id;
+  expected_outputs:
+  - stream_plan
+- name: off by default - aggregation on a key is kept
+  before:
+  - setup_off
+  sql: |
+    select id, sum(amt) as total from f group by id;
+  expected_outputs:
+  - stream_plan
+
+# Unused outer join on a unique key.
+- name: unused left join on the primary key of the right side
+  before:
+  - setup
+  sql: |
+    select f.id, f.amt from f left join d on f.dim_id = d.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: unused left join with an extra condition
+  before:
+  - setup
+  sql: |
+    select f.id, f.amt from f left join d on f.dim_id = d.id and d.grp > 1 and f.amt > 0;
+  expected_outputs:
+  - stream_plan
+- name: unused right join
+  before:
+  - setup
+  sql: |
+    select f.id, f.amt from d right join f on f.dim_id = d.id;
+  expected_outputs:
+  - stream_plan
+- name: unused left join whose right key is bound by a constant
+  before:
+  - setup
+  sql: |
+    select f.id, f.amt from f left join d on d.id = 7 and f.amt > d.grp;
+  expected_outputs:
+  - stream_plan
+- name: two left joins - only the unused one is removed
+  before:
+  - setup
+  sql: |
+    select f.id, e.code from f left join d on f.dim_id = d.id left join e on f.amt = e.id;
+  expected_outputs:
+  - stream_plan
+- name: unused left join on a deduplicated right side
+  before:
+  - setup
+  sql: |
+    select f.id, f.amt from f left join (
+      select * from (select *, row_number() over (partition by grp order by id) as rn from d) x where rn = 1
+    ) latest on f.dim_id = latest.grp;
+  expected_outputs:
+  - stream_plan
+- name: unused left join on an aggregated right side
+  before:
+  - setup
+  sql: |
+    select f.id, f.amt from f left join (select grp, count(*) as cnt from d group by grp) g on f.dim_id = g.grp;
+  expected_outputs:
+  - stream_plan
+- name: unused left join on a distinct right side
+  before:
+  - setup
+  sql: |
+    select f.id, f.amt from f left join (select distinct grp from d) g on f.dim_id = g.grp;
+  expected_outputs:
+  - stream_plan
+- name: unused left join under an aggregation
+  before:
+  - setup
+  sql: |
+    select f.dim_id, sum(f.amt) as total from f left join d on f.dim_id = d.id group by f.dim_id;
+  expected_outputs:
+  - stream_plan
+- name: unused left join in a view with more columns than its consumer needs
+  before:
+  - setup
+  sql: |
+    create view wide as select f.id, f.amt, d.name, d.grp, e.code from f
+      left join d on f.dim_id = d.id left join e on f.amt = e.id;
+    select id, amt from wide where amt > 3;
+  expected_outputs:
+  - stream_plan
+- name: kept - left join whose right side is used
+  before:
+  - setup
+  sql: |
+    select f.id, d.name from f left join d on f.dim_id = d.id;
+  expected_outputs:
+  - stream_plan
+- name: kept - left join whose right side is used in a filter above
+  before:
+  - setup
+  sql: |
+    select f.id, f.amt from f left join d on f.dim_id = d.id where d.id is null;
+  expected_outputs:
+  - stream_plan
+- name: kept - unused left join on a column that is not a key
+  before:
+  - setup
+  sql: |
+    select f.id, f.amt from f left join d on f.dim_id = d.grp;
+  expected_outputs:
+  - stream_plan
+- name: kept - unused left join on a table without primary key
+  before:
+  - setup
+  sql: |
+    select f.id, f.amt from f left join nopk on f.dim_id = nopk.a;
+  expected_outputs:
+  - stream_plan
+- name: kept - unused inner join
+  before:
+  - setup
+  sql: |
+    select f.id, f.amt from f join d on f.dim_id = d.id;
+  expected_outputs:
+  - stream_plan
+- name: kept - unused left join whose key is compared behind a cast
+  before:
+  - setup
+  sql: |
+    select f.id, f.amt from f left join d on f.dim_id::bigint = d.id::bigint;
+  expected_outputs:
+  - stream_plan
+- name: kept - unused left join on a union, which has no key
+  before:
+  - setup
+  sql: |
+    select f.id, f.amt from f left join (select id from d union all select id from e) u on f.dim_id = u.id;
+  expected_outputs:
+  - stream_plan
+- name: kept - unused full join
+  before:
+  - setup
+  sql: |
+    select f.id, f.amt from f full join d on f.dim_id = d.id;
+  expected_outputs:
+  - stream_plan
+
+# Aggregation, distinct, top-n and dedup on a key.
+- name: aggregation on the primary key
+  before:
+  - setup
+  sql: |
+    select id, sum(amt) as total, count(*) as cnt, count(dim_id) as cnt_dim, min(label) as first_label,
+      max(amt) as max_amt, sum(price) as total_price
+    from f group by id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: aggregation with filters on the primary key
+  before:
+  - setup
+  sql: |
+    select id, count(*) filter (where amt > 5) as cnt, sum(amt) filter (where dim_id is not null) as total
+    from f group by id;
+  expected_outputs:
+  - stream_plan
+- name: average on the primary key
+  before:
+  - setup
+  sql: |
+    select id, avg(amt) as average from f group by id;
+  expected_outputs:
+  - stream_plan
+- name: aggregation on a group key larger than the primary key
+  before:
+  - setup
+  sql: |
+    select id, dim_id, sum(amt) as total from f group by id, dim_id;
+  expected_outputs:
+  - stream_plan
+- name: distinct on columns that contain the primary key
+  before:
+  - setup
+  sql: |
+    select distinct id, amt from f;
+  expected_outputs:
+  - stream_plan
+- name: distinct on the output of an aggregation
+  before:
+  - setup
+  sql: |
+    select distinct grp, cnt from (select grp, count(*) as cnt from d group by grp) g;
+  expected_outputs:
+  - stream_plan
+- name: aggregation above a left join with a unique right side
+  before:
+  - setup
+  sql: |
+    select f.id, d.name, sum(f.amt) as total from f left join d on f.dim_id = d.id group by f.id, d.name;
+  expected_outputs:
+  - stream_plan
+- name: top-1 per primary key
+  before:
+  - setup
+  sql: |
+    select id, amt from (select *, row_number() over (partition by id order by amt) as rn from f) x where rn = 1;
+  expected_outputs:
+  - stream_plan
+- name: top-1 over a top-1 on the same key
+  before:
+  - setup
+  sql: |
+    with latest as (
+      select * from (select *, row_number() over (partition by grp order by id desc) as rn from d) x where rn = 1
+    )
+    select grp, name from (select *, row_number() over (partition by grp order by name) as rn2 from latest) y
+    where rn2 = 1;
+  expected_outputs:
+  - stream_plan
+- name: kept - aggregation on a column that is not a key
+  before:
+  - setup
+  sql: |
+    select dim_id, sum(amt) as total from f group by dim_id;
+  expected_outputs:
+  - stream_plan
+- name: kept - distinct without the primary key
+  before:
+  - setup
+  sql: |
+    select distinct dim_id, amt from f;
+  expected_outputs:
+  - stream_plan
+- name: kept - aggregation without group key
+  before:
+  - setup
+  sql: |
+    select sum(amt) as total, count(*) as cnt from (select * from f where id = 1) x;
+  expected_outputs:
+  - stream_plan
+- name: kept - aggregation on the primary key with an aggregate without a one-row form
+  before:
+  - setup
+  sql: |
+    select id, array_agg(amt) as amounts from f group by id;
+  expected_outputs:
+  - stream_plan
+- name: kept - aggregation on the key of a union
+  before:
+  - setup
+  sql: |
+    select id, count(*) as cnt from (select id from d union all select id from e) u group by id;
+  expected_outputs:
+  - stream_plan
+- name: kept - top-2 per group on a column that is not a key
+  before:
+  - setup
+  sql: |
+    select id, amt from (select *, row_number() over (partition by dim_id order by amt) as rn from f) x where rn <= 2;
+  expected_outputs:
+  - stream_plan
+- name: kept - aggregation above an inner join that multiplies rows
+  before:
+  - setup
+  sql: |
+    select f.id, sum(d.grp) as total from f join d on f.dim_id = d.grp group by f.id;
+  expected_outputs:
+  - stream_plan
