@@ -110,7 +110,7 @@ fn is_null_column(expr: &ExprImpl) -> Option<usize> {
 ///
 /// Anything else (`IS [NOT] DISTINCT FROM`, `= ANY(array)`, a column wrapped in a cast or in any
 /// other function, ...) is deliberately not recognized.
-fn null_rejected_columns(expr: &ExprImpl) -> Vec<usize> {
+pub(super) fn null_rejected_columns(expr: &ExprImpl) -> Vec<usize> {
     let Some(call) = expr.as_function_call() else {
         return vec![];
     };

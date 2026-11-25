@@ -211,6 +211,10 @@ mod empty_input_simplify_rule;
 pub use empty_input_simplify_rule::*;
 mod never_true_predicate_rule;
 pub use never_true_predicate_rule::*;
+mod column_facts_simplify_rule;
+pub use column_facts_simplify_rule::*;
+mod constant_row_join_rule;
+pub use constant_row_join_rule::*;
 mod join_project_transpose_rule;
 pub use join_project_transpose_rule::*;
 mod limit_push_down_rule;
@@ -353,6 +357,8 @@ macro_rules! for_all_rules {
             , { EmptyRelationPropagateRule }
             , { EmptyInputSimplifyRule }
             , { NeverTruePredicateRule }
+            , { ColumnFactsSimplifyRule }
+            , { ConstantRowJoinRule }
             , { BushyTreeJoinOrderingRule }
             , { StreamProjectMergeRule }
             , { StreamProjectSplitRule }

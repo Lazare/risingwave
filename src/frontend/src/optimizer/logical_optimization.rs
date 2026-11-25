@@ -503,9 +503,13 @@ static STREAM_PRUNE_EMPTY_RELATION: LazyLock<OptimizationStage> = LazyLock::new(
     OptimizationStage::new(
         "Prune Empty Relation For Stream",
         vec![
+            // In this order: a predicate simplified with what is known about its columns may
+            // become never true, which may empty an input of the operator above.
+            ColumnFactsSimplifyRule::create(),
             NeverTruePredicateRule::create(),
             EmptyRelationPropagateRule::create(),
             EmptyInputSimplifyRule::create(),
+            ConstantRowJoinRule::create(),
         ],
         // Must be bottom-up so that an empty relation is propagated to the top in one pass.
         ApplyOrder::BottomUp,

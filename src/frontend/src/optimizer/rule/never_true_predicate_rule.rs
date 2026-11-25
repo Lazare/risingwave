@@ -60,17 +60,23 @@ impl NeverTruePredicateRule {
         if !is_never_true(join.on()) {
             return None;
         }
-        let (left, right) = (join.left(), join.right());
-        match join.join_type() {
-            JoinType::Inner | JoinType::LeftSemi | JoinType::RightSemi => Some(empty_like(plan)),
-            JoinType::LeftOuter | JoinType::LeftAnti if !is_empty(&right) => {
-                Some(join.clone_with_left_right(left, empty_like(&right)).into())
-            }
-            JoinType::RightOuter | JoinType::RightAnti if !is_empty(&left) => {
-                Some(join.clone_with_left_right(empty_like(&left), right).into())
-            }
-            _ => None,
+        fold_join_without_match(plan, join)
+    }
+}
+
+/// Rewrites a join whose condition never holds, see [`NeverTruePredicateRule`]. Returns `None`
+/// for the join types that are left untouched, or if the join is already in its final form.
+pub(super) fn fold_join_without_match(plan: &PlanRef, join: &LogicalJoin) -> Option<PlanRef> {
+    let (left, right) = (join.left(), join.right());
+    match join.join_type() {
+        JoinType::Inner | JoinType::LeftSemi | JoinType::RightSemi => Some(empty_like(plan)),
+        JoinType::LeftOuter | JoinType::LeftAnti if !is_empty(&right) => {
+            Some(join.clone_with_left_right(left, empty_like(&right)).into())
         }
+        JoinType::RightOuter | JoinType::RightAnti if !is_empty(&left) => {
+            Some(join.clone_with_left_right(empty_like(&left), right).into())
+        }
+        _ => None,
     }
 }
 
@@ -109,7 +115,7 @@ pub(super) fn is_never_true(predicate: &Condition) -> bool {
 
 /// Returns the value of a constant expression: `None` if the expression is not constant or fails
 /// to evaluate, `Some(None)` for a constant `NULL`.
-fn constant_value(expr: &ExprImpl) -> Option<Option<ScalarImpl>> {
+pub(super) fn constant_value(expr: &ExprImpl) -> Option<Option<ScalarImpl>> {
     expr.try_fold_const()?.ok()
 }
 
@@ -224,7 +230,7 @@ impl Domain {
 
 /// The types for which the equality and the order of `ScalarImpl` are those of the SQL operators,
 /// and for which two equal values are indistinguishable.
-fn is_simple_type(data_type: &DataType) -> bool {
+pub(super) fn is_simple_type(data_type: &DataType) -> bool {
     matches!(
         data_type,
         DataType::Boolean
@@ -240,14 +246,14 @@ fn is_simple_type(data_type: &DataType) -> bool {
 }
 
 /// Returns `(i, type)` iff the expression is exactly the column `#i` of a simple type.
-fn simple_column(expr: &ExprImpl) -> Option<(usize, DataType)> {
+pub(super) fn simple_column(expr: &ExprImpl) -> Option<(usize, DataType)> {
     let input_ref = expr.as_input_ref()?;
     let data_type = input_ref.return_type();
     is_simple_type(&data_type).then(|| (input_ref.index(), data_type))
 }
 
 /// Returns the value of a constant expression of the given type; `Some(None)` for `NULL`.
-fn typed_constant(expr: &ExprImpl, data_type: &DataType) -> Option<Option<ScalarImpl>> {
+pub(super) fn typed_constant(expr: &ExprImpl, data_type: &DataType) -> Option<Option<ScalarImpl>> {
     if expr.return_type() != *data_type {
         return None;
     }
@@ -266,6 +272,38 @@ fn typed_constants(exprs: &[ExprImpl], data_type: &DataType) -> Option<(Vec<Scal
         }
     }
     Some((values, has_null))
+}
+
+/// Returns `(i, <cmp>, c)` iff the expression is a comparison `#i <cmp> c` or `c <cmp> #i` between
+/// a direct reference to a column of a simple type and a non-`NULL` constant of exactly the same
+/// type. The comparison is normalized so that the column is on the left.
+pub(super) fn column_comparison(expr: &ExprImpl) -> Option<(usize, ExprType, ScalarImpl)> {
+    let call = expr.as_function_call()?;
+    let func_type = call.func_type();
+    let [left, right] = call.inputs() else {
+        return None;
+    };
+    if !is_comparison(func_type) {
+        return None;
+    }
+    if let Some((index, data_type)) = simple_column(left)
+        && let Some(Some(value)) = typed_constant(right, &data_type)
+    {
+        Some((index, func_type, value))
+    } else if let Some((index, data_type)) = simple_column(right)
+        && let Some(Some(value)) = typed_constant(left, &data_type)
+    {
+        let flipped = match func_type {
+            ExprType::LessThan => ExprType::GreaterThan,
+            ExprType::LessThanOrEqual => ExprType::GreaterThanOrEqual,
+            ExprType::GreaterThan => ExprType::LessThan,
+            ExprType::GreaterThanOrEqual => ExprType::LessThanOrEqual,
+            other => other,
+        };
+        Some((index, flipped, value))
+    } else {
+        None
+    }
 }
 
 /// Records what a conjunct says about a column, if it has one of the recognized forms. Anything
@@ -310,24 +348,8 @@ fn collect_constraint(expr: &ExprImpl, domains: &mut BTreeMap<usize, Domain>) {
                 domains.entry(index).or_default().allowed.push(values);
             }
         }
-        (func_type, [left, right]) if is_comparison(func_type) => {
-            // Normalize to `#i <cmp> c`.
-            let (index, value, func_type) = if let Some((index, data_type)) = simple_column(left)
-                && let Some(Some(value)) = typed_constant(right, &data_type)
-            {
-                (index, value, func_type)
-            } else if let Some((index, data_type)) = simple_column(right)
-                && let Some(Some(value)) = typed_constant(left, &data_type)
-            {
-                let flipped = match func_type {
-                    ExprType::LessThan => ExprType::GreaterThan,
-                    ExprType::LessThanOrEqual => ExprType::GreaterThanOrEqual,
-                    ExprType::GreaterThan => ExprType::LessThan,
-                    ExprType::GreaterThanOrEqual => ExprType::LessThanOrEqual,
-                    other => other,
-                };
-                (index, value, flipped)
-            } else {
+        (func_type, [_, _]) if is_comparison(func_type) => {
+            let Some((index, func_type, value)) = column_comparison(expr) else {
                 return;
             };
             let domain = domains.entry(index).or_default();
