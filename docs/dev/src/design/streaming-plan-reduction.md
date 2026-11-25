@@ -25,7 +25,7 @@ own rules.
 | 4 | Stronger derivation of unique keys | done (prototype) |
 | 1 | Elimination of an unused outer join on a unique key | done (prototype) |
 | 2 | Elimination of an aggregation, `DISTINCT` or top-n on a key | done (prototype) |
-| 3 | Elimination of a self-join on a key | in progress: repeated lookups of a table done on the branch `proto/streaming-merge-repeated-lookups`, aggregations next |
+| 3 | Elimination of a self-join on a key | in progress: repeated lookups of a table done on the branch `proto/streaming-merge-repeated-lookups`, lookups nested in trees of joins and semi or anti joins answered by a carried row done on the branch `proto/plan-reduction-flat-lookups`, aggregations next |
 | 5 | Aggregation pushed below a join onto the unique side | selected, not started |
 | 6 | Merge of two stacked aggregations | selected, not started |
 | 7 | Join common to the branches of a `UNION ALL` joined once above the union | done (prototype, branch of idea 3) |
@@ -196,6 +196,60 @@ input joined on their group key: one aggregation with a `FILTER` per call.
   - Still out of reach: a lookup whose removed side is itself a chain of joins that ends with
     the scan, and a key equality that an ancestor join establishes. Both need the inner joins
     to be looked at as one flat join with classes of equal columns.
+- **Lookups nested in a tree of joins, done on the branch `proto/plan-reduction-flat-lookups`**
+  (same variable and rule, module `flat` of the rule):
+  - A tree of inner joins, filters and projections is one flat join: the cross product of its
+    leaves, filtered by all its conjuncts. A left outer join of the tree keeps every row of its
+    preserved side and can be applied last: `(X LEFT JOIN Y) JOIN L` is
+    `(X JOIN L) LEFT JOIN Y` when the condition with `L` does not refer to `Y`, and a conjunct
+    can move above the left joins of the columns it does not refer to. The equalities of the
+    conjuncts make *classes* of equal columns: `a.x = b.y AND b.y = c.z` puts `a.x`, `b.y` and
+    `c.z` in one class, and in every row they hold the same value, which is not `NULL`.
+  - The lookup is now any leaf of the tree reached through inner joins, filters, projections
+    and the preserved side of left outer joins. It is taken out of the tree: the joins and
+    filters that do not need its columns stay in place, the conjuncts that do are lifted, and
+    so are the left outer joins whose condition reads it. The lookup is then joined with the
+    rest of the tree and that join goes through the rule as before; the lifted left joins and
+    conjuncts follow. `f JOIN d ON f.dim_id = d.id JOIN (s JOIN d d2 ON s.id = d2.id) x
+    ON d.id = x.id` keeps one read of `d`, and `(d LEFT JOIN a ...) JOIN (d d2 LEFT JOIN b ...)
+    ON d.id = d2.id` becomes `d LEFT JOIN b ... LEFT JOIN a ...`.
+  - A join of the tree that loses all its equalities to the lifted conjuncts is given the
+    equalities that the classes imply between its sides (`g.id = d2.id AND d2.id = s.id` leaves
+    `g.id = s.id` when `d2` goes): a streaming join needs one.
+  - The lookup may also be nested in the right side of a left outer, semi or anti join whose left
+    side carries the row: each column of its key is in a class (of the right side and of the
+    condition of the join) with a column of the left side bound to the same column of the
+    instance. In a pair of rows that the join matches, the lookup then reads the row of the
+    instance. The rest of the right side is joined instead, with the same conditions over the
+    row of the instance, its filter and the non-`NULL` compared columns. For a left join, the
+    columns of the right side that are computed (and not plain columns of the rest, which the
+    join pads) are guarded by "the rest matched" (a column of the rest compared with `=` is not
+    `NULL`), and the left joins lifted from the right side are applied with that guard. A
+    conjunct on the columns of such a left join refuses the rewrite: it removes rows of the right
+    side, not pairs. For a semi or anti join, the lifted left joins are dropped (they never
+    remove a row).
+  - A semi or anti join is also answered by the *row of the instance itself* when its condition
+    compares columns of the table, key or not, with columns of the left side bound to the same
+    columns of one instance, the other conjuncts refer to the left side only, and the scan of
+    the instance has the filter of the right side: the carried row matches whenever these
+    columns are not `NULL`, and nothing matches otherwise. `EXISTS` becomes a filter on that,
+    `NOT EXISTS` its opposite. No uniqueness is needed: one matching row is enough. With a
+    filter that the carried row may fail, another row could match: kept.
+  - The columns bound to the same column of an instance hold the same value or are all `NULL`,
+    so an inner join binds an instance of one side through the bound columns of the other side
+    too: the equalities of the joins below are not lost when the instance is met higher.
+  - The instance is also followed through a table function in the select list (`ProjectSet`):
+    each of its rows comes from one row of its input.
+  - A semi or anti join whose right side is a shared sub-plan (a view used twice) is looked into
+    too, but only rewritten when nothing of the sub-plan is left in it: the rest would otherwise
+    be computed a second time next to the shared one.
+  - Not handled, deliberately: a lookup in the padded side of a left join of the tree (it is
+    not pulled above the outer join), a lookup of a derived relation (aggregation, distinct or
+    top-1 of a shared sub-plan), a lookup whose row is designated through a lifted left join,
+    a key compared on a computed expression. An unused inner join on the key is never removed:
+    the row may be missing, which the join filters (an unused left join on a unique key is
+    removed by idea 1). Redundancies that hold only because a consumer is insensitive to
+    duplicates (a top-1 or a `min` above) are not used either.
 - **Next for the aggregations**: `Agg(group k)` over the same input with different filters,
   joined on `k` from the same column, becomes one aggregation with a `FILTER` per call and a
   `count(*) FILTER` per former aggregation to tell whether its group existed.
