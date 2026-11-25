@@ -1,0 +1,251 @@
+# Tests for the per-row evaluation of correlated subqueries that read no table, only columns of
+# the outer row through set-returning functions (`streaming_unnest_lateral_functions`):
+# `LateralTableFunctionRule` and `UnnestArrayOfTableFunctionRule`.
+- id: setup
+  sql: |
+    set streaming_unnest_lateral_functions = true;
+    create table t (id int primary key, s varchar, c varchar, j jsonb, arr int[], arr2 int[][], n int);
+    create table u (k int, arr int[]);
+    create table r (id int primary key, tid int, x int);
+  expected_outputs: []
+- id: setup_off
+  sql: |
+    create table t (id int primary key, s varchar, c varchar, j jsonb, arr int[], arr2 int[][], n int);
+  expected_outputs: []
+
+- name: off by default - LEFT JOIN LATERAL over regexp_matches reads the outer side again for its domain
+  before: [setup_off]
+  sql: |
+    select t.id, a.x from t left join lateral (select (regexp_matches(t.s, 'A([0-9]+)'))[1] as x) as a on true;
+  expected_outputs:
+  - stream_plan
+
+- name: off by default - ARRAY of a set-returning function of the outer row
+  before: [setup_off]
+  sql: |
+    select t.id, array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))) as xs from t;
+  expected_outputs:
+  - stream_plan
+
+# Rewritten: LEFT JOIN LATERAL, an outer ProjectSet emulated with generate_series(1, 1).
+
+- name: two LEFT JOIN LATERAL over regexp_matches, with a filter on the outer side
+  before: [setup]
+  sql: |
+    select t.id, a.x, b.y
+    from t
+    left join lateral (select (regexp_matches(t.s, 'A([0-9]+)'))[1] as x) as a on true
+    left join lateral (select (regexp_matches(t.s, 'B([0-9]+)'))[1] as y) as b on true
+    where t.c = 'K';
+  expected_outputs:
+  - stream_plan
+
+- name: LEFT JOIN of a table function of the outer row
+  before: [setup]
+  sql: |
+    select t.id, e.x from t left join jsonb_array_elements_text(t.j -> 'xs') as e(x) on true;
+  expected_outputs:
+  - stream_plan
+
+- name: LEFT JOIN of unnest WITH ORDINALITY, the ordinality is NULL on the padded row
+  before: [setup]
+  sql: |
+    select t.id, x.v, x.o from t left join unnest(t.arr) with ordinality as x(v, o) on true;
+  expected_outputs:
+  - stream_plan
+
+- name: LEFT JOIN LATERAL with a constant column, NULL on the padded row
+  before: [setup]
+  sql: |
+    select t.id, l.one, l.v from t left join lateral (select 1 as one, unnest(t.arr) as v) as l on true;
+  expected_outputs:
+  - stream_plan
+
+- name: LEFT JOIN of generate_series bounded by a column of the outer row
+  before: [setup]
+  sql: |
+    select t.id, g.i from t left join generate_series(1, t.n) as g(i) on true;
+  expected_outputs:
+  - stream_plan
+
+- name: LEFT JOIN of jsonb_each, a table function returning a struct
+  before: [setup]
+  sql: |
+    select t.id, e.key, e.value from t left join jsonb_each(t.j -> 'obj') as e on true;
+  expected_outputs:
+  - stream_plan
+
+# Rewritten: an aggregation over set-returning functions of the outer row, grouped per outer row.
+
+- name: ARRAY of a set-returning function of the outer row
+  before: [setup]
+  sql: |
+    select t.id, array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))) as xs from t;
+  expected_outputs:
+  - stream_plan
+
+- name: COALESCE of an ARRAY of a set-returning function of the outer row
+  before: [setup]
+  sql: |
+    select id, coalesce(array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))), array[]::text[]) as xs from t;
+  expected_outputs:
+  - stream_plan
+
+- name: scalar max over a set-returning function, with a filter on the outer side
+  before: [setup]
+  sql: |
+    select t.id, (select max(x) from jsonb_array_elements_text(t.j -> 'xs') as x) as m from t where t.c = 'c';
+  expected_outputs:
+  - stream_plan
+
+- name: scalar sum, guarded by a count of its non-NULL values
+  before: [setup]
+  sql: |
+    select t.id, (select sum((e ->> 'a')::bigint) from jsonb_array_elements(t.j -> 'ys') as e) as total from t;
+  expected_outputs:
+  - stream_plan
+
+- name: count and EXISTS over unnest in one select list, the padded row known with generate_subscripts
+  before: [setup]
+  sql: |
+    select t.id, (select count(*) from unnest(t.arr) as v) as c, exists (select 1 from unnest(t.arr) as v) as e from t;
+  expected_outputs:
+  - stream_plan
+
+- name: string_agg with ORDER BY over the keys of an object of the outer row
+  before: [setup]
+  sql: |
+    select t.id, (select string_agg(k, ',' order by k) from jsonb_object_keys(t.j -> 'obj') as k) as ks from t;
+  expected_outputs:
+  - stream_plan
+
+- name: correlated column in the aggregated expression
+  before: [setup]
+  sql: |
+    select t.id, (select max(v + t.n) from unnest(t.arr) as v) as m from t;
+  expected_outputs:
+  - stream_plan
+
+- name: outer side without a key of its own, with duplicates
+  before: [setup]
+  sql: |
+    select u.k, (select max(v) from unnest(u.arr) as v) as m from u;
+  expected_outputs:
+  - stream_plan
+
+# Rewritten: unnest of an ARRAY of a set-returning function is the function.
+
+- name: unnest of a COALESCE of an ARRAY of a set-returning function
+  before: [setup]
+  sql: |
+    select t1.id, x.v
+    from (select id, coalesce(array(select jsonb_array_elements_text(coalesce(j -> 'xs', '[]'::jsonb))), array[]::text[]) as arr from t) as t1
+    join unnest(t1.arr) as x(v) on true;
+  expected_outputs:
+  - stream_plan
+
+# Rewritten: a window over a set-returning function of the outer row, partitioned per outer row.
+
+- name: running sum over unnest WITH ORDINALITY in a lateral subquery
+  before: [setup]
+  sql: |
+    select t.id, x.v, x.run
+    from t cross join lateral (
+      select v, sum(v) over (order by o rows unbounded preceding) as run
+      from unnest(t.arr) with ordinality as w(v, o)
+    ) as x;
+  expected_outputs:
+  - stream_plan
+
+# Partly rewritten.
+
+- name: partly - the array is also selected, only the ARRAY subquery is evaluated per row
+  before: [setup]
+  sql: |
+    select t1.id, t1.arr, x.v
+    from (select id, array(select jsonb_array_elements_text(j -> 'xs')) as arr from t) as t1
+    join unnest(t1.arr) as x(v) on true;
+  expected_outputs:
+  - stream_plan
+
+- name: partly - unnest of an ARRAY of arrays flattens them, only the ARRAY subquery is evaluated per row
+  before: [setup]
+  sql: |
+    select t1.id, x.v
+    from (select id, array(select regexp_matches(s, '[0-9]')) as arr from t) as t1
+    join unnest(t1.arr) as x(v) on true;
+  expected_outputs:
+  - stream_plan
+
+# Kept in the general way.
+
+- name: kept - LEFT JOIN LATERAL with a condition that is not true
+  before: [setup]
+  sql: |
+    select t.id, e.x from t left join jsonb_array_elements_text(t.j -> 'xs') as e(x) on e.x <> 'a';
+  expected_outputs:
+  - stream_plan
+
+- name: kept - the lateral subquery reads a table
+  before: [setup]
+  sql: |
+    select t.id, l.x from t left join lateral (select r.x from r where r.tid = t.id order by r.x limit 1) as l on true;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - ARRAY with ORDER BY and LIMIT
+  before: [setup]
+  sql: |
+    select t.id, array(select v from unnest(t.arr) as v order by v limit 2) as a from t;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - count of distinct values
+  before: [setup]
+  sql: |
+    select t.id, (select count(distinct v) from unnest(t.arr) as v) as c from t;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - bool_or is not among the aggregates evaluated per row
+  before: [setup]
+  sql: |
+    select t.id, (select bool_or(v > 1) from unnest(t.arr) as v) as b from t;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - count over unnest of a nested array, whose padded row is not known
+  before: [setup]
+  sql: |
+    select t.id, (select count(*) from unnest(t.arr2) as v) as c from t;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - a condition inside the subquery
+  before: [setup]
+  sql: |
+    select t.id, (select count(*) from unnest(t.arr) as v where v > 1) as c from t;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - window in a LEFT JOIN LATERAL
+  before: [setup]
+  sql: |
+    select t.id, x.v, x.c
+    from t left join lateral (select v, count(*) over () as c from unnest(t.arr) as v) as x on true;
+  expected_outputs:
+  - stream_plan
+
+- name: unchanged - inner lateral table function, already a ProjectSet without the variable
+  before: [setup]
+  sql: |
+    select t.id, e.x from t, jsonb_array_elements_text(t.j -> 'xs') as e(x);
+  expected_outputs:
+  - stream_plan
+
+- name: unchanged - batch plan of an ARRAY of a set-returning function
+  before: [setup]
+  sql: |
+    select t.id, array(select jsonb_array_elements_text(t.j -> 'xs')) as xs from t;
+  expected_outputs:
+  - batch_plan

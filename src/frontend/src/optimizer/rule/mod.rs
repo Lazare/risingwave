@@ -227,6 +227,9 @@ mod stacked_agg_merge_rule;
 pub use stacked_agg_merge_rule::*;
 mod identical_subplan_share;
 pub use identical_subplan_share::*;
+// Per-row evaluation of lateral set-returning functions (`streaming_unnest_lateral_functions`).
+mod lateral_table_function_rule;
+pub use lateral_table_function_rule::*;
 mod repeated_lookup_merge_rule;
 pub use repeated_lookup_merge_rule::*;
 mod unique_key_simplify_rule;
@@ -382,6 +385,8 @@ macro_rules! for_all_rules {
             , { ApplyOneRowJoinSplitRule }
             , { UnionScanMergeRule }
             , { StackedAggMergeRule }
+            , { LateralTableFunctionRule }
+            , { UnnestArrayOfTableFunctionRule }
             , { BushyTreeJoinOrderingRule }
             , { StreamProjectMergeRule }
             , { StreamProjectSplitRule }

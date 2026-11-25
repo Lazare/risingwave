@@ -269,6 +269,28 @@ static STREAM_MERGE_STACKED_AGGS: LazyLock<OptimizationStage> = LazyLock::new(||
     )
 });
 
+// Per-row evaluation of lateral set-returning functions (`streaming_unnest_lateral_functions`):
+// `unnest(ARRAY(SELECT srf(..)))` first, from the top, before the apply of the `ARRAY(..)` is
+// evaluated per row on its own.
+static STREAM_UNNEST_ARRAY_OF_FUNCTION: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Stream Unnest Array Of Lateral Function",
+        vec![UnnestArrayOfTableFunctionRule::create()],
+        ApplyOrder::TopDown,
+    )
+});
+
+static STREAM_UNNEST_LATERAL_FUNCTIONS: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Stream Unnest Lateral Functions",
+        vec![
+            ApplyOneRowJoinSplitRule::create(),
+            LateralTableFunctionRule::create(),
+        ],
+        ApplyOrder::BottomUp,
+    )
+});
+
 static SET_OPERATION_MERGE: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Set Operation Merge",
@@ -735,6 +757,18 @@ impl LogicalOptimizer {
             // join with the aggregation grouped by those columns, without the domain (the distinct
             // values of the outer columns, read again from the outer side) of the general way.
             plan = plan.optimize_by_rules_until_fix_point(&STREAM_SIMPLE_UNNESTING_AGG)?;
+        }
+        if for_stream
+            && ctx
+                .session_ctx()
+                .config()
+                .streaming_unnest_lateral_functions()
+            && !ctx.is_stream_prune_baseline()
+        {
+            // A subquery that reads no table, only columns of the outer row through set-returning
+            // functions, is evaluated on each outer row, without the domain of the general way.
+            plan = plan.optimize_by_rules(&STREAM_UNNEST_ARRAY_OF_FUNCTION)?;
+            plan = plan.optimize_by_rules_until_fix_point(&STREAM_UNNEST_LATERAL_FUNCTIONS)?;
         }
         debug_assert!(!HasMaxOneRowApply().visit(plan.clone()));
         // Predicate push down before translate apply, because we need to calculate the domain

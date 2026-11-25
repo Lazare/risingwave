@@ -327,6 +327,13 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     streaming_share_identical_subplans: bool,
 
+    /// In the plan of a new streaming job, evaluate on each outer row a correlated subquery that
+    /// reads no table, only columns of the outer row through set-returning functions (`LEFT JOIN
+    /// LATERAL`, `ARRAY(SELECT srf(..))`, an aggregate or a window over them), instead of
+    /// re-reading the outer side to build the set of its distinct values. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    streaming_unnest_lateral_functions: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,
