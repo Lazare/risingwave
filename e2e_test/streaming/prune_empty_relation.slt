@@ -1713,9 +1713,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from per_key_agg_filter_on except select * from per_key_agg_filter_off) x),
-  (select count(*) from (select * from per_key_agg_filter_off except select * from per_key_agg_filter_on) y),
-  (select count(*) from per_key_agg_filter_on) - (select count(*) from per_key_agg_filter_off);
+  (select count(*) from (select * from per_key_agg_filter_on except select * from (select id, count(*) filter (where amt > 5) as cnt, sum(amt) filter (where dim_id is not null) as total from per_f group by id) q) x),
+  (select count(*) from (select * from (select id, count(*) filter (where amt > 5) as cnt, sum(amt) filter (where dim_id is not null) as total from per_f group by id) q except select * from per_key_agg_filter_on) y),
+  (select count(*) from per_key_agg_filter_on) - (select count(*) from (select id, count(*) filter (where amt > 5) as cnt, sum(amt) filter (where dim_id is not null) as total from per_f group by id) q);
 ----
 0 0 0
 
@@ -2602,9 +2602,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from per_key_agg_filter_on except select * from per_key_agg_filter_off) x),
-  (select count(*) from (select * from per_key_agg_filter_off except select * from per_key_agg_filter_on) y),
-  (select count(*) from per_key_agg_filter_on) - (select count(*) from per_key_agg_filter_off);
+  (select count(*) from (select * from per_key_agg_filter_on except select * from (select id, count(*) filter (where amt > 5) as cnt, sum(amt) filter (where dim_id is not null) as total from per_f group by id) q) x),
+  (select count(*) from (select * from (select id, count(*) filter (where amt > 5) as cnt, sum(amt) filter (where dim_id is not null) as total from per_f group by id) q except select * from per_key_agg_filter_on) y),
+  (select count(*) from per_key_agg_filter_on) - (select count(*) from (select id, count(*) filter (where amt > 5) as cnt, sum(amt) filter (where dim_id is not null) as total from per_f group by id) q);
 ----
 0 0 0
 
@@ -3462,9 +3462,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from per_key_agg_filter_on except select * from per_key_agg_filter_off) x),
-  (select count(*) from (select * from per_key_agg_filter_off except select * from per_key_agg_filter_on) y),
-  (select count(*) from per_key_agg_filter_on) - (select count(*) from per_key_agg_filter_off);
+  (select count(*) from (select * from per_key_agg_filter_on except select * from (select id, count(*) filter (where amt > 5) as cnt, sum(amt) filter (where dim_id is not null) as total from per_f group by id) q) x),
+  (select count(*) from (select * from (select id, count(*) filter (where amt > 5) as cnt, sum(amt) filter (where dim_id is not null) as total from per_f group by id) q except select * from per_key_agg_filter_on) y),
+  (select count(*) from per_key_agg_filter_on) - (select count(*) from (select id, count(*) filter (where amt > 5) as cnt, sum(amt) filter (where dim_id is not null) as total from per_f group by id) q);
 ----
 0 0 0
 
@@ -3641,6 +3641,24 @@ query I
 select count(*) from per_nn_is_null_on;
 ----
 0
+
+# The filtered sum of a row that does not pass the filter any more: the streaming aggregation
+# keeps `0`, the projection that replaces it returns `NULL` as the query does.
+
+query II
+select cnt, total from per_key_agg_filter_off where id = 15;
+----
+0 0
+
+query II
+select cnt, total from per_key_agg_filter_on where id = 15;
+----
+0 NULL
+
+query II
+select count(*) filter (where amt > 5), sum(amt) filter (where dim_id is not null) from per_f where id = 15;
+----
+0 NULL
 
 # A `NOT NULL` column added later: the rows written before read its default value.
 

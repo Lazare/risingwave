@@ -128,6 +128,12 @@ When the group key contains a key of the input, every group holds exactly one ro
 
 Needs a non-empty group key (an aggregation without group key emits a row over an empty input) and
 aggregates with a closed form over one row. `NULL` in a key is fine: a key treats it as a value.
+
+Visible difference, found by the differential test: a streaming `sum` keeps `0`, not `NULL`, once
+all its inputs are retracted while its group still holds rows (a `FILTER` that the row does not
+pass any more, or an argument that becomes `NULL`). The projection that replaces the aggregation
+returns `NULL`, as the batch execution of the query does. A materialized view created with the
+simplification can therefore hold `NULL` where the same view without it holds `0`.
 Seen in Materialize (`reduce_elision`), Calcite (`AGGREGATE_REMOVE`), CockroachDB
 (`EliminateDistinct`, `EliminateGroupBy`), Spark (`RemoveRedundantAggregates`).
 
