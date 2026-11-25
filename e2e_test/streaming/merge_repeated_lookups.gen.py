@@ -147,6 +147,39 @@ CASES = [
     ('exists_left', 'exists on a table that a left lookup already reads',
      f"select f.id as fid, a.name as an from {F} f left join {D} a on f.dim_id = a.id "
      f"where exists (select 1 from {DA} b where b.id = f.dim_id and b.grp < f.amt)"),
+    # The kept lookup is below an aggregation, a top-1 or a shared sub-plan.
+    ('above_agg', 'lookup of a row that an aggregation grouped by its key already read',
+     f"select t.dim_id as did, t.total as total, b.grp as bg from "
+     f"(select f.dim_id, sum(f.amt) as total from {F} f join {D} a on f.dim_id = a.id group by f.dim_id) t "
+     f"left join {D} b on t.dim_id = b.id"),
+    ('above_agg_two', 'lookup above an aggregation grouped by the key and another column',
+     f"select t.dim_id as did, t.label as label, t.total as total, b.grp as bg, b.name as bn from "
+     f"(select f.dim_id, f.label, sum(f.amt) as total from {F} f join {D} a on f.dim_id = a.id where a.active "
+     f"group by f.dim_id, f.label) t join {D} b on t.dim_id = b.id"),
+    ('above_agg_left', 'left lookup above an aggregation over a left lookup of the same row',
+     f"select t.dim_id as did, t.n as n, t.total as total, b.grp as bg from "
+     f"(select f.dim_id, max(a.name) as n, sum(f.amt) as total from {F} f left join {D} a on f.dim_id = a.id "
+     f"group by f.dim_id) t left join {D} b on t.dim_id = b.id"),
+    ('above_agg_left_filter', 'filtered left lookup above an aggregation over a filtered left lookup',
+     f"select t.dim_id as did, t.n as n, t.cnt as cnt, b.grp as bg from "
+     f"(select f.dim_id, max(a.name) as n, count(*) as cnt from {F} f left join {DA} a on f.dim_id = a.id "
+     f"group by f.dim_id) t left join (select * from {D} where grp = 2) b on t.dim_id = b.id"),
+    ('above_agg_kept', 'kept: lookup above an aggregation that is not grouped by the key',
+     f"select t.label as label, t.dim as dim, b.grp as bg from "
+     f"(select f.label, max(f.dim_id) as dim from {F} f join {D} a on f.dim_id = a.id group by f.label) t "
+     f"left join {D} b on t.dim = b.id"),
+    ('above_top1', 'lookup above a top-1 per group',
+     f"select x.other_id as oid, x.name as an, b.grp as bg from "
+     f"(select distinct on (f.other_id) f.other_id, f.dim_id, a.name from {F} f join {D} a on f.dim_id = a.id "
+     f"order by f.other_id, f.id) x left join {D} b on x.dim_id = b.id"),
+    ('above_rank', 'lookup above a ranking that keeps the first row of each group',
+     f"select x.other_id as oid, x.name as an, b.grp as bg from (select other_id, dim_id, name from "
+     f"(select f.other_id, f.dim_id, a.name, row_number() over (partition by f.other_id order by f.amt desc, f.id) as rn "
+     f"from {F} f left join {D} a on f.dim_id = a.id) r where rn = 1) x join {D} b on x.dim_id = b.id"),
+    ('above_share', 'lookup of a row that a shared sub-plan already outputs',
+     f"with v as (select f.id, f.dim_id, f.amt, a.name, a.grp from {F} f join {D} a on f.dim_id = a.id) "
+     f"select x.id as xid, x.grp as g1, y.amt as yamt, b.grp as g2 from v x join v y on x.amt = y.id "
+     f"left join {D} b on x.dim_id = b.id"),
     # A key that can be NULL.
     ('null_key_left', 'left lookups in a relation whose key can be NULL',
      f"select f.id as fid, a.cnt as ac, b.top as bt from {F} f left join {DM} a on f.amt = a.id left join {DM} b on f.amt = b.id"),

@@ -45,12 +45,15 @@
 //!   `Project`, `Filter` and `Share` nodes (see [`PureScan`]), joined on the whole key of `T`.
 //! - An *instance* is another scan of `T` in the other side of the join, which is kept (see
 //!   [`Carried`]). In a row of the kept side, the instance is *matched* when the row was built
-//!   from a row of `T`, and not from the `NULL`s of an outer join.
+//!   from a row of `T`, and not from the `NULL`s of an outer join. The instance is followed up
+//!   the plan through projections, filters, joins, top-n and dedup, shared sub-plans, and the
+//!   aggregations whose group key designates its row.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use risingwave_common::catalog::TableId;
 use risingwave_common::types::DataType;
+use risingwave_expr::aggregate::PbAggKind;
 use risingwave_pb::plan_common::JoinType;
 
 use super::column_facts_simplify_rule::column_facts;
@@ -59,7 +62,7 @@ use super::prelude::{PlanRef, *};
 use super::unique_key_simplify_rule::is_unique_on_compared_columns;
 use crate::catalog::table_catalog::TableType;
 use crate::expr::{Expr, ExprImpl, ExprRewriter, ExprType, FunctionCall, InputRef};
-use crate::optimizer::plan_node::generic::GenericPlanRef;
+use crate::optimizer::plan_node::generic::{Agg, GenericPlanRef, PlanAggCall};
 use crate::optimizer::plan_node::{
     LogicalFilter, LogicalJoin, LogicalProject, LogicalScan, PlanNodeId, PlanTreeNodeBinary,
     PlanTreeNodeUnary,
@@ -75,7 +78,7 @@ impl<F: FnMut(InputRef) -> ExprImpl> ExprRewriter for MapInputRef<F> {
     }
 }
 
-fn map_input_refs(expr: &ExprImpl, f: impl FnMut(InputRef) -> ExprImpl) -> ExprImpl {
+pub(super) fn map_input_refs(expr: &ExprImpl, f: impl FnMut(InputRef) -> ExprImpl) -> ExprImpl {
     MapInputRef(f).rewrite_expr(expr.clone())
 }
 
@@ -84,7 +87,7 @@ fn is_not_null(expr: ExprImpl) -> ExprImpl {
 }
 
 /// The conjunction of the expressions, which must not be empty.
-fn and_all(exprs: Vec<ExprImpl>) -> ExprImpl {
+pub(super) fn and_all(exprs: Vec<ExprImpl>) -> ExprImpl {
     exprs
         .into_iter()
         .reduce(|left, right| {
@@ -108,7 +111,9 @@ fn when_all(conditions: &[ExprImpl], value: ExprImpl) -> ExprImpl {
 }
 
 /// The columns that an expression over the columns of a table refers to.
-fn referred_columns<'a>(exprs: impl IntoIterator<Item = &'a ExprImpl>) -> BTreeSet<usize> {
+pub(super) fn referred_columns<'a>(
+    exprs: impl IntoIterator<Item = &'a ExprImpl>,
+) -> BTreeSet<usize> {
     let mut columns = BTreeSet::new();
     for expr in exprs {
         map_input_refs(expr, |input_ref| {
@@ -119,19 +124,19 @@ fn referred_columns<'a>(exprs: impl IntoIterator<Item = &'a ExprImpl>) -> BTreeS
     columns
 }
 
-fn table_column(scan: &LogicalScan, column: usize) -> InputRef {
+pub(super) fn table_column(scan: &LogicalScan, column: usize) -> InputRef {
     InputRef::new(column, scan.table().columns()[column].data_type().clone())
 }
 
 /// A plan made of `Project`, `Filter` and `Share` nodes over the scan of one table: every row
 /// comes from one row of the table, and is computed from that row only.
-struct PureScan {
-    scan: LogicalScan,
+pub(super) struct PureScan {
+    pub(super) scan: LogicalScan,
     /// The conjuncts that a row of the table satisfies to be read, over the columns of the table:
     /// the predicate of the scan and those of the filters.
-    predicate: Vec<ExprImpl>,
+    pub(super) predicate: Vec<ExprImpl>,
     /// The output columns of the plan, over the columns of the table.
-    exprs: Vec<ExprImpl>,
+    pub(super) exprs: Vec<ExprImpl>,
 }
 
 impl PureScan {
@@ -151,7 +156,7 @@ impl PureScan {
 ///
 /// A scan in the past (`FOR SYSTEM_TIME AS OF`) is not accepted: two of them do not read the
 /// same rows. The expressions must be pure, as they are evaluated elsewhere in the plan.
-fn pure_scan(plan: &PlanRef) -> Option<PureScan> {
+pub(super) fn pure_scan(plan: &PlanRef) -> Option<PureScan> {
     if let Some(scan) = plan.as_logical_scan() {
         let table = scan.table();
         if scan.as_of().is_some()
@@ -225,6 +230,8 @@ struct OuterLookup {
 struct Carried {
     scan_id: PlanNodeId,
     table_id: TableId,
+    /// The columns of the key of the table.
+    key: Vec<usize>,
     /// For a column of the table, the columns of the plan node that are bound to it: when such
     /// a column is not `NULL`, the instance is matched and the column holds the value of the
     /// column of the table in the matched row.
@@ -319,12 +326,24 @@ fn outer_lookup_of(join: &LogicalJoin) -> Option<(PureScan, BTreeMap<usize, usiz
 
 type Memo = HashMap<PlanNodeId, Vec<Carried>>;
 
+/// Returns whether a plan node only selects rows of its single input, with the same columns.
+fn is_row_selection(plan: &PlanRef) -> bool {
+    plan.as_logical_top_n().is_some()
+        || plan.as_logical_limit().is_some()
+        || plan.as_logical_dedup().is_some()
+}
+
 /// Returns the instances of tables that the rows of a plan node carry. A node that is not listed
 /// here carries none, which is always safe.
 ///
 /// - `Scan`: itself, bound to the columns that it reads.
-/// - `Share` over a [`PureScan`], `Project`, `Filter`: those of the input. A filter binds the
-///   columns that it compares with a bound column.
+/// - `Share`, `Project`, `Filter`: those of the input. A filter binds the columns that it
+///   compares with a bound column.
+/// - `TopN`, `Limit`, `Dedup`: those of the input, whose rows they only select.
+/// - `Agg` without grouping sets: those of the input that the group key designates. When the
+///   group key holds, for every column of the key of the table, a column that is bound to it or
+///   that an outer lookup compares with it, all the rows of a group carry the same row of the
+///   table, and so does the row of the group.
 /// - Inner join: those of both sides, and the condition binds columns as a filter does.
 /// - Left and full outer joins: those of both sides. The columns of the padded side are `NULL`
 ///   in a padded row, as a bound column must be when the instance is not matched. A left outer
@@ -351,16 +370,47 @@ fn derive_carried(plan: &PlanRef, memo: &mut Memo) -> Vec<Carried> {
         return vec![Carried {
             scan_id: plan.id(),
             table_id: scan.table().id(),
+            key: scan.table().stream_key(),
             bound,
             outer_lookup: None,
         }];
     }
     if let Some(share) = plan.as_logical_share() {
-        return if pure_scan(plan).is_some() {
-            carried(&share.input(), memo)
-        } else {
-            vec![]
-        };
+        return carried(&share.input(), memo);
+    }
+    if is_row_selection(plan) {
+        return carried(&plan.inputs()[0], memo);
+    }
+    if let Some(agg) = plan.as_logical_agg() {
+        if !agg.grouping_sets().is_empty() {
+            return vec![];
+        }
+        // The output columns are the group key columns, then the aggregate calls.
+        let positions: HashMap<usize, Vec<usize>> = agg
+            .group_key()
+            .indices()
+            .enumerate()
+            .map(|(output, input)| (input, vec![output]))
+            .collect();
+        return carried(&agg.input(), memo)
+            .into_iter()
+            .map(|instance| instance.map(&positions))
+            // The rows of a group must all carry the same row of the table: the group key
+            // designates it, as a lookup does (see `merge_lookup`).
+            .filter(|instance| {
+                instance.key.iter().all(|column| {
+                    let is_bound = instance
+                        .bound
+                        .get(column)
+                        .is_some_and(|columns| !columns.is_empty());
+                    let is_searched = instance
+                        .outer_lookup
+                        .as_ref()
+                        .is_some_and(|lookup| lookup.keys.contains_key(column));
+                    is_bound || is_searched
+                })
+            })
+            .collect();
     }
     if let Some(project) = plan.as_logical_project() {
         let mut positions: HashMap<usize, Vec<usize>> = HashMap::new();
@@ -489,8 +539,64 @@ fn expose(plan: &PlanRef, request: &Request<'_>, memo: &mut Memo) -> Option<Expo
         });
     }
     if let Some(share) = plan.as_logical_share() {
-        // The rewritten scan is not shared any more: the other consumers keep the former one.
-        return expose(&share.input(), request, memo);
+        if pure_scan(plan).is_some() {
+            // The rewritten scan is not shared any more: the other consumers keep the former one.
+            return expose(&share.input(), request, memo);
+        }
+        // A shared sub-plan is not rewritten: its other consumers would compute it a second
+        // time. Only the columns that it already outputs can be used.
+        if request.outer_lookup.is_some() {
+            return None;
+        }
+        let instances = carried(plan, memo);
+        let instance = instances
+            .iter()
+            .find(|instance| instance.scan_id == request.scan_id)?;
+        let positions = request
+            .columns
+            .iter()
+            .map(|column| Some((*column, *instance.bound.get(column)?.first()?)))
+            .collect::<Option<_>>()?;
+        return Some(Exposed {
+            plan: plan.clone(),
+            positions,
+            predicate: None,
+        });
+    }
+    if is_row_selection(plan) {
+        // The columns are appended: the operator refers to the same columns as before.
+        let input = expose(&plan.inputs()[0], request, memo)?;
+        return Some(Exposed {
+            plan: plan.clone_with_inputs(&[input.plan]),
+            ..input
+        });
+    }
+    if let Some(agg) = plan.as_logical_agg() {
+        // The rows of a group all carry the same row of the table (see `carried`): any of
+        // them gives its columns.
+        let input = expose(&agg.input(), request, memo)?;
+        let (mut agg_calls, group_key, _, _, enable_two_phase) = agg.clone().decompose();
+        let mut positions = BTreeMap::new();
+        for (&column, &position) in &input.positions {
+            positions.insert(column, group_key.len() + agg_calls.len());
+            let data_type = input.plan.schema().fields()[position].data_type();
+            agg_calls.push(PlanAggCall {
+                agg_type: PbAggKind::InternalLastSeenValue.into(),
+                return_type: data_type.clone(),
+                inputs: vec![InputRef::new(position, data_type)],
+                distinct: false,
+                order_by: vec![],
+                filter: Condition::true_cond(),
+                direct_args: vec![],
+            });
+        }
+        return Some(Exposed {
+            plan: Agg::new(agg_calls, group_key, input.plan)
+                .with_enable_two_phase(enable_two_phase)
+                .into(),
+            positions,
+            predicate: input.predicate,
+        });
     }
     if let Some(project) = plan.as_logical_project() {
         let input = expose(&project.input(), request, memo)?;
@@ -734,7 +840,7 @@ impl RepeatedLookupMergeRule {
 }
 
 /// Returns the same inner join with its two sides exchanged.
-fn commute(join: &LogicalJoin) -> LogicalJoin {
+pub(super) fn commute(join: &LogicalJoin) -> LogicalJoin {
     let left_len = join.left().schema().len();
     let right_len = join.right().schema().len();
     let moved = |index: usize| {
