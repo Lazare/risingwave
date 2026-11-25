@@ -1,6 +1,6 @@
 """Generates `e2e_test/streaming/merge_union_scans.slt`, the differential test of the single read of
 a table that several branches of a union read in streaming plans: every query is materialized with
-and without `streaming_merge_union_scans`.
+and without `streaming_merge_union_scans` and `streaming_share_union_scans` (both on, or both off).
 
 Every query names its output columns c1, c2, ...: the materialized views are compared as multisets
 (each distinct row with its number of occurrences), since the rewrite must keep the duplicates.
@@ -100,6 +100,7 @@ CASES = [
 out = []
 def switch(on):
     stmt(f"set streaming_merge_union_scans = {'true' if on else 'false'}")
+    stmt(f"set streaming_share_union_scans = {'true' if on else 'false'}")
 
 def stmt(sql):
     out.append(f"statement ok\n{sql};\n")

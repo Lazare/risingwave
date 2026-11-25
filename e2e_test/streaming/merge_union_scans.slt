@@ -50,6 +50,9 @@ insert into mus_j values (1, 'e', '{"a": {"x": 1, "y": 2}, "b": {"z": 3}}'), (2,
 statement ok
 set streaming_merge_union_scans = false;
 
+statement ok
+set streaming_share_union_scans = false;
+
 # two branches with a different filter and projection
 
 statement ok
@@ -172,6 +175,9 @@ create materialized view mus_anti_off as select k as c1, 'u' as c2 from mus_u un
 
 statement ok
 set streaming_merge_union_scans = true;
+
+statement ok
+set streaming_share_union_scans = true;
 
 # two branches with a different filter and projection
 
@@ -2932,3 +2938,6 @@ drop table mus_t;
 
 statement ok
 set streaming_merge_union_scans = false;
+
+statement ok
+set streaming_share_union_scans = false;

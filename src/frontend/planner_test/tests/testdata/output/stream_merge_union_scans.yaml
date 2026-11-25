@@ -8,6 +8,16 @@
     create table h (r int primary key, k int, a int);
     create table m (r int primary key, g int, v int);
     create table j (r int primary key, kind varchar, f jsonb);
+- id: setup_share
+  sql: |
+    set streaming_merge_union_scans = true;
+    set streaming_share_union_scans = true;
+    create table t (k int primary key, a int, b int, x varchar, y varchar, flag boolean, ts timestamptz);
+    create table u (k int primary key, a int, c int);
+    create table w (k int, v int, ts timestamp, watermark for ts as ts - interval '1' second) append only;
+    create table h (r int primary key, k int, a int);
+    create table m (r int primary key, g int, v int);
+    create table j (r int primary key, kind varchar, f jsonb);
 - id: setup_off
   sql: |
     create table t (k int primary key, a int, b int, x varchar, y varchar, flag boolean, ts timestamptz);
@@ -330,7 +340,7 @@
                     └─StreamTableScan { table: h, columns: [h.k, h.a, h.r], stream_scan_type: SnapshotBackfill, stream_key: [h.r], pk: [r], dist: UpstreamHashShard(h.r) }
 - name: a branch with a temporal filter, the other two are merged, the table is shared
   before:
-  - setup
+  - setup_share
   sql: |
     select k, a from t where a > 0
     union all
@@ -376,7 +386,7 @@
     └─LogicalScan { table: u, columns: [u.k, u.a], predicate: (u.a > 0:Int32) }
 - name: a branch with a join shares the scan of the other branch
   before:
-  - setup
+  - setup_share
   sql: |
     select t.k, t.a from t where t.a > 0
     union all
@@ -408,7 +418,7 @@
               └─StreamTableScan { table: u, columns: [u.k, u.c], stream_scan_type: SnapshotBackfill, stream_key: [u.k], pk: [k], dist: UpstreamHashShard(u.k) }
 - name: a branch with a table function shares the scan of the other branch
   before:
-  - setup
+  - setup_share
   sql: |
     select k, unnest(array[a, b]) as v from t
     union all
@@ -505,7 +515,7 @@
               └─LogicalNow { output: [now] }
 - name: a plain branch and a left join branch share the scan
   before:
-  - setup
+  - setup_share
   sql: |
     select t.k, coalesce(m.v, 0) as v from t left join m on t.k = m.g where t.x = 'a'
     union all
@@ -543,7 +553,7 @@
                 └─StreamTableScan { table: t, columns: [t.k, t.x], stream_scan_type: SnapshotBackfill, stream_key: [t.k], pk: [k], dist: UpstreamHashShard(t.k) }
 - name: two joins on different columns share the scans of both tables
   before:
-  - setup
+  - setup_share
   sql: |
     select t.k, m.v from t join m on t.a = m.g and m.v > 0
     union all
@@ -564,7 +574,7 @@
           └─LogicalScan { table: m, columns: [m.g, m.v], predicate: ((m.v > 0:Int32) OR (m.v < 0:Int32)) }
 - name: two table functions and a plain branch share the scan
   before:
-  - setup
+  - setup_share
   sql: |
     select x.key as v from j cross join jsonb_each_text(j.f -> 'a') as x where kind in ('e', 'p')
     union all
@@ -616,7 +626,7 @@
                 └─StreamTableScan { table: j, columns: [j.kind, j.f, j.r], stream_scan_type: SnapshotBackfill, stream_key: [j.r], pk: [r], dist: UpstreamHashShard(j.r) }
 - name: an anti join in one branch shares the scan of the other branch
   before:
-  - setup
+  - setup_share
   sql: |
     select k, 'u' as st from u
     union all
@@ -633,7 +643,7 @@
           └─LogicalScan { table: u, columns: [u.k] }
 - name: kept - a self-join inside one branch only
   before:
-  - setup
+  - setup_share
   sql: |
     select t1.k, t2.a from t t1 join t t2 on t1.a = t2.k
     union all
@@ -646,7 +656,7 @@
     └─LogicalScan { table: u, columns: [u.k, u.c] }
 - name: kept - the shared join is already read once, the join above it is not merged
   before:
-  - setup
+  - setup_share
   sql: |
     with c as (select t.k, t.a, u.c from t join u on t.a = u.a)
     select k, a, null::int as v from c where c > 0
@@ -667,3 +677,16 @@
       │     ├─LogicalScan { table: t, columns: [t.k, t.a] }
       │     └─LogicalScan { table: u, columns: [u.a, u.c] }
       └─LogicalScan { table: m, columns: [m.g, m.v] }
+- name: the shared scan is off by default - a branch with a join keeps its own scan
+  before:
+  - setup
+  sql: |
+    select t.k, t.a from t where t.a > 0
+    union all
+    select t.k, u.c from t join u on t.k = u.k;
+  optimized_logical_plan_for_stream: |-
+    LogicalUnion { all: true }
+    ├─LogicalScan { table: t, columns: [t.k, t.a], predicate: (t.a > 0:Int32) }
+    └─LogicalJoin { type: Inner, on: (t.k = u.k), output: [t.k, u.c] }
+      ├─LogicalScan { table: t, columns: [t.k] }
+      └─LogicalScan { table: u, columns: [u.k, u.c] }
