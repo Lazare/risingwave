@@ -363,6 +363,7 @@
     create table s (sid int primary key, id int, ts int);
     create table h (rid int primary key, id int, x int);
     create view sd as select s.sid, s.id, s.ts, d.name, d.active from s join d on s.id = d.id;
+    create view hd as select h.id, h.rid, e.code from h join d on h.id = d.id and d.active left join e on h.id = e.id;
   expected_outputs: []
 - name: nested inner lookup - the equality comes from the join above
   before: [setup_flat]
@@ -437,6 +438,25 @@
   expected_outputs:
   - optimized_logical_plan_for_stream
   - stream_plan
+- name: not exists on a shared view whose rows the left side all carries
+  before: [setup_flat]
+  sql: |
+    select f.id, h.rid from f join d on f.dim_id = d.id join h on h.id = d.id
+    where not exists (select 1 from hd where hd.id = f.dim_id)
+    union all
+    select hd.id, hd.rid from hd;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: kept - exists on a shared view of which a join would be left
+  before: [setup_flat]
+  sql: |
+    select f.id from f join d on f.dim_id = d.id
+    where exists (select 1 from hd where hd.id = f.dim_id)
+    union all
+    select hd.id from hd;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
 - name: exists on a column that is not a key, carried by the left side
   before: [setup_flat]
   sql: |

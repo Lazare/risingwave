@@ -9,6 +9,7 @@ import sys
 
 F, D, E, G, S, H = 'mlf_f', 'mlf_d', 'mlf_e', 'mlf_g', 'mlf_s', 'mlf_h'
 SD = 'mlf_sd'  # view: S with the row of D that its id designates
+HD = 'mlf_hd'  # view: H with the row of D that its id designates, if active, used twice below
 
 CASES = [
     # A lookup nested in a tree of inner joins.
@@ -49,6 +50,10 @@ CASES = [
      f"select f.id as fid, h.rid from {F} f join {D} d on f.dim_id = d.id join {H} h on h.id = d.id "
      f"where not exists (select 1 from {H} h2 join {D} d2 on h2.id = d2.id and d2.active "
      f"left join {E} e on h2.id = e.id where h2.id = f.dim_id)"),
+    ('anti_shared', 'not exists on a shared view whose rows the left side all carries',
+     f"select f.id as fid, h.rid from {F} f join {D} d on f.dim_id = d.id join {H} h on h.id = d.id "
+     f"where not exists (select 1 from {HD} x where x.id = f.dim_id) "
+     f"union all select x.id, x.rid from {HD} x"),
     ('semi_witness', 'exists on a column that is not a key, carried by the left side',
      f"select f.id as fid, h.rid, h.x from {F} f join {H} h on f.dim_id = h.id "
      f"where exists (select 1 from {H} h2 where h2.id = f.dim_id)"),
@@ -59,6 +64,9 @@ CASES = [
     ('kept_witness_filter', 'exists with a filter that the carried row may fail',
      f"select f.id as fid, h.rid from {F} f join {H} h on f.dim_id = h.id "
      f"where exists (select 1 from {H} h2 where h2.id = f.dim_id and h2.x > 0)"),
+    ('kept_shared', 'exists on a shared view of which a join would be left',
+     f"select f.id as fid from {F} f join {D} d on f.dim_id = d.id "
+     f"where exists (select 1 from {HD} x where x.id = f.dim_id) union all select x.id from {HD} x"),
     ('kept_anti_unbound', 'not exists on a column that the outer join compares but does not bind',
      f"select f.id as fid, h.rid from {F} f left join {H} h on f.other_id = h.id "
      f"where not exists (select 1 from {H} h2 where h2.id = f.other_id)"),
@@ -123,6 +131,8 @@ stmt(f"create table {G} (id int primary key, a int)")
 stmt(f"create table {S} (sid int primary key, id int, ts int)")
 stmt(f"create table {H} (rid int primary key, id int, x int)")
 stmt(f"create view {SD} as select s.sid, s.id, s.ts, d.name, d.active from {S} s join {D} d on s.id = d.id")
+stmt(f"create view {HD} as select h.id, h.rid, e.code from {H} h join {D} d on h.id = d.id and d.active "
+     f"left join {E} e on h.id = e.id")
 out.append("# Rows present before the materialized views are created: they go through the backfill.\n")
 stmt(f"insert into {D} values (1, 'a', 1, true), (2, 'b', 2, false), (3, 'c', null, true), "
      f"(4, null, 3, null), (5, 'e', 1, true), (6, 'f', 2, false)")
@@ -180,6 +190,7 @@ out.append("# Cleanup.\n")
 for sfx in ('on', 'off'):
     for name, _, _ in reversed(CASES):
         stmt(f"drop materialized view mlf_{name}_{sfx}")
+stmt(f"drop view {HD}")
 stmt(f"drop view {SD}")
 for table in (H, S, G, E, D, F):
     stmt(f"drop table {table}")

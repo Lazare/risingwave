@@ -30,6 +30,9 @@ create table mlf_h (rid int primary key, id int, x int);
 statement ok
 create view mlf_sd as select s.sid, s.id, s.ts, d.name, d.active from mlf_s s join mlf_d d on s.id = d.id;
 
+statement ok
+create view mlf_hd as select h.id, h.rid, e.code from mlf_h h join mlf_d d on h.id = d.id and d.active left join mlf_e e on h.id = e.id;
+
 # Rows present before the materialized views are created: they go through the backfill.
 
 statement ok
@@ -103,6 +106,11 @@ create materialized view mlf_semi_chain_off as select f.id as fid, d.name from m
 statement ok
 create materialized view mlf_anti_carried_off as select f.id as fid, h.rid from mlf_f f join mlf_d d on f.dim_id = d.id join mlf_h h on h.id = d.id where not exists (select 1 from mlf_h h2 join mlf_d d2 on h2.id = d2.id and d2.active left join mlf_e e on h2.id = e.id where h2.id = f.dim_id);
 
+# not exists on a shared view whose rows the left side all carries
+
+statement ok
+create materialized view mlf_anti_shared_off as select f.id as fid, h.rid from mlf_f f join mlf_d d on f.dim_id = d.id join mlf_h h on h.id = d.id where not exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id, x.rid from mlf_hd x;
+
 # exists on a column that is not a key, carried by the left side
 
 statement ok
@@ -117,6 +125,11 @@ create materialized view mlf_anti_witness_padded_off as select f.id as fid, h.ri
 
 statement ok
 create materialized view mlf_kept_witness_filter_off as select f.id as fid, h.rid from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id and h2.x > 0);
+
+# exists on a shared view of which a join would be left
+
+statement ok
+create materialized view mlf_kept_shared_off as select f.id as fid from mlf_f f join mlf_d d on f.dim_id = d.id where exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id from mlf_hd x;
 
 # not exists on a column that the outer join compares but does not bind
 
@@ -191,6 +204,11 @@ create materialized view mlf_semi_chain_on as select f.id as fid, d.name from ml
 statement ok
 create materialized view mlf_anti_carried_on as select f.id as fid, h.rid from mlf_f f join mlf_d d on f.dim_id = d.id join mlf_h h on h.id = d.id where not exists (select 1 from mlf_h h2 join mlf_d d2 on h2.id = d2.id and d2.active left join mlf_e e on h2.id = e.id where h2.id = f.dim_id);
 
+# not exists on a shared view whose rows the left side all carries
+
+statement ok
+create materialized view mlf_anti_shared_on as select f.id as fid, h.rid from mlf_f f join mlf_d d on f.dim_id = d.id join mlf_h h on h.id = d.id where not exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id, x.rid from mlf_hd x;
+
 # exists on a column that is not a key, carried by the left side
 
 statement ok
@@ -205,6 +223,11 @@ create materialized view mlf_anti_witness_padded_on as select f.id as fid, h.rid
 
 statement ok
 create materialized view mlf_kept_witness_filter_on as select f.id as fid, h.rid from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id and h2.x > 0);
+
+# exists on a shared view of which a join would be left
+
+statement ok
+create materialized view mlf_kept_shared_on as select f.id as fid from mlf_f f join mlf_d d on f.dim_id = d.id where exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id from mlf_hd x;
 
 # not exists on a column that the outer join compares but does not bind
 
@@ -310,6 +333,14 @@ select
 
 query III
 select
+  (select count(*) from (select * from mlf_anti_shared_on except select * from mlf_anti_shared_off) x),
+  (select count(*) from (select * from mlf_anti_shared_off except select * from mlf_anti_shared_on) y),
+  (select count(*) from mlf_anti_shared_on) - (select count(*) from mlf_anti_shared_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from mlf_semi_witness_on except select * from mlf_semi_witness_off) x),
   (select count(*) from (select * from mlf_semi_witness_off except select * from mlf_semi_witness_on) y),
   (select count(*) from mlf_semi_witness_on) - (select count(*) from mlf_semi_witness_off);
@@ -329,6 +360,14 @@ select
   (select count(*) from (select * from mlf_kept_witness_filter_on except select * from mlf_kept_witness_filter_off) x),
   (select count(*) from (select * from mlf_kept_witness_filter_off except select * from mlf_kept_witness_filter_on) y),
   (select count(*) from mlf_kept_witness_filter_on) - (select count(*) from mlf_kept_witness_filter_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mlf_kept_shared_on except select * from mlf_kept_shared_off) x),
+  (select count(*) from (select * from mlf_kept_shared_off except select * from mlf_kept_shared_on) y),
+  (select count(*) from mlf_kept_shared_on) - (select count(*) from mlf_kept_shared_off);
 ----
 0 0 0
 
@@ -448,6 +487,14 @@ select
 
 query III
 select
+  (select count(*) from (select * from mlf_anti_shared_on except select * from (select f.id as fid, h.rid from mlf_f f join mlf_d d on f.dim_id = d.id join mlf_h h on h.id = d.id where not exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id, x.rid from mlf_hd x) q) x),
+  (select count(*) from (select * from (select f.id as fid, h.rid from mlf_f f join mlf_d d on f.dim_id = d.id join mlf_h h on h.id = d.id where not exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id, x.rid from mlf_hd x) q except select * from mlf_anti_shared_on) y),
+  (select count(*) from mlf_anti_shared_on) - (select count(*) from (select f.id as fid, h.rid from mlf_f f join mlf_d d on f.dim_id = d.id join mlf_h h on h.id = d.id where not exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id, x.rid from mlf_hd x) q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from mlf_semi_witness_on except select * from (select f.id as fid, h.rid, h.x from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id)) q) x),
   (select count(*) from (select * from (select f.id as fid, h.rid, h.x from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id)) q except select * from mlf_semi_witness_on) y),
   (select count(*) from mlf_semi_witness_on) - (select count(*) from (select f.id as fid, h.rid, h.x from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id)) q);
@@ -467,6 +514,14 @@ select
   (select count(*) from (select * from mlf_kept_witness_filter_on except select * from (select f.id as fid, h.rid from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id and h2.x > 0)) q) x),
   (select count(*) from (select * from (select f.id as fid, h.rid from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id and h2.x > 0)) q except select * from mlf_kept_witness_filter_on) y),
   (select count(*) from mlf_kept_witness_filter_on) - (select count(*) from (select f.id as fid, h.rid from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id and h2.x > 0)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mlf_kept_shared_on except select * from (select f.id as fid from mlf_f f join mlf_d d on f.dim_id = d.id where exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id from mlf_hd x) q) x),
+  (select count(*) from (select * from (select f.id as fid from mlf_f f join mlf_d d on f.dim_id = d.id where exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id from mlf_hd x) q except select * from mlf_kept_shared_on) y),
+  (select count(*) from mlf_kept_shared_on) - (select count(*) from (select f.id as fid from mlf_f f join mlf_d d on f.dim_id = d.id where exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id from mlf_hd x) q);
 ----
 0 0 0
 
@@ -609,6 +664,14 @@ select
 
 query III
 select
+  (select count(*) from (select * from mlf_anti_shared_on except select * from mlf_anti_shared_off) x),
+  (select count(*) from (select * from mlf_anti_shared_off except select * from mlf_anti_shared_on) y),
+  (select count(*) from mlf_anti_shared_on) - (select count(*) from mlf_anti_shared_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from mlf_semi_witness_on except select * from mlf_semi_witness_off) x),
   (select count(*) from (select * from mlf_semi_witness_off except select * from mlf_semi_witness_on) y),
   (select count(*) from mlf_semi_witness_on) - (select count(*) from mlf_semi_witness_off);
@@ -628,6 +691,14 @@ select
   (select count(*) from (select * from mlf_kept_witness_filter_on except select * from mlf_kept_witness_filter_off) x),
   (select count(*) from (select * from mlf_kept_witness_filter_off except select * from mlf_kept_witness_filter_on) y),
   (select count(*) from mlf_kept_witness_filter_on) - (select count(*) from mlf_kept_witness_filter_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mlf_kept_shared_on except select * from mlf_kept_shared_off) x),
+  (select count(*) from (select * from mlf_kept_shared_off except select * from mlf_kept_shared_on) y),
+  (select count(*) from mlf_kept_shared_on) - (select count(*) from mlf_kept_shared_off);
 ----
 0 0 0
 
@@ -747,6 +818,14 @@ select
 
 query III
 select
+  (select count(*) from (select * from mlf_anti_shared_on except select * from (select f.id as fid, h.rid from mlf_f f join mlf_d d on f.dim_id = d.id join mlf_h h on h.id = d.id where not exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id, x.rid from mlf_hd x) q) x),
+  (select count(*) from (select * from (select f.id as fid, h.rid from mlf_f f join mlf_d d on f.dim_id = d.id join mlf_h h on h.id = d.id where not exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id, x.rid from mlf_hd x) q except select * from mlf_anti_shared_on) y),
+  (select count(*) from mlf_anti_shared_on) - (select count(*) from (select f.id as fid, h.rid from mlf_f f join mlf_d d on f.dim_id = d.id join mlf_h h on h.id = d.id where not exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id, x.rid from mlf_hd x) q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from mlf_semi_witness_on except select * from (select f.id as fid, h.rid, h.x from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id)) q) x),
   (select count(*) from (select * from (select f.id as fid, h.rid, h.x from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id)) q except select * from mlf_semi_witness_on) y),
   (select count(*) from mlf_semi_witness_on) - (select count(*) from (select f.id as fid, h.rid, h.x from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id)) q);
@@ -766,6 +845,14 @@ select
   (select count(*) from (select * from mlf_kept_witness_filter_on except select * from (select f.id as fid, h.rid from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id and h2.x > 0)) q) x),
   (select count(*) from (select * from (select f.id as fid, h.rid from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id and h2.x > 0)) q except select * from mlf_kept_witness_filter_on) y),
   (select count(*) from mlf_kept_witness_filter_on) - (select count(*) from (select f.id as fid, h.rid from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id and h2.x > 0)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mlf_kept_shared_on except select * from (select f.id as fid from mlf_f f join mlf_d d on f.dim_id = d.id where exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id from mlf_hd x) q) x),
+  (select count(*) from (select * from (select f.id as fid from mlf_f f join mlf_d d on f.dim_id = d.id where exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id from mlf_hd x) q except select * from mlf_kept_shared_on) y),
+  (select count(*) from mlf_kept_shared_on) - (select count(*) from (select f.id as fid from mlf_f f join mlf_d d on f.dim_id = d.id where exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id from mlf_hd x) q);
 ----
 0 0 0
 
@@ -926,6 +1013,14 @@ select
 
 query III
 select
+  (select count(*) from (select * from mlf_anti_shared_on except select * from mlf_anti_shared_off) x),
+  (select count(*) from (select * from mlf_anti_shared_off except select * from mlf_anti_shared_on) y),
+  (select count(*) from mlf_anti_shared_on) - (select count(*) from mlf_anti_shared_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from mlf_semi_witness_on except select * from mlf_semi_witness_off) x),
   (select count(*) from (select * from mlf_semi_witness_off except select * from mlf_semi_witness_on) y),
   (select count(*) from mlf_semi_witness_on) - (select count(*) from mlf_semi_witness_off);
@@ -945,6 +1040,14 @@ select
   (select count(*) from (select * from mlf_kept_witness_filter_on except select * from mlf_kept_witness_filter_off) x),
   (select count(*) from (select * from mlf_kept_witness_filter_off except select * from mlf_kept_witness_filter_on) y),
   (select count(*) from mlf_kept_witness_filter_on) - (select count(*) from mlf_kept_witness_filter_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mlf_kept_shared_on except select * from mlf_kept_shared_off) x),
+  (select count(*) from (select * from mlf_kept_shared_off except select * from mlf_kept_shared_on) y),
+  (select count(*) from mlf_kept_shared_on) - (select count(*) from mlf_kept_shared_off);
 ----
 0 0 0
 
@@ -1064,6 +1167,14 @@ select
 
 query III
 select
+  (select count(*) from (select * from mlf_anti_shared_on except select * from (select f.id as fid, h.rid from mlf_f f join mlf_d d on f.dim_id = d.id join mlf_h h on h.id = d.id where not exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id, x.rid from mlf_hd x) q) x),
+  (select count(*) from (select * from (select f.id as fid, h.rid from mlf_f f join mlf_d d on f.dim_id = d.id join mlf_h h on h.id = d.id where not exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id, x.rid from mlf_hd x) q except select * from mlf_anti_shared_on) y),
+  (select count(*) from mlf_anti_shared_on) - (select count(*) from (select f.id as fid, h.rid from mlf_f f join mlf_d d on f.dim_id = d.id join mlf_h h on h.id = d.id where not exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id, x.rid from mlf_hd x) q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from mlf_semi_witness_on except select * from (select f.id as fid, h.rid, h.x from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id)) q) x),
   (select count(*) from (select * from (select f.id as fid, h.rid, h.x from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id)) q except select * from mlf_semi_witness_on) y),
   (select count(*) from mlf_semi_witness_on) - (select count(*) from (select f.id as fid, h.rid, h.x from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id)) q);
@@ -1083,6 +1194,14 @@ select
   (select count(*) from (select * from mlf_kept_witness_filter_on except select * from (select f.id as fid, h.rid from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id and h2.x > 0)) q) x),
   (select count(*) from (select * from (select f.id as fid, h.rid from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id and h2.x > 0)) q except select * from mlf_kept_witness_filter_on) y),
   (select count(*) from mlf_kept_witness_filter_on) - (select count(*) from (select f.id as fid, h.rid from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id and h2.x > 0)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mlf_kept_shared_on except select * from (select f.id as fid from mlf_f f join mlf_d d on f.dim_id = d.id where exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id from mlf_hd x) q) x),
+  (select count(*) from (select * from (select f.id as fid from mlf_f f join mlf_d d on f.dim_id = d.id where exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id from mlf_hd x) q except select * from mlf_kept_shared_on) y),
+  (select count(*) from mlf_kept_shared_on) - (select count(*) from (select f.id as fid from mlf_f f join mlf_d d on f.dim_id = d.id where exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id from mlf_hd x) q);
 ----
 0 0 0
 
@@ -1207,6 +1326,14 @@ select
 
 query III
 select
+  (select count(*) from (select * from mlf_anti_shared_on except select * from mlf_anti_shared_off) x),
+  (select count(*) from (select * from mlf_anti_shared_off except select * from mlf_anti_shared_on) y),
+  (select count(*) from mlf_anti_shared_on) - (select count(*) from mlf_anti_shared_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from mlf_semi_witness_on except select * from mlf_semi_witness_off) x),
   (select count(*) from (select * from mlf_semi_witness_off except select * from mlf_semi_witness_on) y),
   (select count(*) from mlf_semi_witness_on) - (select count(*) from mlf_semi_witness_off);
@@ -1226,6 +1353,14 @@ select
   (select count(*) from (select * from mlf_kept_witness_filter_on except select * from mlf_kept_witness_filter_off) x),
   (select count(*) from (select * from mlf_kept_witness_filter_off except select * from mlf_kept_witness_filter_on) y),
   (select count(*) from mlf_kept_witness_filter_on) - (select count(*) from mlf_kept_witness_filter_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mlf_kept_shared_on except select * from mlf_kept_shared_off) x),
+  (select count(*) from (select * from mlf_kept_shared_off except select * from mlf_kept_shared_on) y),
+  (select count(*) from mlf_kept_shared_on) - (select count(*) from mlf_kept_shared_off);
 ----
 0 0 0
 
@@ -1345,6 +1480,14 @@ select
 
 query III
 select
+  (select count(*) from (select * from mlf_anti_shared_on except select * from (select f.id as fid, h.rid from mlf_f f join mlf_d d on f.dim_id = d.id join mlf_h h on h.id = d.id where not exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id, x.rid from mlf_hd x) q) x),
+  (select count(*) from (select * from (select f.id as fid, h.rid from mlf_f f join mlf_d d on f.dim_id = d.id join mlf_h h on h.id = d.id where not exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id, x.rid from mlf_hd x) q except select * from mlf_anti_shared_on) y),
+  (select count(*) from mlf_anti_shared_on) - (select count(*) from (select f.id as fid, h.rid from mlf_f f join mlf_d d on f.dim_id = d.id join mlf_h h on h.id = d.id where not exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id, x.rid from mlf_hd x) q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from mlf_semi_witness_on except select * from (select f.id as fid, h.rid, h.x from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id)) q) x),
   (select count(*) from (select * from (select f.id as fid, h.rid, h.x from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id)) q except select * from mlf_semi_witness_on) y),
   (select count(*) from mlf_semi_witness_on) - (select count(*) from (select f.id as fid, h.rid, h.x from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id)) q);
@@ -1364,6 +1507,14 @@ select
   (select count(*) from (select * from mlf_kept_witness_filter_on except select * from (select f.id as fid, h.rid from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id and h2.x > 0)) q) x),
   (select count(*) from (select * from (select f.id as fid, h.rid from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id and h2.x > 0)) q except select * from mlf_kept_witness_filter_on) y),
   (select count(*) from mlf_kept_witness_filter_on) - (select count(*) from (select f.id as fid, h.rid from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id and h2.x > 0)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mlf_kept_shared_on except select * from (select f.id as fid from mlf_f f join mlf_d d on f.dim_id = d.id where exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id from mlf_hd x) q) x),
+  (select count(*) from (select * from (select f.id as fid from mlf_f f join mlf_d d on f.dim_id = d.id where exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id from mlf_hd x) q except select * from mlf_kept_shared_on) y),
+  (select count(*) from mlf_kept_shared_on) - (select count(*) from (select f.id as fid from mlf_f f join mlf_d d on f.dim_id = d.id where exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id from mlf_hd x) q);
 ----
 0 0 0
 
@@ -1486,6 +1637,14 @@ select
 
 query III
 select
+  (select count(*) from (select * from mlf_anti_shared_on except select * from mlf_anti_shared_off) x),
+  (select count(*) from (select * from mlf_anti_shared_off except select * from mlf_anti_shared_on) y),
+  (select count(*) from mlf_anti_shared_on) - (select count(*) from mlf_anti_shared_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from mlf_semi_witness_on except select * from mlf_semi_witness_off) x),
   (select count(*) from (select * from mlf_semi_witness_off except select * from mlf_semi_witness_on) y),
   (select count(*) from mlf_semi_witness_on) - (select count(*) from mlf_semi_witness_off);
@@ -1505,6 +1664,14 @@ select
   (select count(*) from (select * from mlf_kept_witness_filter_on except select * from mlf_kept_witness_filter_off) x),
   (select count(*) from (select * from mlf_kept_witness_filter_off except select * from mlf_kept_witness_filter_on) y),
   (select count(*) from mlf_kept_witness_filter_on) - (select count(*) from mlf_kept_witness_filter_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mlf_kept_shared_on except select * from mlf_kept_shared_off) x),
+  (select count(*) from (select * from mlf_kept_shared_off except select * from mlf_kept_shared_on) y),
+  (select count(*) from mlf_kept_shared_on) - (select count(*) from mlf_kept_shared_off);
 ----
 0 0 0
 
@@ -1624,6 +1791,14 @@ select
 
 query III
 select
+  (select count(*) from (select * from mlf_anti_shared_on except select * from (select f.id as fid, h.rid from mlf_f f join mlf_d d on f.dim_id = d.id join mlf_h h on h.id = d.id where not exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id, x.rid from mlf_hd x) q) x),
+  (select count(*) from (select * from (select f.id as fid, h.rid from mlf_f f join mlf_d d on f.dim_id = d.id join mlf_h h on h.id = d.id where not exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id, x.rid from mlf_hd x) q except select * from mlf_anti_shared_on) y),
+  (select count(*) from mlf_anti_shared_on) - (select count(*) from (select f.id as fid, h.rid from mlf_f f join mlf_d d on f.dim_id = d.id join mlf_h h on h.id = d.id where not exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id, x.rid from mlf_hd x) q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from mlf_semi_witness_on except select * from (select f.id as fid, h.rid, h.x from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id)) q) x),
   (select count(*) from (select * from (select f.id as fid, h.rid, h.x from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id)) q except select * from mlf_semi_witness_on) y),
   (select count(*) from mlf_semi_witness_on) - (select count(*) from (select f.id as fid, h.rid, h.x from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id)) q);
@@ -1643,6 +1818,14 @@ select
   (select count(*) from (select * from mlf_kept_witness_filter_on except select * from (select f.id as fid, h.rid from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id and h2.x > 0)) q) x),
   (select count(*) from (select * from (select f.id as fid, h.rid from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id and h2.x > 0)) q except select * from mlf_kept_witness_filter_on) y),
   (select count(*) from mlf_kept_witness_filter_on) - (select count(*) from (select f.id as fid, h.rid from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id and h2.x > 0)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mlf_kept_shared_on except select * from (select f.id as fid from mlf_f f join mlf_d d on f.dim_id = d.id where exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id from mlf_hd x) q) x),
+  (select count(*) from (select * from (select f.id as fid from mlf_f f join mlf_d d on f.dim_id = d.id where exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id from mlf_hd x) q except select * from mlf_kept_shared_on) y),
+  (select count(*) from mlf_kept_shared_on) - (select count(*) from (select f.id as fid from mlf_f f join mlf_d d on f.dim_id = d.id where exists (select 1 from mlf_hd x where x.id = f.dim_id) union all select x.id from mlf_hd x) q);
 ----
 0 0 0
 
@@ -1693,6 +1876,9 @@ statement ok
 drop materialized view mlf_kept_anti_unbound_on;
 
 statement ok
+drop materialized view mlf_kept_shared_on;
+
+statement ok
 drop materialized view mlf_kept_witness_filter_on;
 
 statement ok
@@ -1700,6 +1886,9 @@ drop materialized view mlf_anti_witness_padded_on;
 
 statement ok
 drop materialized view mlf_semi_witness_on;
+
+statement ok
+drop materialized view mlf_anti_shared_on;
 
 statement ok
 drop materialized view mlf_anti_carried_on;
@@ -1744,6 +1933,9 @@ statement ok
 drop materialized view mlf_kept_anti_unbound_off;
 
 statement ok
+drop materialized view mlf_kept_shared_off;
+
+statement ok
 drop materialized view mlf_kept_witness_filter_off;
 
 statement ok
@@ -1751,6 +1943,9 @@ drop materialized view mlf_anti_witness_padded_off;
 
 statement ok
 drop materialized view mlf_semi_witness_off;
+
+statement ok
+drop materialized view mlf_anti_shared_off;
 
 statement ok
 drop materialized view mlf_anti_carried_off;
@@ -1781,6 +1976,9 @@ drop materialized view mlf_inner_sibling_off;
 
 statement ok
 drop materialized view mlf_inner_ancestor_off;
+
+statement ok
+drop view mlf_hd;
 
 statement ok
 drop view mlf_sd;

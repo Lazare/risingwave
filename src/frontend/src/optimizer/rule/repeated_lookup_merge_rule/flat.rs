@@ -165,15 +165,27 @@ struct Lifter {
     /// The conjuncts of the filters and inner joins met on the way to the lookup, which hold in
     /// every row of the tree.
     seen: Vec<ExprImpl>,
+    /// Whether the lookup may be looked for inside a shared sub-plan, and whether it was. The
+    /// sub-plan is not rewritten, its consumer gets a new one: this is only worth it when nothing
+    /// of the sub-plan is left in that consumer.
+    through_share: bool,
+    crossed_share: bool,
 }
 
 impl Lifter {
-    fn new(target: PlanNodeId, next: usize, classes: Vec<BTreeSet<usize>>) -> Self {
+    fn new(
+        target: PlanNodeId,
+        next: usize,
+        classes: Vec<BTreeSet<usize>>,
+        through_share: bool,
+    ) -> Self {
         Self {
             target,
             next,
             classes,
             seen: vec![],
+            through_share,
+            crossed_share: false,
         }
     }
 
@@ -200,6 +212,12 @@ impl Lifter {
                 lifted: vec![],
                 exts: vec![],
             });
+        }
+        if let Some(share) = plan.as_logical_share()
+            && self.through_share
+        {
+            self.crossed_share = true;
+            return self.lift(&share.input());
         }
         if let Some(project) = plan.as_logical_project() {
             if !project.exprs().iter().all(is_movable) {
@@ -400,23 +418,28 @@ impl Lifter {
 }
 
 /// The lookups that a tree of joins holds: the [`PureScan`]s reached through projections,
-/// filters, inner joins and the preserved side of left outer joins.
-fn nested_lookups(plan: &PlanRef, lookups: &mut Vec<PlanRef>) {
+/// filters, inner joins and the preserved side of left outer joins, and shared sub-plans if
+/// `through_share`.
+fn nested_lookups(plan: &PlanRef, through_share: bool, lookups: &mut Vec<PlanRef>) {
     if pure_scan(plan).is_some() {
         lookups.push(plan.clone());
         return;
     }
     if let Some(project) = plan.as_logical_project() {
-        nested_lookups(&project.input(), lookups);
+        nested_lookups(&project.input(), through_share, lookups);
     } else if let Some(filter) = plan.as_logical_filter() {
-        nested_lookups(&filter.input(), lookups);
+        nested_lookups(&filter.input(), through_share, lookups);
+    } else if let Some(share) = plan.as_logical_share() {
+        if through_share {
+            nested_lookups(&share.input(), through_share, lookups);
+        }
     } else if let Some(join) = plan.as_logical_join() {
         match join.join_type() {
             JoinType::Inner => {
-                nested_lookups(&join.left(), lookups);
-                nested_lookups(&join.right(), lookups);
+                nested_lookups(&join.left(), through_share, lookups);
+                nested_lookups(&join.right(), through_share, lookups);
             }
-            JoinType::LeftOuter => nested_lookups(&join.left(), lookups),
+            JoinType::LeftOuter => nested_lookups(&join.left(), through_share, lookups),
             _ => {}
         }
     }
@@ -449,10 +472,9 @@ pub(super) fn merge_nested_lookup(plan: &PlanRef, join: &LogicalJoin) -> Option<
     let (left, right) = (join.left(), join.right());
     let mut lookups = vec![];
     match join.join_type() {
-        JoinType::Inner => nested_lookups(plan, &mut lookups),
-        JoinType::LeftOuter | JoinType::LeftSemi | JoinType::LeftAnti => {
-            nested_lookups(&right, &mut lookups)
-        }
+        JoinType::Inner => nested_lookups(plan, false, &mut lookups),
+        JoinType::LeftOuter => nested_lookups(&right, false, &mut lookups),
+        JoinType::LeftSemi | JoinType::LeftAnti => nested_lookups(&right, true, &mut lookups),
         _ => return None,
     }
     // A lookup that is a side of the join is the one of `merge_lookup`.
@@ -484,27 +506,29 @@ pub(super) fn merge_nested_lookup(plan: &PlanRef, join: &LogicalJoin) -> Option<
 
 /// Runs the [`Lifter`] twice: once to find the classes of equal columns of the tree, once to
 /// take the lookup out. `extra` gives the conjuncts of the condition of the join above the tree,
-/// from the outputs of the tree.
+/// from the outputs of the tree. Also returns whether the lookup was in a shared sub-plan.
 fn lift_twice(
     tree: &PlanRef,
     lookup: &PlanRef,
     next: usize,
+    through_share: bool,
     extra: impl Fn(&[ExprImpl]) -> Vec<ExprImpl>,
-) -> Option<(Lifted, Vec<BTreeSet<usize>>)> {
-    let mut lifter = Lifter::new(lookup.id(), next, vec![]);
+) -> Option<(Lifted, Vec<BTreeSet<usize>>, bool)> {
+    let mut lifter = Lifter::new(lookup.id(), next, vec![], through_share);
     let first = lifter.lift(tree)?;
     let mut conjuncts = lifter.seen;
     conjuncts.extend(extra(&first.outputs));
     let classes = equal_classes(&conjuncts);
-    let lifted = Lifter::new(lookup.id(), next, classes.clone()).lift(tree)?;
-    Some((lifted, classes))
+    let mut lifter = Lifter::new(lookup.id(), next, classes.clone(), through_share);
+    let lifted = lifter.lift(tree)?;
+    Some((lifted, classes, lifter.crossed_share))
 }
 
 /// The lookup is in the tree of inner joins `plan`: joined with the rest of the tree, it is a side
 /// of a join, which [`merge_lookup`] removes.
 fn merge_in_inner_tree(plan: &PlanRef, lookup: &PlanRef) -> Option<PlanRef> {
     let lookup_len = lookup.schema().len();
-    let (lifted, _) = lift_twice(plan, lookup, lookup_len, |_| vec![])?;
+    let (lifted, _, _) = lift_twice(plan, lookup, lookup_len, false, |_| vec![])?;
     let rest = lifted.rest?;
     let ext_columns: BTreeSet<usize> = lifted
         .exts
@@ -612,7 +636,14 @@ fn merge_in_right_side(join: &LogicalJoin, lookup: &PlanRef, pure: &PureScan) ->
             .map(|conjunct| substitute(conjunct, &columns))
             .collect()
     };
-    let (lifted, classes) = lift_twice(&right, lookup, lookup_len + left_len, condition)?;
+    let through_share = join_type != JoinType::LeftOuter;
+    let (lifted, classes, crossed_share) = lift_twice(
+        &right,
+        lookup,
+        lookup_len + left_len,
+        through_share,
+        condition,
+    )?;
     let mut conjuncts = condition(&lifted.outputs);
     conjuncts.extend(lifted.lifted.iter().cloned());
     // A conjunct on the columns of a lifted left outer join can not be applied in the condition of
@@ -751,10 +782,15 @@ fn merge_in_right_side(join: &LogicalJoin, lookup: &PlanRef, pure: &PureScan) ->
                 }
                 let join =
                     LogicalJoin::new(new_left, rest.plan, join_type, Condition { conjunctions });
-                // The rest of the right side may look up a row of the left side in turn.
-                merge_lookup(&join)
-                    .or_else(|| witness_lookup(&join))
-                    .unwrap_or_else(|| join.into())
+                // The rest of the right side may look up a row of the left side in turn. A rest
+                // taken out of a shared sub-plan would be computed a second time: then it must
+                // go too.
+                let merged = merge_lookup(&join).or_else(|| witness_lookup(&join));
+                match merged {
+                    Some(merged) => merged,
+                    None if crossed_share => return None,
+                    None => join.into(),
+                }
             }
         };
         let exprs = join
