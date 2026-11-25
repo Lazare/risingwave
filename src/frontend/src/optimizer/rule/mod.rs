@@ -207,6 +207,20 @@ mod contradictory_null_filter_rule;
 pub use contradictory_null_filter_rule::*;
 mod empty_relation_propagate_rule;
 pub use empty_relation_propagate_rule::*;
+mod empty_input_simplify_rule;
+pub use empty_input_simplify_rule::*;
+mod never_true_predicate_rule;
+pub use never_true_predicate_rule::*;
+mod column_facts_simplify_rule;
+pub use column_facts_simplify_rule::*;
+mod constant_row_join_rule;
+pub use constant_row_join_rule::*;
+mod common_join_over_union_rule;
+pub use common_join_over_union_rule::*;
+mod repeated_lookup_merge_rule;
+pub use repeated_lookup_merge_rule::*;
+mod unique_key_simplify_rule;
+pub use unique_key_simplify_rule::*;
 mod join_project_transpose_rule;
 pub use join_project_transpose_rule::*;
 mod limit_push_down_rule;
@@ -347,6 +361,14 @@ macro_rules! for_all_rules {
             , { AlwaysFalseFilterRule }
             , { ContradictoryNullFilterRule }
             , { EmptyRelationPropagateRule }
+            , { EmptyInputSimplifyRule }
+            , { NeverTruePredicateRule }
+            , { ColumnFactsSimplifyRule }
+            , { ConstantRowJoinRule }
+            , { UnusedOuterJoinEliminateRule }
+            , { AggOnKeyEliminateRule }
+            , { RepeatedLookupMergeRule }
+            , { CommonJoinOverUnionRule }
             , { BushyTreeJoinOrderingRule }
             , { StreamProjectMergeRule }
             , { StreamProjectSplitRule }

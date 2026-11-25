@@ -1,0 +1,351 @@
+# Tests for the merge of repeated lookups in streaming plans
+# (`streaming_merge_repeated_lookups`): `RepeatedLookupMergeRule`.
+- id: setup
+  sql: |
+    set streaming_merge_repeated_lookups = true;
+    create table f (id int primary key, dim_id int, other_id int, amt int, label varchar);
+    create table d (id int primary key, name varchar, grp int, active boolean);
+    create table e (id int primary key, code varchar);
+    create table p (a int, b int, v int, w int, primary key (a, b));
+    create table g (id int primary key, a int, b int);
+    create table nopk (id int, name varchar);
+    create view v1 as select f.id, f.dim_id, f.amt, d.name from f left join d on f.dim_id = d.id;
+    create view v2 as select v1.*, d.grp from v1 left join d on v1.dim_id = d.id;
+    create view w1 as select f.id, f.dim_id, f.amt, d.name, d.id as did from f join d on f.dim_id = d.id;
+    create view w2 as select w1.*, d.grp from w1 join d on w1.did = d.id;
+    create view da as select * from d where active;
+  expected_outputs: []
+- id: setup_off
+  sql: |
+    create table f (id int primary key, dim_id int, other_id int, amt int, label varchar);
+    create table d (id int primary key, name varchar, grp int, active boolean);
+  expected_outputs: []
+
+- name: off by default - the two lookups are kept
+  before: [setup_off]
+  sql: |
+    select f.id, a.name, b.grp from f left join d a on f.dim_id = a.id left join d b on f.dim_id = b.id;
+  expected_outputs:
+  - stream_plan
+
+# Left outer lookups.
+- name: two left lookups of the same row
+  before: [setup]
+  sql: |
+    select f.id, a.name, b.grp from f left join d a on f.dim_id = a.id left join d b on f.dim_id = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: three left lookups through a stack of views
+  before: [setup]
+  sql: |
+    select v2.id, v2.name, v2.grp, d.active from v2 left join d on v2.dim_id = d.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: left lookup from the key that the first lookup returned
+  before: [setup]
+  sql: |
+    select f.id, a.name, b.grp from f left join d a on f.dim_id = a.id left join d b on a.id = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: left lookup with a filter after an unfiltered one
+  before: [setup]
+  sql: |
+    select f.id, a.name, b.grp from f left join d a on f.dim_id = a.id left join da b on f.dim_id = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: unfiltered left lookup after a filtered one - the scan reads all the rows
+  before: [setup]
+  sql: |
+    select f.id, a.name, b.grp from f left join da a on f.dim_id = a.id left join d b on f.dim_id = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: two left lookups with different filters - the scan reads the rows of both
+  before: [setup]
+  sql: |
+    select f.id, a.name, b.grp
+    from f
+    left join (select * from d where grp = 1) a on f.dim_id = a.id
+    left join (select * from d where grp = 2) b on f.dim_id = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: two left lookups with the same filter, through a shared view
+  before: [setup]
+  sql: |
+    select f.id, a.name, b.grp from f left join da a on f.dim_id = a.id left join da b on f.dim_id = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: left lookup with an extra condition
+  before: [setup]
+  sql: |
+    select f.id, a.name, b.grp from f left join d a on f.dim_id = a.id left join d b on f.dim_id = b.id and f.amt > b.grp;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: left lookup of computed columns
+  before: [setup]
+  sql: |
+    select f.id, a.name, b.label2, b.one
+    from f left join d a on f.dim_id = a.id
+    left join (select id, coalesce(name, 'none') as label2, 1 as one from d) b on f.dim_id = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: left lookup on a composite key
+  before: [setup]
+  sql: |
+    select g.id, x.v, y.w from g left join p x on g.a = x.a and g.b = x.b left join p y on g.a = y.a and g.b = y.b;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+
+# Inner lookups.
+- name: two inner lookups of the same row
+  before: [setup]
+  sql: |
+    select f.id, a.name, b.grp from f join d a on f.dim_id = a.id join d b on f.dim_id = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: two inner lookups through a stack of views
+  before: [setup]
+  sql: |
+    select * from w2;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: inner lookup with a filter after an unfiltered one - the filter moves to the kept scan
+  before: [setup]
+  sql: |
+    select f.id, a.name, b.grp from f join d a on f.dim_id = a.id join da b on f.dim_id = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: left lookup after an inner one
+  before: [setup]
+  sql: |
+    select f.id, a.name, b.grp from f join d a on f.dim_id = a.id left join d b on f.dim_id = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: filtered left lookup after an inner one
+  before: [setup]
+  sql: |
+    select f.id, a.name, b.grp from f join d a on f.dim_id = a.id left join da b on f.dim_id = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: inner lookup after a left one
+  before: [setup]
+  sql: |
+    select f.id, a.name, b.grp from f left join d a on f.dim_id = a.id join d b on f.dim_id = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: self join of a table on its key
+  before: [setup]
+  sql: |
+    select a.id, a.name, b.grp from d a join d b on a.id = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: self left join of a table on its key with a filter
+  before: [setup]
+  sql: |
+    select a.id, a.name, b.grp from d a left join da b on a.id = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: lookup through another table in between
+  before: [setup]
+  sql: |
+    select f.id, a.name, e.code, b.grp
+    from f join d a on f.dim_id = a.id join e on f.other_id = e.id join d b on f.dim_id = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: inner lookup on a composite key
+  before: [setup]
+  sql: |
+    select g.id, x.v, y.w from g join p x on g.a = x.a and g.b = x.b join p y on g.a = y.a and g.b = y.b;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+
+# The kept lookup already outputs the column that the removed one reads.
+- name: two inner lookups of the same column
+  before: [setup]
+  sql: |
+    select f.id, a.name, b.name as name2 from f join d a on f.dim_id = a.id join d b on f.dim_id = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: lookups of the same column with an outer join in between
+  before: [setup]
+  sql: |
+    select f.id, a.name, e.code, b.name as name2, b.id as id2
+    from f join d a on f.dim_id = a.id left join e on f.other_id = e.id left join d b on f.dim_id = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: left lookups of the same columns with an outer join in between
+  before: [setup]
+  sql: |
+    select f.id, a.name, a.id as id1, e.code, b.name as name2, b.id as id2
+    from f left join d a on f.dim_id = a.id left join e on f.other_id = e.id left join d b on f.dim_id = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+
+# Semi and anti joins: the lookup only tells whether the row is found.
+- name: exists on the same table with a filter
+  before: [setup]
+  sql: |
+    select a.id, a.name from d a where exists (select 1 from da b where b.id = a.id);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: not exists on the same table with a filter
+  before: [setup]
+  sql: |
+    select a.id, a.name from d a where not exists (select 1 from da b where b.id = a.id);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: not exists on the same table without filter - only a NULL key has no match
+  before: [setup]
+  sql: |
+    select a.id, a.name from d a where not exists (select 1 from d b where b.id = a.id);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: not exists on a table that an inner lookup already reads
+  before: [setup]
+  sql: |
+    select f.id, a.name from f join d a on f.dim_id = a.id
+    where not exists (select 1 from d b where b.id = f.dim_id and b.grp = 2);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: not exists on a table that a left lookup already reads
+  before: [setup]
+  sql: |
+    select f.id, a.name from f left join d a on f.dim_id = a.id
+    where not exists (select 1 from da b where b.id = f.dim_id);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - not exists on a column that is not the key
+  before: [setup]
+  sql: |
+    select a.id, a.name from d a where not exists (select 1 from d b where b.grp = a.id);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+
+# The kept lookup is below an aggregation, a top-1 or a shared sub-plan.
+- name: lookup of a row that an aggregation grouped by its key already read
+  before: [setup]
+  sql: |
+    select t.dim_id, t.total, b.grp
+    from (select f.dim_id, sum(f.amt) as total from f join d a on f.dim_id = a.id group by f.dim_id) t
+    left join d b on t.dim_id = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: lookup above an aggregation grouped by the key and another column
+  before: [setup]
+  sql: |
+    select t.dim_id, t.label, t.total, b.grp, b.name
+    from (select f.dim_id, f.label, sum(f.amt) as total from f join d a on f.dim_id = a.id where a.active group by f.dim_id, f.label) t
+    join d b on t.dim_id = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: left lookup above an aggregation over a left lookup of the same row
+  before: [setup]
+  sql: |
+    select t.dim_id, t.n, t.total, b.grp
+    from (select f.dim_id, max(a.name) as n, sum(f.amt) as total from f left join d a on f.dim_id = a.id group by f.dim_id) t
+    left join d b on t.dim_id = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - lookup above an aggregation that is not grouped by the key
+  before: [setup]
+  sql: |
+    select t.label, t.dim, b.grp
+    from (select f.label, max(f.dim_id) as dim from f join d a on f.dim_id = a.id group by f.label) t
+    left join d b on t.dim = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: lookup above a top-1 per group
+  before: [setup]
+  sql: |
+    select x.other_id, x.name, b.grp
+    from (select distinct on (f.other_id) f.other_id, f.dim_id, a.name from f join d a on f.dim_id = a.id) x
+    left join d b on x.dim_id = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: lookup above a ranking that keeps the first row of each group
+  before: [setup]
+  sql: |
+    select x.other_id, x.name, b.grp
+    from (
+      select other_id, dim_id, name from (
+        select f.other_id, f.dim_id, a.name, row_number() over (partition by f.other_id order by f.amt desc) as rn
+        from f left join d a on f.dim_id = a.id
+      ) r where rn = 1
+    ) x
+    join d b on x.dim_id = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: lookup of a row that a shared sub-plan already outputs
+  before: [setup]
+  sql: |
+    with v as (select f.id, f.dim_id, f.amt, a.name, a.grp from f join d a on f.dim_id = a.id)
+    select x.id, x.grp as grp1, y.amt, b.grp as grp2
+    from v x join v y on x.amt = y.id left join d b on x.dim_id = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - lookup of a column that the shared sub-plan does not output
+  before: [setup]
+  sql: |
+    with v as (select f.id, f.dim_id, f.amt, a.name from f join d a on f.dim_id = a.id)
+    select x.id, x.name, y.amt, b.grp
+    from v x join v y on x.amt = y.id left join d b on x.dim_id = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+
+# Lookups that are kept.
+- name: kept - lookups of two different rows
+  before: [setup]
+  sql: |
+    select f.id, a.name, b.grp from f left join d a on f.dim_id = a.id left join d b on f.other_id = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - lookup on a column that is not the key
+  before: [setup]
+  sql: |
+    select f.id, a.name, b.grp from f left join d a on f.dim_id = a.grp left join d b on f.dim_id = b.grp;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - lookup on a part of a composite key
+  before: [setup]
+  sql: |
+    select g.id, x.v, y.w from g left join p x on g.a = x.a and g.b = x.b left join p y on g.a = y.a;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - lookup on a composite key from crossed columns
+  before: [setup]
+  sql: |
+    select g.id, x.v, y.w from g left join p x on g.a = x.a and g.b = x.b left join p y on g.b = y.a and g.a = y.b;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - first left lookup has an extra condition
+  before: [setup]
+  sql: |
+    select f.id, a.name, b.grp from f left join d a on f.dim_id = a.id and f.amt > a.grp left join d b on f.dim_id = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - table without primary key
+  before: [setup]
+  sql: |
+    select f.id, a.name, b.name as name2 from f left join nopk a on f.dim_id = a.id left join nopk b on f.dim_id = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - key compared behind a cast
+  before: [setup]
+  sql: |
+    select f.id, a.name, b.grp from f left join d a on f.dim_id = a.id left join d b on f.dim_id::bigint = b.id::bigint;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - full outer join
+  before: [setup]
+  sql: |
+    select f.id, a.name, b.grp from f left join d a on f.dim_id = a.id full join d b on f.dim_id = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream

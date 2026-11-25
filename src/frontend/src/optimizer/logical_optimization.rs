@@ -238,6 +238,14 @@ static SIMPLE_UNNESTING: LazyLock<OptimizationStage> = LazyLock::new(|| {
     )
 });
 
+static STREAM_SIMPLE_UNNESTING_AGG: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Stream Simple Unnesting of Aggregations",
+        vec![PullUpCorrelatedPredicateAggRule::create_for_stream()],
+        ApplyOrder::BottomUp,
+    )
+});
+
 static SET_OPERATION_MERGE: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Set Operation Merge",
@@ -499,6 +507,53 @@ static BATCH_PRUNE_EMPTY_RELATION: LazyLock<OptimizationStage> = LazyLock::new(|
     )
 });
 
+static STREAM_PRUNE_EMPTY_RELATION: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Prune Empty Relation For Stream",
+        vec![
+            // In this order: a predicate simplified with what is known about its columns may
+            // become never true, which may empty an input of the operator above.
+            ColumnFactsSimplifyRule::create(),
+            NeverTruePredicateRule::create(),
+            EmptyRelationPropagateRule::create(),
+            EmptyInputSimplifyRule::create(),
+            ConstantRowJoinRule::create(),
+        ],
+        // Must be bottom-up so that an empty relation is propagated to the top in one pass.
+        ApplyOrder::BottomUp,
+    )
+});
+
+static STREAM_FACTOR_UNION_JOIN: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Factor Union Join For Stream",
+        vec![CommonJoinOverUnionRule::create()],
+        // Bottom-up: the branches of a union are reduced before the union is looked at.
+        ApplyOrder::BottomUp,
+    )
+});
+
+static STREAM_MERGE_REPEATED_LOOKUPS: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Merge Repeated Lookups For Stream",
+        vec![RepeatedLookupMergeRule::create()],
+        // Bottom-up: a lookup merged below is carried by the input of the lookups above.
+        ApplyOrder::BottomUp,
+    )
+});
+
+static STREAM_SIMPLIFY_ON_UNIQUE_KEY: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Simplify On Unique Key For Stream",
+        vec![
+            UnusedOuterJoinEliminateRule::create(),
+            AggOnKeyEliminateRule::create(),
+        ],
+        // Bottom-up: an operator removed below may give a key to the input of an operator above.
+        ApplyOrder::BottomUp,
+    )
+});
+
 static LIMIT_PUSH_DOWN: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Push Down Limit",
@@ -637,6 +692,7 @@ impl LogicalOptimizer {
     pub fn subquery_unnesting(
         mut plan: LogicalPlanRef,
         enable_share_plan: bool,
+        for_stream: bool,
         explain_trace: bool,
         ctx: &OptimizerContextRef,
     ) -> Result<LogicalPlanRef> {
@@ -646,6 +702,17 @@ impl LogicalOptimizer {
         }
         // Simple Unnesting.
         plan = plan.optimize_by_rules(&SIMPLE_UNNESTING)?;
+        if for_stream
+            && ctx
+                .session_ctx()
+                .config()
+                .streaming_simplify_subquery_unnesting()
+        {
+            // A subquery that aggregates the rows equal to columns of the outer row becomes a left
+            // join with the aggregation grouped by those columns, without the domain (the distinct
+            // values of the outer columns, read again from the outer side) of the general way.
+            plan = plan.optimize_by_rules(&STREAM_SIMPLE_UNNESTING_AGG)?;
+        }
         debug_assert!(!HasMaxOneRowApply().visit(plan.clone()));
         // Predicate push down before translate apply, because we need to calculate the domain
         // and predicate push down can reduce the size of domain.
@@ -765,7 +832,7 @@ impl LogicalOptimizer {
 
         plan = plan.optimize_by_rules(&CORRELATED_TOP_N_TO_VECTOR_SEARCH_FOR_STREAM)?;
 
-        plan = Self::subquery_unnesting(plan, enable_share_plan, explain_trace, &ctx)?;
+        plan = Self::subquery_unnesting(plan, enable_share_plan, true, explain_trace, &ctx)?;
         if has_logical_max_one_row(plan.clone()) {
             // `MaxOneRow` is currently only used for the runtime check of
             // scalar subqueries, while it's not supported in streaming mode, so
@@ -837,6 +904,85 @@ impl LogicalOptimizer {
         plan = Self::column_pruning(plan, explain_trace, &ctx);
         plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
 
+        // After the final predicate pushdown, the conjuncts that contradict each other have been
+        // merged into the same filter, scan or join. Remove the sub-plans that are proven to be
+        // empty, so that their fragments, backfills and states are never created. On demand
+        // only: the plan of a streaming job is frozen when the job is created.
+        if ctx.session_ctx().config().streaming_prune_empty_relation()
+            && !ctx.is_stream_prune_baseline()
+        {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&STREAM_PRUNE_EMPTY_RELATION)?;
+            let applied = ctx.total_rule_applied() - applied_before;
+            ctx.add_stream_prune_rule_applied(applied);
+            if applied > 0 {
+                // A simplified filter or projection may not use a column any more: an aggregate
+                // call, or a whole side of a join, can then be pruned.
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+            }
+        }
+
+        // Remove the operators that the unique keys of their inputs make useless: an outer join
+        // that is not used and can not multiply rows, an aggregation whose groups hold one row.
+        // On demand only, as above. An operator that is removed may leave columns unused, which
+        // may in turn make a join below unused: prune the columns and try again.
+        if ctx
+            .session_ctx()
+            .config()
+            .streaming_simplify_on_unique_key()
+            && !ctx.is_stream_prune_baseline()
+        {
+            for _ in 0..3 {
+                let applied_before = ctx.total_rule_applied();
+                plan = plan.optimize_by_rules(&STREAM_SIMPLIFY_ON_UNIQUE_KEY)?;
+                let applied = ctx.total_rule_applied() - applied_before;
+                if applied == 0 {
+                    break;
+                }
+                ctx.add_stream_prune_rule_applied(applied);
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+            }
+        }
+
+        // Remove the joins that look up a row of a table that their other side already carries.
+        // After the simplifications above, which remove the lookups that are not used at all.
+        // The filters and projections that replace the joins are then pushed down and pruned.
+        if ctx
+            .session_ctx()
+            .config()
+            .streaming_merge_repeated_lookups()
+            && !ctx.is_stream_prune_baseline()
+        {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&STREAM_MERGE_REPEATED_LOOKUPS)?;
+            let applied = ctx.total_rule_applied() - applied_before;
+            if applied > 0 {
+                ctx.add_stream_prune_rule_applied(applied);
+                plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
+            }
+        }
+
+        // Join once, above a union, the table that several of its branches join on the same
+        // columns. The per-branch conditions that the rule leaves around the single join are
+        // then pushed down and simplified: in a branch, the number of the branch is a constant.
+        if ctx.session_ctx().config().streaming_factor_union_join()
+            && !ctx.is_stream_prune_baseline()
+        {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&STREAM_FACTOR_UNION_JOIN)?;
+            let applied = ctx.total_rule_applied() - applied_before;
+            if applied > 0 {
+                ctx.add_stream_prune_rule_applied(applied);
+                plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+                plan = plan.optimize_by_rules(&STREAM_PRUNE_EMPTY_RELATION)?;
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
+            }
+        }
+        crate::optimizer::rule::diagnose_repeated_reads(&plan);
+
         plan = plan.optimize_by_rules(&CONSTANT_OUTPUT_REMOVE)?;
         plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
 
@@ -892,7 +1038,7 @@ impl LogicalOptimizer {
 
         plan = plan.optimize_by_rules(&CORRELATED_TOP_N_TO_VECTOR_SEARCH_FOR_BATCH)?;
 
-        plan = Self::subquery_unnesting(plan, false, explain_trace, &ctx)?;
+        plan = Self::subquery_unnesting(plan, false, false, explain_trace, &ctx)?;
 
         // Filter simplification must be applied before predicate push-down
         // otherwise the filter for some nodes (e.g., `LogicalScan`)

@@ -1,0 +1,194 @@
+# Tests for the unnesting of correlated subqueries without a domain in streaming plans
+# (`streaming_simplify_subquery_unnesting`): `PullUpCorrelatedPredicateAggRule::create_for_stream`.
+- id: setup
+  sql: |
+    set streaming_simplify_subquery_unnesting = true;
+    create table p (id int primary key, v int, g int);
+    create table r (id int primary key, pid int, s varchar, x int);
+    create table q (id int primary key, pid int);
+    create table u (k int, v int);
+    create table t (id int primary key, s varchar, j jsonb);
+  expected_outputs: []
+- id: setup_off
+  sql: |
+    create table p (id int primary key, v int, g int);
+    create table r (id int primary key, pid int, s varchar, x int);
+  expected_outputs: []
+
+- name: off by default - EXISTS in the select list reads the outer side again for its domain
+  before: [setup_off]
+  sql: |
+    select p.id, exists (select 1 from r where r.pid = p.id) as e from p;
+  expected_outputs:
+  - stream_plan
+
+- name: off by default - scalar min in the select list
+  before: [setup_off]
+  sql: |
+    select p.id, (select min(r.x) from r where r.pid = p.id) as m from p;
+  expected_outputs:
+  - stream_plan
+
+# Rewritten.
+
+- name: EXISTS in the select list
+  before: [setup]
+  sql: |
+    select p.id, exists (select 1 from r where r.pid = p.id and r.s = 'x') as e from p;
+  expected_outputs:
+  - stream_plan
+
+- name: NOT EXISTS in the select list
+  before: [setup]
+  sql: |
+    select p.id, not exists (select 1 from r where r.pid = p.id) as e from p;
+  expected_outputs:
+  - stream_plan
+
+- name: EXISTS under OR in WHERE
+  before: [setup]
+  sql: |
+    select p.id from p where p.v > 0 or exists (select 1 from r where r.pid = p.id);
+  expected_outputs:
+  - stream_plan
+
+- name: EXISTS in a CASE, correlated on a column that is not a key
+  before: [setup]
+  sql: |
+    select p.id, case when exists (select 1 from r where r.pid = p.v) then 'y' else 'n' end as c from p;
+  expected_outputs:
+  - stream_plan
+
+- name: two NOT EXISTS joined by AND
+  before: [setup]
+  sql: |
+    select p.id, not exists (select 1 from r where r.s = 'x' and r.pid = p.id)
+             and not exists (select 1 from q where q.pid = p.id) as flag
+    from p;
+  expected_outputs:
+  - stream_plan
+
+- name: filter on the EXISTS column of a view
+  before: [setup]
+  sql: |
+    create view pv as select p.id, p.v, exists (select 1 from r where r.pid = p.id) as e from p;
+    select id from pv where e;
+  expected_outputs:
+  - stream_plan
+
+- name: outer side without a key
+  before: [setup]
+  sql: |
+    select u.k, exists (select 1 from r where r.pid = u.k) as e from u;
+  expected_outputs:
+  - stream_plan
+
+- name: scalar min
+  before: [setup]
+  sql: |
+    select p.id, (select min(r.x) from r where r.pid = p.id) as m from p;
+  expected_outputs:
+  - stream_plan
+
+- name: scalar count
+  before: [setup]
+  sql: |
+    select p.id, (select count(*) from r where r.pid = p.id) as c from p;
+  expected_outputs:
+  - stream_plan
+
+- name: count of a column and of distinct values, and sum, in two subqueries
+  before: [setup]
+  sql: |
+    select p.id,
+      (select sum(r.x) from r where r.pid = p.id) as s,
+      (select count(r.x) + count(distinct r.s) from r where r.pid = p.id) as c
+    from p;
+  expected_outputs:
+  - stream_plan
+
+- name: ARRAY subquery, empty array when nothing matches
+  before: [setup]
+  sql: |
+    select p.id, array(select r.x from r where r.pid = p.id) as xs from p;
+  expected_outputs:
+  - stream_plan
+
+- name: count compared in WHERE
+  before: [setup]
+  sql: |
+    select p.id from p where p.v = (select count(*) from r where r.pid = p.id);
+  expected_outputs:
+  - stream_plan
+
+- name: correlated on two columns
+  before: [setup]
+  sql: |
+    select p.id, (select count(*) from r where r.pid = p.id and r.x = p.v) as c from p;
+  expected_outputs:
+  - stream_plan
+
+- name: aggregate with a filter clause
+  before: [setup]
+  sql: |
+    select p.id, (select count(*) filter (where r.x > 0) from r where r.pid = p.id) as c from p;
+  expected_outputs:
+  - stream_plan
+
+# Kept in the general way.
+
+- name: kept - correlated column in the aggregated expression
+  before: [setup]
+  sql: |
+    select p.id, (select max(r.x + p.v) from r where r.pid = p.id) as m from p;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - correlation that is not an equality
+  before: [setup]
+  sql: |
+    select p.id, (select count(*) from r where r.pid = p.id or r.x = p.v) as c from p;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - IS NOT DISTINCT FROM written in the subquery
+  before: [setup]
+  sql: |
+    select p.id, (select count(*) from r where r.pid is not distinct from p.id) as c from p;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - aggregate whose value over an empty input is not known to the rule
+  before: [setup]
+  sql: |
+    select p.id, (select approx_count_distinct(r.x) from r where r.pid = p.id) as c from p;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - the subquery groups its rows
+  before: [setup]
+  sql: |
+    select p.id, (select count(*) from r where r.pid = p.id group by r.s limit 1) as c from p;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - lateral subquery without a table
+  before: [setup]
+  sql: |
+    select t.id, a.x from t left join lateral (select (regexp_matches(t.s, 'A([0-9]+)'))[1] as x) a on true;
+  expected_outputs:
+  - stream_plan
+
+- name: unchanged - EXISTS in a WHERE conjunction is a semi join without the variable too
+  before: [setup]
+  sql: |
+    select p.id from p where exists (select 1 from r where r.pid = p.id);
+  expected_outputs:
+  - stream_plan
+
+- name: unchanged - batch plan of EXISTS in the select list
+  before: [setup]
+  sql: |
+    select p.id, exists (select 1 from r where r.pid = p.id) as e from p;
+  expected_outputs:
+  - batch_plan

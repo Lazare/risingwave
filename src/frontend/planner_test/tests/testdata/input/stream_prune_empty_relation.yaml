@@ -1,0 +1,861 @@
+# Tests for the pruning of the sub-plans proven to be empty in streaming plans
+# (`streaming_prune_empty_relation`): `ColumnFactsSimplifyRule`, `NeverTruePredicateRule`,
+# `EmptyRelationPropagateRule`, `EmptyInputSimplifyRule` and `ConstantRowJoinRule`.
+- id: setup
+  sql: |
+    set streaming_prune_empty_relation = true;
+    create table t (v1 int, v2 int, v3 varchar, b boolean, f double, ts timestamp);
+    create table s (k int, w int);
+    create table r (k int, x int);
+    create table nn (a int not null, b int, c int not null default 5, d int default 7);
+    create table gen (a int not null, b int, g int as a + 1);
+  expected_outputs: []
+- id: setup_off
+  sql: |
+    create table t (v1 int, v2 int, v3 varchar, b boolean, f double, ts timestamp);
+    create table s (k int, w int);
+  expected_outputs: []
+
+# The variable is off by default: nothing is pruned.
+- name: off by default - contradictory filter is kept
+  before:
+  - setup_off
+  sql: |
+    select * from t where v1 = 1 and v1 = 2;
+  expected_outputs:
+  - stream_plan
+- name: off by default - outer join with a contradictory side is kept
+  before:
+  - setup_off
+  sql: |
+    select t.v1, s.w from t left join (select * from s where w is null and w = 1) s on t.v1 = s.k;
+  expected_outputs:
+  - stream_plan
+
+# Predicates that are never true.
+- name: constant false conjunct
+  before:
+  - setup
+  sql: |
+    select * from t where 1 = 0 and v1 > 1;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: constant null conjunct
+  before:
+  - setup
+  sql: |
+    select * from t where null and v1 > 1;
+  expected_outputs:
+  - stream_plan
+- name: comparison with a null constant
+  before:
+  - setup
+  sql: |
+    select * from t where v1 = null;
+  expected_outputs:
+  - stream_plan
+- name: comparison with a typed null constant on the left
+  before:
+  - setup
+  sql: |
+    select * from t where null::int < v1;
+  expected_outputs:
+  - stream_plan
+- name: is null and in-list
+  before:
+  - setup
+  sql: |
+    select * from t where v3 is null and v3 in ('a', 'b');
+  expected_outputs:
+  - stream_plan
+- name: two different equalities
+  before:
+  - setup
+  sql: |
+    select * from t where v1 = 1 and v1 = 2;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: disjoint in-lists
+  before:
+  - setup
+  sql: |
+    select * from t where v3 in ('a', 'b') and v3 in ('c');
+  expected_outputs:
+  - stream_plan
+- name: equal and not equal to the same value
+  before:
+  - setup
+  sql: |
+    select * from t where v1 = 1 and v1 <> 1;
+  expected_outputs:
+  - stream_plan
+- name: in-list and not in-list
+  before:
+  - setup
+  sql: |
+    select * from t where v1 in (1, 2) and v1 not in (2, 1, 3);
+  expected_outputs:
+  - stream_plan
+- name: empty range
+  before:
+  - setup
+  sql: |
+    select * from t where v1 > 5 and v1 < 3;
+  expected_outputs:
+  - stream_plan
+- name: empty range with the column on the right
+  before:
+  - setup
+  sql: |
+    select * from t where 1 > v1 and 1 < v1;
+  expected_outputs:
+  - stream_plan
+- name: empty between
+  before:
+  - setup
+  sql: |
+    select * from t where v1 between 5 and 3;
+  expected_outputs:
+  - stream_plan
+- name: point range excluded by a not equal
+  before:
+  - setup
+  sql: |
+    select * from t where v1 >= 5 and v1 <= 5 and v1 <> 5;
+  expected_outputs:
+  - stream_plan
+- name: equality outside the range
+  before:
+  - setup
+  sql: |
+    select * from t where v3 = 'a' and v3 > 'b';
+  expected_outputs:
+  - stream_plan
+- name: half-open range that excludes its only bound
+  before:
+  - setup
+  sql: |
+    select * from t where v1 > 5 and v1 <= 5;
+  expected_outputs:
+  - stream_plan
+- name: in-list with only null
+  before:
+  - setup
+  sql: |
+    select * from t where v1 in (null);
+  expected_outputs:
+  - stream_plan
+- name: boolean column and its negation
+  before:
+  - setup
+  sql: |
+    select * from t where b and not b;
+  expected_outputs:
+  - stream_plan
+- name: boolean column true and false
+  before:
+  - setup
+  sql: |
+    select * from t where b = true and b = false;
+  expected_outputs:
+  - stream_plan
+- name: timestamp contradiction
+  before:
+  - setup
+  sql: |
+    select * from t where ts = '2026-01-01 00:00:00' and ts > '2026-06-01 00:00:00';
+  expected_outputs:
+  - stream_plan
+- name: contradiction next to a temporal filter
+  before:
+  - setup
+  sql: |
+    select * from t where ts > now() - interval '1 hour' and v1 is null and v1 = 3;
+  expected_outputs:
+  - stream_plan
+- name: contradiction split between a subquery and the outer filter
+  before:
+  - setup
+  sql: |
+    select * from (select * from t where v1 = 1) x where v1 = 2;
+  expected_outputs:
+  - stream_plan
+
+# Predicates that must be kept.
+- name: redundant in-list next to an equality
+  before:
+  - setup
+  sql: |
+    select * from t where v1 = 1 and v1 in (1, 2);
+  expected_outputs:
+  - stream_plan
+- name: kept - point range
+  before:
+  - setup
+  sql: |
+    select * from t where v1 >= 5 and v1 <= 5;
+  expected_outputs:
+  - stream_plan
+- name: kept - open range between consecutive integers (types are not assumed to be discrete)
+  before:
+  - setup
+  sql: |
+    select * from t where v1 > 1 and v1 < 2;
+  expected_outputs:
+  - stream_plan
+- name: kept - equalities on different columns
+  before:
+  - setup
+  sql: |
+    select * from t where v1 = 1 and v2 = 2;
+  expected_outputs:
+  - stream_plan
+- name: disjunction simplified by an equality on the same column
+  before:
+  - setup
+  sql: |
+    select * from t where (v1 = 1 or v2 = 1) and v1 = 2;
+  expected_outputs:
+  - stream_plan
+- name: redundant in-list with a null item next to an equality
+  before:
+  - setup
+  sql: |
+    select * from t where v1 in (1, null) and v1 = 1;
+  expected_outputs:
+  - stream_plan
+- name: kept - column behind a cast
+  before:
+  - setup
+  sql: |
+    select * from t where v1::bigint = 1 and v1::bigint = 2;
+  expected_outputs:
+  - stream_plan
+- name: kept - double precision column (not a simple type)
+  before:
+  - setup
+  sql: |
+    select * from t where f = 1.0 and f = 2.0;
+  expected_outputs:
+  - stream_plan
+- name: kept - is null or contradiction
+  before:
+  - setup
+  sql: |
+    select * from t where v1 is null or (v1 = 1 and v1 = 2);
+  expected_outputs:
+  - stream_plan
+- name: kept - temporal filter alone
+  before:
+  - setup
+  sql: |
+    select * from t where ts > now() - interval '1 hour';
+  expected_outputs:
+  - stream_plan
+- name: kept - is distinct from is not a strict comparison
+  before:
+  - setup
+  sql: |
+    select * from t where v1 is null and v1 is distinct from 1;
+  expected_outputs:
+  - stream_plan
+
+# Union all: the filter on a constant column removes branches.
+- name: union all - one branch is removed
+  before:
+  - setup
+  sql: |
+    select * from (
+      select 'a' as kind, v1 as v from t
+      union all
+      select 'b' as kind, k as v from s
+      union all
+      select 'c' as kind, k as v from r
+    ) u where kind = 'a' or kind = 'c';
+  expected_outputs:
+  - stream_plan
+- name: union all - a single branch is left
+  before:
+  - setup
+  sql: |
+    select * from (
+      select 'a' as kind, v1 as v from t
+      union all
+      select 'b' as kind, k as v from s
+    ) u where kind = 'b';
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: union all - every branch is removed
+  before:
+  - setup
+  sql: |
+    select * from (
+      select 'a' as kind, v1 as v from t
+      union all
+      select 'b' as kind, k as v from s
+    ) u where kind = 'z';
+  expected_outputs:
+  - stream_plan
+- name: union all - numeric discriminator in a view
+  before:
+  - setup
+  sql: |
+    create view u as select 1 as src, v1 as v from t union all select 2 as src, k as v from s;
+    select v from u where src = 2;
+  expected_outputs:
+  - stream_plan
+- name: union distinct - one branch is removed
+  before:
+  - setup
+  sql: |
+    select * from (
+      select 'a' as kind, v1 as v from t
+      union
+      select 'b' as kind, k as v from s
+    ) u where kind = 'a';
+  expected_outputs:
+  - stream_plan
+
+# Joins.
+- name: inner join - a side is empty
+  before:
+  - setup
+  sql: |
+    select * from t join s on t.v1 = s.k where s.w is null and s.w = 1;
+  expected_outputs:
+  - stream_plan
+- name: left join - the right side is empty
+  before:
+  - setup
+  sql: |
+    select t.v1, s.w, t.v3, s.k from t left join (select * from s where w = 1 and w = 2) s on t.v1 = s.k;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: left join - the left side is empty
+  before:
+  - setup
+  sql: |
+    select t.v1, s.w from (select * from t where v1 = 1 and v1 = 2) t left join s on t.v1 = s.k;
+  expected_outputs:
+  - stream_plan
+- name: right join - the left side is empty
+  before:
+  - setup
+  sql: |
+    select t.v1, s.w, s.k from (select * from t where v1 = 1 and v1 = 2) t right join s on t.v1 = s.k;
+  expected_outputs:
+  - stream_plan
+- name: full join - the right side is empty
+  before:
+  - setup
+  sql: |
+    select t.v1, s.w from t full join (select * from s where w = 1 and w = 2) s on t.v1 = s.k;
+  expected_outputs:
+  - stream_plan
+- name: full join - the left side is empty
+  before:
+  - setup
+  sql: |
+    select t.v1, s.w from (select * from t where v1 = 1 and v1 = 2) t full join s on t.v1 = s.k;
+  expected_outputs:
+  - stream_plan
+- name: full join - both sides are empty
+  before:
+  - setup
+  sql: |
+    select t.v1, s.w from (select * from t where v1 = 1 and v1 = 2) t
+    full join (select * from s where w = 1 and w = 2) s on t.v1 = s.k;
+  expected_outputs:
+  - stream_plan
+- name: semi join - the right side is empty
+  before:
+  - setup
+  sql: |
+    select * from t where v1 in (select k from s where w = 1 and w = 2);
+  expected_outputs:
+  - stream_plan
+- name: anti join - the right side is empty
+  before:
+  - setup
+  sql: |
+    select v1, v3 from t where not exists (select 1 from s where s.k = t.v1 and w = 1 and w = 2);
+  expected_outputs:
+  - stream_plan
+- name: inner join - the condition is never true
+  before:
+  - setup
+  sql: |
+    select * from t join s on t.v1 = s.k and s.w = 1 and t.v2 = 3 and t.v2 = 4;
+  expected_outputs:
+  - stream_plan
+- name: left join - the condition is never true (constants turned into join keys)
+  before:
+  - setup
+  sql: |
+    select t.v1, s.w from t left join s on t.v1 = s.k and t.v2 = 3 and t.v2 = 4;
+  expected_outputs:
+  - stream_plan
+- name: kept - full join whose condition is never true
+  before:
+  - setup
+  sql: |
+    select t.v1, s.w from t full join s on t.v1 = s.k and t.v1 = 3 and t.v1 = 4;
+  expected_outputs:
+  - stream_plan
+- name: three-way join - only the optional side is removed
+  before:
+  - setup
+  sql: |
+    select t.v1, s.w, r.x from t join s on t.v1 = s.k
+    left join (select * from r where x is null and x > 0) r on s.k = r.k;
+  expected_outputs:
+  - stream_plan
+
+# Aggregations.
+- name: agg with group key over an empty input
+  before:
+  - setup
+  sql: |
+    select v2, count(*) from t where v1 = 1 and v1 = 2 group by v2;
+  expected_outputs:
+  - stream_plan
+- name: agg without group key over an empty input
+  before:
+  - setup
+  sql: |
+    select count(*) as c1, count(v1) as c2, sum(v1) as s1, min(v3) as m1, max(ts) as m2, avg(v2) as a1,
+      bool_and(b) as b1, string_agg(v3, ',' order by v3) as sa
+    from t where v1 = 1 and v1 = 2;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: distinct agg without group key over an empty input
+  before:
+  - setup
+  sql: |
+    select count(distinct v1) as c, sum(distinct v2) as s from t where v1 = 1 and v1 = 2;
+  expected_outputs:
+  - stream_plan
+- name: kept - agg without group key and an aggregate whose empty result is not known
+  before:
+  - setup
+  sql: |
+    select percentile_cont(0.5) within group (order by f) from t where v1 = 1 and v1 = 2;
+  expected_outputs:
+  - stream_plan
+- name: agg without group key over a join with an empty side
+  before:
+  - setup
+  sql: |
+    select count(*) from t join (select * from s where w = 1 and w = 2) s on t.v1 = s.k;
+  expected_outputs:
+  - stream_plan
+- name: distinct over an empty input
+  before:
+  - setup
+  sql: |
+    select distinct v2 from t where v1 = 1 and v1 = 2;
+  expected_outputs:
+  - stream_plan
+
+# Limit, top-n, window functions.
+- name: limit 0
+  before:
+  - setup
+  sql: |
+    select * from t limit 0;
+  expected_outputs:
+  - stream_plan
+- name: order by with limit 0
+  before:
+  - setup
+  sql: |
+    select * from t order by v1 limit 0;
+  expected_outputs:
+  - stream_plan
+- name: top-n over an empty input
+  before:
+  - setup
+  sql: |
+    select * from (select * from t where v1 = 1 and v1 = 2) x order by v2 limit 3;
+  expected_outputs:
+  - stream_plan
+- name: group top-n over an empty input
+  before:
+  - setup
+  sql: |
+    select * from (
+      select *, row_number() over (partition by v2 order by v3) as rn from t where v1 = 1 and v1 = 2
+    ) x where rn = 1;
+  expected_outputs:
+  - stream_plan
+
+# Shared sub-plans.
+- name: shared empty relation used twice
+  before:
+  - setup
+  sql: |
+    with c as (select * from t where v1 = 1 and v1 = 2)
+    select a.v1, b.v2 from c a join c b on a.v1 = b.v1;
+  expected_outputs:
+  - stream_plan
+- name: shared relation with one empty consumer
+  before:
+  - setup
+  sql: |
+    with c as (select v1, v2 from t)
+    select * from c where v1 = 1 and v1 = 2
+    union all
+    select * from c where v2 = 7;
+  expected_outputs:
+  - stream_plan
+
+# Constant propagation: a column known to hold one constant is replaced with it.
+- name: constant propagated into another conjunct
+  before:
+  - setup
+  sql: |
+    select v1, v2 from t where v1 = 3 and v2 > v1;
+  expected_outputs:
+  - stream_plan
+- name: constant propagated into a projection
+  before:
+  - setup
+  sql: |
+    select v1, v1 + v2 as total from t where v1 = 3;
+  expected_outputs:
+  - stream_plan
+- name: constant propagated through an equality between columns, then a contradiction
+  before:
+  - setup
+  sql: |
+    select v1, v2 from t where v1 = 3 and v2 = v1 and v2 = 4;
+  expected_outputs:
+  - stream_plan
+- name: constant propagated from a subquery into an expression of the outer filter
+  before:
+  - setup
+  sql: |
+    select v1, v2 from (select v1, v2 from t where v1 = 3) x where v1 + v2 > 10;
+  expected_outputs:
+  - stream_plan
+- name: constant column of a union branch in a case expression
+  before:
+  - setup
+  sql: |
+    select case when kind = 'a' then v else -v end as r, case when kind = 'b' then 1 when v > 0 then 2 else 3 end as c
+    from (select 'a' as kind, v1 as v from t union all select 'b' as kind, k as v from s) u where kind = 'a';
+  expected_outputs:
+  - stream_plan
+- name: constant group key removed by a having clause
+  before:
+  - setup
+  sql: |
+    select kind, count(*) as cnt from (select 'a' as kind, v1 from t) x group by kind having kind = 'b';
+  expected_outputs:
+  - stream_plan
+- name: constant propagated through an inner join
+  before:
+  - setup
+  sql: |
+    select t.v1, s.w, t.v2 + s.k as total from t join s on t.v1 = s.k where t.v1 = 3;
+  expected_outputs:
+  - stream_plan
+- name: kept - a plain constant column stays a column
+  before:
+  - setup
+  sql: |
+    select v1, v2 from t where v1 = 3;
+  expected_outputs:
+  - stream_plan
+- name: kept - constant of the optional side of a left join is not propagated above it
+  before:
+  - setup
+  sql: |
+    select t.v1, s.w, s.w + 1 as w1, s.w is null as missing
+    from t left join (select * from s where w = 1) s on t.v1 = s.k;
+  expected_outputs:
+  - stream_plan
+- name: temporal filter on a constant column
+  before:
+  - setup
+  sql: |
+    select v1, ts from t where ts = '2026-01-01 00:00:00' and ts > now() - interval '1 hour';
+  expected_outputs:
+  - stream_plan
+
+# Known nullability.
+- name: is null on a count
+  before:
+  - setup
+  sql: |
+    select * from (select v1, count(*) as c from t group by v1) x where c is null;
+  expected_outputs:
+  - stream_plan
+- name: is null on a count in a projection
+  before:
+  - setup
+  sql: |
+    select v1, c is null as missing, c is not null as present from (select v1, count(*) as c from t group by v1) x;
+  expected_outputs:
+  - stream_plan
+- name: is null on a coalesce with a constant
+  before:
+  - setup
+  sql: |
+    select * from (select coalesce(v1, 0) as c, v2 from t) x where c is null;
+  expected_outputs:
+  - stream_plan
+- name: is not null implied by a comparison
+  before:
+  - setup
+  sql: |
+    select v1, v2 from t where v1 > 0 and v1 is not null;
+  expected_outputs:
+  - stream_plan
+- name: is null under a disjunction, on a column that a comparison makes not null
+  before:
+  - setup
+  sql: |
+    select v1, v2 from t where (v1 is null or v2 = 1) and v1 > 0;
+  expected_outputs:
+  - stream_plan
+- name: kept - is null on a join key, pushed below the inner join
+  before:
+  - setup
+  sql: |
+    select t.v1, s.w from t join s on t.v1 = s.k where s.k is null or s.w = 1;
+  expected_outputs:
+  - stream_plan
+- name: kept - is null on the optional side of a left join (anti join pattern)
+  before:
+  - setup
+  sql: |
+    select t.v1, t.v2 from t left join s on t.v1 = s.k where s.k is null;
+  expected_outputs:
+  - stream_plan
+- name: kept - is null on a sum
+  before:
+  - setup
+  sql: |
+    select * from (select v1, sum(v2) as total from t group by v1) x where total is null;
+  expected_outputs:
+  - stream_plan
+- name: kept - is null on a plain column
+  before:
+  - setup
+  sql: |
+    select v1, v2 is null as missing from t where v1 is null;
+  expected_outputs:
+  - stream_plan
+
+# NOT NULL constraints of tables: a table drops the rows that violate them.
+- name: is null on a not null column
+  before:
+  - setup
+  sql: |
+    select a, b from nn where a is null;
+  expected_outputs:
+  - stream_plan
+- name: is not null on a not null column
+  before:
+  - setup
+  sql: |
+    select a, b from nn where a is not null and b > 0;
+  expected_outputs:
+  - stream_plan
+- name: is null on not null columns in a projection
+  before:
+  - setup
+  sql: |
+    select a, a is null as m1, coalesce(a, 0) is null as m2, c is null as m3, b is null as m4 from nn;
+  expected_outputs:
+  - stream_plan
+- name: is null on a not null column with a default
+  before:
+  - setup
+  sql: |
+    select a, c from nn where c is null;
+  expected_outputs:
+  - stream_plan
+- name: is null on a not null column through an inner join
+  before:
+  - setup
+  sql: |
+    select t.v1, nn.a from t join nn on t.v1 = nn.b where nn.a is null;
+  expected_outputs:
+  - stream_plan
+- name: kept - is null on nullable columns of a table with not null columns
+  before:
+  - setup
+  sql: |
+    select a, b, d from nn where b is null or d is null;
+  expected_outputs:
+  - stream_plan
+- name: kept - is null on a not null column of the optional side of a left join
+  before:
+  - setup
+  sql: |
+    select t.v1, nn.a from t left join nn on t.v1 = nn.b where nn.a is null;
+  expected_outputs:
+  - stream_plan
+- name: kept - not null column of a table with a generated column
+  before:
+  - setup
+  sql: |
+    select a, b from gen where a is null;
+  expected_outputs:
+  - stream_plan
+- name: kept - column of a materialized view over a not null column
+  before:
+  - setup
+  sql: |
+    create materialized view mv_nn as select a, b from nn;
+    select a, b from mv_nn where a is null;
+  expected_outputs:
+  - stream_plan
+
+# Redundant conjuncts.
+- name: redundant lower bounds
+  before:
+  - setup
+  sql: |
+    select v1, v2 from t where v1 > 5 and v1 > 3 and v1 >= 5;
+  expected_outputs:
+  - stream_plan
+- name: redundant upper bounds
+  before:
+  - setup
+  sql: |
+    select v1, v2 from t where v1 < 5 and v1 <= 5 and v3 < 'm' and v3 < 'c';
+  expected_outputs:
+  - stream_plan
+- name: kept - bounds in both directions and on different columns
+  before:
+  - setup
+  sql: |
+    select v1, v2 from t where v1 > 3 and v1 < 9 and v2 > 5;
+  expected_outputs:
+  - stream_plan
+- name: kept - bounds of a double precision column
+  before:
+  - setup
+  sql: |
+    select v1, f from t where f > 5 and f > 3;
+  expected_outputs:
+  - stream_plan
+
+# Join with a relation made of one row of constants.
+- name: cross join with a constant row
+  before:
+  - setup
+  sql: |
+    select t.v1, c.x, c.y from t cross join (values (1, 'a')) as c(x, y);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: inner join with a constant row and a condition
+  before:
+  - setup
+  sql: |
+    select t.v1, t.v2, c.y from t join (values (1, 2)) as c(x, y) on t.v1 = c.x and t.v2 > c.y;
+  expected_outputs:
+  - stream_plan
+- name: constant row on the left side
+  before:
+  - setup
+  sql: |
+    select c.x, s.k, s.w from (values (7)) as c(x) join s on s.w < c.x;
+  expected_outputs:
+  - stream_plan
+- name: join with the constant row of an aggregation over an empty input
+  before:
+  - setup
+  sql: |
+    select t.v1, a.c from t cross join (select count(*) as c from s where w = 1 and w = 2) a;
+  expected_outputs:
+  - stream_plan
+- name: kept - join with two constant rows
+  before:
+  - setup
+  sql: |
+    select t.v1, c.x from t join (values (1), (2)) as c(x) on t.v1 = c.x;
+  expected_outputs:
+  - stream_plan
+- name: kept - left join with a constant row
+  before:
+  - setup
+  sql: |
+    select t.v1, c.x from t left join (values (1)) as c(x) on t.v1 = c.x;
+  expected_outputs:
+  - stream_plan
+
+# An aggregate of a constant over a group is the constant.
+- name: last_value of a constant, packed by the planner with another last_value
+  before:
+  - setup
+  sql: |
+    select v1, x from (
+      select v1, last_value('set' order by ts) as op, last_value(v2 order by ts) as x from t group by v1
+    ) z where op = 'set';
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: last_value of a constant column of a view that tags its rows
+  before:
+  - setup
+  sql: |
+    with ops(op, k, x, ts) as (select 'set', v1, v2, ts from t),
+    last as (select k, last_value(op order by ts) as op, last_value(x order by ts) as x, first_value(ts order by ts) as created from ops group by k)
+    select k, x, created from last where op = 'set';
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: max and min of a constant - the group becomes a distinct
+  before:
+  - setup
+  sql: |
+    select v1 from (select v1, max('a') as hi, min(1) as lo from t group by v1) z where hi = 'a' and lo = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: aggregate of a constant compared with another value - the group is empty
+  before:
+  - setup
+  sql: |
+    select v1 from (select v1, last_value('set' order by ts) as op from t group by v1) z where op = 'delete';
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - aggregate of a constant with a filter clause, which can be NULL
+  before:
+  - setup
+  sql: |
+    select v1 from (select v1, max('a') filter (where v2 > 0) as hi from t group by v1) z where hi = 'a';
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - aggregate of a constant without group key, which is NULL over no row
+  before:
+  - setup
+  sql: |
+    select hi from (select max('a') as hi from t) z where hi = 'a';
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - last_value of a value that differs between the branches of a union
+  before:
+  - setup
+  sql: |
+    with ops(op, k, ts) as (select 'set', v1, ts from t union all select 'delete', v1, ts from t where b)
+    select k from (select k, last_value(op order by ts) as op from ops group by k) z where op = 'set';
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: aggregate of a constant on the optional side of a left join stays nullable
+  before:
+  - setup
+  sql: |
+    select s.k, z.op is null as missing, z.op = 'set' as is_set from s left join (
+      select v1, last_value('set' order by ts) as op from t group by v1
+    ) z on s.k = z.v1;
+  expected_outputs:
+  - optimized_logical_plan_for_stream

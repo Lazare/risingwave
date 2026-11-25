@@ -274,6 +274,39 @@ pub struct SessionConfig {
     #[parameter(default = false)]
     streaming_unsafe_allow_upsert_sink_pk_mismatch: bool,
 
+    /// Remove from the plan of a new streaming job the sub-plans that are proven to never
+    /// produce a row, e.g. below a filter such as `x IS NULL AND x = 1` or `'b' = 'a'`, so that
+    /// their fragments, backfills and states are not created. Defaults to false.
+    #[parameter(default = false)]
+    streaming_prune_empty_relation: bool,
+
+    /// Remove from the plan of a new streaming job the operators that the unique keys of their
+    /// inputs make useless: an outer join whose optional side is not used and is unique on the
+    /// join columns, an aggregation, top-n or dedup whose groups hold exactly one row. The
+    /// result then relies on these keys being exact. Defaults to false.
+    #[parameter(default = false)]
+    streaming_simplify_on_unique_key: bool,
+
+    /// Remove from the plan of a new streaming job a join that looks up, by its key, a row of a
+    /// table that the other side of the join already carries: several joins of the same table on
+    /// its key from the same columns become one. The result then relies on the key of the table
+    /// being exact. Defaults to false.
+    #[parameter(default = false)]
+    streaming_merge_repeated_lookups: bool,
+
+    /// In the plan of a new streaming job, join once, above a `UNION ALL`, the table that several
+    /// of its branches join on the same columns: the table is scanned once and its join state is
+    /// kept once. Defaults to false.
+    #[parameter(default = false)]
+    streaming_factor_union_join: bool,
+
+    /// In the plan of a new streaming job, turn a correlated subquery that aggregates the rows
+    /// equal to columns of the outer row (`EXISTS`, `count`, `min`, `ARRAY(...)`, ...) into a left
+    /// join with the aggregation grouped by those columns, instead of re-reading the outer side to
+    /// build the set of its distinct values. Defaults to false.
+    #[parameter(default = false)]
+    streaming_simplify_subquery_unnesting: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,

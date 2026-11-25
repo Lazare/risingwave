@@ -68,7 +68,7 @@ impl ContradictoryNullFilterRule {
 
 /// Returns whether the conjunction contains `IsNull(#i)` together with a conjunct that can not be
 /// `TRUE` when `#i` is `NULL`.
-fn is_null_contradiction(predicate: &Condition) -> bool {
+pub(super) fn is_null_contradiction(predicate: &Condition) -> bool {
     let is_null_columns: HashSet<usize> = predicate
         .conjunctions
         .iter()
@@ -110,7 +110,7 @@ fn is_null_column(expr: &ExprImpl) -> Option<usize> {
 ///
 /// Anything else (`IS [NOT] DISTINCT FROM`, `= ANY(array)`, a column wrapped in a cast or in any
 /// other function, ...) is deliberately not recognized.
-fn null_rejected_columns(expr: &ExprImpl) -> Vec<usize> {
+pub(super) fn null_rejected_columns(expr: &ExprImpl) -> Vec<usize> {
     let Some(call) = expr.as_function_call() else {
         return vec![];
     };

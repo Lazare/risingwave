@@ -61,6 +61,12 @@ pub struct OptimizerContext {
     /// Batch materialized view candidates for exact-match rewriting.
     batch_mview_candidates: RefCell<Vec<MaterializedViewCandidate>>,
 
+    /// Whether this context plans a streaming job again without the pruning of the sub-plans
+    /// proven empty, only to report what the pruning saves. The notices to the user are muted.
+    stream_prune_baseline: Cell<bool>,
+    /// Number of rules applied by the pruning of the sub-plans proven empty of a streaming plan.
+    stream_prune_rule_applied: Cell<usize>,
+
     /// Last assigned plan node ID.
     last_plan_node_id: Cell<i32>,
     /// Last assigned correlated ID.
@@ -114,6 +120,8 @@ impl OptimizerContext {
             overwrite_options,
             iceberg_snapshot_id_map: RefCell::new(HashMap::new()),
             batch_mview_candidates: RefCell::new(Vec::new()),
+            stream_prune_baseline: Cell::new(false),
+            stream_prune_rule_applied: Cell::new(0),
 
             last_plan_node_id: Cell::new(RESERVED_ID_NUM.into()),
             last_correlated_id: Cell::new(0),
@@ -139,6 +147,8 @@ impl OptimizerContext {
             overwrite_options: OverwriteOptions::default(),
             iceberg_snapshot_id_map: RefCell::new(HashMap::new()),
             batch_mview_candidates: RefCell::new(Vec::new()),
+            stream_prune_baseline: Cell::new(false),
+            stream_prune_rule_applied: Cell::new(0),
 
             last_plan_node_id: Cell::new(0),
             last_correlated_id: Cell::new(0),
@@ -203,6 +213,24 @@ impl OptimizerContext {
         *self.total_rule_applied.borrow()
     }
 
+    /// Plan without the pruning of the sub-plans proven empty, see `stream_prune_baseline`.
+    pub fn set_stream_prune_baseline(&self) {
+        self.stream_prune_baseline.set(true);
+    }
+
+    pub fn is_stream_prune_baseline(&self) -> bool {
+        self.stream_prune_baseline.get()
+    }
+
+    pub fn add_stream_prune_rule_applied(&self, num: usize) {
+        self.stream_prune_rule_applied
+            .set(self.stream_prune_rule_applied.get() + num);
+    }
+
+    pub fn stream_prune_rule_applied(&self) -> usize {
+        self.stream_prune_rule_applied.get()
+    }
+
     pub fn is_explain_verbose(&self) -> bool {
         self.explain_options.verbose
     }
@@ -228,6 +256,10 @@ impl OptimizerContext {
     }
 
     pub fn warn_to_user(&self, str: impl Into<String>) {
+        if self.is_stream_prune_baseline() {
+            // Already sent while planning the job itself.
+            return;
+        }
         self.session_ctx().notice_to_user(str);
     }
 

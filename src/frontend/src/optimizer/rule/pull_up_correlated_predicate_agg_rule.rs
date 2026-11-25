@@ -14,12 +14,13 @@
 
 use fixedbitset::FixedBitSet;
 use itertools::{Either, Itertools};
-use risingwave_common::types::DataType;
+use risingwave_common::types::{DataType, ScalarImpl};
 use risingwave_common::util::column_index_mapping::ColIndexMapping;
 use risingwave_expr::aggregate::{AggType, PbAggKind};
+use risingwave_pb::plan_common::JoinType;
 
 use super::prelude::{PlanRef, *};
-use crate::expr::{Expr, ExprImpl, ExprRewriter, ExprType, FunctionCall, InputRef};
+use crate::expr::{Expr, ExprImpl, ExprRewriter, ExprType, FunctionCall, InputRef, Literal};
 use crate::optimizer::plan_expr_visitor::Strong;
 use crate::optimizer::plan_node::generic::{Agg, GenericPlanNode, GenericPlanRef};
 use crate::optimizer::plan_node::*;
@@ -59,7 +60,16 @@ use crate::utils::{Condition, IndexSet};
 ///                 |
 ///               Filter
 /// ```
-pub struct PullUpCorrelatedPredicateAggRule {}
+///
+/// The variant for streaming plans (`create_for_stream`) also applies when the result of the
+/// aggregation over an empty input is not NULL (`count`, `EXISTS`, `coalesce(array_agg(..), ..)`):
+/// a projection above the join gives the value of the empty input to the outer rows that no group
+/// matched. It also applies to a scalar subquery still marked as returning at most one row (an
+/// aggregation without group key does), and only to a left outer apply, the form of a subquery in
+/// a select list or a condition.
+pub struct PullUpCorrelatedPredicateAggRule {
+    for_stream: bool,
+}
 impl Rule<Logical> for PullUpCorrelatedPredicateAggRule {
     fn apply(&self, plan: PlanRef) -> Option<PlanRef> {
         let top_filter = if let Some(top_filter) = plan.as_logical_filter() {
@@ -72,7 +82,10 @@ impl Rule<Logical> for PullUpCorrelatedPredicateAggRule {
         let (apply_left, apply_right, apply_on, join_type, correlated_id, _, max_one_row) =
             apply.clone().decompose();
 
-        if max_one_row {
+        if max_one_row && !self.for_stream {
+            return None;
+        }
+        if self.for_stream && join_type != JoinType::LeftOuter {
             return None;
         }
 
@@ -95,6 +108,15 @@ impl Rule<Logical> for PullUpCorrelatedPredicateAggRule {
             return None;
         }
         assert!(grouping_sets.is_empty());
+        // The value of every aggregate call over an empty input, for the variant for streaming.
+        let empty_values = if self.for_stream {
+            agg_calls
+                .iter()
+                .map(empty_input_value)
+                .collect::<Option<Vec<_>>>()?
+        } else {
+            vec![]
+        };
         let bottom_project = if let Some(project) = input.as_logical_project() {
             project.clone()
         } else {
@@ -153,10 +175,37 @@ impl Rule<Logical> for PullUpCorrelatedPredicateAggRule {
 
         let new_bottom_proj: PlanRef = LogicalProject::new(filter, bottom_proj_exprs).into();
 
+        // The variant for streaming: the outputs that are not NULL over an empty input get, for the
+        // outer rows that no group matches, the value they have over an empty input.
+        let mut empty_outputs: Vec<Option<ExprImpl>> = vec![];
+        if self.for_stream {
+            let mut null_aggs = FixedBitSet::with_capacity(agg_calls.len());
+            for (i, value) in empty_values.iter().enumerate() {
+                if value.is_null() {
+                    null_aggs.insert(i);
+                }
+            }
+            let mut substitute = EmptyInputRewriter {
+                values: &empty_values,
+            };
+            empty_outputs = top_proj_exprs
+                .iter()
+                .map(|expr| {
+                    (!Strong::is_null(expr, null_aggs.clone()))
+                        .then(|| fold_constant(substitute.rewrite_expr(expr.clone())))
+                })
+                .collect();
+            // A condition of the apply could reject a matched group: its row would then be padded
+            // with NULLs, not with the values over an empty input.
+            if empty_outputs.iter().any(Option::is_some) && !apply_on.always_true() {
+                return None;
+            }
+        }
+
         // We can apply this rule only if:
         // 1. The `group by + proj` returns null for empty input
         // 2. OR the top filter is null for empty input
-        {
+        if !self.for_stream {
             // When group input is empty, if the agg is not `count`, it would return null.
             let null_agg_pos = agg_calls
                 .iter()
@@ -267,12 +316,62 @@ impl Rule<Logical> for PullUpCorrelatedPredicateAggRule {
             conjunctions: cor_eq_exprs,
         });
 
+        let apply_len = apply.schema().len();
+        let apply_left_len = apply_left.schema().len();
+        if empty_outputs.iter().any(Option::is_some) {
+            // Keep the first group key column: it is NULL exactly when no group matched, because the
+            // join compares it with `=`.
+            let key_position = apply_left_len + new_top_proj.schema().len() - cor_eq_exprs_len;
+            let key_type = new_top_proj.schema().fields()
+                [new_top_proj.schema().len() - cor_eq_exprs_len]
+                .data_type
+                .clone();
+            let new_join: PlanRef = LogicalJoin::with_output_indices(
+                apply_left,
+                new_top_proj,
+                join_type,
+                on,
+                (0..apply_len).chain([key_position]).collect(),
+            )
+            .into();
+            let matched: ExprImpl = FunctionCall::new_unchecked(
+                ExprType::IsNotNull,
+                vec![InputRef::new(apply_len, key_type).into()],
+                DataType::Boolean,
+            )
+            .into();
+            let exprs = (0..apply_len)
+                .map(|i| {
+                    let data_type = new_join.schema().fields()[i].data_type.clone();
+                    let column: ExprImpl = InputRef::new(i, data_type.clone()).into();
+                    match i
+                        .checked_sub(apply_left_len)
+                        .and_then(|j| empty_outputs[j].clone())
+                    {
+                        Some(empty) => FunctionCall::new_unchecked(
+                            ExprType::Case,
+                            vec![matched.clone(), column, empty],
+                            data_type,
+                        )
+                        .into(),
+                        None => column,
+                    }
+                })
+                .collect();
+            let project: PlanRef = LogicalProject::new(new_join, exprs).into();
+            return Some(if top_filter.predicate().always_true() {
+                project
+            } else {
+                top_filter.clone_with_input(project).into()
+            });
+        }
+
         let new_join = LogicalJoin::with_output_indices(
             apply_left,
             new_top_proj,
             join_type,
             on,
-            (0..apply.schema().len()).collect(),
+            (0..apply_len).collect(),
         )
         .into();
 
@@ -293,8 +392,63 @@ impl ExprRewriter for ShiftInputRefRewriter {
     }
 }
 
+/// Replaces the outputs of the aggregation with their values over an empty input.
+struct EmptyInputRewriter<'a> {
+    values: &'a [ExprImpl],
+}
+impl ExprRewriter for EmptyInputRewriter<'_> {
+    fn rewrite_input_ref(&mut self, input_ref: InputRef) -> ExprImpl {
+        self.values[input_ref.index()].clone()
+    }
+}
+
+fn fold_constant(expr: ExprImpl) -> ExprImpl {
+    match expr.try_fold_const() {
+        Some(Ok(datum)) => Literal::new(datum, expr.return_type()).into(),
+        _ => expr,
+    }
+}
+
+/// The value of an aggregate call over an empty input, for the calls whose value is known.
+fn empty_input_value(call: &PlanAggCall) -> Option<ExprImpl> {
+    let AggType::Builtin(kind) = &call.agg_type else {
+        return None;
+    };
+    let datum = match kind {
+        PbAggKind::Count if call.return_type == DataType::Int64 => Some(ScalarImpl::Int64(0)),
+        PbAggKind::Sum
+        | PbAggKind::Min
+        | PbAggKind::Max
+        | PbAggKind::Avg
+        | PbAggKind::StringAgg
+        | PbAggKind::ArrayAgg
+        | PbAggKind::FirstValue
+        | PbAggKind::LastValue
+        | PbAggKind::VarPop
+        | PbAggKind::VarSamp
+        | PbAggKind::StddevPop
+        | PbAggKind::StddevSamp
+        | PbAggKind::BitAnd
+        | PbAggKind::BitOr
+        | PbAggKind::BitXor
+        | PbAggKind::BoolAnd
+        | PbAggKind::BoolOr
+        | PbAggKind::JsonbAgg
+        | PbAggKind::JsonbObjectAgg
+        | PbAggKind::ArgMin
+        | PbAggKind::ArgMax => None,
+        _ => return None,
+    };
+    Some(Literal::new(datum, call.return_type.clone()).into())
+}
+
 impl PullUpCorrelatedPredicateAggRule {
     pub fn create() -> BoxedRule {
-        Box::new(PullUpCorrelatedPredicateAggRule {})
+        Box::new(PullUpCorrelatedPredicateAggRule { for_stream: false })
+    }
+
+    /// The variant for streaming plans, see the rule.
+    pub fn create_for_stream() -> BoxedRule {
+        Box::new(PullUpCorrelatedPredicateAggRule { for_stream: true })
     }
 }
