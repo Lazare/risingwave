@@ -1,2 +1,1 @@
 # Differential tests run by `proto-streaming-prune-check.yml`: <name> <file> <minutes>.
-union factor_union_join 90
