@@ -136,6 +136,20 @@ Seen in Materialize (`reduce_elision`), Calcite (`AGGREGATE_REMOVE`), CockroachD
 `SELECT id, x, y FROM t WHERE p AND q AND id IS NOT NULL`. Same for two aggregations of the same
 input joined on their group key: one aggregation with a `FILTER` per call.
 
+- **First step, raised on 2026-11-25: the same table joined several times on its key.**
+  `f LEFT JOIN d d1 ON f.a = d1.id LEFT JOIN d d2 ON f.a = d2.id` reads the same row of `d`
+  twice: by transitivity `d1.id = d2.id`, which is a self-join of `d` on its key. One join is
+  enough and the columns of `d2` are those of `d1`. Typical when two views each join the same
+  dimension and a third one joins both views. Sub-plan sharing already gives a single scan of
+  `d`, but each join keeps its own state for both of its sides.
+  - Sound when both joins read the same relation with the same filter, both conditions bind a
+    key of it to the *same* column of the other side (not `buyer_id` and `seller_id`: those are
+    two different rows), and the join types agree (both inner, both left, or inner then left).
+  - With different filters on the two reads, the columns of the second one need a `CASE` on
+    its filter: that is the general rule below.
+  - The work: the two joins are often not adjacent after join ordering, the columns of the kept
+    read must be widened and carried through the joins in between, and inner joins can be
+    handled in the multi-join form while left joins can not.
 - Both sides must be the same stream at the same epoch: not for temporal joins, nor for a side
   behind a temporal filter or an emit-on-window-close delay.
 - The work is matching two sub-plans up to a column mapping, looking through shared sub-plans.
