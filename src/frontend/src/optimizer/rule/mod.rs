@@ -221,9 +221,12 @@ mod apply_one_row_join_split_rule;
 pub use apply_one_row_join_split_rule::*;
 mod repeated_lookup_merge_rule;
 pub use repeated_lookup_merge_rule::*;
-// The default branch of a top-1 over a union (`streaming_merge_lookups_under_dedup`).
+// The default branch of a top-1 over a union, the unused joins below an operator that does not
+// see duplicates (`streaming_merge_lookups_under_dedup`).
 mod top_one_default_branch_rule;
 pub use top_one_default_branch_rule::*;
+mod unused_join_under_dedup_rule;
+pub use unused_join_under_dedup_rule::*;
 mod unique_key_simplify_rule;
 pub use unique_key_simplify_rule::*;
 mod join_project_transpose_rule;
@@ -374,6 +377,7 @@ macro_rules! for_all_rules {
             , { AggOnKeyEliminateRule }
             , { RepeatedLookupMergeRule }
             , { TopOneDefaultBranchRule }
+            , { UnusedJoinUnderDedupRule }
             , { CommonJoinOverUnionRule }
             , { ApplyOneRowJoinSplitRule }
             , { BushyTreeJoinOrderingRule }

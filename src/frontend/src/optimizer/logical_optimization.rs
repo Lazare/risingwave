@@ -545,11 +545,15 @@ static STREAM_MERGE_REPEATED_LOOKUPS: LazyLock<OptimizationStage> = LazyLock::ne
     )
 });
 
-// The default branch of a top-1 over a union (`streaming_merge_lookups_under_dedup`).
+// The default branch of a top-1 over a union, the unused joins below an operator that does not
+// see duplicates (`streaming_merge_lookups_under_dedup`).
 static STREAM_TOP_ONE_DEFAULT_BRANCH: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Remove Default Branch Of Top One For Stream",
-        vec![TopOneDefaultBranchRule::create()],
+        vec![
+            TopOneDefaultBranchRule::create(),
+            UnusedJoinUnderDedupRule::create(),
+        ],
         ApplyOrder::BottomUp,
     )
 });

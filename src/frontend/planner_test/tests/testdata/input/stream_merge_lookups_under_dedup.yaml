@@ -7,6 +7,7 @@
     create table a (k int primary key, id int, ok boolean);
     create table b (k int primary key, id int);
     create table x (k int primary key, tid int);
+    create table q (k int primary key, id int, v int);
     create view st as select id, status, p from (
       select id, status, p, row_number() over (partition by id order by p desc) as rn from (
         select id, 'initiated' as status, 1 as p from t
@@ -124,5 +125,63 @@
         ) u
       ) z where rn = 1
     ) s on t.id = s.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+
+# Unused left joins below an operator that does not see duplicates: `UnusedJoinUnderDedupRule`.
+- name: unused left join below a top-1 whose other columns are constants
+  before: [setup]
+  sql: |
+    select id, status from (
+      select id, status, row_number() over (partition by id order by p desc) as rn from (
+        select t.id, 'x' as status, 1 as p from t left join q on t.id = q.id
+      ) u
+    ) z where rn = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: unused left join below a distinct
+  before: [setup]
+  sql: |
+    select distinct t.id, t.name from t left join q on t.id = q.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: unused left join below min, max and bool_or
+  before: [setup]
+  sql: |
+    select t.id, min(t.name) as mn, max(t.rev) as mx, bool_or(t.flag) as f from t left join q on t.id = q.id group by t.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: unused left join in the right side of an exists
+  before: [setup]
+  sql: |
+    select x.k from x where exists (select 1 from t left join q on t.id = q.id where t.id = x.tid);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: unused left join in a branch of a union below a distinct
+  before: [setup]
+  sql: |
+    select distinct id from (select t.id from t left join q on t.id = q.id union all select a.id from a) u;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - unused left join below a count
+  before: [setup]
+  sql: |
+    select t.id, count(*) as c from t left join q on t.id = q.id group by t.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - unused left join below a top-1 that outputs a column out of its key and order
+  before: [setup]
+  sql: |
+    select id, name from (
+      select t.id, t.name, row_number() over (partition by t.id order by t.rev desc) as rn
+      from t left join q on t.id = q.id
+    ) z where rn = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - left join whose right side is used below a distinct
+  before: [setup]
+  sql: |
+    select distinct t.id, q.v from t left join q on t.id = q.id;
   expected_outputs:
   - optimized_logical_plan_for_stream
