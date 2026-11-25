@@ -387,6 +387,7 @@ macro_rules! for_all_rules {
             , { StackedAggMergeRule }
             , { LateralTableFunctionRule }
             , { UnnestArrayOfTableFunctionRule }
+            , { UnionScanShareRule }
             , { BushyTreeJoinOrderingRule }
             , { StreamProjectMergeRule }
             , { StreamProjectSplitRule }
