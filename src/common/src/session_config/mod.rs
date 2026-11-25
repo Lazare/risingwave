@@ -294,6 +294,12 @@ pub struct SessionConfig {
     #[parameter(default = false)]
     streaming_merge_repeated_lookups: bool,
 
+    /// In the plan of a new streaming job, remove what only adds duplicates that a consumer above
+    /// does not see: the default branch of a top-1 per key over a union, when the other side of
+    /// the join that reads the top-1 already carries its row. Defaults to false.
+    #[parameter(default = false)]
+    streaming_merge_lookups_under_dedup: bool,
+
     /// In the plan of a new streaming job, join once, above a `UNION ALL`, the table that several
     /// of its branches join on the same columns: the table is scanned once and its join state is
     /// kept once. Defaults to false.

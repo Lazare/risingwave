@@ -1,0 +1,128 @@
+# Tests for the removal of what only adds duplicates that a consumer does not see, in streaming
+# plans (`streaming_merge_lookups_under_dedup`): `TopOneDefaultBranchRule`.
+- id: setup
+  sql: |
+    set streaming_merge_lookups_under_dedup = true;
+    create table t (rev int primary key, id int, name varchar, flag boolean);
+    create table a (k int primary key, id int, ok boolean);
+    create table b (k int primary key, id int);
+    create table x (k int primary key, tid int);
+    create view st as select id, status, p from (
+      select id, status, p, row_number() over (partition by id order by p desc) as rn from (
+        select id, 'initiated' as status, 1 as p from t
+        union all select id, 'active', 2 from a where ok
+        union all select id, 'blocked', 3 from b
+      ) u
+    ) z where rn = 1;
+    create view sc as select id, status from (
+      select id, status, row_number() over (partition by id order by p desc) as rn from (
+        select id, 'open' as status, 1 as p from t
+        union all select id, case when ok then 'approved' else 'rejected' end, case when ok then 4 else 5 end from a
+        union all select id, 'pending', 2 from b
+      ) u
+    ) z where rn = 1;
+  expected_outputs: []
+- name: off by default - the default branch is kept
+  before: [setup]
+  sql: |
+    set streaming_merge_lookups_under_dedup = false;
+    select t.rev, t.name, st.status from t join st on t.id = st.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: inner join with a status whose default branch reads the same table
+  before: [setup]
+  sql: |
+    select t.rev, t.name, st.status, st.p from t join st on t.id = st.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: left join with a status whose priorities include a case of literals
+  before: [setup]
+  sql: |
+    select t.rev, t.name, sc.status from t left join sc on t.id = sc.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: rows whose status is the default one
+  before: [setup]
+  sql: |
+    select t.rev, t.name from t join st on t.id = st.id where st.status = 'initiated';
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: status of the rows of a join that carries the table
+  before: [setup]
+  sql: |
+    select x.k, t.name, st.status from x join t on x.tid = t.id join st on x.tid = st.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - the default branch is not strictly the worst
+  before: [setup]
+  sql: |
+    select t.rev, s.status from t join (
+      select id, status from (
+        select id, status, row_number() over (partition by id order by p desc) as rn from (
+          select id, 'initiated' as status, 2 as p from t
+          union all select id, 'active', 2 from a
+        ) u
+      ) z where rn = 1
+    ) s on t.id = s.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: a case of the other branch may give NULL, which comes first in a descending order
+  before: [setup]
+  sql: |
+    select t.rev, s.status from t join (
+      select id, status from (
+        select id, status, row_number() over (partition by id order by p desc) as rn from (
+          select id, 'initiated' as status, 1 as p from t
+          union all select id, 'active', case when ok then 2 end from a
+        ) u
+      ) z where rn = 1
+    ) s on t.id = s.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - the default branch is filtered and the carried rows are not
+  before: [setup]
+  sql: |
+    select t.rev, s.status from t join (
+      select id, status from (
+        select id, status, row_number() over (partition by id order by p desc) as rn from (
+          select id, 'initiated' as status, 1 as p from t where flag
+          union all select id, 'active', 2 from a
+        ) u
+      ) z where rn = 1
+    ) s on t.id = s.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - the default branch gives a column of its rows
+  before: [setup]
+  sql: |
+    select t.rev, s.status from t join (
+      select id, status from (
+        select id, status, row_number() over (partition by id order by p desc) as rn from (
+          select id, name as status, 1 as p from t
+          union all select id, 'active', 2 from a
+        ) u
+      ) z where rn = 1
+    ) s on t.id = s.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - the left side does not carry the table of the default branch
+  before: [setup]
+  sql: |
+    select x.k, st.status from x join st on x.tid = st.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - an ascending order, where the default branch comes first
+  before: [setup]
+  sql: |
+    select t.rev, s.status from t join (
+      select id, status from (
+        select id, status, row_number() over (partition by id order by p) as rn from (
+          select id, 'initiated' as status, 1 as p from t
+          union all select id, 'active', 2 from a
+        ) u
+      ) z where rn = 1
+    ) s on t.id = s.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream

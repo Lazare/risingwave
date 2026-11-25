@@ -62,6 +62,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use risingwave_common::catalog::TableId;
 use risingwave_common::types::{DataType, StructType};
+use risingwave_common::util::iter_util::ZipEqFast;
 use risingwave_expr::aggregate::PbAggKind;
 use risingwave_pb::plan_common::JoinType;
 
@@ -245,7 +246,7 @@ enum Relation {
 /// A lookup: a plan made of `Project` and `Filter` nodes over the read of a [`Relation`] (see
 /// [`lookup_of`]). For a table, the read is the scan and the columns are those of the table; for
 /// a shared sub-plan, the read is the `Share` node and the columns are its output columns.
-struct Lookup {
+pub(super) struct Lookup {
     relation: Relation,
     /// The node that reads the relation.
     read_id: PlanNodeId,
@@ -254,7 +255,7 @@ struct Lookup {
     /// The conjuncts that a row of the relation satisfies to be read, over its columns.
     predicate: Vec<ExprImpl>,
     /// The output columns of the plan, over the columns of the relation.
-    exprs: Vec<ExprImpl>,
+    pub(super) exprs: Vec<ExprImpl>,
 }
 
 impl Lookup {
@@ -267,7 +268,7 @@ impl Lookup {
 
 /// Returns the [`Lookup`] form of a plan: a [`PureScan`], or `Project` and `Filter` nodes over a
 /// shared sub-plan that has a unique key (see [`share_key`]).
-fn lookup_of(plan: &PlanRef) -> Option<Lookup> {
+pub(super) fn lookup_of(plan: &PlanRef) -> Option<Lookup> {
     if let Some(pure) = pure_scan(plan) {
         return Some(Lookup {
             relation: Relation::Table(pure.scan.table().id()),
@@ -1164,6 +1165,35 @@ fn searched_same_rows(instance: &Carried, predicate: &[ExprImpl]) -> bool {
     instance.outer_lookup.as_ref().is_some_and(|lookup| {
         lookup.predicate.iter().all(|c| predicate.contains(c))
             && predicate.iter().all(|c| lookup.predicate.contains(c))
+    })
+}
+
+/// Whether the rows of a plan carry a row of the relation of a lookup that the lookup reads too,
+/// with, for each of `columns` (columns of the relation), the column of `compared` at the same
+/// position bound to it: whenever these columns are not `NULL`, the lookup has a row with these
+/// values (the carried row is one), whether or not the relation is unique on them. Used by
+/// `TopOneDefaultBranchRule`.
+pub(super) fn carried_witness(
+    plan: &PlanRef,
+    lookup: &Lookup,
+    columns: &[usize],
+    compared: &[usize],
+) -> bool {
+    carried(plan, &mut Memo::new()).iter().any(|instance| {
+        instance.relation == lookup.relation
+            && columns
+                .iter()
+                .zip_eq_fast(compared)
+                .all(|(column, plan_column)| {
+                    instance
+                        .bound
+                        .get(column)
+                        .is_some_and(|bound| bound.contains(plan_column))
+                })
+            && lookup
+                .predicate
+                .iter()
+                .all(|conjunct| instance.predicate.contains(conjunct))
     })
 }
 
