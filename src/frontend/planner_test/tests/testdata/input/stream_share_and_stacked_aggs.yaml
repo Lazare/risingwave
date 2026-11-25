@@ -1,0 +1,324 @@
+# Tests for the late sharing of identical sub-plans (`streaming_share_identical_subplans`:
+# `share_identical_subplans`) and for the merge of stacked aggregations
+# (`streaming_merge_stacked_aggregations`: `StackedAggMergeRule`) in streaming plans.
+- id: setup_share
+  sql: |
+    set streaming_share_identical_subplans = true;
+    create table a (id int primary key, k int, x int);
+    create table h (id int primary key, sid int, st varchar, v int);
+    create table b (id int primary key, k int, y int);
+    create view v1 as select a.id, a.k, h.v from a join h on a.k = h.sid;
+    create view g1 as select sid, count(*) as c, max(v) as m from h group by sid;
+  expected_outputs: []
+- id: setup_share_off
+  sql: |
+    create table a (id int primary key, k int, x int);
+    create table h (id int primary key, sid int, st varchar, v int);
+    create view v1 as select a.id, a.k, h.v from a join h on a.k = h.sid;
+  expected_outputs: []
+- id: setup_aggs
+  sql: |
+    set streaming_merge_stacked_aggregations = true;
+    create table t (id int primary key, g int, w int, v int, n numeric, big bigint, f float8, flag boolean);
+    create table s (id int primary key, g int, v int);
+    create table a (id int primary key, k int);
+  expected_outputs: []
+- id: setup_aggs_off
+  sql: |
+    create table t (id int primary key, g int, w int, v int, n numeric, big bigint, f float8, flag boolean);
+  expected_outputs: []
+- id: setup_both
+  sql: |
+    set streaming_share_identical_subplans = true;
+    set streaming_merge_stacked_aggregations = true;
+    create table t (id int primary key, g int, w int, v int);
+  expected_outputs: []
+
+# Late sharing of identical sub-plans.
+
+- name: off by default - the same join, filtered above a view and in the query, is computed twice
+  before: [setup_share_off]
+  sql: |
+    select id, v from v1 where v > 0
+    union all
+    select a.id, h.v from a join h on a.k = h.sid where h.v > 0;
+  expected_outputs:
+  - stream_plan
+
+- name: the same join, filtered above a view and in the query, is computed once
+  before: [setup_share]
+  sql: |
+    select id, v from v1 where v > 0
+    union all
+    select a.id, h.v from a join h on a.k = h.sid where h.v > 0;
+  expected_outputs:
+  - stream_plan
+
+- name: the same aggregation, from a view whose other aggregate is pruned, is computed once
+  before: [setup_share]
+  sql: |
+    select a.id, g1.c from a join g1 on a.k = g1.sid
+    union all
+    select b.id, x.c from b join (select sid, count(*) as c from h group by sid) x on b.k = x.sid;
+  expected_outputs:
+  - stream_plan
+
+- name: the domain of two subqueries with the same correlation is computed once
+  before: [setup_share]
+  sql: |
+    select a.id,
+      (select max(v) from h where h.sid = a.k) as m1,
+      (select count(*) from h where h.sid = a.k and h.st = 'x') as c2
+    from a;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - identical filtered scans without state are not shared
+  before: [setup_share]
+  sql: |
+    select a.id from a where exists (select 1 from h where h.sid = a.k and h.v > 0)
+    union all
+    select b.id from b where exists (select 1 from h where h.sid = b.k and h.v > 0);
+  expected_outputs:
+  - stream_plan
+
+- name: kept - a plan without duplicate
+  before: [setup_share]
+  sql: |
+    select a.id, h.v from a join h on a.k = h.sid where h.v > 0;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - the same join with different filters is not identical
+  before: [setup_share]
+  sql: |
+    select a.id, h.v from a join h on a.k = h.sid where h.v > 0
+    union all
+    select a.id, h.v from a join h on a.k = h.sid where h.v < 0;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - the same join reading other columns is not identical
+  before: [setup_share]
+  sql: |
+    select a.id, h.v from a join h on a.k = h.sid
+    union all
+    select a.id, h.id from a join h on a.k = h.sid;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - a sub-plan shared at the beginning stays shared
+  before: [setup_share]
+  sql: |
+    with j as (select a.id, h.v from a join h on a.k = h.sid where h.v > 0)
+    select id, v from j union all select id, v + 1 from j;
+  expected_outputs:
+  - stream_plan
+
+# Merge of stacked aggregations.
+
+- name: off by default - sum of sums
+  before: [setup_aggs_off]
+  sql: |
+    select g, sum(sv) as s from (select g, w, sum(v) as sv from t group by g, w) x group by g;
+  expected_outputs:
+  - stream_plan
+
+- name: sum of sums, sum of counts, max of maxes, min of mins, on fewer group key columns
+  before: [setup_aggs]
+  sql: |
+    select g, sum(sv) as s, sum(c) as c, sum(cv) as cv, max(mx) as mx, min(mn) as mn
+    from (
+      select g, w, sum(v) as sv, count(*) as c, count(v) as cv, max(v) as mx, min(v) as mn
+      from t group by g, w
+    ) x group by g;
+  expected_outputs:
+  - stream_plan
+
+- name: sum of sums of bigint and numeric keeps the types of the stacked sums
+  before: [setup_aggs]
+  sql: |
+    select g, sum(sb) as sb, sum(sn) as sn
+    from (select g, w, sum(big) as sb, sum(n) as sn from t group by g, w) x group by g;
+  expected_outputs:
+  - stream_plan
+
+- name: the FILTER of an inner aggregate is kept
+  before: [setup_aggs]
+  sql: |
+    select g, sum(sp) as sp, sum(cp) as cp, bool_or(bo) as bo
+    from (
+      select g, w, sum(v) filter (where v > 0) as sp, count(*) filter (where w > 0) as cp,
+        bool_or(flag) as bo
+      from t group by g, w
+    ) x group by g;
+  expected_outputs:
+  - stream_plan
+
+- name: same group key on both levels
+  before: [setup_aggs]
+  sql: |
+    select g, w, sum(sv) as s, max(mx) as mx
+    from (select g, w, sum(v) as sv, max(v) as mx from t group by g, w) x group by g, w;
+  expected_outputs:
+  - stream_plan
+
+- name: without outer group key, sum of sums and max of maxes
+  before: [setup_aggs]
+  sql: |
+    select sum(sv) as s, max(mx) as mx from (select g, sum(v) as sv, max(v) as mx from t group by g) x;
+  expected_outputs:
+  - stream_plan
+
+- name: a DISTINCT below count and sum becomes distinct aggregates
+  before: [setup_aggs]
+  sql: |
+    select g, count(v) as c, sum(v) as s from (select distinct g, v from t) d group by g;
+  expected_outputs:
+  - stream_plan
+
+- name: a DISTINCT below a count distinct on fewer columns
+  before: [setup_aggs]
+  sql: |
+    select g, count(distinct v) as c from (select distinct g, v, w from t) d group by g;
+  expected_outputs:
+  - stream_plan
+
+- name: DISTINCT of DISTINCT
+  before: [setup_aggs]
+  sql: |
+    select distinct g from (select distinct g, v from t) d;
+  expected_outputs:
+  - stream_plan
+
+- name: GROUP BY on fewer columns without aggregate
+  before: [setup_aggs]
+  sql: |
+    select g from (select g, w, count(*) as c from t group by g, w) x group by g;
+  expected_outputs:
+  - stream_plan
+
+- name: three levels of sums
+  before: [setup_aggs]
+  sql: |
+    select g, sum(s2) as s from (
+      select g, w, sum(s1) as s2 from (select g, w, v, sum(n) as s1 from t group by g, w, v) x group by g, w
+    ) y group by g;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - avg of avg
+  before: [setup_aggs]
+  sql: |
+    select g, avg(av) as a from (select g, w, avg(v) as av from t group by g, w) x group by g;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - count of counts counts inner groups
+  before: [setup_aggs]
+  sql: |
+    select g, count(c) as n, count(*) as m from (select g, w, count(*) as c from t group by g, w) x group by g;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - sum of sums of floats
+  before: [setup_aggs]
+  sql: |
+    select g, sum(sf) as s from (select g, w, sum(f) as sf from t group by g, w) x group by g;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - sum of counts without outer group key
+  before: [setup_aggs]
+  sql: |
+    select sum(c) as c from (select g, count(*) as c from t group by g) x;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - a HAVING on the inner aggregation
+  before: [setup_aggs]
+  sql: |
+    select g, sum(sv) as s from (select g, w, sum(v) as sv from t group by g, w having count(*) > 1) x group by g;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - outer group key on an aggregate
+  before: [setup_aggs]
+  sql: |
+    select c, count(*) as n from (select g, count(*) as c from t group by g) x group by c;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - max of mins, sum of distinct sums
+  before: [setup_aggs]
+  sql: |
+    select g, max(mn) as m, sum(distinct sv) as s from (select g, w, min(v) as mn, sum(v) as sv from t group by g, w) x group by g;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - count of a column of a DISTINCT on more columns counts duplicates of the column
+  before: [setup_aggs]
+  sql: |
+    select g, count(v) as c from (select distinct g, v, w from t) d group by g;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - min of a column of a DISTINCT, the state would hold every row
+  before: [setup_aggs]
+  sql: |
+    select g, min(v) as m from (select distinct g, v from t) d group by g;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - an inner aggregation shared by two consumers
+  before: [setup_aggs]
+  sql: |
+    with x as (select g, w, sum(v) as sv from t group by g, w)
+    select g, sum(sv) as s from x group by g
+    union all
+    select g, sv::numeric from x where w = 1;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - sums of the aggregations of the branches of a union
+  before: [setup_aggs]
+  sql: |
+    select g, sum(sv) as s from (
+      select g, sum(v) as sv from t group by g
+      union all
+      select g, sum(v) as sv from s group by g
+    ) u group by g;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - top-1 over a DISTINCT
+  before: [setup_aggs]
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select id as k, 'a' as st, 1 as p from a
+        union all
+        select g as k, 'b' as st, 2 as p from (select distinct g from s) as d
+      ) as u
+    ) as r where rn = 1;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - semi join over a DISTINCT
+  before: [setup_aggs]
+  sql: |
+    select id from a where k in (select distinct g from s);
+  expected_outputs:
+  - stream_plan
+
+# Both.
+
+- name: two stacked aggregations merged into the same aggregation are then computed once
+  before: [setup_both]
+  sql: |
+    select x.g, x.s, y.m from
+      (select g, sum(sv) as s from (select g, w, sum(v) as sv from t group by g, w) i group by g) x
+      join (select g, sum(sv) as m from (select g, v, sum(v) as sv from t group by g, v) j group by g) y
+      on x.g = y.g;
+  expected_outputs:
+  - stream_plan

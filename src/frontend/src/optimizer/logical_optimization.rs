@@ -249,6 +249,16 @@ static STREAM_SIMPLE_UNNESTING_AGG: LazyLock<OptimizationStage> = LazyLock::new(
     )
 });
 
+// Merge of stacked aggregations, see `StackedAggMergeRule`.
+static STREAM_MERGE_STACKED_AGGS: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Merge Stacked Aggregations For Stream",
+        vec![StackedAggMergeRule::create()],
+        // Bottom-up: an aggregation merged below can be merged again with the one above.
+        ApplyOrder::BottomUp,
+    )
+});
+
 static SET_OPERATION_MERGE: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Set Operation Merge",
@@ -982,6 +992,43 @@ impl LogicalOptimizer {
                 plan = plan.optimize_by_rules(&STREAM_PRUNE_EMPTY_RELATION)?;
                 plan = Self::column_pruning(plan, explain_trace, &ctx);
                 plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
+            }
+        }
+        // Merge an aggregation over another one into a single aggregation of the input of the inner
+        // one (`StackedAggMergeRule`), then share the stateful sub-plans that the simplifications
+        // above made identical (`share_identical_subplans`): the common sub-plan sharing at the
+        // beginning only saw them before predicate pushdown, unnesting and column pruning. Last,
+        // because the rules above need a plan per consumer.
+        if ctx
+            .session_ctx()
+            .config()
+            .streaming_merge_stacked_aggregations()
+            && !ctx.is_stream_prune_baseline()
+        {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&STREAM_MERGE_STACKED_AGGS)?;
+            let applied = ctx.total_rule_applied() - applied_before;
+            if applied > 0 {
+                ctx.add_stream_prune_rule_applied(applied);
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
+            }
+        }
+        if enable_share_plan
+            && ctx
+                .session_ctx()
+                .config()
+                .streaming_share_identical_subplans()
+            && !ctx.is_stream_prune_baseline()
+        {
+            let (shared, new_shares) = share_identical_subplans(plan);
+            plan = shared;
+            if new_shares > 0 {
+                ctx.add_stream_prune_rule_applied(new_shares);
+                if explain_trace {
+                    ctx.trace("Share Identical Sub-plans:");
+                    ctx.trace(plan.explain_to_string());
+                }
             }
         }
         crate::optimizer::rule::diagnose_repeated_reads(&plan);
