@@ -307,6 +307,13 @@ pub struct SessionConfig {
     #[parameter(default = false)]
     streaming_simplify_subquery_unnesting: bool,
 
+    /// In the plan of a new streaming job, read once the table that several branches of a
+    /// `UNION ALL` read, each with its own filter and projection: one scan, one copy of each row
+    /// per branch, and the filter and projection of each branch applied to its copies. Defaults to
+    /// false.
+    #[parameter(default = false)]
+    streaming_merge_union_scans: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,
