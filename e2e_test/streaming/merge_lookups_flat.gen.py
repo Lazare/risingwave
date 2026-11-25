@@ -76,13 +76,17 @@ CASES = [
     ('kept_nonkey', 'nested lookup compared on a column that is not its key',
      f"select f.id as fid, d.grp, x.sid, x.name from {F} f join {D} d on f.dim_id = d.id "
      f"join (select s.sid, s.id, d2.name from {S} s join {D} d2 on s.id = d2.grp) x on d.id = x.id"),
-    ('kept_padded', 'nested lookup in the padded side of a left join of the tree',
+    ('inner_over_padded', 'inner lookup of a row that a left join of the other side reads',
      f"select f.id as fid, d.grp, x.sid, x.name from {F} f join {D} d on f.dim_id = d.id "
      f"join (select s.sid, s.id, d2.name from {S} s left join {D} d2 on s.id = d2.id) x on d.id = x.id"),
-    ('kept_ext_cond', 'left join whose condition tests a column of a left join of its right side',
+    ('left_ext_rejected', 'left join whose condition rejects the padded rows of a left join of its right side',
      f"select f.id as fid, r.name, r.code from {F} f left join {D} d on f.dim_id = d.id left join ("
      f"select d2.id, d2.name, e.code from {D} d2 left join {E} e on d2.grp = e.id"
      f") r on d.id = r.id and r.code = 'x'"),
+    ('kept_ext_cond', 'left join whose condition tests a column of a left join of its right side',
+     f"select f.id as fid, r.name, r.code from {F} f left join {D} d on f.dim_id = d.id left join ("
+     f"select d2.id, d2.name, e.code from {D} d2 left join {E} e on d2.grp = e.id"
+     f") r on d.id = r.id and r.code is null"),
 ]
 
 out = []

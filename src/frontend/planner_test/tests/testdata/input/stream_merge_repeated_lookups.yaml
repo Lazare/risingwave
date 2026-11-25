@@ -497,11 +497,19 @@
     join (select s.id, s.ts, d2.name from s join d d2 on s.id = d2.grp) x on d.id = x.id;
   expected_outputs:
   - optimized_logical_plan_for_stream
-- name: kept - nested lookup in the padded side of a left join of the tree
+- name: inner lookup of a row that a left join of the other side reads - the padded rows go
   before: [setup_flat]
   sql: |
     select f.id, d.grp, x.ts, x.name from f join d on f.dim_id = d.id
     join (select s.id, s.ts, d2.name from s left join d d2 on s.id = d2.id) x on d.id = x.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: left join whose condition rejects the padded rows of a left join of its right side
+  before: [setup_flat]
+  sql: |
+    select f.id, r.name, r.code from f left join d on f.dim_id = d.id left join (
+      select d2.id, d2.name, e.code from d d2 left join e on d2.grp = e.id
+    ) r on d.id = r.id and r.code = 'x';
   expected_outputs:
   - optimized_logical_plan_for_stream
 - name: kept - left join whose condition tests a column of a left join of its right side
@@ -509,7 +517,7 @@
   sql: |
     select f.id, r.name, r.code from f left join d on f.dim_id = d.id left join (
       select d2.id, d2.name, e.code from d d2 left join e on d2.grp = e.id
-    ) r on d.id = r.id and r.code = 'x';
+    ) r on d.id = r.id and r.code is null;
   expected_outputs:
   - optimized_logical_plan_for_stream
 - name: kept - nested lookups of two different rows

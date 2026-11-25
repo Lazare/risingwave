@@ -146,15 +146,20 @@ create materialized view mlf_kept_anti_unbound_off as select f.id as fid, h.rid 
 statement ok
 create materialized view mlf_kept_nonkey_off as select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s join mlf_d d2 on s.id = d2.grp) x on d.id = x.id;
 
-# nested lookup in the padded side of a left join of the tree
+# inner lookup of a row that a left join of the other side reads
 
 statement ok
-create materialized view mlf_kept_padded_off as select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id;
+create materialized view mlf_inner_over_padded_off as select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id;
+
+# left join whose condition rejects the padded rows of a left join of its right side
+
+statement ok
+create materialized view mlf_left_ext_rejected_off as select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x';
 
 # left join whose condition tests a column of a left join of its right side
 
 statement ok
-create materialized view mlf_kept_ext_cond_off as select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x';
+create materialized view mlf_kept_ext_cond_off as select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code is null;
 
 statement ok
 set streaming_merge_repeated_lookups = true;
@@ -249,15 +254,20 @@ create materialized view mlf_kept_anti_unbound_on as select f.id as fid, h.rid f
 statement ok
 create materialized view mlf_kept_nonkey_on as select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s join mlf_d d2 on s.id = d2.grp) x on d.id = x.id;
 
-# nested lookup in the padded side of a left join of the tree
+# inner lookup of a row that a left join of the other side reads
 
 statement ok
-create materialized view mlf_kept_padded_on as select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id;
+create materialized view mlf_inner_over_padded_on as select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id;
+
+# left join whose condition rejects the padded rows of a left join of its right side
+
+statement ok
+create materialized view mlf_left_ext_rejected_on as select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x';
 
 # left join whose condition tests a column of a left join of its right side
 
 statement ok
-create materialized view mlf_kept_ext_cond_on as select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x';
+create materialized view mlf_kept_ext_cond_on as select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code is null;
 
 # After the backfill: with and without the variable, every materialized view holds the same rows.
 
@@ -407,9 +417,17 @@ select
 
 query III
 select
-  (select count(*) from (select * from mlf_kept_padded_on except select * from mlf_kept_padded_off) x),
-  (select count(*) from (select * from mlf_kept_padded_off except select * from mlf_kept_padded_on) y),
-  (select count(*) from mlf_kept_padded_on) - (select count(*) from mlf_kept_padded_off);
+  (select count(*) from (select * from mlf_inner_over_padded_on except select * from mlf_inner_over_padded_off) x),
+  (select count(*) from (select * from mlf_inner_over_padded_off except select * from mlf_inner_over_padded_on) y),
+  (select count(*) from mlf_inner_over_padded_on) - (select count(*) from mlf_inner_over_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mlf_left_ext_rejected_on except select * from mlf_left_ext_rejected_off) x),
+  (select count(*) from (select * from mlf_left_ext_rejected_off except select * from mlf_left_ext_rejected_on) y),
+  (select count(*) from mlf_left_ext_rejected_on) - (select count(*) from mlf_left_ext_rejected_off);
 ----
 0 0 0
 
@@ -569,17 +587,25 @@ select
 
 query III
 select
-  (select count(*) from (select * from mlf_kept_padded_on except select * from (select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id) q) x),
-  (select count(*) from (select * from (select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id) q except select * from mlf_kept_padded_on) y),
-  (select count(*) from mlf_kept_padded_on) - (select count(*) from (select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id) q);
+  (select count(*) from (select * from mlf_inner_over_padded_on except select * from (select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id) q) x),
+  (select count(*) from (select * from (select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id) q except select * from mlf_inner_over_padded_on) y),
+  (select count(*) from mlf_inner_over_padded_on) - (select count(*) from (select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id) q);
 ----
 0 0 0
 
 query III
 select
-  (select count(*) from (select * from mlf_kept_ext_cond_on except select * from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x') q) x),
-  (select count(*) from (select * from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x') q except select * from mlf_kept_ext_cond_on) y),
-  (select count(*) from mlf_kept_ext_cond_on) - (select count(*) from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x') q);
+  (select count(*) from (select * from mlf_left_ext_rejected_on except select * from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x') q) x),
+  (select count(*) from (select * from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x') q except select * from mlf_left_ext_rejected_on) y),
+  (select count(*) from mlf_left_ext_rejected_on) - (select count(*) from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x') q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mlf_kept_ext_cond_on except select * from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code is null) q) x),
+  (select count(*) from (select * from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code is null) q except select * from mlf_kept_ext_cond_on) y),
+  (select count(*) from mlf_kept_ext_cond_on) - (select count(*) from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code is null) q);
 ----
 0 0 0
 
@@ -754,9 +780,17 @@ select
 
 query III
 select
-  (select count(*) from (select * from mlf_kept_padded_on except select * from mlf_kept_padded_off) x),
-  (select count(*) from (select * from mlf_kept_padded_off except select * from mlf_kept_padded_on) y),
-  (select count(*) from mlf_kept_padded_on) - (select count(*) from mlf_kept_padded_off);
+  (select count(*) from (select * from mlf_inner_over_padded_on except select * from mlf_inner_over_padded_off) x),
+  (select count(*) from (select * from mlf_inner_over_padded_off except select * from mlf_inner_over_padded_on) y),
+  (select count(*) from mlf_inner_over_padded_on) - (select count(*) from mlf_inner_over_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mlf_left_ext_rejected_on except select * from mlf_left_ext_rejected_off) x),
+  (select count(*) from (select * from mlf_left_ext_rejected_off except select * from mlf_left_ext_rejected_on) y),
+  (select count(*) from mlf_left_ext_rejected_on) - (select count(*) from mlf_left_ext_rejected_off);
 ----
 0 0 0
 
@@ -916,17 +950,25 @@ select
 
 query III
 select
-  (select count(*) from (select * from mlf_kept_padded_on except select * from (select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id) q) x),
-  (select count(*) from (select * from (select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id) q except select * from mlf_kept_padded_on) y),
-  (select count(*) from mlf_kept_padded_on) - (select count(*) from (select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id) q);
+  (select count(*) from (select * from mlf_inner_over_padded_on except select * from (select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id) q) x),
+  (select count(*) from (select * from (select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id) q except select * from mlf_inner_over_padded_on) y),
+  (select count(*) from mlf_inner_over_padded_on) - (select count(*) from (select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id) q);
 ----
 0 0 0
 
 query III
 select
-  (select count(*) from (select * from mlf_kept_ext_cond_on except select * from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x') q) x),
-  (select count(*) from (select * from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x') q except select * from mlf_kept_ext_cond_on) y),
-  (select count(*) from mlf_kept_ext_cond_on) - (select count(*) from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x') q);
+  (select count(*) from (select * from mlf_left_ext_rejected_on except select * from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x') q) x),
+  (select count(*) from (select * from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x') q except select * from mlf_left_ext_rejected_on) y),
+  (select count(*) from mlf_left_ext_rejected_on) - (select count(*) from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x') q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mlf_kept_ext_cond_on except select * from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code is null) q) x),
+  (select count(*) from (select * from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code is null) q except select * from mlf_kept_ext_cond_on) y),
+  (select count(*) from mlf_kept_ext_cond_on) - (select count(*) from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code is null) q);
 ----
 0 0 0
 
@@ -1119,9 +1161,17 @@ select
 
 query III
 select
-  (select count(*) from (select * from mlf_kept_padded_on except select * from mlf_kept_padded_off) x),
-  (select count(*) from (select * from mlf_kept_padded_off except select * from mlf_kept_padded_on) y),
-  (select count(*) from mlf_kept_padded_on) - (select count(*) from mlf_kept_padded_off);
+  (select count(*) from (select * from mlf_inner_over_padded_on except select * from mlf_inner_over_padded_off) x),
+  (select count(*) from (select * from mlf_inner_over_padded_off except select * from mlf_inner_over_padded_on) y),
+  (select count(*) from mlf_inner_over_padded_on) - (select count(*) from mlf_inner_over_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mlf_left_ext_rejected_on except select * from mlf_left_ext_rejected_off) x),
+  (select count(*) from (select * from mlf_left_ext_rejected_off except select * from mlf_left_ext_rejected_on) y),
+  (select count(*) from mlf_left_ext_rejected_on) - (select count(*) from mlf_left_ext_rejected_off);
 ----
 0 0 0
 
@@ -1281,17 +1331,25 @@ select
 
 query III
 select
-  (select count(*) from (select * from mlf_kept_padded_on except select * from (select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id) q) x),
-  (select count(*) from (select * from (select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id) q except select * from mlf_kept_padded_on) y),
-  (select count(*) from mlf_kept_padded_on) - (select count(*) from (select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id) q);
+  (select count(*) from (select * from mlf_inner_over_padded_on except select * from (select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id) q) x),
+  (select count(*) from (select * from (select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id) q except select * from mlf_inner_over_padded_on) y),
+  (select count(*) from mlf_inner_over_padded_on) - (select count(*) from (select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id) q);
 ----
 0 0 0
 
 query III
 select
-  (select count(*) from (select * from mlf_kept_ext_cond_on except select * from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x') q) x),
-  (select count(*) from (select * from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x') q except select * from mlf_kept_ext_cond_on) y),
-  (select count(*) from mlf_kept_ext_cond_on) - (select count(*) from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x') q);
+  (select count(*) from (select * from mlf_left_ext_rejected_on except select * from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x') q) x),
+  (select count(*) from (select * from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x') q except select * from mlf_left_ext_rejected_on) y),
+  (select count(*) from mlf_left_ext_rejected_on) - (select count(*) from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x') q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mlf_kept_ext_cond_on except select * from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code is null) q) x),
+  (select count(*) from (select * from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code is null) q except select * from mlf_kept_ext_cond_on) y),
+  (select count(*) from mlf_kept_ext_cond_on) - (select count(*) from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code is null) q);
 ----
 0 0 0
 
@@ -1448,9 +1506,17 @@ select
 
 query III
 select
-  (select count(*) from (select * from mlf_kept_padded_on except select * from mlf_kept_padded_off) x),
-  (select count(*) from (select * from mlf_kept_padded_off except select * from mlf_kept_padded_on) y),
-  (select count(*) from mlf_kept_padded_on) - (select count(*) from mlf_kept_padded_off);
+  (select count(*) from (select * from mlf_inner_over_padded_on except select * from mlf_inner_over_padded_off) x),
+  (select count(*) from (select * from mlf_inner_over_padded_off except select * from mlf_inner_over_padded_on) y),
+  (select count(*) from mlf_inner_over_padded_on) - (select count(*) from mlf_inner_over_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mlf_left_ext_rejected_on except select * from mlf_left_ext_rejected_off) x),
+  (select count(*) from (select * from mlf_left_ext_rejected_off except select * from mlf_left_ext_rejected_on) y),
+  (select count(*) from mlf_left_ext_rejected_on) - (select count(*) from mlf_left_ext_rejected_off);
 ----
 0 0 0
 
@@ -1610,17 +1676,25 @@ select
 
 query III
 select
-  (select count(*) from (select * from mlf_kept_padded_on except select * from (select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id) q) x),
-  (select count(*) from (select * from (select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id) q except select * from mlf_kept_padded_on) y),
-  (select count(*) from mlf_kept_padded_on) - (select count(*) from (select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id) q);
+  (select count(*) from (select * from mlf_inner_over_padded_on except select * from (select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id) q) x),
+  (select count(*) from (select * from (select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id) q except select * from mlf_inner_over_padded_on) y),
+  (select count(*) from mlf_inner_over_padded_on) - (select count(*) from (select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id) q);
 ----
 0 0 0
 
 query III
 select
-  (select count(*) from (select * from mlf_kept_ext_cond_on except select * from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x') q) x),
-  (select count(*) from (select * from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x') q except select * from mlf_kept_ext_cond_on) y),
-  (select count(*) from mlf_kept_ext_cond_on) - (select count(*) from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x') q);
+  (select count(*) from (select * from mlf_left_ext_rejected_on except select * from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x') q) x),
+  (select count(*) from (select * from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x') q except select * from mlf_left_ext_rejected_on) y),
+  (select count(*) from mlf_left_ext_rejected_on) - (select count(*) from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x') q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mlf_kept_ext_cond_on except select * from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code is null) q) x),
+  (select count(*) from (select * from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code is null) q except select * from mlf_kept_ext_cond_on) y),
+  (select count(*) from mlf_kept_ext_cond_on) - (select count(*) from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code is null) q);
 ----
 0 0 0
 
@@ -1775,9 +1849,17 @@ select
 
 query III
 select
-  (select count(*) from (select * from mlf_kept_padded_on except select * from mlf_kept_padded_off) x),
-  (select count(*) from (select * from mlf_kept_padded_off except select * from mlf_kept_padded_on) y),
-  (select count(*) from mlf_kept_padded_on) - (select count(*) from mlf_kept_padded_off);
+  (select count(*) from (select * from mlf_inner_over_padded_on except select * from mlf_inner_over_padded_off) x),
+  (select count(*) from (select * from mlf_inner_over_padded_off except select * from mlf_inner_over_padded_on) y),
+  (select count(*) from mlf_inner_over_padded_on) - (select count(*) from mlf_inner_over_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mlf_left_ext_rejected_on except select * from mlf_left_ext_rejected_off) x),
+  (select count(*) from (select * from mlf_left_ext_rejected_off except select * from mlf_left_ext_rejected_on) y),
+  (select count(*) from mlf_left_ext_rejected_on) - (select count(*) from mlf_left_ext_rejected_off);
 ----
 0 0 0
 
@@ -1937,17 +2019,25 @@ select
 
 query III
 select
-  (select count(*) from (select * from mlf_kept_padded_on except select * from (select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id) q) x),
-  (select count(*) from (select * from (select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id) q except select * from mlf_kept_padded_on) y),
-  (select count(*) from mlf_kept_padded_on) - (select count(*) from (select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id) q);
+  (select count(*) from (select * from mlf_inner_over_padded_on except select * from (select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id) q) x),
+  (select count(*) from (select * from (select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id) q except select * from mlf_inner_over_padded_on) y),
+  (select count(*) from mlf_inner_over_padded_on) - (select count(*) from (select f.id as fid, d.grp, x.sid, x.name from mlf_f f join mlf_d d on f.dim_id = d.id join (select s.sid, s.id, d2.name from mlf_s s left join mlf_d d2 on s.id = d2.id) x on d.id = x.id) q);
 ----
 0 0 0
 
 query III
 select
-  (select count(*) from (select * from mlf_kept_ext_cond_on except select * from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x') q) x),
-  (select count(*) from (select * from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x') q except select * from mlf_kept_ext_cond_on) y),
-  (select count(*) from mlf_kept_ext_cond_on) - (select count(*) from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x') q);
+  (select count(*) from (select * from mlf_left_ext_rejected_on except select * from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x') q) x),
+  (select count(*) from (select * from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x') q except select * from mlf_left_ext_rejected_on) y),
+  (select count(*) from mlf_left_ext_rejected_on) - (select count(*) from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code = 'x') q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mlf_kept_ext_cond_on except select * from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code is null) q) x),
+  (select count(*) from (select * from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code is null) q except select * from mlf_kept_ext_cond_on) y),
+  (select count(*) from mlf_kept_ext_cond_on) - (select count(*) from (select f.id as fid, r.name, r.code from mlf_f f left join mlf_d d on f.dim_id = d.id left join (select d2.id, d2.name, e.code from mlf_d d2 left join mlf_e e on d2.grp = e.id) r on d.id = r.id and r.code is null) q);
 ----
 0 0 0
 
@@ -1957,7 +2047,10 @@ statement ok
 drop materialized view mlf_kept_ext_cond_on;
 
 statement ok
-drop materialized view mlf_kept_padded_on;
+drop materialized view mlf_left_ext_rejected_on;
+
+statement ok
+drop materialized view mlf_inner_over_padded_on;
 
 statement ok
 drop materialized view mlf_kept_nonkey_on;
@@ -2017,7 +2110,10 @@ statement ok
 drop materialized view mlf_kept_ext_cond_off;
 
 statement ok
-drop materialized view mlf_kept_padded_off;
+drop materialized view mlf_left_ext_rejected_off;
+
+statement ok
+drop materialized view mlf_inner_over_padded_off;
 
 statement ok
 drop materialized view mlf_kept_nonkey_off;

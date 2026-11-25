@@ -167,9 +167,11 @@ struct Lifter {
     /// The conjuncts of the filters and inner joins met on the way to the lookup, which hold in
     /// every row of the tree.
     seen: Vec<ExprImpl>,
-    /// Whether the lookup may be looked for inside a shared sub-plan, and whether it was. The
-    /// sub-plan is not rewritten, its consumer gets a new one: this is only worth it when nothing
-    /// of the sub-plan is left in that consumer.
+    /// Whether only the existence of a row of the tree matters (the right side of a semi or anti
+    /// join). Then every left outer join on the way is lifted, to be dropped: it never removes a
+    /// row. And the lookup may be looked for inside a shared sub-plan: the sub-plan is not
+    /// rewritten, its consumer gets a new one, which is only worth it when nothing of the
+    /// sub-plan is left in that consumer (see `crossed_share`).
     through_share: bool,
     crossed_share: bool,
 }
@@ -334,15 +336,18 @@ impl Lifter {
                 }
             }
         } else {
-            let in_place = rest.as_ref().and_then(|rest| {
-                let position = |column: usize| {
-                    rest.position(column)
-                        .or_else(|| Some(rest.layout.len() + other.position(column)?))
-                };
-                on.iter()
-                    .map(|conjunct| to_positions(conjunct, position))
-                    .collect::<Option<Vec<_>>>()
-            });
+            let in_place = rest
+                .as_ref()
+                .filter(|_| !self.through_share)
+                .and_then(|rest| {
+                    let position = |column: usize| {
+                        rest.position(column)
+                            .or_else(|| Some(rest.layout.len() + other.position(column)?))
+                    };
+                    on.iter()
+                        .map(|conjunct| to_positions(conjunct, position))
+                        .collect::<Option<Vec<_>>>()
+                });
             match (rest, in_place) {
                 (Some(rest), Some(conjunctions)) => {
                     let layout = rest.layout.iter().chain(&other.layout).copied().collect();
