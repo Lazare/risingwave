@@ -573,7 +573,7 @@ fn derive(plan: &PlanRef, ctx: &Ctx<'_>) -> Option<PlanRef> {
             _ => return None,
         }
         let new: PlanRef = LogicalJoin::new(
-            input.clone(),
+            input,
             join_right,
             JoinType::LeftOuter,
             Condition { conjunctions },
