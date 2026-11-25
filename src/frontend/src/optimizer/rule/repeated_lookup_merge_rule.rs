@@ -213,7 +213,8 @@ fn pure_scan(plan: &PlanRef) -> Option<PureScan> {
 struct OuterLookup {
     /// The join that looks the row up.
     join_id: PlanNodeId,
-    /// For each column of the key of the table, the column of the plan that it is compared with.
+    /// For each column of the key of the table, the column of the plan that it is compared with,
+    /// if the plan still outputs it.
     keys: BTreeMap<usize, usize>,
 }
 
@@ -243,14 +244,15 @@ impl Carried {
                 .flat_map(|column| positions.get(column).into_iter().flatten().copied())
                 .collect();
         }
-        self.outer_lookup = self.outer_lookup.and_then(|mut lookup| {
+        if let Some(lookup) = &mut self.outer_lookup {
+            // A column that is not kept is forgotten: the lookup then only serves along with a
+            // bound column, see `merge_lookup`.
             lookup.keys = lookup
                 .keys
                 .iter()
-                .map(|(key, column)| Some((*key, *positions.get(column)?.first()?)))
-                .collect::<Option<_>>()?;
-            Some(lookup)
-        });
+                .filter_map(|(key, column)| Some((*key, *positions.get(column)?.first()?)))
+                .collect();
+        }
         self
     }
 
@@ -535,9 +537,12 @@ fn expose(plan: &PlanRef, request: &Request<'_>, memo: &mut Memo) -> Option<Expo
                 index
             }
         };
-        let on = join.on().clone().rewrite_expr(&mut MapInputRef(|input_ref| {
-            InputRef::new(moved(input_ref.index()), input_ref.return_type()).into()
-        }));
+        let on = join
+            .on()
+            .clone()
+            .rewrite_expr(&mut MapInputRef(|input_ref| {
+                InputRef::new(moved(input_ref.index()), input_ref.return_type()).into()
+            }));
         for index in &mut output {
             *index = moved(*index);
         }
@@ -630,19 +635,24 @@ fn widen_outer_lookup(
         })
     };
     // The condition compares the same columns of the left side with the columns of the key.
-    let on = join.on().clone().rewrite_expr(&mut MapInputRef(|input_ref| {
-        if input_ref.index() < left_len {
-            return input_ref.into();
-        }
-        let column = pure
-            .key_column_at(input_ref.index() - left_len)
-            .expect("the condition compares the columns of the key");
-        InputRef::new(position(column), input_ref.return_type()).into()
-    }));
+    let on = join
+        .on()
+        .clone()
+        .rewrite_expr(&mut MapInputRef(|input_ref| {
+            if input_ref.index() < left_len {
+                return input_ref.into();
+            }
+            let column = pure
+                .key_column_at(input_ref.index() - left_len)
+                .expect("the condition compares the columns of the key");
+            InputRef::new(position(column), input_ref.return_type()).into()
+        }));
     let new_join: PlanRef =
         LogicalJoin::new(left.clone(), scan.into(), JoinType::LeftOuter, on).into();
     // A matched row has a key that is not `NULL`: the condition compares it with `=`.
-    let mut found = vec![is_not_null(to_join(&table_column(&pure.scan, key[0]).into()))];
+    let mut found = vec![is_not_null(to_join(
+        &table_column(&pure.scan, key[0]).into(),
+    ))];
     if !is_covered {
         found.extend(pure.predicate.iter().map(to_join));
     }
@@ -721,9 +731,12 @@ fn commute(join: &LogicalJoin) -> LogicalJoin {
             index - left_len
         }
     };
-    let on = join.on().clone().rewrite_expr(&mut MapInputRef(|input_ref| {
-        InputRef::new(moved(input_ref.index()), input_ref.return_type()).into()
-    }));
+    let on = join
+        .on()
+        .clone()
+        .rewrite_expr(&mut MapInputRef(|input_ref| {
+            InputRef::new(moved(input_ref.index()), input_ref.return_type()).into()
+        }));
     let output = join.output_indices().iter().map(|&index| moved(index));
     LogicalJoin::with_output_indices(
         join.right(),

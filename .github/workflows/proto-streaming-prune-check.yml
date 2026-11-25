@@ -19,6 +19,7 @@ on:
   push:
     branches:
       - 'proto/streaming-prune-empty-relation'
+      - 'proto/streaming-merge-repeated-lookups'
 
 concurrency:
   group: proto-streaming-prune-check-${{ github.ref }}
@@ -244,8 +245,16 @@ jobs:
           tail -50 "$RUNNER_TEMP/e2e/node.log"
           exit 1
 
+      - name: Differential test of the merge of repeated lookups
+        run: |
+          set -o pipefail
+          export PATH="$PWD/e2e_test/commands:$PATH"
+          sqllogictest -p 4566 -d dev './e2e_test/streaming/merge_repeated_lookups.slt' \
+            2>&1 | tee "$RUNNER_TEMP/e2e/differential-merge.log"
+
       - name: Differential test of the pruning
         id: differential
+        if: ${{ !cancelled() }}
         run: |
           # Without `pipefail` the step would succeed whenever `tee` does.
           set -o pipefail
