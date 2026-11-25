@@ -425,7 +425,7 @@
   before:
   - setup
   sql: |
-    select count(*), count(v1), sum(v1), min(v3), max(ts), avg(v2), bool_and(b), string_agg(v3, ',')
+    select count(*), count(v1), sum(v1), min(v3), max(ts), avg(v2), bool_and(b), string_agg(v3, ',' order by v3)
     from t where v1 = 1 and v1 = 2;
   expected_outputs:
   - optimized_logical_plan_for_stream

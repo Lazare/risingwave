@@ -1,0 +1,1977 @@
+# Differential test of `streaming_prune_empty_relation`: every query is materialized twice, with
+# and without the pruning of the sub-plans proven empty, and both materialized views must hold
+# the same rows after the backfill and after each round of changes.
+#
+# Generated: edit the list of queries and regenerate rather than editing by hand.
+
+statement ok
+SET RW_IMPLICIT_FLUSH TO true;
+
+statement ok
+create table per_t (v1 int, v2 int, v3 varchar, b boolean, ts timestamp);
+
+statement ok
+create table per_s (k int, w int);
+
+statement ok
+create table per_r (k int, x int);
+
+# Rows present before the materialized views are created: they go through the backfill.
+
+statement ok
+insert into per_t values (1, 3, 'a', true, '2026-01-01 00:00:00'), (2, 4, 'b', false, '2026-01-02 00:00:00'), (2, 7, null, null, null), (null, 3, 'c', true, '2026-01-03 00:00:00'), (6, null, 'a', false, '2026-01-04 00:00:00');
+
+statement ok
+insert into per_s values (1, 1), (2, 2), (2, null), (null, 5), (7, 1);
+
+statement ok
+insert into per_r values (1, 10), (2, null), (5, 0);
+
+statement ok
+set streaming_prune_empty_relation = false;
+
+# two different equalities
+
+statement ok
+create materialized view per_eq_eq_off as select v1, v2, v3 from per_t where v1 = 1 and v1 = 2;
+
+# is null and in-list
+
+statement ok
+create materialized view per_null_in_off as select v1, v3 from per_t where v3 is null and v3 in ('a', 'b');
+
+# comparison with a null constant
+
+statement ok
+create materialized view per_eq_null_off as select v1, v2 from per_t where v1 = null;
+
+# empty range
+
+statement ok
+create materialized view per_range_off as select v1, v2 from per_t where v1 > 5 and v1 < 3;
+
+# boolean column and its negation
+
+statement ok
+create materialized view per_bool_off as select v1, b from per_t where b and not b;
+
+# in-list and not in-list
+
+statement ok
+create materialized view per_in_notin_off as select v1, v3 from per_t where v1 in (1, 2) and v1 not in (2, 1, 3);
+
+# constant false conjunct
+
+statement ok
+create materialized view per_const_false_off as select v1, v2 from per_t where 1 = 0 and v1 > 1;
+
+# kept: satisfiable equality and in-list
+
+statement ok
+create materialized view per_kept_eq_in_off as select v1, v2 from per_t where v1 = 1 and v1 in (1, 2);
+
+# kept: point range
+
+statement ok
+create materialized view per_kept_point_off as select v1, v2 from per_t where v1 >= 2 and v1 <= 2;
+
+# kept: open range
+
+statement ok
+create materialized view per_kept_open_off as select v1, v2 from per_t where v1 > 1 and v1 < 3;
+
+# kept: contradiction under a disjunction
+
+statement ok
+create materialized view per_kept_or_off as select v1, v2 from per_t where v1 is null or (v1 = 1 and v1 = 2);
+
+# kept: in-list with a null item
+
+statement ok
+create materialized view per_kept_in_null_off as select v1, v2 from per_t where v1 in (1, null) and v1 = 1;
+
+# union all: one branch removed
+
+statement ok
+create materialized view per_union_two_off as select kind, v from (select 'a' as kind, v1 as v from per_t union all select 'b' as kind, k as v from per_s union all select 'c' as kind, k as v from per_r) u where kind = 'a' or kind = 'c';
+
+# union all: a single branch left
+
+statement ok
+create materialized view per_union_one_off as select kind, v from (select 'a' as kind, v1 as v from per_t union all select 'b' as kind, k as v from per_s) u where kind = 'b';
+
+# union all: every branch removed
+
+statement ok
+create materialized view per_union_none_off as select kind, v from (select 'a' as kind, v1 as v from per_t union all select 'b' as kind, k as v from per_s) u where kind = 'z';
+
+# union distinct: one branch removed
+
+statement ok
+create materialized view per_union_distinct_off as select kind, v from (select 'a' as kind, v1 as v from per_t union select 'b' as kind, k as v from per_s) u where kind = 'a';
+
+# inner join: a side is empty
+
+statement ok
+create materialized view per_inner_empty_off as select t.v1 as tv, s.w as sw from per_t t join per_s s on t.v1 = s.k where s.w is null and s.w = 1;
+
+# left join: the right side is empty
+
+statement ok
+create materialized view per_left_right_empty_off as select t.v1 as tv, t.v3 as tv3, s.w as sw, s.k as sk from per_t t left join (select * from per_s where w = 1 and w = 2) s on t.v1 = s.k;
+
+# left join: the left side is empty
+
+statement ok
+create materialized view per_left_left_empty_off as select t.v1 as tv, s.w as sw from (select * from per_t where v1 = 1 and v1 = 2) t left join per_s s on t.v1 = s.k;
+
+# right join: the left side is empty
+
+statement ok
+create materialized view per_right_left_empty_off as select t.v1 as tv, s.w as sw, s.k as sk from (select * from per_t where v1 = 1 and v1 = 2) t right join per_s s on t.v1 = s.k;
+
+# full join: the right side is empty
+
+statement ok
+create materialized view per_full_right_empty_off as select t.v1 as tv, t.v2 as tv2, s.w as sw from per_t t full join (select * from per_s where w = 1 and w = 2) s on t.v1 = s.k;
+
+# full join: the left side is empty
+
+statement ok
+create materialized view per_full_left_empty_off as select t.v1 as tv, s.w as sw, s.k as sk from (select * from per_t where v1 = 1 and v1 = 2) t full join per_s s on t.v1 = s.k;
+
+# full join: both sides are empty
+
+statement ok
+create materialized view per_full_both_empty_off as select t.v1 as tv, s.w as sw from (select * from per_t where v1 = 1 and v1 = 2) t full join (select * from per_s where w = 1 and w = 2) s on t.v1 = s.k;
+
+# semi join: the right side is empty
+
+statement ok
+create materialized view per_semi_empty_off as select v1, v2 from per_t where v1 in (select k from per_s where w = 1 and w = 2);
+
+# anti join: the right side is empty
+
+statement ok
+create materialized view per_anti_empty_off as select v1, v3 from per_t t where not exists (select 1 from per_s s where s.k = t.v1 and w = 1 and w = 2);
+
+# inner join: the condition is never true
+
+statement ok
+create materialized view per_inner_on_false_off as select t.v1 as tv, s.w as sw from per_t t join per_s s on t.v1 = s.k and t.v2 = 3 and t.v2 = 4;
+
+# left join: the condition is never true
+
+statement ok
+create materialized view per_left_on_false_off as select t.v1 as tv, t.v2 as tv2, s.w as sw from per_t t left join per_s s on t.v1 = s.k and t.v2 = 3 and t.v2 = 4;
+
+# kept: full join whose condition is never true
+
+statement ok
+create materialized view per_kept_full_on_false_off as select t.v1 as tv, s.w as sw from per_t t full join per_s s on t.v1 = s.k and t.v1 = 3 and t.v1 = 4;
+
+# three-way join: only the optional side is removed
+
+statement ok
+create materialized view per_three_way_off as select t.v1 as tv, s.w as sw, r.x as rx from per_t t join per_s s on t.v1 = s.k left join (select * from per_r where x is null and x > 0) r on s.k = r.k;
+
+# left join used as an anti join, with an empty right side
+
+statement ok
+create materialized view per_left_is_null_off as select t.v1 as tv, coalesce(s.w, -1) as sw from per_t t left join (select * from per_s where w = 1 and w = 2) s on t.v1 = s.k where s.k is null;
+
+# agg with group key over an empty input
+
+statement ok
+create materialized view per_agg_group_off as select v2, count(*) as cnt from per_t where v1 = 1 and v1 = 2 group by v2;
+
+# agg without group key over an empty input
+
+statement ok
+create materialized view per_agg_simple_off as select count(*) as c1, count(v1) as c2, sum(v1) as s1, min(v3) as m1, max(ts) as m2, avg(v2) as a1, bool_and(b) as b1, string_agg(v3, ',' order by v3) as sa from per_t where v1 = 1 and v1 = 2;
+
+# distinct agg without group key over an empty input
+
+statement ok
+create materialized view per_agg_distinct_off as select count(distinct v1) as c, sum(distinct v2) as s from per_t where v1 = 1 and v1 = 2;
+
+# agg without group key over a join with an empty side
+
+statement ok
+create materialized view per_agg_join_off as select count(*) as c, max(t.v2) as m from per_t t join (select * from per_s where w = 1 and w = 2) s on t.v1 = s.k;
+
+# agg without group key over a non-empty input
+
+statement ok
+create materialized view per_agg_kept_off as select count(*) as c, sum(v1) as s from per_t where v1 >= 2 and v1 <= 2;
+
+# distinct over an empty input
+
+statement ok
+create materialized view per_distinct_off as select distinct v2 from per_t where v1 = 1 and v1 = 2;
+
+# top-n over an empty input
+
+statement ok
+create materialized view per_topn_off as select v1, v2 from (select * from per_t where v1 = 1 and v1 = 2) x order by v2 limit 3;
+
+# group top-n over an empty input
+
+statement ok
+create materialized view per_group_topn_off as select v1, v2, v3 from (select *, row_number() over (partition by v2 order by v3) as rn from per_t where v1 = 1 and v1 = 2) x where rn = 1;
+
+# shared empty relation used twice
+
+statement ok
+create materialized view per_share_twice_off as with c as (select * from per_t where v1 = 1 and v1 = 2) select a.v1 as av, b.v2 as bv from c a join c b on a.v1 = b.v1;
+
+# shared relation with one empty consumer
+
+statement ok
+create materialized view per_share_one_off as with c as (select v1, v2 from per_t) select v1, v2 from c where v1 = 1 and v1 = 2 union all select v1, v2 from c where v2 = 7;
+
+# contradiction next to a temporal filter
+
+statement ok
+create materialized view per_temporal_off as select v1, ts from per_t where ts > now() - interval '1 hour' and v1 is null and v1 = 3;
+
+# on top of an empty materialized view
+
+statement ok
+create materialized view per_down_empty_agg_off as select v1, count(*) as cnt from per_eq_eq_off group by v1;
+
+# join with an empty materialized view
+
+statement ok
+create materialized view per_down_empty_join_off as select t.v1 as tv, e.v2 as ev from per_t t left join per_eq_eq_off e on t.v1 = e.v1;
+
+# on top of a left join replaced with a projection
+
+statement ok
+create materialized view per_down_padded_off as select tv, count(sw) as cnt, count(*) as total from per_left_right_empty_off group by tv;
+
+# on top of an aggregation replaced with its constant row
+
+statement ok
+create materialized view per_down_const_row_off as select t.v1 as tv, a.c1 as c1, a.s1 as s1 from per_t t join per_agg_simple_off a on a.c1 = 0;
+
+statement ok
+set streaming_prune_empty_relation = true;
+
+# two different equalities
+
+statement ok
+create materialized view per_eq_eq_on as select v1, v2, v3 from per_t where v1 = 1 and v1 = 2;
+
+# is null and in-list
+
+statement ok
+create materialized view per_null_in_on as select v1, v3 from per_t where v3 is null and v3 in ('a', 'b');
+
+# comparison with a null constant
+
+statement ok
+create materialized view per_eq_null_on as select v1, v2 from per_t where v1 = null;
+
+# empty range
+
+statement ok
+create materialized view per_range_on as select v1, v2 from per_t where v1 > 5 and v1 < 3;
+
+# boolean column and its negation
+
+statement ok
+create materialized view per_bool_on as select v1, b from per_t where b and not b;
+
+# in-list and not in-list
+
+statement ok
+create materialized view per_in_notin_on as select v1, v3 from per_t where v1 in (1, 2) and v1 not in (2, 1, 3);
+
+# constant false conjunct
+
+statement ok
+create materialized view per_const_false_on as select v1, v2 from per_t where 1 = 0 and v1 > 1;
+
+# kept: satisfiable equality and in-list
+
+statement ok
+create materialized view per_kept_eq_in_on as select v1, v2 from per_t where v1 = 1 and v1 in (1, 2);
+
+# kept: point range
+
+statement ok
+create materialized view per_kept_point_on as select v1, v2 from per_t where v1 >= 2 and v1 <= 2;
+
+# kept: open range
+
+statement ok
+create materialized view per_kept_open_on as select v1, v2 from per_t where v1 > 1 and v1 < 3;
+
+# kept: contradiction under a disjunction
+
+statement ok
+create materialized view per_kept_or_on as select v1, v2 from per_t where v1 is null or (v1 = 1 and v1 = 2);
+
+# kept: in-list with a null item
+
+statement ok
+create materialized view per_kept_in_null_on as select v1, v2 from per_t where v1 in (1, null) and v1 = 1;
+
+# union all: one branch removed
+
+statement ok
+create materialized view per_union_two_on as select kind, v from (select 'a' as kind, v1 as v from per_t union all select 'b' as kind, k as v from per_s union all select 'c' as kind, k as v from per_r) u where kind = 'a' or kind = 'c';
+
+# union all: a single branch left
+
+statement ok
+create materialized view per_union_one_on as select kind, v from (select 'a' as kind, v1 as v from per_t union all select 'b' as kind, k as v from per_s) u where kind = 'b';
+
+# union all: every branch removed
+
+statement ok
+create materialized view per_union_none_on as select kind, v from (select 'a' as kind, v1 as v from per_t union all select 'b' as kind, k as v from per_s) u where kind = 'z';
+
+# union distinct: one branch removed
+
+statement ok
+create materialized view per_union_distinct_on as select kind, v from (select 'a' as kind, v1 as v from per_t union select 'b' as kind, k as v from per_s) u where kind = 'a';
+
+# inner join: a side is empty
+
+statement ok
+create materialized view per_inner_empty_on as select t.v1 as tv, s.w as sw from per_t t join per_s s on t.v1 = s.k where s.w is null and s.w = 1;
+
+# left join: the right side is empty
+
+statement ok
+create materialized view per_left_right_empty_on as select t.v1 as tv, t.v3 as tv3, s.w as sw, s.k as sk from per_t t left join (select * from per_s where w = 1 and w = 2) s on t.v1 = s.k;
+
+# left join: the left side is empty
+
+statement ok
+create materialized view per_left_left_empty_on as select t.v1 as tv, s.w as sw from (select * from per_t where v1 = 1 and v1 = 2) t left join per_s s on t.v1 = s.k;
+
+# right join: the left side is empty
+
+statement ok
+create materialized view per_right_left_empty_on as select t.v1 as tv, s.w as sw, s.k as sk from (select * from per_t where v1 = 1 and v1 = 2) t right join per_s s on t.v1 = s.k;
+
+# full join: the right side is empty
+
+statement ok
+create materialized view per_full_right_empty_on as select t.v1 as tv, t.v2 as tv2, s.w as sw from per_t t full join (select * from per_s where w = 1 and w = 2) s on t.v1 = s.k;
+
+# full join: the left side is empty
+
+statement ok
+create materialized view per_full_left_empty_on as select t.v1 as tv, s.w as sw, s.k as sk from (select * from per_t where v1 = 1 and v1 = 2) t full join per_s s on t.v1 = s.k;
+
+# full join: both sides are empty
+
+statement ok
+create materialized view per_full_both_empty_on as select t.v1 as tv, s.w as sw from (select * from per_t where v1 = 1 and v1 = 2) t full join (select * from per_s where w = 1 and w = 2) s on t.v1 = s.k;
+
+# semi join: the right side is empty
+
+statement ok
+create materialized view per_semi_empty_on as select v1, v2 from per_t where v1 in (select k from per_s where w = 1 and w = 2);
+
+# anti join: the right side is empty
+
+statement ok
+create materialized view per_anti_empty_on as select v1, v3 from per_t t where not exists (select 1 from per_s s where s.k = t.v1 and w = 1 and w = 2);
+
+# inner join: the condition is never true
+
+statement ok
+create materialized view per_inner_on_false_on as select t.v1 as tv, s.w as sw from per_t t join per_s s on t.v1 = s.k and t.v2 = 3 and t.v2 = 4;
+
+# left join: the condition is never true
+
+statement ok
+create materialized view per_left_on_false_on as select t.v1 as tv, t.v2 as tv2, s.w as sw from per_t t left join per_s s on t.v1 = s.k and t.v2 = 3 and t.v2 = 4;
+
+# kept: full join whose condition is never true
+
+statement ok
+create materialized view per_kept_full_on_false_on as select t.v1 as tv, s.w as sw from per_t t full join per_s s on t.v1 = s.k and t.v1 = 3 and t.v1 = 4;
+
+# three-way join: only the optional side is removed
+
+statement ok
+create materialized view per_three_way_on as select t.v1 as tv, s.w as sw, r.x as rx from per_t t join per_s s on t.v1 = s.k left join (select * from per_r where x is null and x > 0) r on s.k = r.k;
+
+# left join used as an anti join, with an empty right side
+
+statement ok
+create materialized view per_left_is_null_on as select t.v1 as tv, coalesce(s.w, -1) as sw from per_t t left join (select * from per_s where w = 1 and w = 2) s on t.v1 = s.k where s.k is null;
+
+# agg with group key over an empty input
+
+statement ok
+create materialized view per_agg_group_on as select v2, count(*) as cnt from per_t where v1 = 1 and v1 = 2 group by v2;
+
+# agg without group key over an empty input
+
+statement ok
+create materialized view per_agg_simple_on as select count(*) as c1, count(v1) as c2, sum(v1) as s1, min(v3) as m1, max(ts) as m2, avg(v2) as a1, bool_and(b) as b1, string_agg(v3, ',' order by v3) as sa from per_t where v1 = 1 and v1 = 2;
+
+# distinct agg without group key over an empty input
+
+statement ok
+create materialized view per_agg_distinct_on as select count(distinct v1) as c, sum(distinct v2) as s from per_t where v1 = 1 and v1 = 2;
+
+# agg without group key over a join with an empty side
+
+statement ok
+create materialized view per_agg_join_on as select count(*) as c, max(t.v2) as m from per_t t join (select * from per_s where w = 1 and w = 2) s on t.v1 = s.k;
+
+# agg without group key over a non-empty input
+
+statement ok
+create materialized view per_agg_kept_on as select count(*) as c, sum(v1) as s from per_t where v1 >= 2 and v1 <= 2;
+
+# distinct over an empty input
+
+statement ok
+create materialized view per_distinct_on as select distinct v2 from per_t where v1 = 1 and v1 = 2;
+
+# top-n over an empty input
+
+statement ok
+create materialized view per_topn_on as select v1, v2 from (select * from per_t where v1 = 1 and v1 = 2) x order by v2 limit 3;
+
+# group top-n over an empty input
+
+statement ok
+create materialized view per_group_topn_on as select v1, v2, v3 from (select *, row_number() over (partition by v2 order by v3) as rn from per_t where v1 = 1 and v1 = 2) x where rn = 1;
+
+# shared empty relation used twice
+
+statement ok
+create materialized view per_share_twice_on as with c as (select * from per_t where v1 = 1 and v1 = 2) select a.v1 as av, b.v2 as bv from c a join c b on a.v1 = b.v1;
+
+# shared relation with one empty consumer
+
+statement ok
+create materialized view per_share_one_on as with c as (select v1, v2 from per_t) select v1, v2 from c where v1 = 1 and v1 = 2 union all select v1, v2 from c where v2 = 7;
+
+# contradiction next to a temporal filter
+
+statement ok
+create materialized view per_temporal_on as select v1, ts from per_t where ts > now() - interval '1 hour' and v1 is null and v1 = 3;
+
+# on top of an empty materialized view
+
+statement ok
+create materialized view per_down_empty_agg_on as select v1, count(*) as cnt from per_eq_eq_on group by v1;
+
+# join with an empty materialized view
+
+statement ok
+create materialized view per_down_empty_join_on as select t.v1 as tv, e.v2 as ev from per_t t left join per_eq_eq_on e on t.v1 = e.v1;
+
+# on top of a left join replaced with a projection
+
+statement ok
+create materialized view per_down_padded_on as select tv, count(sw) as cnt, count(*) as total from per_left_right_empty_on group by tv;
+
+# on top of an aggregation replaced with its constant row
+
+statement ok
+create materialized view per_down_const_row_on as select t.v1 as tv, a.c1 as c1, a.s1 as s1 from per_t t join per_agg_simple_on a on a.c1 = 0;
+
+# `LIMIT 0` is rejected in streaming without pruning, and empty with it.
+
+statement ok
+set streaming_prune_empty_relation = false;
+
+statement error LIMIT 0 in streaming mode
+create materialized view per_limit0_off as select v1, v2 from per_t order by v1 limit 0;
+
+statement ok
+set streaming_prune_empty_relation = true;
+
+statement ok
+create materialized view per_limit0_on as select v1, v2 from per_t order by v1 limit 0;
+
+# After the backfill: with and without pruning, every materialized view holds the same rows.
+
+query III
+select
+  (select count(*) from (select * from per_eq_eq_on except select * from per_eq_eq_off) x),
+  (select count(*) from (select * from per_eq_eq_off except select * from per_eq_eq_on) y),
+  (select count(*) from per_eq_eq_on) - (select count(*) from per_eq_eq_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_null_in_on except select * from per_null_in_off) x),
+  (select count(*) from (select * from per_null_in_off except select * from per_null_in_on) y),
+  (select count(*) from per_null_in_on) - (select count(*) from per_null_in_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_eq_null_on except select * from per_eq_null_off) x),
+  (select count(*) from (select * from per_eq_null_off except select * from per_eq_null_on) y),
+  (select count(*) from per_eq_null_on) - (select count(*) from per_eq_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_range_on except select * from per_range_off) x),
+  (select count(*) from (select * from per_range_off except select * from per_range_on) y),
+  (select count(*) from per_range_on) - (select count(*) from per_range_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_bool_on except select * from per_bool_off) x),
+  (select count(*) from (select * from per_bool_off except select * from per_bool_on) y),
+  (select count(*) from per_bool_on) - (select count(*) from per_bool_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_in_notin_on except select * from per_in_notin_off) x),
+  (select count(*) from (select * from per_in_notin_off except select * from per_in_notin_on) y),
+  (select count(*) from per_in_notin_on) - (select count(*) from per_in_notin_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_const_false_on except select * from per_const_false_off) x),
+  (select count(*) from (select * from per_const_false_off except select * from per_const_false_on) y),
+  (select count(*) from per_const_false_on) - (select count(*) from per_const_false_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_kept_eq_in_on except select * from per_kept_eq_in_off) x),
+  (select count(*) from (select * from per_kept_eq_in_off except select * from per_kept_eq_in_on) y),
+  (select count(*) from per_kept_eq_in_on) - (select count(*) from per_kept_eq_in_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_kept_point_on except select * from per_kept_point_off) x),
+  (select count(*) from (select * from per_kept_point_off except select * from per_kept_point_on) y),
+  (select count(*) from per_kept_point_on) - (select count(*) from per_kept_point_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_kept_open_on except select * from per_kept_open_off) x),
+  (select count(*) from (select * from per_kept_open_off except select * from per_kept_open_on) y),
+  (select count(*) from per_kept_open_on) - (select count(*) from per_kept_open_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_kept_or_on except select * from per_kept_or_off) x),
+  (select count(*) from (select * from per_kept_or_off except select * from per_kept_or_on) y),
+  (select count(*) from per_kept_or_on) - (select count(*) from per_kept_or_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_kept_in_null_on except select * from per_kept_in_null_off) x),
+  (select count(*) from (select * from per_kept_in_null_off except select * from per_kept_in_null_on) y),
+  (select count(*) from per_kept_in_null_on) - (select count(*) from per_kept_in_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_union_two_on except select * from per_union_two_off) x),
+  (select count(*) from (select * from per_union_two_off except select * from per_union_two_on) y),
+  (select count(*) from per_union_two_on) - (select count(*) from per_union_two_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_union_one_on except select * from per_union_one_off) x),
+  (select count(*) from (select * from per_union_one_off except select * from per_union_one_on) y),
+  (select count(*) from per_union_one_on) - (select count(*) from per_union_one_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_union_none_on except select * from per_union_none_off) x),
+  (select count(*) from (select * from per_union_none_off except select * from per_union_none_on) y),
+  (select count(*) from per_union_none_on) - (select count(*) from per_union_none_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_union_distinct_on except select * from per_union_distinct_off) x),
+  (select count(*) from (select * from per_union_distinct_off except select * from per_union_distinct_on) y),
+  (select count(*) from per_union_distinct_on) - (select count(*) from per_union_distinct_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_inner_empty_on except select * from per_inner_empty_off) x),
+  (select count(*) from (select * from per_inner_empty_off except select * from per_inner_empty_on) y),
+  (select count(*) from per_inner_empty_on) - (select count(*) from per_inner_empty_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_left_right_empty_on except select * from per_left_right_empty_off) x),
+  (select count(*) from (select * from per_left_right_empty_off except select * from per_left_right_empty_on) y),
+  (select count(*) from per_left_right_empty_on) - (select count(*) from per_left_right_empty_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_left_left_empty_on except select * from per_left_left_empty_off) x),
+  (select count(*) from (select * from per_left_left_empty_off except select * from per_left_left_empty_on) y),
+  (select count(*) from per_left_left_empty_on) - (select count(*) from per_left_left_empty_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_right_left_empty_on except select * from per_right_left_empty_off) x),
+  (select count(*) from (select * from per_right_left_empty_off except select * from per_right_left_empty_on) y),
+  (select count(*) from per_right_left_empty_on) - (select count(*) from per_right_left_empty_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_full_right_empty_on except select * from per_full_right_empty_off) x),
+  (select count(*) from (select * from per_full_right_empty_off except select * from per_full_right_empty_on) y),
+  (select count(*) from per_full_right_empty_on) - (select count(*) from per_full_right_empty_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_full_left_empty_on except select * from per_full_left_empty_off) x),
+  (select count(*) from (select * from per_full_left_empty_off except select * from per_full_left_empty_on) y),
+  (select count(*) from per_full_left_empty_on) - (select count(*) from per_full_left_empty_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_full_both_empty_on except select * from per_full_both_empty_off) x),
+  (select count(*) from (select * from per_full_both_empty_off except select * from per_full_both_empty_on) y),
+  (select count(*) from per_full_both_empty_on) - (select count(*) from per_full_both_empty_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_semi_empty_on except select * from per_semi_empty_off) x),
+  (select count(*) from (select * from per_semi_empty_off except select * from per_semi_empty_on) y),
+  (select count(*) from per_semi_empty_on) - (select count(*) from per_semi_empty_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_anti_empty_on except select * from per_anti_empty_off) x),
+  (select count(*) from (select * from per_anti_empty_off except select * from per_anti_empty_on) y),
+  (select count(*) from per_anti_empty_on) - (select count(*) from per_anti_empty_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_inner_on_false_on except select * from per_inner_on_false_off) x),
+  (select count(*) from (select * from per_inner_on_false_off except select * from per_inner_on_false_on) y),
+  (select count(*) from per_inner_on_false_on) - (select count(*) from per_inner_on_false_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_left_on_false_on except select * from per_left_on_false_off) x),
+  (select count(*) from (select * from per_left_on_false_off except select * from per_left_on_false_on) y),
+  (select count(*) from per_left_on_false_on) - (select count(*) from per_left_on_false_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_kept_full_on_false_on except select * from per_kept_full_on_false_off) x),
+  (select count(*) from (select * from per_kept_full_on_false_off except select * from per_kept_full_on_false_on) y),
+  (select count(*) from per_kept_full_on_false_on) - (select count(*) from per_kept_full_on_false_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_three_way_on except select * from per_three_way_off) x),
+  (select count(*) from (select * from per_three_way_off except select * from per_three_way_on) y),
+  (select count(*) from per_three_way_on) - (select count(*) from per_three_way_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_left_is_null_on except select * from per_left_is_null_off) x),
+  (select count(*) from (select * from per_left_is_null_off except select * from per_left_is_null_on) y),
+  (select count(*) from per_left_is_null_on) - (select count(*) from per_left_is_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_group_on except select * from per_agg_group_off) x),
+  (select count(*) from (select * from per_agg_group_off except select * from per_agg_group_on) y),
+  (select count(*) from per_agg_group_on) - (select count(*) from per_agg_group_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_simple_on except select * from per_agg_simple_off) x),
+  (select count(*) from (select * from per_agg_simple_off except select * from per_agg_simple_on) y),
+  (select count(*) from per_agg_simple_on) - (select count(*) from per_agg_simple_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_distinct_on except select * from per_agg_distinct_off) x),
+  (select count(*) from (select * from per_agg_distinct_off except select * from per_agg_distinct_on) y),
+  (select count(*) from per_agg_distinct_on) - (select count(*) from per_agg_distinct_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_join_on except select * from per_agg_join_off) x),
+  (select count(*) from (select * from per_agg_join_off except select * from per_agg_join_on) y),
+  (select count(*) from per_agg_join_on) - (select count(*) from per_agg_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_kept_on except select * from per_agg_kept_off) x),
+  (select count(*) from (select * from per_agg_kept_off except select * from per_agg_kept_on) y),
+  (select count(*) from per_agg_kept_on) - (select count(*) from per_agg_kept_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_distinct_on except select * from per_distinct_off) x),
+  (select count(*) from (select * from per_distinct_off except select * from per_distinct_on) y),
+  (select count(*) from per_distinct_on) - (select count(*) from per_distinct_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_topn_on except select * from per_topn_off) x),
+  (select count(*) from (select * from per_topn_off except select * from per_topn_on) y),
+  (select count(*) from per_topn_on) - (select count(*) from per_topn_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_group_topn_on except select * from per_group_topn_off) x),
+  (select count(*) from (select * from per_group_topn_off except select * from per_group_topn_on) y),
+  (select count(*) from per_group_topn_on) - (select count(*) from per_group_topn_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_share_twice_on except select * from per_share_twice_off) x),
+  (select count(*) from (select * from per_share_twice_off except select * from per_share_twice_on) y),
+  (select count(*) from per_share_twice_on) - (select count(*) from per_share_twice_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_share_one_on except select * from per_share_one_off) x),
+  (select count(*) from (select * from per_share_one_off except select * from per_share_one_on) y),
+  (select count(*) from per_share_one_on) - (select count(*) from per_share_one_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_temporal_on except select * from per_temporal_off) x),
+  (select count(*) from (select * from per_temporal_off except select * from per_temporal_on) y),
+  (select count(*) from per_temporal_on) - (select count(*) from per_temporal_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_down_empty_agg_on except select * from per_down_empty_agg_off) x),
+  (select count(*) from (select * from per_down_empty_agg_off except select * from per_down_empty_agg_on) y),
+  (select count(*) from per_down_empty_agg_on) - (select count(*) from per_down_empty_agg_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_down_empty_join_on except select * from per_down_empty_join_off) x),
+  (select count(*) from (select * from per_down_empty_join_off except select * from per_down_empty_join_on) y),
+  (select count(*) from per_down_empty_join_on) - (select count(*) from per_down_empty_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_down_padded_on except select * from per_down_padded_off) x),
+  (select count(*) from (select * from per_down_padded_off except select * from per_down_padded_on) y),
+  (select count(*) from per_down_padded_on) - (select count(*) from per_down_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_down_const_row_on except select * from per_down_const_row_off) x),
+  (select count(*) from (select * from per_down_const_row_off except select * from per_down_const_row_on) y),
+  (select count(*) from per_down_const_row_on) - (select count(*) from per_down_const_row_off);
+----
+0 0 0
+
+# Spot checks of the rows themselves.
+
+query ITII
+select tv, tv3, sw, sk from per_left_right_empty_on order by tv, tv3;
+----
+1 a NULL NULL
+2 b NULL NULL
+2 NULL NULL NULL
+6 a NULL NULL
+NULL c NULL NULL
+
+query IIITTRTT
+select * from per_agg_simple_on;
+----
+0 0 NULL NULL NULL NULL NULL NULL
+
+query II
+select c, s from per_agg_distinct_on;
+----
+0 NULL
+
+query II
+select c, m from per_agg_join_on;
+----
+0 NULL
+
+query TI
+select kind, v from per_union_one_on order by v;
+----
+b 1
+b 2
+b 2
+b 7
+b NULL
+
+query I
+select count(*) from per_eq_eq_on;
+----
+0
+
+query I
+select count(*) from per_limit0_on;
+----
+0
+
+query III
+select tv, c1, s1 from per_down_const_row_on order by tv;
+----
+1 0 NULL
+2 0 NULL
+2 0 NULL
+6 0 NULL
+NULL 0 NULL
+
+# First round of changes: new rows, some of which satisfy one conjunct of a pruned predicate.
+
+statement ok
+insert into per_t values (1, 4, 'b', false, '2026-02-01 00:00:00'), (2, 3, 'a', true, null), (3, 7, 'z', null, '2026-02-02 00:00:00'), (null, null, null, null, null), (5, 3, 'c', true, '2026-02-03 00:00:00');
+
+statement ok
+insert into per_s values (1, 2), (3, 1), (5, null), (6, 2);
+
+statement ok
+insert into per_r values (3, 1), (6, null), (1, -1);
+
+# After the inserts: with and without pruning, every materialized view holds the same rows.
+
+query III
+select
+  (select count(*) from (select * from per_eq_eq_on except select * from per_eq_eq_off) x),
+  (select count(*) from (select * from per_eq_eq_off except select * from per_eq_eq_on) y),
+  (select count(*) from per_eq_eq_on) - (select count(*) from per_eq_eq_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_null_in_on except select * from per_null_in_off) x),
+  (select count(*) from (select * from per_null_in_off except select * from per_null_in_on) y),
+  (select count(*) from per_null_in_on) - (select count(*) from per_null_in_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_eq_null_on except select * from per_eq_null_off) x),
+  (select count(*) from (select * from per_eq_null_off except select * from per_eq_null_on) y),
+  (select count(*) from per_eq_null_on) - (select count(*) from per_eq_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_range_on except select * from per_range_off) x),
+  (select count(*) from (select * from per_range_off except select * from per_range_on) y),
+  (select count(*) from per_range_on) - (select count(*) from per_range_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_bool_on except select * from per_bool_off) x),
+  (select count(*) from (select * from per_bool_off except select * from per_bool_on) y),
+  (select count(*) from per_bool_on) - (select count(*) from per_bool_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_in_notin_on except select * from per_in_notin_off) x),
+  (select count(*) from (select * from per_in_notin_off except select * from per_in_notin_on) y),
+  (select count(*) from per_in_notin_on) - (select count(*) from per_in_notin_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_const_false_on except select * from per_const_false_off) x),
+  (select count(*) from (select * from per_const_false_off except select * from per_const_false_on) y),
+  (select count(*) from per_const_false_on) - (select count(*) from per_const_false_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_kept_eq_in_on except select * from per_kept_eq_in_off) x),
+  (select count(*) from (select * from per_kept_eq_in_off except select * from per_kept_eq_in_on) y),
+  (select count(*) from per_kept_eq_in_on) - (select count(*) from per_kept_eq_in_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_kept_point_on except select * from per_kept_point_off) x),
+  (select count(*) from (select * from per_kept_point_off except select * from per_kept_point_on) y),
+  (select count(*) from per_kept_point_on) - (select count(*) from per_kept_point_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_kept_open_on except select * from per_kept_open_off) x),
+  (select count(*) from (select * from per_kept_open_off except select * from per_kept_open_on) y),
+  (select count(*) from per_kept_open_on) - (select count(*) from per_kept_open_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_kept_or_on except select * from per_kept_or_off) x),
+  (select count(*) from (select * from per_kept_or_off except select * from per_kept_or_on) y),
+  (select count(*) from per_kept_or_on) - (select count(*) from per_kept_or_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_kept_in_null_on except select * from per_kept_in_null_off) x),
+  (select count(*) from (select * from per_kept_in_null_off except select * from per_kept_in_null_on) y),
+  (select count(*) from per_kept_in_null_on) - (select count(*) from per_kept_in_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_union_two_on except select * from per_union_two_off) x),
+  (select count(*) from (select * from per_union_two_off except select * from per_union_two_on) y),
+  (select count(*) from per_union_two_on) - (select count(*) from per_union_two_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_union_one_on except select * from per_union_one_off) x),
+  (select count(*) from (select * from per_union_one_off except select * from per_union_one_on) y),
+  (select count(*) from per_union_one_on) - (select count(*) from per_union_one_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_union_none_on except select * from per_union_none_off) x),
+  (select count(*) from (select * from per_union_none_off except select * from per_union_none_on) y),
+  (select count(*) from per_union_none_on) - (select count(*) from per_union_none_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_union_distinct_on except select * from per_union_distinct_off) x),
+  (select count(*) from (select * from per_union_distinct_off except select * from per_union_distinct_on) y),
+  (select count(*) from per_union_distinct_on) - (select count(*) from per_union_distinct_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_inner_empty_on except select * from per_inner_empty_off) x),
+  (select count(*) from (select * from per_inner_empty_off except select * from per_inner_empty_on) y),
+  (select count(*) from per_inner_empty_on) - (select count(*) from per_inner_empty_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_left_right_empty_on except select * from per_left_right_empty_off) x),
+  (select count(*) from (select * from per_left_right_empty_off except select * from per_left_right_empty_on) y),
+  (select count(*) from per_left_right_empty_on) - (select count(*) from per_left_right_empty_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_left_left_empty_on except select * from per_left_left_empty_off) x),
+  (select count(*) from (select * from per_left_left_empty_off except select * from per_left_left_empty_on) y),
+  (select count(*) from per_left_left_empty_on) - (select count(*) from per_left_left_empty_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_right_left_empty_on except select * from per_right_left_empty_off) x),
+  (select count(*) from (select * from per_right_left_empty_off except select * from per_right_left_empty_on) y),
+  (select count(*) from per_right_left_empty_on) - (select count(*) from per_right_left_empty_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_full_right_empty_on except select * from per_full_right_empty_off) x),
+  (select count(*) from (select * from per_full_right_empty_off except select * from per_full_right_empty_on) y),
+  (select count(*) from per_full_right_empty_on) - (select count(*) from per_full_right_empty_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_full_left_empty_on except select * from per_full_left_empty_off) x),
+  (select count(*) from (select * from per_full_left_empty_off except select * from per_full_left_empty_on) y),
+  (select count(*) from per_full_left_empty_on) - (select count(*) from per_full_left_empty_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_full_both_empty_on except select * from per_full_both_empty_off) x),
+  (select count(*) from (select * from per_full_both_empty_off except select * from per_full_both_empty_on) y),
+  (select count(*) from per_full_both_empty_on) - (select count(*) from per_full_both_empty_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_semi_empty_on except select * from per_semi_empty_off) x),
+  (select count(*) from (select * from per_semi_empty_off except select * from per_semi_empty_on) y),
+  (select count(*) from per_semi_empty_on) - (select count(*) from per_semi_empty_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_anti_empty_on except select * from per_anti_empty_off) x),
+  (select count(*) from (select * from per_anti_empty_off except select * from per_anti_empty_on) y),
+  (select count(*) from per_anti_empty_on) - (select count(*) from per_anti_empty_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_inner_on_false_on except select * from per_inner_on_false_off) x),
+  (select count(*) from (select * from per_inner_on_false_off except select * from per_inner_on_false_on) y),
+  (select count(*) from per_inner_on_false_on) - (select count(*) from per_inner_on_false_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_left_on_false_on except select * from per_left_on_false_off) x),
+  (select count(*) from (select * from per_left_on_false_off except select * from per_left_on_false_on) y),
+  (select count(*) from per_left_on_false_on) - (select count(*) from per_left_on_false_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_kept_full_on_false_on except select * from per_kept_full_on_false_off) x),
+  (select count(*) from (select * from per_kept_full_on_false_off except select * from per_kept_full_on_false_on) y),
+  (select count(*) from per_kept_full_on_false_on) - (select count(*) from per_kept_full_on_false_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_three_way_on except select * from per_three_way_off) x),
+  (select count(*) from (select * from per_three_way_off except select * from per_three_way_on) y),
+  (select count(*) from per_three_way_on) - (select count(*) from per_three_way_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_left_is_null_on except select * from per_left_is_null_off) x),
+  (select count(*) from (select * from per_left_is_null_off except select * from per_left_is_null_on) y),
+  (select count(*) from per_left_is_null_on) - (select count(*) from per_left_is_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_group_on except select * from per_agg_group_off) x),
+  (select count(*) from (select * from per_agg_group_off except select * from per_agg_group_on) y),
+  (select count(*) from per_agg_group_on) - (select count(*) from per_agg_group_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_simple_on except select * from per_agg_simple_off) x),
+  (select count(*) from (select * from per_agg_simple_off except select * from per_agg_simple_on) y),
+  (select count(*) from per_agg_simple_on) - (select count(*) from per_agg_simple_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_distinct_on except select * from per_agg_distinct_off) x),
+  (select count(*) from (select * from per_agg_distinct_off except select * from per_agg_distinct_on) y),
+  (select count(*) from per_agg_distinct_on) - (select count(*) from per_agg_distinct_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_join_on except select * from per_agg_join_off) x),
+  (select count(*) from (select * from per_agg_join_off except select * from per_agg_join_on) y),
+  (select count(*) from per_agg_join_on) - (select count(*) from per_agg_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_kept_on except select * from per_agg_kept_off) x),
+  (select count(*) from (select * from per_agg_kept_off except select * from per_agg_kept_on) y),
+  (select count(*) from per_agg_kept_on) - (select count(*) from per_agg_kept_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_distinct_on except select * from per_distinct_off) x),
+  (select count(*) from (select * from per_distinct_off except select * from per_distinct_on) y),
+  (select count(*) from per_distinct_on) - (select count(*) from per_distinct_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_topn_on except select * from per_topn_off) x),
+  (select count(*) from (select * from per_topn_off except select * from per_topn_on) y),
+  (select count(*) from per_topn_on) - (select count(*) from per_topn_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_group_topn_on except select * from per_group_topn_off) x),
+  (select count(*) from (select * from per_group_topn_off except select * from per_group_topn_on) y),
+  (select count(*) from per_group_topn_on) - (select count(*) from per_group_topn_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_share_twice_on except select * from per_share_twice_off) x),
+  (select count(*) from (select * from per_share_twice_off except select * from per_share_twice_on) y),
+  (select count(*) from per_share_twice_on) - (select count(*) from per_share_twice_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_share_one_on except select * from per_share_one_off) x),
+  (select count(*) from (select * from per_share_one_off except select * from per_share_one_on) y),
+  (select count(*) from per_share_one_on) - (select count(*) from per_share_one_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_temporal_on except select * from per_temporal_off) x),
+  (select count(*) from (select * from per_temporal_off except select * from per_temporal_on) y),
+  (select count(*) from per_temporal_on) - (select count(*) from per_temporal_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_down_empty_agg_on except select * from per_down_empty_agg_off) x),
+  (select count(*) from (select * from per_down_empty_agg_off except select * from per_down_empty_agg_on) y),
+  (select count(*) from per_down_empty_agg_on) - (select count(*) from per_down_empty_agg_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_down_empty_join_on except select * from per_down_empty_join_off) x),
+  (select count(*) from (select * from per_down_empty_join_off except select * from per_down_empty_join_on) y),
+  (select count(*) from per_down_empty_join_on) - (select count(*) from per_down_empty_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_down_padded_on except select * from per_down_padded_off) x),
+  (select count(*) from (select * from per_down_padded_off except select * from per_down_padded_on) y),
+  (select count(*) from per_down_padded_on) - (select count(*) from per_down_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_down_const_row_on except select * from per_down_const_row_off) x),
+  (select count(*) from (select * from per_down_const_row_off except select * from per_down_const_row_on) y),
+  (select count(*) from per_down_const_row_on) - (select count(*) from per_down_const_row_off);
+----
+0 0 0
+
+# Second round of changes: updates and deletes, which retract rows.
+
+statement ok
+update per_t set v2 = v2 + 1 where v1 = 1;
+
+statement ok
+update per_t set v1 = 2, v3 = null where v1 = 3;
+
+statement ok
+delete from per_t where v1 = 6;
+
+statement ok
+delete from per_t where v1 is null and v2 is null;
+
+statement ok
+update per_s set w = 2 where w = 1;
+
+statement ok
+delete from per_s where k = 2;
+
+statement ok
+update per_r set x = 5 where x is null;
+
+statement ok
+delete from per_r where k = 1;
+
+# After the updates and deletes: with and without pruning, every materialized view holds the same rows.
+
+query III
+select
+  (select count(*) from (select * from per_eq_eq_on except select * from per_eq_eq_off) x),
+  (select count(*) from (select * from per_eq_eq_off except select * from per_eq_eq_on) y),
+  (select count(*) from per_eq_eq_on) - (select count(*) from per_eq_eq_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_null_in_on except select * from per_null_in_off) x),
+  (select count(*) from (select * from per_null_in_off except select * from per_null_in_on) y),
+  (select count(*) from per_null_in_on) - (select count(*) from per_null_in_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_eq_null_on except select * from per_eq_null_off) x),
+  (select count(*) from (select * from per_eq_null_off except select * from per_eq_null_on) y),
+  (select count(*) from per_eq_null_on) - (select count(*) from per_eq_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_range_on except select * from per_range_off) x),
+  (select count(*) from (select * from per_range_off except select * from per_range_on) y),
+  (select count(*) from per_range_on) - (select count(*) from per_range_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_bool_on except select * from per_bool_off) x),
+  (select count(*) from (select * from per_bool_off except select * from per_bool_on) y),
+  (select count(*) from per_bool_on) - (select count(*) from per_bool_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_in_notin_on except select * from per_in_notin_off) x),
+  (select count(*) from (select * from per_in_notin_off except select * from per_in_notin_on) y),
+  (select count(*) from per_in_notin_on) - (select count(*) from per_in_notin_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_const_false_on except select * from per_const_false_off) x),
+  (select count(*) from (select * from per_const_false_off except select * from per_const_false_on) y),
+  (select count(*) from per_const_false_on) - (select count(*) from per_const_false_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_kept_eq_in_on except select * from per_kept_eq_in_off) x),
+  (select count(*) from (select * from per_kept_eq_in_off except select * from per_kept_eq_in_on) y),
+  (select count(*) from per_kept_eq_in_on) - (select count(*) from per_kept_eq_in_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_kept_point_on except select * from per_kept_point_off) x),
+  (select count(*) from (select * from per_kept_point_off except select * from per_kept_point_on) y),
+  (select count(*) from per_kept_point_on) - (select count(*) from per_kept_point_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_kept_open_on except select * from per_kept_open_off) x),
+  (select count(*) from (select * from per_kept_open_off except select * from per_kept_open_on) y),
+  (select count(*) from per_kept_open_on) - (select count(*) from per_kept_open_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_kept_or_on except select * from per_kept_or_off) x),
+  (select count(*) from (select * from per_kept_or_off except select * from per_kept_or_on) y),
+  (select count(*) from per_kept_or_on) - (select count(*) from per_kept_or_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_kept_in_null_on except select * from per_kept_in_null_off) x),
+  (select count(*) from (select * from per_kept_in_null_off except select * from per_kept_in_null_on) y),
+  (select count(*) from per_kept_in_null_on) - (select count(*) from per_kept_in_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_union_two_on except select * from per_union_two_off) x),
+  (select count(*) from (select * from per_union_two_off except select * from per_union_two_on) y),
+  (select count(*) from per_union_two_on) - (select count(*) from per_union_two_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_union_one_on except select * from per_union_one_off) x),
+  (select count(*) from (select * from per_union_one_off except select * from per_union_one_on) y),
+  (select count(*) from per_union_one_on) - (select count(*) from per_union_one_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_union_none_on except select * from per_union_none_off) x),
+  (select count(*) from (select * from per_union_none_off except select * from per_union_none_on) y),
+  (select count(*) from per_union_none_on) - (select count(*) from per_union_none_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_union_distinct_on except select * from per_union_distinct_off) x),
+  (select count(*) from (select * from per_union_distinct_off except select * from per_union_distinct_on) y),
+  (select count(*) from per_union_distinct_on) - (select count(*) from per_union_distinct_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_inner_empty_on except select * from per_inner_empty_off) x),
+  (select count(*) from (select * from per_inner_empty_off except select * from per_inner_empty_on) y),
+  (select count(*) from per_inner_empty_on) - (select count(*) from per_inner_empty_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_left_right_empty_on except select * from per_left_right_empty_off) x),
+  (select count(*) from (select * from per_left_right_empty_off except select * from per_left_right_empty_on) y),
+  (select count(*) from per_left_right_empty_on) - (select count(*) from per_left_right_empty_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_left_left_empty_on except select * from per_left_left_empty_off) x),
+  (select count(*) from (select * from per_left_left_empty_off except select * from per_left_left_empty_on) y),
+  (select count(*) from per_left_left_empty_on) - (select count(*) from per_left_left_empty_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_right_left_empty_on except select * from per_right_left_empty_off) x),
+  (select count(*) from (select * from per_right_left_empty_off except select * from per_right_left_empty_on) y),
+  (select count(*) from per_right_left_empty_on) - (select count(*) from per_right_left_empty_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_full_right_empty_on except select * from per_full_right_empty_off) x),
+  (select count(*) from (select * from per_full_right_empty_off except select * from per_full_right_empty_on) y),
+  (select count(*) from per_full_right_empty_on) - (select count(*) from per_full_right_empty_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_full_left_empty_on except select * from per_full_left_empty_off) x),
+  (select count(*) from (select * from per_full_left_empty_off except select * from per_full_left_empty_on) y),
+  (select count(*) from per_full_left_empty_on) - (select count(*) from per_full_left_empty_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_full_both_empty_on except select * from per_full_both_empty_off) x),
+  (select count(*) from (select * from per_full_both_empty_off except select * from per_full_both_empty_on) y),
+  (select count(*) from per_full_both_empty_on) - (select count(*) from per_full_both_empty_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_semi_empty_on except select * from per_semi_empty_off) x),
+  (select count(*) from (select * from per_semi_empty_off except select * from per_semi_empty_on) y),
+  (select count(*) from per_semi_empty_on) - (select count(*) from per_semi_empty_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_anti_empty_on except select * from per_anti_empty_off) x),
+  (select count(*) from (select * from per_anti_empty_off except select * from per_anti_empty_on) y),
+  (select count(*) from per_anti_empty_on) - (select count(*) from per_anti_empty_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_inner_on_false_on except select * from per_inner_on_false_off) x),
+  (select count(*) from (select * from per_inner_on_false_off except select * from per_inner_on_false_on) y),
+  (select count(*) from per_inner_on_false_on) - (select count(*) from per_inner_on_false_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_left_on_false_on except select * from per_left_on_false_off) x),
+  (select count(*) from (select * from per_left_on_false_off except select * from per_left_on_false_on) y),
+  (select count(*) from per_left_on_false_on) - (select count(*) from per_left_on_false_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_kept_full_on_false_on except select * from per_kept_full_on_false_off) x),
+  (select count(*) from (select * from per_kept_full_on_false_off except select * from per_kept_full_on_false_on) y),
+  (select count(*) from per_kept_full_on_false_on) - (select count(*) from per_kept_full_on_false_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_three_way_on except select * from per_three_way_off) x),
+  (select count(*) from (select * from per_three_way_off except select * from per_three_way_on) y),
+  (select count(*) from per_three_way_on) - (select count(*) from per_three_way_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_left_is_null_on except select * from per_left_is_null_off) x),
+  (select count(*) from (select * from per_left_is_null_off except select * from per_left_is_null_on) y),
+  (select count(*) from per_left_is_null_on) - (select count(*) from per_left_is_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_group_on except select * from per_agg_group_off) x),
+  (select count(*) from (select * from per_agg_group_off except select * from per_agg_group_on) y),
+  (select count(*) from per_agg_group_on) - (select count(*) from per_agg_group_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_simple_on except select * from per_agg_simple_off) x),
+  (select count(*) from (select * from per_agg_simple_off except select * from per_agg_simple_on) y),
+  (select count(*) from per_agg_simple_on) - (select count(*) from per_agg_simple_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_distinct_on except select * from per_agg_distinct_off) x),
+  (select count(*) from (select * from per_agg_distinct_off except select * from per_agg_distinct_on) y),
+  (select count(*) from per_agg_distinct_on) - (select count(*) from per_agg_distinct_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_join_on except select * from per_agg_join_off) x),
+  (select count(*) from (select * from per_agg_join_off except select * from per_agg_join_on) y),
+  (select count(*) from per_agg_join_on) - (select count(*) from per_agg_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_kept_on except select * from per_agg_kept_off) x),
+  (select count(*) from (select * from per_agg_kept_off except select * from per_agg_kept_on) y),
+  (select count(*) from per_agg_kept_on) - (select count(*) from per_agg_kept_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_distinct_on except select * from per_distinct_off) x),
+  (select count(*) from (select * from per_distinct_off except select * from per_distinct_on) y),
+  (select count(*) from per_distinct_on) - (select count(*) from per_distinct_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_topn_on except select * from per_topn_off) x),
+  (select count(*) from (select * from per_topn_off except select * from per_topn_on) y),
+  (select count(*) from per_topn_on) - (select count(*) from per_topn_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_group_topn_on except select * from per_group_topn_off) x),
+  (select count(*) from (select * from per_group_topn_off except select * from per_group_topn_on) y),
+  (select count(*) from per_group_topn_on) - (select count(*) from per_group_topn_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_share_twice_on except select * from per_share_twice_off) x),
+  (select count(*) from (select * from per_share_twice_off except select * from per_share_twice_on) y),
+  (select count(*) from per_share_twice_on) - (select count(*) from per_share_twice_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_share_one_on except select * from per_share_one_off) x),
+  (select count(*) from (select * from per_share_one_off except select * from per_share_one_on) y),
+  (select count(*) from per_share_one_on) - (select count(*) from per_share_one_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_temporal_on except select * from per_temporal_off) x),
+  (select count(*) from (select * from per_temporal_off except select * from per_temporal_on) y),
+  (select count(*) from per_temporal_on) - (select count(*) from per_temporal_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_down_empty_agg_on except select * from per_down_empty_agg_off) x),
+  (select count(*) from (select * from per_down_empty_agg_off except select * from per_down_empty_agg_on) y),
+  (select count(*) from per_down_empty_agg_on) - (select count(*) from per_down_empty_agg_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_down_empty_join_on except select * from per_down_empty_join_off) x),
+  (select count(*) from (select * from per_down_empty_join_off except select * from per_down_empty_join_on) y),
+  (select count(*) from per_down_empty_join_on) - (select count(*) from per_down_empty_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_down_padded_on except select * from per_down_padded_off) x),
+  (select count(*) from (select * from per_down_padded_off except select * from per_down_padded_on) y),
+  (select count(*) from per_down_padded_on) - (select count(*) from per_down_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_down_const_row_on except select * from per_down_const_row_off) x),
+  (select count(*) from (select * from per_down_const_row_off except select * from per_down_const_row_on) y),
+  (select count(*) from per_down_const_row_on) - (select count(*) from per_down_const_row_off);
+----
+0 0 0
+
+query I
+select count(*) from per_eq_eq_on;
+----
+0
+
+query I
+select count(*) from per_limit0_on;
+----
+0
+
+query II
+select c, m from per_agg_join_on;
+----
+0 NULL
+
+# Cleanup.
+
+statement ok
+drop materialized view per_down_const_row_on;
+
+statement ok
+drop materialized view per_down_padded_on;
+
+statement ok
+drop materialized view per_down_empty_join_on;
+
+statement ok
+drop materialized view per_down_empty_agg_on;
+
+statement ok
+drop materialized view per_temporal_on;
+
+statement ok
+drop materialized view per_share_one_on;
+
+statement ok
+drop materialized view per_share_twice_on;
+
+statement ok
+drop materialized view per_group_topn_on;
+
+statement ok
+drop materialized view per_topn_on;
+
+statement ok
+drop materialized view per_distinct_on;
+
+statement ok
+drop materialized view per_agg_kept_on;
+
+statement ok
+drop materialized view per_agg_join_on;
+
+statement ok
+drop materialized view per_agg_distinct_on;
+
+statement ok
+drop materialized view per_agg_simple_on;
+
+statement ok
+drop materialized view per_agg_group_on;
+
+statement ok
+drop materialized view per_left_is_null_on;
+
+statement ok
+drop materialized view per_three_way_on;
+
+statement ok
+drop materialized view per_kept_full_on_false_on;
+
+statement ok
+drop materialized view per_left_on_false_on;
+
+statement ok
+drop materialized view per_inner_on_false_on;
+
+statement ok
+drop materialized view per_anti_empty_on;
+
+statement ok
+drop materialized view per_semi_empty_on;
+
+statement ok
+drop materialized view per_full_both_empty_on;
+
+statement ok
+drop materialized view per_full_left_empty_on;
+
+statement ok
+drop materialized view per_full_right_empty_on;
+
+statement ok
+drop materialized view per_right_left_empty_on;
+
+statement ok
+drop materialized view per_left_left_empty_on;
+
+statement ok
+drop materialized view per_left_right_empty_on;
+
+statement ok
+drop materialized view per_inner_empty_on;
+
+statement ok
+drop materialized view per_union_distinct_on;
+
+statement ok
+drop materialized view per_union_none_on;
+
+statement ok
+drop materialized view per_union_one_on;
+
+statement ok
+drop materialized view per_union_two_on;
+
+statement ok
+drop materialized view per_kept_in_null_on;
+
+statement ok
+drop materialized view per_kept_or_on;
+
+statement ok
+drop materialized view per_kept_open_on;
+
+statement ok
+drop materialized view per_kept_point_on;
+
+statement ok
+drop materialized view per_kept_eq_in_on;
+
+statement ok
+drop materialized view per_const_false_on;
+
+statement ok
+drop materialized view per_in_notin_on;
+
+statement ok
+drop materialized view per_bool_on;
+
+statement ok
+drop materialized view per_range_on;
+
+statement ok
+drop materialized view per_eq_null_on;
+
+statement ok
+drop materialized view per_null_in_on;
+
+statement ok
+drop materialized view per_eq_eq_on;
+
+statement ok
+drop materialized view per_down_const_row_off;
+
+statement ok
+drop materialized view per_down_padded_off;
+
+statement ok
+drop materialized view per_down_empty_join_off;
+
+statement ok
+drop materialized view per_down_empty_agg_off;
+
+statement ok
+drop materialized view per_temporal_off;
+
+statement ok
+drop materialized view per_share_one_off;
+
+statement ok
+drop materialized view per_share_twice_off;
+
+statement ok
+drop materialized view per_group_topn_off;
+
+statement ok
+drop materialized view per_topn_off;
+
+statement ok
+drop materialized view per_distinct_off;
+
+statement ok
+drop materialized view per_agg_kept_off;
+
+statement ok
+drop materialized view per_agg_join_off;
+
+statement ok
+drop materialized view per_agg_distinct_off;
+
+statement ok
+drop materialized view per_agg_simple_off;
+
+statement ok
+drop materialized view per_agg_group_off;
+
+statement ok
+drop materialized view per_left_is_null_off;
+
+statement ok
+drop materialized view per_three_way_off;
+
+statement ok
+drop materialized view per_kept_full_on_false_off;
+
+statement ok
+drop materialized view per_left_on_false_off;
+
+statement ok
+drop materialized view per_inner_on_false_off;
+
+statement ok
+drop materialized view per_anti_empty_off;
+
+statement ok
+drop materialized view per_semi_empty_off;
+
+statement ok
+drop materialized view per_full_both_empty_off;
+
+statement ok
+drop materialized view per_full_left_empty_off;
+
+statement ok
+drop materialized view per_full_right_empty_off;
+
+statement ok
+drop materialized view per_right_left_empty_off;
+
+statement ok
+drop materialized view per_left_left_empty_off;
+
+statement ok
+drop materialized view per_left_right_empty_off;
+
+statement ok
+drop materialized view per_inner_empty_off;
+
+statement ok
+drop materialized view per_union_distinct_off;
+
+statement ok
+drop materialized view per_union_none_off;
+
+statement ok
+drop materialized view per_union_one_off;
+
+statement ok
+drop materialized view per_union_two_off;
+
+statement ok
+drop materialized view per_kept_in_null_off;
+
+statement ok
+drop materialized view per_kept_or_off;
+
+statement ok
+drop materialized view per_kept_open_off;
+
+statement ok
+drop materialized view per_kept_point_off;
+
+statement ok
+drop materialized view per_kept_eq_in_off;
+
+statement ok
+drop materialized view per_const_false_off;
+
+statement ok
+drop materialized view per_in_notin_off;
+
+statement ok
+drop materialized view per_bool_off;
+
+statement ok
+drop materialized view per_range_off;
+
+statement ok
+drop materialized view per_eq_null_off;
+
+statement ok
+drop materialized view per_null_in_off;
+
+statement ok
+drop materialized view per_eq_eq_off;
+
+statement ok
+drop materialized view per_limit0_on;
+
+statement ok
+drop table per_r;
+
+statement ok
+drop table per_s;
+
+statement ok
+drop table per_t;
+
+statement ok
+set streaming_prune_empty_relation = false;
