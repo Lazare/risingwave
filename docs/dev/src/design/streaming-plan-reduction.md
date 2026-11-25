@@ -289,23 +289,24 @@ domain, a left join of the domain with them (an aggregation for a scalar subquer
   both forms, and the row is padded. A projected expression that is not NULL on the padded row
   (a constant, `WITH ORDINALITY`) becomes `CASE WHEN <not padded> THEN .. END`.
 - `ARRAY(SELECT srf(t.a))`, `(SELECT max(x) FROM srf(t.a) x)`, `EXISTS`, `count`, `sum`,
-  `string_agg`, ...: the same `ProjectSet`, then the aggregation grouped by all the columns of `t`
-  (they include its stream key: one group per row of `t`), each call filtered on the rows that are
-  not padded, so that a row whose functions return nothing gets the value over an empty input. A
+  `string_agg`, ...: the same `ProjectSet`, then the aggregation grouped by the stream key of `t`
+  (one group per row of `t`, its other columns carried with `internal_last_seen_value`; grouping
+  by all its columns would keep hidden columns such as `_rw_timestamp`), each call filtered on the
+  rows that are not padded, so that a row whose functions return nothing gets the value over an empty input. A
   row is known to be padded when every function never returns NULL (`jsonb_array_elements`,
   `regexp_matches`, `generate_series`, `jsonb_object_keys`, ...) or has a twin zipped with it
   that returns as many rows and never NULL: `generate_subscripts(a, 1)` for `unnest(a)` of a
   one-dimensional array, `jsonb_array_elements(j)` for `jsonb_array_elements_text(j)` (whose text
   of a JSON null is `''` today but NULL in PostgreSQL: a kept plan does not rely on it). `sum(x)`
-  becomes `CASE WHEN count(x) > 0 THEN sum(x) END`: once the group key is reduced to the stream
-  key (`AggGroupBySimplifyRule`), an update of the array retracts the old values while the group
-  keeps rows, and a streaming `sum` then returns 0 instead of NULL.
+  becomes `CASE WHEN count(x) > 0 THEN sum(x) END`: an update of the array retracts the old values
+  of the group while the new ones come in, and a streaming `sum` whose non-NULL values were all
+  retracted returns 0 instead of NULL.
 - `unnest(ARRAY(SELECT srf(t.a)))` (or of `COALESCE(.., '{}')`) used only as a source of rows:
   `srf(t.a)`, no aggregation at all. A bag: the order of the array does not matter. Not when the
   array is also selected, when the function returns arrays (`unnest` flattens them), or when the
   row number of the `unnest` is read.
 - `CROSS JOIN LATERAL (SELECT v, sum(v) OVER (ORDER BY o) FROM unnest(t.a) WITH ORDINALITY ...)`:
-  an inner `ProjectSet` and the window partitioned by all the columns of `t`.
+  an inner `ProjectSet` and the window partitioned by the stream key of `t`.
 
 Example: `SELECT t.id, a.x FROM t LEFT JOIN LATERAL (SELECT (regexp_matches(t.s, 'A([0-9]+)'))[1]
 AS x) a ON true` was a scan of `t`, a second scan of `t`, an aggregation (the domain), a
@@ -317,8 +318,9 @@ Kept in the general way: a condition in the subquery (`WHERE` over the function,
 than true), a subquery that reads a table, `LIMIT` or `ORDER BY .. LIMIT`, `DISTINCT` aggregates,
 aggregates other than `count`, `sum`, `min`, `max`, `array_agg`, `string_agg`, `jsonb_agg`,
 `jsonb_object_agg`, a window in a left join, `unnest` of a nested array where the padded row
-must be known, an outer side without a stream key, or with a column that can not be a group key
-(map, vector, variant), user-defined or other table functions. Batch plans do not change.
+must be known, an aggregation or a window over an outer side without a stream key, user-defined
+or other table functions. The functions are zipped with a twin only when the padded row must be
+known (an aggregation, or a projected expression that is not NULL on it). Batch plans do not change.
 
 Not done:
 

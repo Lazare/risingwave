@@ -70,15 +70,15 @@ use crate::utils::{Condition, IndexSet};
 ///   the padded row is wrapped in `CASE WHEN <row is not padded> THEN .. END`. The inner form is
 ///   `ApplyTableFunctionToProjectSetRule`.
 /// - an aggregation without group key over the functions (a scalar subquery, `ARRAY(..)`,
-///   `EXISTS`), in a left outer or an inner apply: the aggregation is grouped by all the columns
-///   of the outer side (which include its stream key, so a group holds the rows of one outer row)
-///   over the outer `ProjectSet`, and every aggregate call is filtered on the rows that are not
-///   padded, so that an outer row whose functions return no row gets the value of the aggregation
-///   over an empty input. `sum` is computed as `CASE WHEN count(x) > 0 THEN sum(x) END`: a
-///   streaming `sum` whose non-NULL values were all retracted returns 0 while its group holds
-///   other rows, which happens when the group key is later reduced to the stream key.
-/// - window functions over the functions in an inner apply: the windows are partitioned by all
-///   the columns of the outer side.
+///   `EXISTS`), in a left outer or an inner apply: the aggregation is grouped by the stream key of
+///   the outer side (a group holds the rows of one outer row) over the outer `ProjectSet`, carries
+///   the other columns of the outer side with `internal_last_seen_value`, and filters every
+///   aggregate call on the rows that are not padded, so that an outer row whose functions return
+///   no row gets the value of the aggregation over an empty input. `sum` is computed as
+///   `CASE WHEN count(x) > 0 THEN sum(x) END`: when an update of the outer row retracts all the
+///   non-NULL values of its group while new rows come in, a streaming `sum` returns 0, not NULL.
+/// - window functions over the functions in an inner apply: the windows are partitioned by the
+///   stream key of the outer side.
 pub struct LateralTableFunctionRule {}
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -107,10 +107,8 @@ impl Rule<Logical> for LateralTableFunctionRule {
                 project.input()
             } else if let Some(agg) = cur.as_logical_agg() {
                 agg.input()
-            } else if let Some(over_window) = cur.as_logical_over_window() {
-                over_window.input()
             } else {
-                return None;
+                cur.as_logical_over_window()?.input()
             };
             nodes.push(cur);
             cur = next;
@@ -161,23 +159,41 @@ impl Rule<Logical> for LateralTableFunctionRule {
                 }
             }
         }
-        // A group or a partition must hold the rows of one outer row: the outer side needs a
-        // stream key, and all its columns become a group key or a partition key.
-        if shape != Shape::Plain
-            && (left.stream_key().is_none()
-                || !left
-                    .schema()
-                    .fields()
-                    .iter()
-                    .all(|f| groupable(&f.data_type())))
-        {
-            return None;
-        }
+        // A group or a partition must hold the rows of one outer row: it is keyed by the stream
+        // key of the outer side. The other columns of the outer side, which may not be a key
+        // (`_rw_timestamp`), are carried by the aggregation.
+        let stream_key: Vec<usize> = match shape {
+            Shape::Plain => vec![],
+            Shape::Agg | Shape::Window => {
+                let mut key = left.stream_key()?.to_vec();
+                key.sort_unstable();
+                key.dedup();
+                if key.is_empty() {
+                    return None;
+                }
+                key
+            }
+        };
 
         let outer = shape != Shape::Window;
+        // Whether the padded row must be told from the rows of the functions.
+        let need_flag = match shape {
+            Shape::Plain => {
+                let project = nodes[0].as_logical_project()?;
+                !project
+                    .exprs()
+                    .iter()
+                    .all(|e| null_when_padded(e, project_set.select_list()))
+            }
+            Shape::Agg => true,
+            Shape::Window => false,
+        };
         let left_len = left.schema().len();
         let mut rewriter = CorrelatedRewriter::new(correlated_id, left_len);
-        let base = build_base(&left, &project_set, &mut rewriter, outer)?;
+        let base = build_base(&left, &project_set, &mut rewriter, outer, need_flag)?;
+        if need_flag && !base.has_flag {
+            return None;
+        }
 
         let result = match shape {
             Shape::Plain => {
@@ -211,7 +227,7 @@ impl Rule<Logical> for LateralTableFunctionRule {
                 }
                 // Layout of `cur`: the columns of the outer side, then (below an aggregation) the
                 // flag of the rows that are not padded, then the columns of the subquery's node.
-                let mut cur = base.plan.clone();
+                let mut cur = base.plan;
                 let mut offset = left_len + 1;
                 for node in nodes.iter().rev() {
                     if let Some(project) = node.as_logical_project() {
@@ -236,15 +252,23 @@ impl Rule<Logical> for LateralTableFunctionRule {
                             for partition in &mut function.partition_by {
                                 partition.shift_with_offset(offset as isize);
                             }
-                            function.partition_by = identity_refs(&left, left_len)
-                                .into_iter()
+                            function.partition_by = stream_key
+                                .iter()
+                                .map(|&i| InputRef::new(i, left.schema()[i].data_type()))
                                 .chain(function.partition_by.drain(..))
                                 .collect();
                         }
                         cur = LogicalOverWindow::new(functions, cur).into();
                     } else {
                         let agg = node.as_logical_agg()?;
-                        cur = per_row_agg(agg.agg_calls(), cur, offset, left_len, &mut rewriter);
+                        cur = per_row_agg(
+                            agg.agg_calls(),
+                            cur,
+                            offset,
+                            &stream_key,
+                            left_len,
+                            &mut rewriter,
+                        );
                         offset = left_len;
                     }
                 }
@@ -268,13 +292,15 @@ impl LateralTableFunctionRule {
     }
 }
 
-/// The aggregation of a subquery evaluated per row: grouped by the columns of the outer side, each
-/// call filtered on the rows that are not padded. `input` has the layout [outer columns, flag,
-/// columns of the input of the aggregation]. The result has the layout [outer columns, calls].
+/// The aggregation of a subquery evaluated per row: grouped by the stream key of the outer side,
+/// which carries its other columns with `internal_last_seen_value`; each call is filtered on the
+/// rows that are not padded. `input` has the layout [outer columns, flag, columns of the input of
+/// the aggregation]. The result has the layout [outer columns, calls].
 fn per_row_agg(
     calls: &[PlanAggCall],
     input: PlanRef,
     offset: usize,
+    stream_key: &[usize],
     left_len: usize,
     rewriter: &mut CorrelatedRewriter,
 ) -> PlanRef {
@@ -313,14 +339,15 @@ fn per_row_agg(
         }
         new_calls.push(call);
     }
+    let key_len = stream_key.len();
     let calls_len = new_calls.len();
     let mut outputs: Vec<ExprImpl> = new_calls
         .iter()
         .enumerate()
-        .map(|(j, call)| InputRef::new(left_len + j, call.return_type.clone()).into())
+        .map(|(j, call)| InputRef::new(key_len + j, call.return_type.clone()).into())
         .collect();
     for (g, (j, guard)) in guards.into_iter().enumerate() {
-        let count = InputRef::new(left_len + calls_len + g, DataType::Int64);
+        let count = InputRef::new(key_len + calls_len + g, DataType::Int64);
         let is_positive = FunctionCall::new_unchecked(
             ExprType::GreaterThan,
             vec![count.into(), ExprImpl::literal_bigint(0)],
@@ -335,11 +362,31 @@ fn per_row_agg(
         .into();
         new_calls.push(guard);
     }
-    let group_key = IndexSet::from((0..left_len).collect::<Vec<_>>());
+    // The columns of the outer side: the group key, or carried.
+    let mut left_columns: Vec<ExprImpl> = vec![];
+    for i in 0..left_len {
+        let data_type = input.schema()[i].data_type();
+        let position = match stream_key.iter().position(|&k| k == i) {
+            Some(position) => position,
+            None => {
+                new_calls.push(PlanAggCall {
+                    agg_type: PbAggKind::InternalLastSeenValue.into(),
+                    return_type: data_type.clone(),
+                    inputs: vec![InputRef::new(i, data_type.clone())],
+                    distinct: false,
+                    order_by: vec![],
+                    filter: Condition::true_cond(),
+                    direct_args: vec![],
+                });
+                key_len + new_calls.len() - 1
+            }
+        };
+        left_columns.push(InputRef::new(position, data_type).into());
+    }
+    let group_key = IndexSet::from(stream_key.to_vec());
     let agg: PlanRef = Agg::new(new_calls, group_key, input).into();
-    let mut exprs = identity(&agg, left_len);
-    exprs.extend(outputs);
-    LogicalProject::new(agg, exprs).into()
+    left_columns.extend(outputs);
+    LogicalProject::new(agg, left_columns).into()
 }
 
 /// The aggregate calls whose value over the rows of one outer row is computed exactly by a
@@ -382,6 +429,7 @@ fn build_base(
     project_set: &LogicalProjectSet,
     rewriter: &mut CorrelatedRewriter,
     outer: bool,
+    need_flag: bool,
 ) -> Option<Base> {
     let values = project_set.input();
     if !values.as_logical_values()?.is_empty_scalar() {
@@ -401,7 +449,7 @@ fn build_base(
                 if !supported(table_function) {
                     return None;
                 }
-                if outer {
+                if need_flag {
                     match padding_test(table_function) {
                         PaddingTest::NeverNull => {
                             let column = 1 + left_len + i;
@@ -441,7 +489,7 @@ fn build_base(
     // On an inner `ProjectSet` no row is padded.
     let flag = if !outer {
         ExprImpl::literal_bool(true)
-    } else if has_flag {
+    } else if need_flag && has_flag {
         flag_parts
             .into_iter()
             .reduce(|a, b| {
@@ -463,7 +511,7 @@ fn build_base(
     Some(Base {
         plan: LogicalProject::new(project_set, exprs).into(),
         left_len,
-        has_flag: has_flag || !outer,
+        has_flag: !outer || (need_flag && has_flag),
     })
 }
 
@@ -557,16 +605,6 @@ fn null_when_padded(expr: &ExprImpl, items: &[ExprImpl]) -> bool {
     }
 }
 
-/// Whether a column of this type can be a group key or a partition key.
-fn groupable(data_type: &DataType) -> bool {
-    match data_type {
-        DataType::Map(_) | DataType::Vector(_) | DataType::Variant => false,
-        DataType::Struct(st) => st.types().all(groupable),
-        DataType::List(list) => groupable(list.elem()),
-        _ => true,
-    }
-}
-
 fn is_not_null(input_ref: InputRef) -> ExprImpl {
     FunctionCall::new_unchecked(
         ExprType::IsNotNull,
@@ -657,17 +695,15 @@ impl Rule<Logical> for UnnestArrayOfTableFunctionRule {
     fn apply(&self, plan: PlanRef) -> Option<PlanRef> {
         // The projections and filters above the `ProjectSet`, from the top.
         let mut chain: Vec<PlanRef> = vec![];
-        let mut cur = plan.clone();
+        let mut cur = plan;
         let project_set = loop {
             if let Some(project_set) = cur.as_logical_project_set() {
                 break project_set.clone();
             }
             let next = if let Some(project) = cur.as_logical_project() {
                 project.input()
-            } else if let Some(filter) = cur.as_logical_filter() {
-                filter.input()
             } else {
-                return None;
+                cur.as_logical_filter()?.input()
             };
             chain.push(cur);
             cur = next;
@@ -776,7 +812,7 @@ impl Rule<Logical> for UnnestArrayOfTableFunctionRule {
         // The projection keeps its columns, the array becomes NULL (nothing reads it), and the
         // columns of the outer side are appended for the arguments of the function.
         let q_len = q_exprs.len();
-        let mut new_q = q_exprs.clone();
+        let mut new_q = q_exprs;
         new_q[array_col] = ExprImpl::literal_null(new_q[array_col].return_type());
         new_q.extend(identity(&left, left_len));
         let new_q: PlanRef = LogicalProject::new(left, new_q).into();
