@@ -30,7 +30,7 @@ own rules.
 | 6 | Merge of two stacked aggregations | selected, not started |
 | 7 | Join common to the branches of a `UNION ALL` joined once above the union | done (prototype, branch of idea 3) |
 | 8 | Aggregate of a constant over a group | done (prototype, branch of idea 3) |
-| 9 | Leftovers of subquery decorrelation (domain re-scan, aggregation and null-safe join back) | selected, after 3, 7 and 8 are validated |
+| 9 | Leftovers of subquery decorrelation (domain re-scan, aggregation and null-safe join back) | aggregating subqueries done (prototype, branch `proto/streaming-simplify-subquery-unnesting`); laterals without a table not started |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -230,6 +230,47 @@ needed. `C` is scanned once and its join state kept once.
 so a constant argument gives a constant result, also when the planner packs it with other values
 into a `ROW(...)`. Removes the filter of the pattern "keep the group if its last operation is
 the one constant operation there is". Part of `streaming_prune_empty_relation`.
+
+### 9. Leftovers of subquery decorrelation (added on 2026-11-25, aggregating subqueries done)
+
+Variable `streaming_simplify_subquery_unnesting`. A subquery in a select list, under `OR` or in a
+`CASE` (`EXISTS`, a scalar aggregate, `ARRAY(...)`) is planned as a left outer apply. The rule
+`PullUpCorrelatedPredicateAggRule` turns an aggregation correlated by equalities into a left join
+with the aggregation grouped by the compared columns, but in the streaming plans of such
+subqueries it never applied:
+
+- the apply of a select-list subquery is marked "at most one row", the rule refuses the mark, and
+  the rule that clears it comes after it in the same single pass;
+- it refuses `count` (the count bug: `count` over an empty input is 0, the outer join pads with
+  NULL), so every `EXISTS`, planned as `count(*) >= 1`;
+- several subqueries of one select list are under one apply, joined with `FULL OUTER JOIN ON
+  true`, and subqueries with the same correlated filter share it.
+
+They went the general way: the outer side read again, its distinct correlated values aggregated
+into a domain, a left join of the domain with the subquery, the aggregation, and a null-safe join
+back. With the variable, a second pass of a streaming variant of the rule:
+
+- accepts the mark and left outer applies only (a semi join over an aggregation without group key
+  is always true, see below);
+- gives the outputs that are not NULL over an empty input their value over an empty input with
+  `CASE WHEN <group key> IS NOT NULL THEN <output> ELSE <value> END` (false for `EXISTS`, 0 for
+  `count`, the empty array for `ARRAY`), when every aggregate call has a known value over an empty
+  input and the apply has no condition;
+- `ApplyOneRowJoinSplitRule` splits the apply of several subqueries into one apply per subquery
+  when each returns exactly one row, and the variant looks through the share of their filter.
+
+Kept in the general way: a correlated column in the aggregated expression, a correlation that is
+not an equality, `IS NOT DISTINCT FROM` written in the subquery, a subquery that groups its rows,
+an aggregate whose value over an empty input is not listed, laterals without a table (a set
+returning function of the outer row only, which needs an outer `ProjectSet` RisingWave does not
+have). Batch plans do not change.
+
+Found on the way, not changed: in the existing rule, `WHERE EXISTS (SELECT min(x) FROM r WHERE
+r.k = t.k)`, which is always true (an aggregation without group key returns one row), is planned
+as a semi join on `r.k = t.k`, and `NOT EXISTS` of the same as an anti join: the semi join
+drops the rows of `t` without a match where the query keeps every row, the anti join keeps them
+where the query returns none (seen in streaming plans, batch not checked). The rule checks the null-rejection of a filter above the apply but not the join
+type of the apply.
 
 ### 5. Aggregation pushed below a join onto the unique side
 
