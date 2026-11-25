@@ -28,7 +28,7 @@ own rules.
 | 3 | Elimination of a self-join on a key | in progress: repeated lookups of a table done on the branch `proto/streaming-merge-repeated-lookups`, lookups nested in trees of joins and semi or anti joins answered by a carried row done on the branch `proto/plan-reduction-flat-lookups`, aggregations next |
 | 5 | Aggregation pushed below a join onto the unique side | selected, not started |
 | 6 | Merge of two stacked aggregations | done (prototype, branch `proto/plan-reduction-shared-aggs`): stacked aggregations and a dedup below a distinct count; a dedup below a top-1 or a semi join not done (see 6) |
-| 7 | Join common to the branches of a `UNION ALL` joined once above the union | done (prototype, branch of idea 3) |
+| 7 | Join common to the branches of a `UNION ALL` joined once above the union | done (prototype, branch of idea 3); derived joined side, several joins and semi or anti joins above the join on the branch `proto/plan-reduction-union-derived` |
 | 8 | Aggregate of a constant over a group | done (prototype, branch of idea 3) |
 | 9 | Leftovers of subquery decorrelation (domain re-scan, aggregation and null-safe join back) | aggregating subqueries done (prototype, branch `proto/streaming-simplify-subquery-unnesting`); laterals without a table not started |
 | US | Branches of a `UNION ALL` that read the same table read it once (`Expand` per branch) | done (prototype, branch `proto/plan-reduction-union-scans`); dominance under a top-1 not done |
@@ -267,19 +267,47 @@ input joined on their group key: one aggregation with a `FILTER` per call.
 
 `(A ⋈ C) UNION ALL (B ⋈ C)` is `(A UNION ALL B) ⋈ C` for the inner, left outer, left semi and
 left anti joins: variable `streaming_factor_union_join`, rule `CommonJoinOverUnionRule`. No key is
-needed. `C` is scanned once and its join state kept once.
+needed. `C` is computed once and its join state kept once.
 
-- The branches that are merged join the same table, with the same join type, on the same
-  expressions of the table; their other inputs are unioned with the number of their branch.
+- The branches that are merged join the same relation, with the same join type, on the same
+  expressions of the relation; their other inputs are unioned with the number of their branch.
+- The joined relation is the scan of a table (with its filters and projections, also through a
+  shared sub-plan), or a *derived* relation: filters and projections over a sub-plan that is the
+  same plan in every merged branch (typically the shared sub-plan of a view or of a subquery
+  written twice: joins, aggregations, unions). A shared sub-plan is kept as it is, since it may
+  have other consumers; the filters and projections above it may differ between branches.
+- The derived relation must give the same rows wherever it is computed: tables read in the
+  present (no `FOR SYSTEM_TIME AS OF`, no source), projections, filters, joins (not as-of),
+  unions, values, project sets, and aggregations whose calls do not depend on the order of the
+  rows (`count`, `sum`, `min`, `max`, `avg`, bit and bool aggregates); every expression pure and
+  without `now()`. Kept: temporal filters, user-defined functions, `string_agg`, `array_agg`,
+  `first_value`..., top-n and window functions (ties may be broken differently).
 - What differs between branches moves around the single join: the rest of a join condition and
-  the filter of a scan are checked in the join condition for the rows of the branch (an outer or
-  anti join stays exact); the filter and projection above a join are applied per branch above.
-- An expression of the joined table that a branch computed below an outer join is still
+  the filter of the joined relation are checked in the join condition for the rows of the
+  branch (an outer or anti join stays exact); the filter and projection above a join are applied
+  per branch above. `NULL` keys and duplicates of the joined relation behave as in each branch:
+  every row of the union meets the same rows of the relation as before, under the same
+  condition.
+- An expression of the joined relation that a branch computed below an outer join is still
   computed below the single join, so that it is `NULL` without a match.
+- Several joins: the union of the other inputs of the single join, and the union of the merged
+  branches with the others, are looked at again. `(A ⋈ C ⋈ H) ∪ (B ⋈ C ⋈ H)` becomes
+  `((A ∪ B) ⋈ C) ⋈ H`, and two stacked anti joins common to the branches are both factored.
+- A semi or anti join above the join of a branch, whose condition only uses the columns of one
+  input `L` of that join, is first moved into `L`: `(L ⋈ X) ⋉ R = (L ⋉ R) ⋈ X`, as every row of
+  the join carries the columns of one row of `L` unchanged. Allowed for `L` the left input of an
+  inner, left outer, left semi or left anti join, or either input of an inner join; not for the
+  side of a left join that is padded with `NULL`. The join below can then be the shared one,
+  as in `(A ⟕ C WHERE NOT EXISTS (.. A ..)) ∪ (B ⟕ C)`. A branch read as written is preferred.
 - Cost to keep in mind: one join state holds the rows of every branch, and the rows of the union
-  are as wide as the widest branch.
-- Not done: a common side that is more than the scan of a table, an inner join in one branch
-  and an anti join on the same key in another (one left join split on `IS NULL`).
+  are as wide as the widest branch. A semi or anti join moved down keeps the rows of `L` in its
+  state instead of the rows of the join.
+- Not done: an inner join in one branch and an anti join on the same key in another (one left
+  join split on `IS NULL`); branches whose filters on the joined relation are disjoint and whose
+  join keys differ (one join on a `CASE` key); a join made redundant by the same join above the
+  union; joins that are common only after reordering the joins of a branch; a non deterministic
+  relation shared by one sub-plan (both branches already read the same rows there, but it is
+  kept on purpose).
 
 ### 8. Aggregate of a constant (added on 2026-11-25, done on the branch)
 

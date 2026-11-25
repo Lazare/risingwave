@@ -8,6 +8,12 @@
     create table e (id int primary key, code varchar, ref int);
     create table g (id int primary key, a int, b int);
     create view da as select * from d where active;
+    create view dj as select d.id, d.name, d.grp, g.a from d join g on d.grp = g.b;
+    create view dagg as select grp, count(*) as cnt, max(name) as mx from d group by grp;
+    create table h (id int primary key, ts timestamptz, v int);
+    create view hrecent as select id, v from h where ts > now() - interval '1 hour';
+    create view dnames as select grp, string_agg(name, ',') as names from d group by grp;
+    create view dtop as select id, name from d order by grp limit 3;
   expected_outputs: []
 - id: setup_off
   sql: |
@@ -144,6 +150,96 @@
   expected_outputs:
   - optimized_logical_plan_for_stream
 
+# The joined side is a derived relation: the same view or sub-plan in every branch.
+- name: derived side - a view with a join, inner joins
+  before: [setup]
+  sql: |
+    select f.id, v.name from f join dj v on f.dim_id = v.id
+    union all
+    select e.id, v.name from e join dj v on e.ref = v.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: derived side - an aggregating view, left joins
+  before: [setup]
+  sql: |
+    select f.id, v.cnt, v.mx from f left join dagg v on f.amt = v.grp
+    union all
+    select e.id, v.cnt, e.code from e left join dagg v on e.ref = v.grp;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: derived side - anti joins with a view with a join
+  before: [setup]
+  sql: |
+    select f.id, f.label from f where not exists (select 1 from dj v where v.id = f.dim_id)
+    union all
+    select e.id, e.code from e where not exists (select 1 from dj v where v.id = e.ref);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: derived side - a different filter of the view in each branch
+  before: [setup]
+  sql: |
+    select f.id, v.cnt from f join dagg v on f.amt = v.grp where v.cnt > 1
+    union all
+    select e.id, v.cnt from e join dagg v on e.ref = v.grp where v.mx is not null;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: derived side - an extra condition on the view in one branch
+  before: [setup]
+  sql: |
+    select f.id, v.name from f join dj v on f.dim_id = v.id and v.a > f.amt
+    union all
+    select e.id, v.name from e join dj v on e.ref = v.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: derived side - the same subquery written in each branch
+  before: [setup]
+  sql: |
+    select f.id, v.cnt from f join (select grp, count(*) as cnt from d group by grp) v on f.amt = v.grp
+    union all
+    select e.id, v.cnt from e join (select grp, count(*) as cnt from d group by grp) v on e.ref = v.grp;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+
+# Several joins, and semi or anti joins above the join.
+- name: two joins common to the branches
+  before: [setup]
+  sql: |
+    select f.id, g.a from f join d on f.dim_id = d.id join g on d.grp = g.b and g.a > 0
+    union all
+    select e.id, g.a from e join d on e.ref = d.id join g on d.grp = g.b and g.a > 0;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: two anti joins in each branch
+  before: [setup]
+  sql: |
+    select f.id, f.label from f
+    where not exists (select 1 from g where g.a = f.other_id and g.b > 0) and not exists (select 1 from d where d.id = f.other_id)
+    union all
+    select e.id, e.code from e
+    where not exists (select 1 from g where g.a = e.ref and g.b > 0) and not exists (select 1 from d where d.id = e.ref);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: anti join on the other input above a left join in one branch
+  before: [setup]
+  sql: |
+    select f.id, d.name from f left join d on f.dim_id = d.id where not exists (select 1 from g where g.a = f.other_id)
+    union all
+    select e.id, d.name from e left join d on e.ref = d.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: semi join on the joined table above inner joins
+  before: [setup]
+  sql: |
+    select f.id, d.name from f join d on f.dim_id = d.id where exists (select 1 from g where g.b = d.grp)
+    union all
+    select e.id, d.name from e join d on e.ref = d.id where exists (select 1 from g where g.b = d.grp);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+
 # Unions that are kept.
 - name: kept - an inner join and a left join
   before: [setup]
@@ -175,5 +271,53 @@
     select f.id, d.name from f join d on f.dim_id = d.id
     union all
     select max(e.id), d.name from e join d on e.ref = d.id group by d.name;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - a view with a temporal filter
+  before: [setup]
+  sql: |
+    select f.id, v.v from f join hrecent v on f.dim_id = v.id
+    union all
+    select e.id, v.v from e join hrecent v on e.ref = v.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - a view with an aggregate that depends on the order of the rows
+  before: [setup]
+  sql: |
+    select f.id, v.names from f join dnames v on f.amt = v.grp
+    union all
+    select e.id, v.names from e join dnames v on e.ref = v.grp;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - a view with a top-n
+  before: [setup]
+  sql: |
+    select f.id, v.name from f join dtop v on f.dim_id = v.id
+    union all
+    select e.id, v.name from e join dtop v on e.ref = v.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - two different views
+  before: [setup]
+  sql: |
+    select f.id, v.name from f join dj v on f.dim_id = v.id
+    union all
+    select e.id, v.name from e join da v on e.ref = v.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - anti join on both inputs of the join below
+  before: [setup]
+  sql: |
+    select f.id, d.name from f left join d on f.dim_id = d.id where not exists (select 1 from g where g.a = f.amt and g.b = d.grp)
+    union all
+    select e.id, d.name from e left join d on e.ref = d.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - anti join on the padded side of a left join
+  before: [setup]
+  sql: |
+    select f.id, d.name from f left join d on f.dim_id = d.id where not exists (select 1 from g where g.a = d.grp)
+    union all
+    select e.id, d.name from e left join d on e.ref = d.id;
   expected_outputs:
   - optimized_logical_plan_for_stream
