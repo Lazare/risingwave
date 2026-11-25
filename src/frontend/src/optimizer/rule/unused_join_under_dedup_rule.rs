@@ -43,9 +43,7 @@ use super::column_facts_simplify_rule::column_facts;
 use super::prelude::{PlanRef, *};
 use crate::expr::{ExprImpl, InputRef};
 use crate::optimizer::plan_node::generic::{GenericPlanRef, PlanAggCall};
-use crate::optimizer::plan_node::{
-    LogicalJoin, LogicalProject, PlanTreeNodeBinary, PlanTreeNodeUnary,
-};
+use crate::optimizer::plan_node::{LogicalProject, PlanTreeNodeBinary, PlanTreeNodeUnary};
 
 pub struct UnusedJoinUnderDedupRule;
 

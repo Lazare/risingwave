@@ -264,7 +264,31 @@ input joined on their group key: one aggregation with a `FILTER` per call.
     - The conditions that a rewrite builds are tidied: repeated conjuncts go, `x = x` becomes
       `x IS NOT NULL`.
   - Not handled, deliberately: a lookup whose row is designated through a lifted left join, a
-    key compared on a computed expression, two equal sub-plans that are not shared. An unused inner join on the key is never removed:
+    key compared on a computed expression, two equal sub-plans that are not shared.
+- **Duplicates that a consumer does not see** (branch `proto/plan-reduction-flat-lookups`,
+  variable `streaming_merge_lookups_under_dedup`, rules `TopOneDefaultBranchRule` and
+  `UnusedJoinUnderDedupRule`). Exact only, no assumption on keys that are not declared:
+  - *Default branch of a status*: a top-1 per key over a `UNION ALL` (one branch per status,
+    with a priority), joined (inner or left) on the group key with a side that carries a row of
+    the table that the default branch reads. The default branch reads the table without a filter
+    the carried row could fail, outputs the key and literals in the columns that are read, and
+    its priority is a literal strictly worse, in the order of the top-1 (`NULL`s placed as the
+    order places them), than every value of the other branches (literals, or `CASE`s of
+    literals). It then never wins, not even on a tie; its rows of a key are equal on the read
+    columns; and it has a row for every carried key (the carried row is one, whether or not the
+    table is unique on that key). The top-1 of the other branches, left-joined, gives the status
+    when it finds a row, the default literals otherwise; the filters above the top-1 apply to
+    that value. The other branches keep their rows and their relative order, so the top-1
+    keeps the same row among them.
+  - *Unused left join*: below an aggregation of `min`, `max`, `bool_and`, `bool_or` or
+    `DISTINCT` calls (or a `DISTINCT`), the right side of a semi or anti join, or a top-1 whose
+    rows tying on the order are equal (every column in the group key, the order, or constant),
+    a left outer join that outputs no right column only repeats rows, and is removed. It is
+    looked for through projections, filters, unions, inner and left joins and the left side of
+    semi and anti joins, never into a shared sub-plan.
+  - Not done: a top-1 or `DISTINCT ON` without a total order (it keeps an arbitrary row, which a
+    rewrite may change), a consumer that counts or sums, an inner join whose match is only
+    implied by a join above the consumer. An unused inner join on the key is never removed:
     the row may be missing, which the join filters (an unused left join on a unique key is
     removed by idea 1). Redundancies that hold only because a consumer is insensitive to
     duplicates (a top-1 or a `min` above) are not used either.

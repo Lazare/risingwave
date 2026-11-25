@@ -164,7 +164,7 @@ fn remove_default_branch(join: &LogicalJoin) -> Option<PlanRef> {
         return None;
     }
     let group_key = top_n.group_key().to_vec();
-    let first_order = top_n.topn_order().column_orders.first()?.clone();
+    let first_order = *top_n.topn_order().column_orders.first()?;
     if group_key.is_empty() {
         return None;
     }
