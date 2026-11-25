@@ -1,0 +1,68 @@
+# A group key that contains the primary key of the input is reduced to that key, and the other
+# group key columns are carried by `internal_last_seen_value`. A column updated to NULL must be
+# NULL in the result, not keep its previous value.
+
+statement ok
+SET RW_IMPLICIT_FLUSH TO true;
+
+statement ok
+create table t (id int primary key, v int, w varchar);
+
+statement ok
+insert into t values (1, 2, 'a'), (2, 3, null), (3, null, 'c');
+
+statement ok
+create materialized view mv as select id, v, w, count(*) as c from t group by id, v, w;
+
+query IITI
+select * from mv order by id;
+----
+1 2 a 1
+2 3 NULL 1
+3 NULL c 1
+
+# A value becomes NULL.
+statement ok
+update t set v = null where id = 1;
+
+statement ok
+update t set w = null where id = 3;
+
+query IITI
+select * from mv order by id;
+----
+1 NULL a 1
+2 3 NULL 1
+3 NULL NULL 1
+
+# NULL becomes a value again, and a row is deleted and inserted again with NULLs.
+statement ok
+update t set v = 5, w = 'b' where id = 2;
+
+statement ok
+update t set v = 7 where id = 1;
+
+statement ok
+delete from t where id = 3;
+
+statement ok
+insert into t values (3, null, null);
+
+query IITI
+select * from mv order by id;
+----
+1 7 a 1
+2 5 b 1
+3 NULL NULL 1
+
+# The materialized view holds the rows of its query.
+query I
+select count(*) from (select * from mv except select id, v, w, count(*) from t group by id, v, w) x;
+----
+0
+
+statement ok
+drop materialized view mv;
+
+statement ok
+drop table t;

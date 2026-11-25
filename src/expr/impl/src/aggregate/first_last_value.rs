@@ -88,7 +88,10 @@ fn last_value<T>(_: Option<T>, input: Option<T>) -> Option<T> {
     internal,
     type_infer = "|args| Ok(args[0].clone())"
 )]
-fn internal_last_seen_value<T>(state: T, input: T, retract: bool) -> T {
+fn internal_last_seen_value<T>(state: Option<T>, input: Option<T>, retract: bool) -> Option<T> {
+    // A NULL input is a value like any other: the planner uses this aggregate for a column that
+    // a group key determines (`GROUP BY pk, col` becomes `GROUP BY pk`), and the column may be
+    // updated to NULL. Skipping NULL inputs kept the previous value.
     if retract { state } else { input }
 }
 
