@@ -66,10 +66,20 @@ use crate::utils::{Condition, IndexSet};
 /// The largest number of copies of one shape that are compared.
 const MAX_COPIES: usize = 16;
 
+/// The largest number of joins that are compared for a reordering.
+const MAX_REORDERED_JOINS: usize = 64;
+
 /// Shares the stateful sub-plans of `plan` that compute the same core (see the module
 /// documentation). Returns the new plan and the number of copies replaced with a shared core;
 /// with none, `plan` itself is returned.
-pub fn share_widened_subplans(plan: PlanRef) -> (PlanRef, usize) {
+pub fn share_widened_subplans(original: PlanRef) -> (PlanRef, usize) {
+    // First reorder the joins of copies that contain the join of another copy.
+    let reordered = expose_common_joins(&original);
+    let plan = if reordered.is_empty() {
+        original.clone()
+    } else {
+        replace(&original, &reordered, &mut HashMap::new())
+    };
     let mut candidates = vec![];
     let mut visited = HashSet::new();
     collect_candidates(&plan, &mut visited, &mut candidates);
@@ -136,7 +146,7 @@ pub fn share_widened_subplans(plan: PlanRef) -> (PlanRef, usize) {
         }
     }
     if replacements.is_empty() {
-        return (plan, 0);
+        return (original, 0);
     }
     let count = replacements.len();
     let mut memo = HashMap::new();
@@ -184,10 +194,45 @@ fn shape(plan: &PlanRef) -> String {
         Some(join) => format!("Join{:?}", join.join_type()),
         None => format!("{:?}", plan.node_type()),
     };
-    format!(
-        "{head}({})",
-        plan.inputs().iter().map(shape).collect_vec().join(",")
-    )
+    let mut inputs = plan.inputs().iter().map(shape).collect_vec();
+    // The sides of an inner join commute: `merge_joins` swaps them to align the copies.
+    if plan
+        .as_logical_join()
+        .is_some_and(|join| join.join_type() == JoinType::Inner)
+    {
+        inputs.sort();
+    }
+    format!("{head}({})", inputs.join(","))
+}
+
+/// The same inner join with its sides swapped, with the same output columns.
+fn swap_inner_join(plan: &PlanRef) -> PlanRef {
+    let join = plan.as_logical_join().unwrap();
+    let (left, right) = (join.left(), join.right());
+    let (left_len, right_len) = (left.schema().len(), right.schema().len());
+    let swapped = (0..left_len + right_len)
+        .map(|column| {
+            if column < left_len {
+                right_len + column
+            } else {
+                column - left_len
+            }
+        })
+        .collect_vec();
+    let on = Condition {
+        conjunctions: join
+            .on()
+            .conjunctions
+            .iter()
+            .map(|conjunct| rewrite(conjunct, &swapped, left_len + right_len))
+            .collect(),
+    };
+    let output_indices = join
+        .output_indices()
+        .iter()
+        .map(|&column| swapped[column])
+        .collect();
+    LogicalJoin::with_output_indices(right, left, JoinType::Inner, on, output_indices).into()
 }
 
 fn size(plan: &PlanRef) -> usize {
@@ -471,7 +516,26 @@ fn merge_scans(copies: &[PlanRef]) -> Option<Merged> {
 /// Joins of the same type and condition. The residual conjuncts of a side are lifted when they
 /// commute with the join.
 fn merge_joins(copies: &[PlanRef]) -> Option<Merged> {
-    let joins = copies
+    // Inner joins whose sides are swapped with respect to the first copy are swapped back.
+    let first = copies[0].as_logical_join().unwrap();
+    let first_sides = (shape(&first.left()), shape(&first.right()));
+    let oriented = copies
+        .iter()
+        .map(|copy| {
+            let join = copy.as_logical_join().unwrap();
+            let sides = (shape(&join.left()), shape(&join.right()));
+            if join.join_type() == JoinType::Inner
+                && sides != first_sides
+                && sides.0 == first_sides.1
+                && sides.1 == first_sides.0
+            {
+                swap_inner_join(copy)
+            } else {
+                copy.clone()
+            }
+        })
+        .collect_vec();
+    let joins = oriented
         .iter()
         .map(|copy| copy.as_logical_join().unwrap())
         .collect_vec();
@@ -693,4 +757,432 @@ fn call_position(call: PlanAggCall, calls: &mut Vec<PlanAggCall>) -> usize {
             calls.len() - 1
         }
     }
+}
+
+// Reordering of inner joins, to expose in a copy the join that another copy computes.
+//
+// `(t1 JOIN t3) JOIN t2` contains `t1 JOIN t2` once its inner joins are reordered, and
+// `(j JOIN m) LEFT JOIN r` contains `m LEFT JOIN r` when the condition of the left join only reads
+// `m` and `r`. Inner joins commute and associate when each conjunct is evaluated at a join that
+// has all its columns, and `(x JOIN y) LEFT JOIN z` is `x JOIN (y LEFT JOIN z)` when the condition
+// of the left join reads `y` and `z` only. A copy is reordered only when the exposed join then
+// merges with the other copy.
+
+/// A tree of inner joins over the leaves of a region.
+#[derive(Clone)]
+enum JoinTree {
+    Leaf(usize),
+    Join(Box<JoinTree>, Box<JoinTree>),
+}
+
+impl JoinTree {
+    fn shifted(&self, offset: usize) -> JoinTree {
+        match self {
+            JoinTree::Leaf(leaf) => JoinTree::Leaf(leaf + offset),
+            JoinTree::Join(left, right) => JoinTree::Join(
+                Box::new(left.shifted(offset)),
+                Box::new(right.shifted(offset)),
+            ),
+        }
+    }
+
+    fn mapped(&self, leaf_map: &[usize]) -> JoinTree {
+        match self {
+            JoinTree::Leaf(leaf) => JoinTree::Leaf(leaf_map[*leaf]),
+            JoinTree::Join(left, right) => JoinTree::Join(
+                Box::new(left.mapped(leaf_map)),
+                Box::new(right.mapped(leaf_map)),
+            ),
+        }
+    }
+}
+
+/// A region of inner joins: its leaves (any other node), the conjuncts of its joins and filters
+/// over the concatenation of the columns of the leaves, and its output columns in that
+/// concatenation.
+struct Region {
+    leaves: Vec<PlanRef>,
+    tree: JoinTree,
+    conjuncts: Vec<ExprImpl>,
+    outputs: Vec<usize>,
+}
+
+impl Region {
+    fn width(&self) -> usize {
+        self.leaves.iter().map(|leaf| leaf.schema().len()).sum()
+    }
+
+    fn offsets(&self) -> Vec<usize> {
+        let mut offsets = vec![];
+        let mut offset = 0;
+        for leaf in &self.leaves {
+            offsets.push(offset);
+            offset += leaf.schema().len();
+        }
+        offsets
+    }
+}
+
+fn is_inner_join(plan: &PlanRef) -> bool {
+    plan.as_logical_join()
+        .is_some_and(|join| join.join_type() == JoinType::Inner)
+}
+
+/// The node below projections of columns and filters, if it is an inner join.
+fn inner_join_below(plan: &PlanRef) -> bool {
+    if let Some(project) = plan.as_logical_project() {
+        return project
+            .exprs()
+            .iter()
+            .all(|expr| expr.as_input_ref().is_some())
+            && inner_join_below(&project.input());
+    }
+    if let Some(filter) = plan.as_logical_filter() {
+        return inner_join_below(&filter.input());
+    }
+    is_inner_join(plan)
+}
+
+/// The region of inner joins rooted at `plan`; any other node is a region of one leaf.
+fn flatten(plan: &PlanRef) -> Region {
+    if inner_join_below(plan) {
+        if let Some(project) = plan.as_logical_project() {
+            let mut region = flatten(&project.input());
+            region.outputs = project
+                .exprs()
+                .iter()
+                .map(|expr| region.outputs[expr.as_input_ref().unwrap().index()])
+                .collect();
+            return region;
+        }
+        if let Some(filter) = plan.as_logical_filter() {
+            let mut region = flatten(&filter.input());
+            let width = region.width();
+            let conjuncts = filter
+                .predicate()
+                .conjunctions
+                .iter()
+                .map(|conjunct| rewrite(conjunct, &region.outputs, width))
+                .collect_vec();
+            region.conjuncts.extend(conjuncts);
+            return region;
+        }
+        let join = plan.as_logical_join().unwrap();
+        let left = flatten(&join.left());
+        let right = flatten(&join.right());
+        let left_width = left.width();
+        let width = left_width + right.width();
+        let shift = (0..right.width()).map(|c| left_width + c).collect_vec();
+        let sides = left
+            .outputs
+            .iter()
+            .copied()
+            .chain(right.outputs.iter().map(|c| left_width + c))
+            .collect_vec();
+        let mut conjuncts = left.conjuncts.clone();
+        conjuncts.extend(
+            right
+                .conjuncts
+                .iter()
+                .map(|conjunct| rewrite(conjunct, &shift, width)),
+        );
+        conjuncts.extend(
+            join.on()
+                .conjunctions
+                .iter()
+                .map(|conjunct| rewrite(conjunct, &sides, width)),
+        );
+        let outputs = join
+            .output_indices()
+            .iter()
+            .map(|&column| sides[column])
+            .collect();
+        let tree = JoinTree::Join(
+            Box::new(left.tree.clone()),
+            Box::new(right.tree.shifted(left.leaves.len())),
+        );
+        let mut leaves = left.leaves;
+        leaves.extend(right.leaves);
+        return Region {
+            leaves,
+            tree,
+            conjuncts,
+            outputs,
+        };
+    }
+    Region {
+        leaves: vec![plan.clone()],
+        tree: JoinTree::Leaf(0),
+        conjuncts: vec![],
+        outputs: (0..plan.schema().len()).collect(),
+    }
+}
+
+/// Builds the inner joins of `tree` over the leaves of `region`. Each conjunct of `pending` is
+/// placed at the lowest node that has all the leaves it reads, and removed from `pending`.
+/// Returns the plan and the column of the concatenation that each of its columns is.
+fn build(region: &Region, tree: &JoinTree, pending: &mut Vec<ExprImpl>) -> (PlanRef, Vec<usize>) {
+    let offsets = region.offsets();
+    let (plan, columns, leaves) = match tree {
+        JoinTree::Leaf(leaf) => {
+            let width = region.leaves[*leaf].schema().len();
+            let columns = (offsets[*leaf]..offsets[*leaf] + width).collect_vec();
+            (region.leaves[*leaf].clone(), columns, vec![*leaf])
+        }
+        JoinTree::Join(left, right) => {
+            let (left_plan, left_columns) = build(region, left, pending);
+            let (right_plan, right_columns) = build(region, right, pending);
+            let columns = left_columns
+                .iter()
+                .chain(&right_columns)
+                .copied()
+                .collect_vec();
+            let on = take_placed(region, pending, &columns);
+            let plan: PlanRef = LogicalJoin::new(left_plan, right_plan, JoinType::Inner, on).into();
+            (plan, columns, vec![])
+        }
+    };
+    if leaves.is_empty() {
+        return (plan, columns);
+    }
+    // Conjuncts on one leaf only: a filter above it.
+    let on = take_placed(region, pending, &columns);
+    if on.always_true() {
+        (plan, columns)
+    } else {
+        (LogicalFilter::create(plan, on), columns)
+    }
+}
+
+/// Removes from `pending` the conjuncts that only read `columns` (columns of the concatenation),
+/// and returns them over the positions of those columns.
+fn take_placed(region: &Region, pending: &mut Vec<ExprImpl>, columns: &[usize]) -> Condition {
+    let width = region.width();
+    let position = |column: usize| columns.iter().position(|c| *c == column);
+    let (placed, kept): (Vec<_>, Vec<_>) = pending.drain(..).partition(|conjunct| {
+        conjunct
+            .collect_input_refs(width)
+            .ones()
+            .all(|column| position(column).is_some())
+    });
+    *pending = kept;
+    let to_local = ColIndexMapping::new((0..width).map(position).collect(), columns.len());
+    Condition {
+        conjunctions: placed
+            .into_iter()
+            .map(|conjunct| to_local.clone().rewrite_expr(conjunct))
+            .collect(),
+    }
+}
+
+/// Matches each leaf of `target` with a distinct leaf of `region` of the same shape, in order.
+fn match_leaves(target: &Region, region: &Region) -> Option<Vec<usize>> {
+    let mut used = vec![false; region.leaves.len()];
+    let mut matched = vec![];
+    for leaf in &target.leaves {
+        let leaf_shape = shape(leaf);
+        let found = (0..region.leaves.len())
+            .find(|&index| !used[index] && shape(&region.leaves[index]) == leaf_shape)?;
+        used[found] = true;
+        matched.push(found);
+    }
+    Some(matched)
+}
+
+/// Joins the other leaves of `region` above `plan` (whose columns are `columns`, possibly with
+/// columns outside of the concatenation marked `usize::MAX`), with the pending conjuncts.
+fn join_rest(
+    region: &Region,
+    mut plan: PlanRef,
+    mut columns: Vec<usize>,
+    matched: &[usize],
+    pending: &mut Vec<ExprImpl>,
+) -> (PlanRef, Vec<usize>) {
+    for leaf in 0..region.leaves.len() {
+        if matched.contains(&leaf) {
+            continue;
+        }
+        let (leaf_plan, leaf_columns) = build(region, &JoinTree::Leaf(leaf), pending);
+        columns.extend(leaf_columns);
+        let on = take_placed(region, pending, &columns);
+        plan = LogicalJoin::new(plan, leaf_plan, JoinType::Inner, on).into();
+    }
+    (plan, columns)
+}
+
+/// `copy` reordered so that it contains a join of the shape of `target` that merges with it, and
+/// that join.
+fn expose(target: &PlanRef, copy: &PlanRef) -> Option<(PlanRef, PlanRef)> {
+    if is_inner_join(target) && is_inner_join(copy) {
+        return expose_inner(target, copy);
+    }
+    let target_join = target.as_logical_join()?;
+    let copy_join = copy.as_logical_join()?;
+    if target_join.join_type() == JoinType::LeftOuter
+        && copy_join.join_type() == JoinType::LeftOuter
+    {
+        return expose_left(target, copy);
+    }
+    None
+}
+
+/// Inner joins: the leaves of the target are joined first, in the order of the target, then the
+/// other leaves of the copy.
+fn expose_inner(target: &PlanRef, copy: &PlanRef) -> Option<(PlanRef, PlanRef)> {
+    let target_region = flatten(target);
+    let region = flatten(copy);
+    if target_region.leaves.len() < 2 || target_region.leaves.len() >= region.leaves.len() {
+        return None;
+    }
+    let matched = match_leaves(&target_region, &region)?;
+    let mut pending = region.conjuncts.clone();
+    let (exposed, columns) = build(&region, &target_region.tree.mapped(&matched), &mut pending);
+    merge(&[target.clone(), exposed.clone()])?;
+    let (plan, columns) = join_rest(&region, exposed.clone(), columns, &matched, &mut pending);
+    let plan = finish(plan, &columns, &region.outputs, pending)?;
+    Some((plan, exposed))
+}
+
+/// Left joins: `(rest JOIN s) LEFT JOIN z` becomes `rest JOIN (s LEFT JOIN z)`, where `s` are the
+/// leaves of the left side of the copy that match the left side of the target, and the condition
+/// of the left join reads `s` and `z` only.
+fn expose_left(target: &PlanRef, copy: &PlanRef) -> Option<(PlanRef, PlanRef)> {
+    let target_join = target.as_logical_join().unwrap();
+    let copy_join = copy.as_logical_join().unwrap();
+    let target_left = flatten(&target_join.left());
+    let region = flatten(&copy_join.left());
+    if target_left.leaves.len() >= region.leaves.len() {
+        return None;
+    }
+    let matched = match_leaves(&target_left, &region)?;
+    let mut pending = region.conjuncts.clone();
+    let (left_plan, left_columns) =
+        build(&region, &target_left.tree.mapped(&matched), &mut pending);
+
+    // The condition of the left join, over the columns of the new left side and of `z`.
+    let copy_left_len = copy_join.left().schema().len();
+    let right = copy_join.right();
+    let right_len = right.schema().len();
+    let left_len = left_columns.len();
+    let to_new = (0..copy_left_len)
+        .map(|column| {
+            let concat = region.outputs[column];
+            left_columns.iter().position(|c| *c == concat)
+        })
+        .chain((0..right_len).map(|column| Some(left_len + column)))
+        .collect_vec();
+    let mut conjuncts = vec![];
+    for conjunct in &copy_join.on().conjunctions {
+        let reads_matched = conjunct
+            .collect_input_refs(copy_left_len + right_len)
+            .ones()
+            .all(|column| to_new[column].is_some());
+        if !reads_matched {
+            return None;
+        }
+        let mut map = ColIndexMapping::new(to_new.clone(), left_len + right_len);
+        conjuncts.push(map.rewrite_expr(conjunct.clone()));
+    }
+    let exposed: PlanRef = LogicalJoin::new(
+        left_plan,
+        right,
+        JoinType::LeftOuter,
+        Condition {
+            conjunctions: conjuncts,
+        },
+    )
+    .into();
+    merge(&[target.clone(), exposed.clone()])?;
+    // The columns of `z` are outside of the concatenation of the leaves of the region.
+    let columns = left_columns
+        .iter()
+        .copied()
+        .chain((0..right_len).map(|column| usize::MAX - column))
+        .collect_vec();
+    let (plan, columns) = join_rest(&region, exposed.clone(), columns, &matched, &mut pending);
+    // The output of the copy: its left columns in the concatenation, then the columns of `z`.
+    let outputs = copy_join
+        .output_indices()
+        .iter()
+        .map(|&column| {
+            if column < copy_left_len {
+                region.outputs[column]
+            } else {
+                usize::MAX - (column - copy_left_len)
+            }
+        })
+        .collect_vec();
+    let plan = finish(plan, &columns, &outputs, pending)?;
+    Some((plan, exposed))
+}
+
+/// Checks that every conjunct was placed, and projects the output columns of the copy.
+fn finish(
+    plan: PlanRef,
+    columns: &[usize],
+    outputs: &[usize],
+    pending: Vec<ExprImpl>,
+) -> Option<PlanRef> {
+    if !pending.is_empty() {
+        return None;
+    }
+    let positions = outputs
+        .iter()
+        .map(|output| columns.iter().position(|c| c == output))
+        .collect::<Option<Vec<_>>>()?;
+    Some(LogicalProject::with_out_col_idx(plan, positions.into_iter()).into())
+}
+
+/// Reorders the joins of copies so that they contain a join that another copy computes (see
+/// above). Returns the replacements of the reordered copies.
+fn expose_common_joins(plan: &PlanRef) -> HashMap<PlanNodeId, PlanRef> {
+    let mut candidates = vec![];
+    let mut visited = HashSet::new();
+    collect_candidates(plan, &mut visited, &mut candidates);
+    let joins = candidates
+        .into_iter()
+        .filter(|candidate| candidate.as_logical_join().is_some())
+        .take(MAX_REORDERED_JOINS)
+        .collect_vec();
+    let descendants = joins
+        .iter()
+        .map(|join| {
+            let mut nodes = HashSet::new();
+            mark_subtree(join, &mut nodes);
+            nodes
+        })
+        .collect_vec();
+    let mut replacements = HashMap::new();
+    let mut targets: HashSet<PlanNodeId> = HashSet::new();
+    let mut rewritten: HashSet<PlanNodeId> = HashSet::new();
+    for (copy_index, copy) in joins.iter().enumerate() {
+        if targets.contains(&copy.id()) {
+            continue;
+        }
+        // A copy that contains a join chosen as a target is left as it is: reordering it could
+        // remove that join.
+        if targets
+            .iter()
+            .any(|target| descendants[copy_index].contains(target))
+        {
+            continue;
+        }
+        for (target_index, target) in joins.iter().enumerate() {
+            let related = descendants[copy_index].contains(&target.id())
+                || descendants[target_index].contains(&copy.id());
+            let inside_rewritten = joins.iter().enumerate().any(|(index, join)| {
+                rewritten.contains(&join.id()) && descendants[index].contains(&target.id())
+            });
+            if related || inside_rewritten {
+                continue;
+            }
+            if let Some((reordered, _)) = expose(target, copy) {
+                replacements.insert(copy.id(), reordered);
+                rewritten.insert(copy.id());
+                targets.insert(target.id());
+                break;
+            }
+        }
+    }
+    replacements
 }

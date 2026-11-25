@@ -37,6 +37,15 @@ CASES = [
     ('widen_left', 'a left join filtered on its preserved side in one copy',
      f"select a.id, h.v from {A} a left join {H} h on a.k = h.sid where a.x > 0 "
      f"union all select a.id, h.id from {A} a left join {H} h on a.k = h.sid"),
+    ('swapped', 'the same inner join with its sides swapped',
+     f"select a.id, h.v from {A} a join {H} h on a.k = h.sid where h.v > 0 "
+     f"union all select a.id, h.id from {H} h join {A} a on h.sid = a.k where a.x = 1"),
+    ('reorder_inner', 'a join of three tables reordered to share the join of two of them',
+     f"select a.id, h.v from {A} a join {H} h on a.k = h.sid where h.st = 'x' "
+     f"union all select a.id, h.v from {A} a join {B} b on a.k = b.k join {H} h on a.k = h.sid"),
+    ('reorder_left', 'an inner join below a left join reordered to share the left join',
+     f"select h.id, a.id as aid from {H} h left join {A} a on h.sid = a.k where h.v > 0 "
+     f"union all select h.id, a.id from {B} b join {H} h on b.k = h.id left join {A} a on h.sid = a.k"),
     ('agg_filters', 'two aggregations of the same input and key with different filters',
      f"select a.id, coalesce(x.s, 0) as s, y.c from {A} a "
      f"left join (select sid, sum(v) as s from {H} where v is not null group by sid) x on a.k = x.sid "

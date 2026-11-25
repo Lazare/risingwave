@@ -93,6 +93,21 @@ create materialized view ssa_widen_filters_off as select a.id, h.v from ssa_a a 
 statement ok
 create materialized view ssa_widen_left_off as select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid;
 
+# the same inner join with its sides swapped
+
+statement ok
+create materialized view ssa_swapped_off as select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_h h join ssa_a a on h.sid = a.k where a.x = 1;
+
+# a join of three tables reordered to share the join of two of them
+
+statement ok
+create materialized view ssa_reorder_inner_off as select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x' union all select a.id, h.v from ssa_a a join ssa_b b on a.k = b.k join ssa_h h on a.k = h.sid;
+
+# an inner join below a left join reordered to share the left join
+
+statement ok
+create materialized view ssa_reorder_left_off as select h.id, a.id as aid from ssa_h h left join ssa_a a on h.sid = a.k where h.v > 0 union all select h.id, a.id from ssa_b b join ssa_h h on b.k = h.id left join ssa_a a on h.sid = a.k;
+
 # two aggregations of the same input and key with different filters
 
 statement ok
@@ -258,6 +273,21 @@ create materialized view ssa_widen_filters_on as select a.id, h.v from ssa_a a j
 
 statement ok
 create materialized view ssa_widen_left_on as select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid;
+
+# the same inner join with its sides swapped
+
+statement ok
+create materialized view ssa_swapped_on as select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_h h join ssa_a a on h.sid = a.k where a.x = 1;
+
+# a join of three tables reordered to share the join of two of them
+
+statement ok
+create materialized view ssa_reorder_inner_on as select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x' union all select a.id, h.v from ssa_a a join ssa_b b on a.k = b.k join ssa_h h on a.k = h.sid;
+
+# an inner join below a left join reordered to share the left join
+
+statement ok
+create materialized view ssa_reorder_left_on as select h.id, a.id as aid from ssa_h h left join ssa_a a on h.sid = a.k where h.v > 0 union all select h.id, a.id from ssa_b b join ssa_h h on b.k = h.id left join ssa_a a on h.sid = a.k;
 
 # two aggregations of the same input and key with different filters
 
@@ -445,6 +475,30 @@ select
   (select count(*) from (select * from ssa_widen_left_on except select * from ssa_widen_left_off) x),
   (select count(*) from (select * from ssa_widen_left_off except select * from ssa_widen_left_on) y),
   (select count(*) from ssa_widen_left_on) - (select count(*) from ssa_widen_left_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_swapped_on except select * from ssa_swapped_off) x),
+  (select count(*) from (select * from ssa_swapped_off except select * from ssa_swapped_on) y),
+  (select count(*) from ssa_swapped_on) - (select count(*) from ssa_swapped_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_reorder_inner_on except select * from ssa_reorder_inner_off) x),
+  (select count(*) from (select * from ssa_reorder_inner_off except select * from ssa_reorder_inner_on) y),
+  (select count(*) from ssa_reorder_inner_on) - (select count(*) from ssa_reorder_inner_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_reorder_left_on except select * from ssa_reorder_left_off) x),
+  (select count(*) from (select * from ssa_reorder_left_off except select * from ssa_reorder_left_on) y),
+  (select count(*) from ssa_reorder_left_on) - (select count(*) from ssa_reorder_left_off);
 ----
 0 0 0
 
@@ -703,6 +757,30 @@ select
   (select count(*) from (select * from ssa_widen_left_on except select * from (select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid) q) x),
   (select count(*) from (select * from (select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid) q except select * from ssa_widen_left_on) y),
   (select count(*) from ssa_widen_left_on) - (select count(*) from (select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_swapped_on except select * from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_h h join ssa_a a on h.sid = a.k where a.x = 1) q) x),
+  (select count(*) from (select * from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_h h join ssa_a a on h.sid = a.k where a.x = 1) q except select * from ssa_swapped_on) y),
+  (select count(*) from ssa_swapped_on) - (select count(*) from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_h h join ssa_a a on h.sid = a.k where a.x = 1) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_reorder_inner_on except select * from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x' union all select a.id, h.v from ssa_a a join ssa_b b on a.k = b.k join ssa_h h on a.k = h.sid) q) x),
+  (select count(*) from (select * from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x' union all select a.id, h.v from ssa_a a join ssa_b b on a.k = b.k join ssa_h h on a.k = h.sid) q except select * from ssa_reorder_inner_on) y),
+  (select count(*) from ssa_reorder_inner_on) - (select count(*) from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x' union all select a.id, h.v from ssa_a a join ssa_b b on a.k = b.k join ssa_h h on a.k = h.sid) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_reorder_left_on except select * from (select h.id, a.id as aid from ssa_h h left join ssa_a a on h.sid = a.k where h.v > 0 union all select h.id, a.id from ssa_b b join ssa_h h on b.k = h.id left join ssa_a a on h.sid = a.k) q) x),
+  (select count(*) from (select * from (select h.id, a.id as aid from ssa_h h left join ssa_a a on h.sid = a.k where h.v > 0 union all select h.id, a.id from ssa_b b join ssa_h h on b.k = h.id left join ssa_a a on h.sid = a.k) q except select * from ssa_reorder_left_on) y),
+  (select count(*) from ssa_reorder_left_on) - (select count(*) from (select h.id, a.id as aid from ssa_h h left join ssa_a a on h.sid = a.k where h.v > 0 union all select h.id, a.id from ssa_b b join ssa_h h on b.k = h.id left join ssa_a a on h.sid = a.k) q);
 ----
 0 0 0
 
@@ -1018,6 +1096,30 @@ select
 
 query III
 select
+  (select count(*) from (select * from ssa_swapped_on except select * from ssa_swapped_off) x),
+  (select count(*) from (select * from ssa_swapped_off except select * from ssa_swapped_on) y),
+  (select count(*) from ssa_swapped_on) - (select count(*) from ssa_swapped_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_reorder_inner_on except select * from ssa_reorder_inner_off) x),
+  (select count(*) from (select * from ssa_reorder_inner_off except select * from ssa_reorder_inner_on) y),
+  (select count(*) from ssa_reorder_inner_on) - (select count(*) from ssa_reorder_inner_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_reorder_left_on except select * from ssa_reorder_left_off) x),
+  (select count(*) from (select * from ssa_reorder_left_off except select * from ssa_reorder_left_on) y),
+  (select count(*) from ssa_reorder_left_on) - (select count(*) from ssa_reorder_left_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from ssa_agg_filters_on except select * from ssa_agg_filters_off) x),
   (select count(*) from (select * from ssa_agg_filters_off except select * from ssa_agg_filters_on) y),
   (select count(*) from ssa_agg_filters_on) - (select count(*) from ssa_agg_filters_off);
@@ -1271,6 +1373,30 @@ select
   (select count(*) from (select * from ssa_widen_left_on except select * from (select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid) q) x),
   (select count(*) from (select * from (select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid) q except select * from ssa_widen_left_on) y),
   (select count(*) from ssa_widen_left_on) - (select count(*) from (select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_swapped_on except select * from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_h h join ssa_a a on h.sid = a.k where a.x = 1) q) x),
+  (select count(*) from (select * from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_h h join ssa_a a on h.sid = a.k where a.x = 1) q except select * from ssa_swapped_on) y),
+  (select count(*) from ssa_swapped_on) - (select count(*) from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_h h join ssa_a a on h.sid = a.k where a.x = 1) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_reorder_inner_on except select * from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x' union all select a.id, h.v from ssa_a a join ssa_b b on a.k = b.k join ssa_h h on a.k = h.sid) q) x),
+  (select count(*) from (select * from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x' union all select a.id, h.v from ssa_a a join ssa_b b on a.k = b.k join ssa_h h on a.k = h.sid) q except select * from ssa_reorder_inner_on) y),
+  (select count(*) from ssa_reorder_inner_on) - (select count(*) from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x' union all select a.id, h.v from ssa_a a join ssa_b b on a.k = b.k join ssa_h h on a.k = h.sid) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_reorder_left_on except select * from (select h.id, a.id as aid from ssa_h h left join ssa_a a on h.sid = a.k where h.v > 0 union all select h.id, a.id from ssa_b b join ssa_h h on b.k = h.id left join ssa_a a on h.sid = a.k) q) x),
+  (select count(*) from (select * from (select h.id, a.id as aid from ssa_h h left join ssa_a a on h.sid = a.k where h.v > 0 union all select h.id, a.id from ssa_b b join ssa_h h on b.k = h.id left join ssa_a a on h.sid = a.k) q except select * from ssa_reorder_left_on) y),
+  (select count(*) from ssa_reorder_left_on) - (select count(*) from (select h.id, a.id as aid from ssa_h h left join ssa_a a on h.sid = a.k where h.v > 0 union all select h.id, a.id from ssa_b b join ssa_h h on b.k = h.id left join ssa_a a on h.sid = a.k) q);
 ----
 0 0 0
 
@@ -1582,6 +1708,30 @@ select
 
 query III
 select
+  (select count(*) from (select * from ssa_swapped_on except select * from ssa_swapped_off) x),
+  (select count(*) from (select * from ssa_swapped_off except select * from ssa_swapped_on) y),
+  (select count(*) from ssa_swapped_on) - (select count(*) from ssa_swapped_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_reorder_inner_on except select * from ssa_reorder_inner_off) x),
+  (select count(*) from (select * from ssa_reorder_inner_off except select * from ssa_reorder_inner_on) y),
+  (select count(*) from ssa_reorder_inner_on) - (select count(*) from ssa_reorder_inner_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_reorder_left_on except select * from ssa_reorder_left_off) x),
+  (select count(*) from (select * from ssa_reorder_left_off except select * from ssa_reorder_left_on) y),
+  (select count(*) from ssa_reorder_left_on) - (select count(*) from ssa_reorder_left_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from ssa_agg_filters_on except select * from ssa_agg_filters_off) x),
   (select count(*) from (select * from ssa_agg_filters_off except select * from ssa_agg_filters_on) y),
   (select count(*) from ssa_agg_filters_on) - (select count(*) from ssa_agg_filters_off);
@@ -1835,6 +1985,30 @@ select
   (select count(*) from (select * from ssa_widen_left_on except select * from (select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid) q) x),
   (select count(*) from (select * from (select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid) q except select * from ssa_widen_left_on) y),
   (select count(*) from ssa_widen_left_on) - (select count(*) from (select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_swapped_on except select * from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_h h join ssa_a a on h.sid = a.k where a.x = 1) q) x),
+  (select count(*) from (select * from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_h h join ssa_a a on h.sid = a.k where a.x = 1) q except select * from ssa_swapped_on) y),
+  (select count(*) from ssa_swapped_on) - (select count(*) from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_h h join ssa_a a on h.sid = a.k where a.x = 1) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_reorder_inner_on except select * from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x' union all select a.id, h.v from ssa_a a join ssa_b b on a.k = b.k join ssa_h h on a.k = h.sid) q) x),
+  (select count(*) from (select * from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x' union all select a.id, h.v from ssa_a a join ssa_b b on a.k = b.k join ssa_h h on a.k = h.sid) q except select * from ssa_reorder_inner_on) y),
+  (select count(*) from ssa_reorder_inner_on) - (select count(*) from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x' union all select a.id, h.v from ssa_a a join ssa_b b on a.k = b.k join ssa_h h on a.k = h.sid) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_reorder_left_on except select * from (select h.id, a.id as aid from ssa_h h left join ssa_a a on h.sid = a.k where h.v > 0 union all select h.id, a.id from ssa_b b join ssa_h h on b.k = h.id left join ssa_a a on h.sid = a.k) q) x),
+  (select count(*) from (select * from (select h.id, a.id as aid from ssa_h h left join ssa_a a on h.sid = a.k where h.v > 0 union all select h.id, a.id from ssa_b b join ssa_h h on b.k = h.id left join ssa_a a on h.sid = a.k) q except select * from ssa_reorder_left_on) y),
+  (select count(*) from ssa_reorder_left_on) - (select count(*) from (select h.id, a.id as aid from ssa_h h left join ssa_a a on h.sid = a.k where h.v > 0 union all select h.id, a.id from ssa_b b join ssa_h h on b.k = h.id left join ssa_a a on h.sid = a.k) q);
 ----
 0 0 0
 
@@ -2109,6 +2283,30 @@ select
 
 query III
 select
+  (select count(*) from (select * from ssa_swapped_on except select * from ssa_swapped_off) x),
+  (select count(*) from (select * from ssa_swapped_off except select * from ssa_swapped_on) y),
+  (select count(*) from ssa_swapped_on) - (select count(*) from ssa_swapped_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_reorder_inner_on except select * from ssa_reorder_inner_off) x),
+  (select count(*) from (select * from ssa_reorder_inner_off except select * from ssa_reorder_inner_on) y),
+  (select count(*) from ssa_reorder_inner_on) - (select count(*) from ssa_reorder_inner_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_reorder_left_on except select * from ssa_reorder_left_off) x),
+  (select count(*) from (select * from ssa_reorder_left_off except select * from ssa_reorder_left_on) y),
+  (select count(*) from ssa_reorder_left_on) - (select count(*) from ssa_reorder_left_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from ssa_agg_filters_on except select * from ssa_agg_filters_off) x),
   (select count(*) from (select * from ssa_agg_filters_off except select * from ssa_agg_filters_on) y),
   (select count(*) from ssa_agg_filters_on) - (select count(*) from ssa_agg_filters_off);
@@ -2362,6 +2560,30 @@ select
   (select count(*) from (select * from ssa_widen_left_on except select * from (select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid) q) x),
   (select count(*) from (select * from (select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid) q except select * from ssa_widen_left_on) y),
   (select count(*) from ssa_widen_left_on) - (select count(*) from (select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_swapped_on except select * from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_h h join ssa_a a on h.sid = a.k where a.x = 1) q) x),
+  (select count(*) from (select * from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_h h join ssa_a a on h.sid = a.k where a.x = 1) q except select * from ssa_swapped_on) y),
+  (select count(*) from ssa_swapped_on) - (select count(*) from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_h h join ssa_a a on h.sid = a.k where a.x = 1) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_reorder_inner_on except select * from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x' union all select a.id, h.v from ssa_a a join ssa_b b on a.k = b.k join ssa_h h on a.k = h.sid) q) x),
+  (select count(*) from (select * from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x' union all select a.id, h.v from ssa_a a join ssa_b b on a.k = b.k join ssa_h h on a.k = h.sid) q except select * from ssa_reorder_inner_on) y),
+  (select count(*) from ssa_reorder_inner_on) - (select count(*) from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x' union all select a.id, h.v from ssa_a a join ssa_b b on a.k = b.k join ssa_h h on a.k = h.sid) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_reorder_left_on except select * from (select h.id, a.id as aid from ssa_h h left join ssa_a a on h.sid = a.k where h.v > 0 union all select h.id, a.id from ssa_b b join ssa_h h on b.k = h.id left join ssa_a a on h.sid = a.k) q) x),
+  (select count(*) from (select * from (select h.id, a.id as aid from ssa_h h left join ssa_a a on h.sid = a.k where h.v > 0 union all select h.id, a.id from ssa_b b join ssa_h h on b.k = h.id left join ssa_a a on h.sid = a.k) q except select * from ssa_reorder_left_on) y),
+  (select count(*) from ssa_reorder_left_on) - (select count(*) from (select h.id, a.id as aid from ssa_h h left join ssa_a a on h.sid = a.k where h.v > 0 union all select h.id, a.id from ssa_b b join ssa_h h on b.k = h.id left join ssa_a a on h.sid = a.k) q);
 ----
 0 0 0
 
@@ -2634,6 +2856,30 @@ select
 
 query III
 select
+  (select count(*) from (select * from ssa_swapped_on except select * from ssa_swapped_off) x),
+  (select count(*) from (select * from ssa_swapped_off except select * from ssa_swapped_on) y),
+  (select count(*) from ssa_swapped_on) - (select count(*) from ssa_swapped_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_reorder_inner_on except select * from ssa_reorder_inner_off) x),
+  (select count(*) from (select * from ssa_reorder_inner_off except select * from ssa_reorder_inner_on) y),
+  (select count(*) from ssa_reorder_inner_on) - (select count(*) from ssa_reorder_inner_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_reorder_left_on except select * from ssa_reorder_left_off) x),
+  (select count(*) from (select * from ssa_reorder_left_off except select * from ssa_reorder_left_on) y),
+  (select count(*) from ssa_reorder_left_on) - (select count(*) from ssa_reorder_left_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from ssa_agg_filters_on except select * from ssa_agg_filters_off) x),
   (select count(*) from (select * from ssa_agg_filters_off except select * from ssa_agg_filters_on) y),
   (select count(*) from ssa_agg_filters_on) - (select count(*) from ssa_agg_filters_off);
@@ -2887,6 +3133,30 @@ select
   (select count(*) from (select * from ssa_widen_left_on except select * from (select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid) q) x),
   (select count(*) from (select * from (select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid) q except select * from ssa_widen_left_on) y),
   (select count(*) from ssa_widen_left_on) - (select count(*) from (select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_swapped_on except select * from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_h h join ssa_a a on h.sid = a.k where a.x = 1) q) x),
+  (select count(*) from (select * from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_h h join ssa_a a on h.sid = a.k where a.x = 1) q except select * from ssa_swapped_on) y),
+  (select count(*) from ssa_swapped_on) - (select count(*) from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_h h join ssa_a a on h.sid = a.k where a.x = 1) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_reorder_inner_on except select * from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x' union all select a.id, h.v from ssa_a a join ssa_b b on a.k = b.k join ssa_h h on a.k = h.sid) q) x),
+  (select count(*) from (select * from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x' union all select a.id, h.v from ssa_a a join ssa_b b on a.k = b.k join ssa_h h on a.k = h.sid) q except select * from ssa_reorder_inner_on) y),
+  (select count(*) from ssa_reorder_inner_on) - (select count(*) from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x' union all select a.id, h.v from ssa_a a join ssa_b b on a.k = b.k join ssa_h h on a.k = h.sid) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_reorder_left_on except select * from (select h.id, a.id as aid from ssa_h h left join ssa_a a on h.sid = a.k where h.v > 0 union all select h.id, a.id from ssa_b b join ssa_h h on b.k = h.id left join ssa_a a on h.sid = a.k) q) x),
+  (select count(*) from (select * from (select h.id, a.id as aid from ssa_h h left join ssa_a a on h.sid = a.k where h.v > 0 union all select h.id, a.id from ssa_b b join ssa_h h on b.k = h.id left join ssa_a a on h.sid = a.k) q except select * from ssa_reorder_left_on) y),
+  (select count(*) from ssa_reorder_left_on) - (select count(*) from (select h.id, a.id as aid from ssa_h h left join ssa_a a on h.sid = a.k where h.v > 0 union all select h.id, a.id from ssa_b b join ssa_h h on b.k = h.id left join ssa_a a on h.sid = a.k) q);
 ----
 0 0 0
 
@@ -3168,6 +3438,15 @@ statement ok
 drop materialized view ssa_agg_filters_on;
 
 statement ok
+drop materialized view ssa_reorder_left_on;
+
+statement ok
+drop materialized view ssa_reorder_inner_on;
+
+statement ok
+drop materialized view ssa_swapped_on;
+
+statement ok
 drop materialized view ssa_widen_left_on;
 
 statement ok
@@ -3262,6 +3541,15 @@ drop materialized view ssa_kept_scalar_filters_off;
 
 statement ok
 drop materialized view ssa_agg_filters_off;
+
+statement ok
+drop materialized view ssa_reorder_left_off;
+
+statement ok
+drop materialized view ssa_reorder_inner_off;
+
+statement ok
+drop materialized view ssa_swapped_off;
 
 statement ok
 drop materialized view ssa_widen_left_off;

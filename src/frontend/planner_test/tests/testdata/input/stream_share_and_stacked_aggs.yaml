@@ -14,6 +14,10 @@
     create table p (id int primary key);
     create table c (id int primary key, pid int, amt int, st varchar);
     create table tg (k varchar primary key, tags jsonb);
+    create table x1 (k int primary key, a int);
+    create table x2 (id int primary key, k int, s varchar);
+    create table x3 (k int primary key, r int);
+    create table jj (mid int primary key, pid int);
   expected_outputs: []
 - id: setup_share_off
   sql: |
@@ -162,6 +166,42 @@
     select a.id, x.c from a join (select sid, count(*) as c from h group by sid) x on a.k = x.c
     union all
     select b.id, y.c from b join (select v, count(*) as c from h group by v) y on b.k = y.v;
+  expected_outputs:
+  - stream_plan
+
+- name: the same inner join with its sides swapped is shared
+  before: [setup_share]
+  sql: |
+    select a.id, h.v from a join h on a.k = h.sid where h.v > 0
+    union all
+    select a.id, h.st from h join a on h.sid = a.k where a.x = 1;
+  expected_outputs:
+  - stream_plan
+
+- name: a join of three tables reordered to share the join of two of them
+  before: [setup_share]
+  sql: |
+    select x1.k, x2.s from x1 join x2 on x1.k = x2.k where x2.s not in ('x', 'y')
+    union all
+    select x1.k, x2.s from x1 join x3 on x1.k = x3.k join x2 on x1.k = x2.k;
+  expected_outputs:
+  - stream_plan
+
+- name: an inner join below a left join reordered to share the left join
+  before: [setup_share]
+  sql: |
+    select m.id, r.id as rid from m left join r on m.code = r.code where m.dir = 'c'
+    union all
+    select m.id, r.id from jj join m on jj.mid = m.id left join r on m.code = r.code;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - the condition of the left join reads the other side of the inner join
+  before: [setup_share]
+  sql: |
+    select m.id, r.id as rid from m left join r on m.code = r.code where m.dir = 'c'
+    union all
+    select m.id, r.id from jj join m on jj.mid = m.id left join r on m.code = r.code and r.x = jj.pid;
   expected_outputs:
   - stream_plan
 
