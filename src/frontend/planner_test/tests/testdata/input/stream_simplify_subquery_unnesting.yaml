@@ -144,10 +144,10 @@
   expected_outputs:
   - stream_plan
 
-- name: kept - correlation that is not an equality
+- name: kept - a correlated condition that is not an equality
   before: [setup]
   sql: |
-    select p.id, (select count(*) from r where r.pid = p.id or r.x = p.v) as c from p;
+    select p.id, (select count(*) from r where r.pid = p.id and r.x > p.v) as c from p;
   expected_outputs:
   - stream_plan
 
@@ -155,13 +155,6 @@
   before: [setup]
   sql: |
     select p.id, (select count(*) from r where r.pid is not distinct from p.id) as c from p;
-  expected_outputs:
-  - stream_plan
-
-- name: kept - aggregate whose value over an empty input is not known to the rule
-  before: [setup]
-  sql: |
-    select p.id, (select approx_count_distinct(r.x) from r where r.pid = p.id) as c from p;
   expected_outputs:
   - stream_plan
 

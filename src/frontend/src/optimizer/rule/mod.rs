@@ -217,6 +217,8 @@ mod constant_row_join_rule;
 pub use constant_row_join_rule::*;
 mod common_join_over_union_rule;
 pub use common_join_over_union_rule::*;
+mod apply_one_row_join_split_rule;
+pub use apply_one_row_join_split_rule::*;
 mod repeated_lookup_merge_rule;
 pub use repeated_lookup_merge_rule::*;
 mod unique_key_simplify_rule;
@@ -369,6 +371,7 @@ macro_rules! for_all_rules {
             , { AggOnKeyEliminateRule }
             , { RepeatedLookupMergeRule }
             , { CommonJoinOverUnionRule }
+            , { ApplyOneRowJoinSplitRule }
             , { BushyTreeJoinOrderingRule }
             , { StreamProjectMergeRule }
             , { StreamProjectSplitRule }

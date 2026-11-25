@@ -241,7 +241,10 @@ static SIMPLE_UNNESTING: LazyLock<OptimizationStage> = LazyLock::new(|| {
 static STREAM_SIMPLE_UNNESTING_AGG: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Stream Simple Unnesting of Aggregations",
-        vec![PullUpCorrelatedPredicateAggRule::create_for_stream()],
+        vec![
+            ApplyOneRowJoinSplitRule::create(),
+            PullUpCorrelatedPredicateAggRule::create_for_stream(),
+        ],
         ApplyOrder::BottomUp,
     )
 });
@@ -711,7 +714,7 @@ impl LogicalOptimizer {
             // A subquery that aggregates the rows equal to columns of the outer row becomes a left
             // join with the aggregation grouped by those columns, without the domain (the distinct
             // values of the outer columns, read again from the outer side) of the general way.
-            plan = plan.optimize_by_rules(&STREAM_SIMPLE_UNNESTING_AGG)?;
+            plan = plan.optimize_by_rules_until_fix_point(&STREAM_SIMPLE_UNNESTING_AGG)?;
         }
         debug_assert!(!HasMaxOneRowApply().visit(plan.clone()));
         // Predicate push down before translate apply, because we need to calculate the domain
