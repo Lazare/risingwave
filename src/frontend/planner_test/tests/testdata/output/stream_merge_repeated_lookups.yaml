@@ -763,9 +763,7 @@
     ├─LogicalJoin { type: Inner, on: (f.dim_id = d.id), output: all }
     │ ├─LogicalScan { table: f, columns: [f.id, f.dim_id] }
     │ └─LogicalScan { table: d, output_columns: [d.id, d.active], required_columns: [d.id, d.active, d.grp], predicate: (d.grp < 10:Int32) }
-    └─LogicalJoin { type: LeftOuter, on: (s.id = e.id), output: [s.id] }
-      ├─LogicalScan { table: s, columns: [s.id] }
-      └─LogicalScan { table: e, columns: [e.id] }
+    └─LogicalScan { table: s, columns: [s.id] }
 - name: not exists on a chain whose rows the left side all carries
   before:
   - setup_flat
@@ -775,33 +773,25 @@
       select 1 from h h2 join d d2 on h2.id = d2.id and d2.active left join e on h2.id = e.id where h2.id = f.dim_id
     );
   optimized_logical_plan_for_stream: |-
-    LogicalJoin { type: LeftAnti, on: (h.id = f.dim_id) AND (h.id = d.id) AND d.active, output: [f.id] }
-    ├─LogicalJoin { type: Inner, on: (h.id = d.id), output: [f.id, f.dim_id, d.id, d.active] }
-    │ ├─LogicalJoin { type: Inner, on: (f.dim_id = d.id), output: all }
-    │ │ ├─LogicalScan { table: f, columns: [f.id, f.dim_id] }
-    │ │ └─LogicalScan { table: d, columns: [d.id, d.active] }
-    │ └─LogicalScan { table: h, columns: [h.id] }
-    └─LogicalJoin { type: LeftOuter, on: (h.id = e.id), output: [h.id] }
-      ├─LogicalScan { table: h, columns: [h.id] }
-      └─LogicalScan { table: e, columns: [e.id] }
+    LogicalJoin { type: Inner, on: (h.id = d.id), output: [f.id] }
+    ├─LogicalJoin { type: Inner, on: (f.dim_id = d.id), output: [f.id, d.id] }
+    │ ├─LogicalScan { table: f, columns: [f.id, f.dim_id] }
+    │ └─LogicalScan { table: d, output_columns: [d.id], required_columns: [d.id, d.active], predicate: Not(Coalesce(d.active, false:Boolean)) }
+    └─LogicalScan { table: h, columns: [h.id] }
   stream_plan: |-
-    StreamMaterialize { columns: [id, f.dim_id(hidden), h.rid(hidden), d.id(hidden)], stream_key: [id, f.dim_id, h.rid, d.id], pk_columns: [id, f.dim_id, h.rid, d.id], pk_conflict: NoCheck }
-    └─StreamExchange { dist: HashShard(f.id, f.dim_id, h.rid, d.id) }
-      └─StreamHashJoin { type: LeftAnti, predicate: f.dim_id = h.id AND d.id = h.id AND d.active, output: [f.id, f.dim_id, h.rid, d.id] }
-        ├─StreamHashJoin { type: Inner, predicate: d.id = h.id, output: [f.id, f.dim_id, d.id, d.active, h.rid] }
-        │ ├─StreamExchange { dist: HashShard(d.id) }
-        │ │ └─StreamHashJoin { type: Inner, predicate: f.dim_id = d.id, output: all }
-        │ │   ├─StreamExchange { dist: HashShard(f.dim_id) }
-        │ │   │ └─StreamTableScan { table: f, columns: [f.id, f.dim_id], stream_scan_type: SnapshotBackfill, stream_key: [f.id], pk: [id], dist: UpstreamHashShard(f.id) }
-        │ │   └─StreamExchange { dist: HashShard(d.id) }
-        │ │     └─StreamTableScan { table: d, columns: [d.id, d.active], stream_scan_type: SnapshotBackfill, stream_key: [d.id], pk: [id], dist: UpstreamHashShard(d.id) }
-        │ └─StreamExchange { dist: HashShard(h.id) }
-        │   └─StreamTableScan { table: h, columns: [h.id, h.rid], stream_scan_type: SnapshotBackfill, stream_key: [h.rid], pk: [rid], dist: UpstreamHashShard(h.rid) }
-        └─StreamHashJoin { type: LeftOuter, predicate: h.id = e.id, output: all }
-          ├─StreamExchange { dist: HashShard(h.id) }
-          │ └─StreamTableScan { table: h, columns: [h.id, h.rid], stream_scan_type: SnapshotBackfill, stream_key: [h.rid], pk: [rid], dist: UpstreamHashShard(h.rid) }
-          └─StreamExchange { dist: HashShard(e.id) }
-            └─StreamTableScan { table: e, columns: [e.id], stream_scan_type: SnapshotBackfill, stream_key: [e.id], pk: [id], dist: UpstreamHashShard(e.id) }
+    StreamMaterialize { columns: [id, f.dim_id(hidden), d.id(hidden), h.rid(hidden)], stream_key: [id, f.dim_id, h.rid, d.id], pk_columns: [id, f.dim_id, h.rid, d.id], pk_conflict: NoCheck }
+    └─StreamExchange { dist: HashShard(f.id, f.dim_id, d.id, h.rid) }
+      └─StreamHashJoin { type: Inner, predicate: d.id = h.id, output: [f.id, f.dim_id, d.id, h.rid] }
+        ├─StreamExchange { dist: HashShard(d.id) }
+        │ └─StreamHashJoin { type: Inner, predicate: f.dim_id = d.id, output: [f.id, d.id, f.dim_id] }
+        │   ├─StreamExchange { dist: HashShard(f.dim_id) }
+        │   │ └─StreamTableScan { table: f, columns: [f.id, f.dim_id], stream_scan_type: SnapshotBackfill, stream_key: [f.id], pk: [id], dist: UpstreamHashShard(f.id) }
+        │   └─StreamExchange { dist: HashShard(d.id) }
+        │     └─StreamProject { exprs: [d.id] }
+        │       └─StreamFilter { predicate: Not(Coalesce(d.active, false:Boolean)) }
+        │         └─StreamTableScan { table: d, columns: [d.id, d.active], stream_scan_type: SnapshotBackfill, stream_key: [d.id], pk: [id], dist: UpstreamHashShard(d.id) }
+        └─StreamExchange { dist: HashShard(h.id) }
+          └─StreamTableScan { table: h, columns: [h.id, h.rid], stream_scan_type: SnapshotBackfill, stream_key: [h.rid], pk: [rid], dist: UpstreamHashShard(h.rid) }
 - name: not exists on a shared view whose rows the left side all carries
   before:
   - setup_flat
@@ -812,66 +802,44 @@
     select hd.id, hd.rid from hd;
   optimized_logical_plan_for_stream: |-
     LogicalUnion { all: true }
-    ├─LogicalJoin { type: LeftAnti, on: (h.id = f.dim_id), output: [f.id, h.rid] }
-    │ ├─LogicalJoin { type: Inner, on: (h.id = d.id), output: [f.id, f.dim_id, h.rid] }
-    │ │ ├─LogicalJoin { type: Inner, on: (f.dim_id = d.id), output: all }
-    │ │ │ ├─LogicalScan { table: f, columns: [f.id, f.dim_id] }
-    │ │ │ └─LogicalScan { table: d, columns: [d.id] }
-    │ │ └─LogicalScan { table: h, columns: [h.rid, h.id] }
-    │ └─LogicalProject { exprs: [h.id] }
-    │   └─LogicalShare { id: 5 }
-    │     └─LogicalJoin { type: LeftOuter, on: (h.id = e.id), output: [h.id, h.rid] }
-    │       ├─LogicalJoin { type: Inner, on: (h.id = d.id), output: [h.rid, h.id] }
-    │       │ ├─LogicalScan { table: h, columns: [h.rid, h.id] }
-    │       │ └─LogicalScan { table: d, output_columns: [d.id], required_columns: [d.id, d.active], predicate: d.active }
-    │       └─LogicalScan { table: e, columns: [e.id] }
-    └─LogicalShare { id: 5 }
-      └─LogicalJoin { type: LeftOuter, on: (h.id = e.id), output: [h.id, h.rid] }
-        ├─LogicalJoin { type: Inner, on: (h.id = d.id), output: [h.rid, h.id] }
-        │ ├─LogicalScan { table: h, columns: [h.rid, h.id] }
-        │ └─LogicalScan { table: d, output_columns: [d.id], required_columns: [d.id, d.active], predicate: d.active }
-        └─LogicalScan { table: e, columns: [e.id] }
+    ├─LogicalJoin { type: Inner, on: (h.id = d.id), output: [f.id, h.rid] }
+    │ ├─LogicalJoin { type: Inner, on: (f.dim_id = d.id), output: [f.id, d.id] }
+    │ │ ├─LogicalScan { table: f, columns: [f.id, f.dim_id] }
+    │ │ └─LogicalScan { table: d, output_columns: [d.id], required_columns: [d.id, d.active], predicate: Not(Coalesce(d.active, false:Boolean)) }
+    │ └─LogicalScan { table: h, columns: [h.rid, h.id] }
+    └─LogicalJoin { type: LeftOuter, on: (h.id = e.id), output: [h.id, h.rid] }
+      ├─LogicalJoin { type: Inner, on: (h.id = d.id), output: [h.rid, h.id] }
+      │ ├─LogicalScan { table: h, columns: [h.rid, h.id] }
+      │ └─LogicalScan { table: d, output_columns: [d.id], required_columns: [d.id, d.active], predicate: d.active }
+      └─LogicalScan { table: e, columns: [e.id] }
   stream_plan: |-
     StreamMaterialize { columns: [id, rid, f.id(hidden), f.dim_id(hidden), h.rid(hidden), d.id(hidden), $src(hidden)], stream_key: [f.id, f.dim_id, h.rid, d.id, $src], pk_columns: [f.id, f.dim_id, h.rid, d.id, $src], pk_conflict: NoCheck }
     └─StreamUnion { all: true }
       ├─StreamExchange { dist: HashShard(f.id, f.dim_id, h.rid, d.id, 0:Int32) }
       │ └─StreamProject { exprs: [f.id, h.rid, f.id, f.dim_id, h.rid, d.id, 0:Int32] }
-      │   └─StreamHashJoin { type: LeftAnti, predicate: f.dim_id = h.id, output: [f.id, h.rid, f.dim_id, d.id] }
-      │     ├─StreamExchange { dist: HashShard(f.dim_id) }
-      │     │ └─StreamHashJoin { type: Inner, predicate: d.id = h.id, output: [f.id, f.dim_id, h.rid, d.id] }
-      │     │   ├─StreamExchange { dist: HashShard(d.id) }
-      │     │   │ └─StreamHashJoin { type: Inner, predicate: f.dim_id = d.id, output: all }
-      │     │   │   ├─StreamExchange { dist: HashShard(f.dim_id) }
-      │     │   │   │ └─StreamTableScan { table: f, columns: [f.id, f.dim_id], stream_scan_type: SnapshotBackfill, stream_key: [f.id], pk: [id], dist: UpstreamHashShard(f.id) }
-      │     │   │   └─StreamExchange { dist: HashShard(d.id) }
-      │     │   │     └─StreamTableScan { table: d, columns: [d.id], stream_scan_type: SnapshotBackfill, stream_key: [d.id], pk: [id], dist: UpstreamHashShard(d.id) }
-      │     │   └─StreamExchange { dist: HashShard(h.id) }
-      │     │     └─StreamTableScan { table: h, columns: [h.rid, h.id], stream_scan_type: SnapshotBackfill, stream_key: [h.rid], pk: [rid], dist: UpstreamHashShard(h.rid) }
-      │     └─StreamProject { exprs: [h.id, h.rid] }
-      │       └─StreamShare { id: 15 }
-      │         └─StreamHashJoin { type: LeftOuter, predicate: h.id = e.id, output: [h.id, h.rid, e.id] }
-      │           ├─StreamHashJoin { type: Inner, predicate: h.id = d.id, output: all }
-      │           │ ├─StreamExchange { dist: HashShard(h.id) }
-      │           │ │ └─StreamTableScan { table: h, columns: [h.rid, h.id], stream_scan_type: SnapshotBackfill, stream_key: [h.rid], pk: [rid], dist: UpstreamHashShard(h.rid) }
-      │           │ └─StreamExchange { dist: HashShard(d.id) }
-      │           │   └─StreamProject { exprs: [d.id] }
-      │           │     └─StreamFilter { predicate: d.active }
-      │           │       └─StreamTableScan { table: d, columns: [d.id, d.active], stream_scan_type: SnapshotBackfill, stream_key: [d.id], pk: [id], dist: UpstreamHashShard(d.id) }
-      │           └─StreamExchange { dist: HashShard(e.id) }
-      │             └─StreamTableScan { table: e, columns: [e.id], stream_scan_type: SnapshotBackfill, stream_key: [e.id], pk: [id], dist: UpstreamHashShard(e.id) }
+      │   └─StreamHashJoin { type: Inner, predicate: d.id = h.id, output: [f.id, h.rid, f.dim_id, d.id] }
+      │     ├─StreamExchange { dist: HashShard(d.id) }
+      │     │ └─StreamHashJoin { type: Inner, predicate: f.dim_id = d.id, output: [f.id, d.id, f.dim_id] }
+      │     │   ├─StreamExchange { dist: HashShard(f.dim_id) }
+      │     │   │ └─StreamTableScan { table: f, columns: [f.id, f.dim_id], stream_scan_type: SnapshotBackfill, stream_key: [f.id], pk: [id], dist: UpstreamHashShard(f.id) }
+      │     │   └─StreamExchange { dist: HashShard(d.id) }
+      │     │     └─StreamProject { exprs: [d.id] }
+      │     │       └─StreamFilter { predicate: Not(Coalesce(d.active, false:Boolean)) }
+      │     │         └─StreamTableScan { table: d, columns: [d.id, d.active], stream_scan_type: SnapshotBackfill, stream_key: [d.id], pk: [id], dist: UpstreamHashShard(d.id) }
+      │     └─StreamExchange { dist: HashShard(h.id) }
+      │       └─StreamTableScan { table: h, columns: [h.rid, h.id], stream_scan_type: SnapshotBackfill, stream_key: [h.rid], pk: [rid], dist: UpstreamHashShard(h.rid) }
       └─StreamExchange { dist: HashShard(h.rid, h.id, null:Int32, null:Int32, 1:Int32) }
         └─StreamProject { exprs: [h.id, h.rid, h.rid, h.id, null:Int32, null:Int32, 1:Int32] }
-          └─StreamShare { id: 15 }
-            └─StreamHashJoin { type: LeftOuter, predicate: h.id = e.id, output: [h.id, h.rid, e.id] }
-              ├─StreamHashJoin { type: Inner, predicate: h.id = d.id, output: all }
-              │ ├─StreamExchange { dist: HashShard(h.id) }
-              │ │ └─StreamTableScan { table: h, columns: [h.rid, h.id], stream_scan_type: SnapshotBackfill, stream_key: [h.rid], pk: [rid], dist: UpstreamHashShard(h.rid) }
-              │ └─StreamExchange { dist: HashShard(d.id) }
-              │   └─StreamProject { exprs: [d.id] }
-              │     └─StreamFilter { predicate: d.active }
-              │       └─StreamTableScan { table: d, columns: [d.id, d.active], stream_scan_type: SnapshotBackfill, stream_key: [d.id], pk: [id], dist: UpstreamHashShard(d.id) }
-              └─StreamExchange { dist: HashShard(e.id) }
-                └─StreamTableScan { table: e, columns: [e.id], stream_scan_type: SnapshotBackfill, stream_key: [e.id], pk: [id], dist: UpstreamHashShard(e.id) }
+          └─StreamHashJoin { type: LeftOuter, predicate: h.id = e.id, output: [h.id, h.rid, e.id] }
+            ├─StreamHashJoin { type: Inner, predicate: h.id = d.id, output: all }
+            │ ├─StreamExchange { dist: HashShard(h.id) }
+            │ │ └─StreamTableScan { table: h, columns: [h.rid, h.id], stream_scan_type: SnapshotBackfill, stream_key: [h.rid], pk: [rid], dist: UpstreamHashShard(h.rid) }
+            │ └─StreamExchange { dist: HashShard(d.id) }
+            │   └─StreamProject { exprs: [d.id] }
+            │     └─StreamFilter { predicate: d.active }
+            │       └─StreamTableScan { table: d, columns: [d.id, d.active], stream_scan_type: SnapshotBackfill, stream_key: [d.id], pk: [id], dist: UpstreamHashShard(d.id) }
+            └─StreamExchange { dist: HashShard(e.id) }
+              └─StreamTableScan { table: e, columns: [e.id], stream_scan_type: SnapshotBackfill, stream_key: [e.id], pk: [id], dist: UpstreamHashShard(e.id) }
 - name: kept - exists on a shared view of which a join would be left
   before:
   - setup_flat
@@ -975,7 +943,7 @@
     └─LogicalJoin { type: Inner, on: (s.id = d.grp), output: all }
       ├─LogicalScan { table: s, columns: [s.id, s.ts] }
       └─LogicalScan { table: d, columns: [d.name, d.grp] }
-- name: kept - nested lookup in the padded side of a left join of the tree
+- name: inner lookup of a row that a left join of the other side reads - the padded rows go
   before:
   - setup_flat
   sql: |
@@ -988,7 +956,7 @@
       └─LogicalJoin { type: LeftOuter, on: (s.id = d.id), output: all }
         ├─LogicalScan { table: s, columns: [s.id, s.ts] }
         └─LogicalScan { table: d, columns: [d.id, d.name, d.grp] }
-- name: kept - left join whose condition tests a column of a left join of its right side
+- name: left join whose condition rejects the padded rows of a left join of its right side
   before:
   - setup_flat
   sql: |
@@ -1002,6 +970,22 @@
       │ ├─LogicalScan { table: f, columns: [f.id, f.dim_id] }
       │ └─LogicalScan { table: d, columns: [d.id, d.name, d.grp] }
       └─LogicalScan { table: e, columns: [e.id, e.code], predicate: (e.code = 'x':Varchar) }
+- name: kept - left join whose condition tests a column of a left join of its right side
+  before:
+  - setup_flat
+  sql: |
+    select f.id, r.name, r.code from f left join d on f.dim_id = d.id left join (
+      select d2.id, d2.name, e.code from d d2 left join e on d2.grp = e.id
+    ) r on d.id = r.id and r.code is null;
+  optimized_logical_plan_for_stream: |-
+    LogicalJoin { type: LeftOuter, on: (d.id = d.id), output: [f.id, d.name, e.code] }
+    ├─LogicalJoin { type: LeftOuter, on: (f.dim_id = d.id), output: [f.id, d.id] }
+    │ ├─LogicalScan { table: f, columns: [f.id, f.dim_id] }
+    │ └─LogicalScan { table: d, columns: [d.id] }
+    └─LogicalFilter { predicate: IsNull(e.code) }
+      └─LogicalJoin { type: LeftOuter, on: (d.grp = e.id), output: [d.id, d.name, e.code] }
+        ├─LogicalScan { table: d, columns: [d.id, d.name, d.grp] }
+        └─LogicalScan { table: e, columns: [e.id, e.code] }
 - name: kept - nested lookups of two different rows
   before:
   - setup_flat
