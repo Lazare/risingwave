@@ -16,6 +16,7 @@
 
 use itertools::Itertools;
 use risingwave_common::types::DataType;
+use risingwave_common::util::iter_util::ZipEqFast;
 use risingwave_expr::aggregate::{AggType, PbAggKind};
 
 use super::prelude::{PlanRef, *};
@@ -460,7 +461,7 @@ impl Rule<Logical> for StackedAggOverUnionMergeRule {
         let new_calls = outer
             .agg_calls()
             .iter()
-            .zip_eq(&calls)
+            .zip_eq_fast(&calls)
             .map(|(call, (_, column))| {
                 let mut call = call.clone();
                 call.inputs = vec![InputRef::new(

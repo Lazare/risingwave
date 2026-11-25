@@ -30,6 +30,20 @@ CASES = [
     ('share_scans', 'identical filtered scans, not shared',
      f"select a.id from {A} a where exists (select 1 from {H} h where h.sid = a.k and h.v > 0) "
      f"union all select b.id from {B} b where exists (select 1 from {H} h where h.sid = b.k and h.v > 0)"),
+    # Widened sharing.
+    ('widen_filters', 'the same join with a different filter in each copy',
+     f"select a.id, h.v from {A} a join {H} h on a.k = h.sid where h.v > 0 "
+     f"union all select a.id, h.id from {A} a join {H} h on a.k = h.sid where h.st = 'x'"),
+    ('widen_left', 'a left join filtered on its preserved side in one copy',
+     f"select a.id, h.v from {A} a left join {H} h on a.k = h.sid where a.x > 0 "
+     f"union all select a.id, h.id from {A} a left join {H} h on a.k = h.sid"),
+    ('agg_filters', 'two aggregations of the same input and key with different filters',
+     f"select a.id, coalesce(x.s, 0) as s, y.c from {A} a "
+     f"left join (select sid, sum(v) as s from {H} where v is not null group by sid) x on a.k = x.sid "
+     f"left join (select sid, count(*) as c from {H} where v is not null and st = 'x' group by sid) y on a.k = y.sid"),
+    ('scalar_filters', 'two aggregations without group key with different filters',
+     f"select a.id from {A} a where a.x < (select max(v) from {H} where st = 'x') "
+     f"union all select b.id from {B} b where b.y < (select max(v) from {H} where st = 'y')"),
     # Merge of stacked aggregations.
     ('stacked', 'sum of sums, sum of counts, max of maxes, min of mins on fewer columns',
      f"select g, coalesce(sum(sv), 0) as s, sum(c) as c, sum(cv) as cv, max(mx) as mx, min(mn) as mn from ("
@@ -64,6 +78,14 @@ CASES = [
      f"(select g, coalesce(sum(sv), 0) as s from (select g, w, sum(v) as sv from {T} group by g, w) i group by g) x "
      f"join (select g, coalesce(sum(sv), 0) as m from (select g, v, sum(v) as sv from {T} group by g, v) j group by g) y "
      f"on x.g = y.g"),
+    ('group_expr', 'an outer group key computed from inner group key columns',
+     f"select g + w as gw, coalesce(sum(sv), 0) as s from (select g, w, v, sum(v) as sv from {T} group by g, w, v) x group by g + w"),
+    ('union_aggs', 'a union of aggregations, one with FILTER, one with HAVING',
+     f"select g, coalesce(sum(sv), 0) as s, min(mn) as mn from (select g, sum(v) filter (where w > 0) as sv, min(v) as mn from {T} group by g "
+     f"union all select g, sum(v), min(v) from {S} group by g having count(*) > 1) u group by g"),
+    ('union_rows', 'a union of an aggregation and of rows',
+     f"select g, min(mv) as mn, max(xv) as mx from (select g, min(v) as mv, max(v) as xv from {T} group by g "
+     f"union all select g, v, v from {S}) u group by g"),
     # Kept.
     ('kept_count_count', 'count of counts counts inner groups',
      f"select g, count(c) as n, count(*) as m from (select g, w, count(*) as c from {T} group by g, w) x group by g"),
@@ -81,7 +103,7 @@ CASES = [
     ('kept_shared_inner', 'an inner aggregation shared by two consumers',
      f"with x as (select g, w, sum(v) as sv from {T} group by g, w) "
      f"select g, coalesce(sum(sv), 0) as s from x group by g union all select g, coalesce(sv, 0)::numeric from x where w = 1"),
-    ('kept_union', 'sums of the aggregations of the branches of a union',
+    ('union_sums', 'sums of the aggregations of the branches of a union',
      f"select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from {T} group by g "
      f"union all select g, sum(v) as sv from {S} group by g) u group by g"),
     ('kept_semi', 'semi join over a DISTINCT',

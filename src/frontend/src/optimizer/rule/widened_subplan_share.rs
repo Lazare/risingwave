@@ -50,6 +50,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use itertools::Itertools;
 use risingwave_common::util::column_index_mapping::ColIndexMapping;
+use risingwave_common::util::iter_util::ZipEqFast;
 use risingwave_pb::plan_common::JoinType;
 
 use super::prelude::PlanRef;
@@ -221,7 +222,7 @@ fn replace(
         .collect_vec();
     let result = if inputs
         .iter()
-        .zip_eq(&new_inputs)
+        .zip_eq_fast(&new_inputs)
         .all(|(old, new)| old.id() == new.id())
     {
         plan.clone()

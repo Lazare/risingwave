@@ -150,9 +150,9 @@
 - name: aggregations without group key with different filters become one with FILTER
   before: [setup_share]
   sql: |
-    select a.id, s.n from a cross join (select max(k) as n from tg where tags @> '["p"]') s
+    select a.id from a where a.x < (select max(v) from h where st = 'x')
     union all
-    select b.id, s2.n from b cross join (select max(k) as n from tg where tags @> '["q"]') s2;
+    select b.id from b where b.y < (select max(v) from h where st = 'y');
   expected_outputs:
   - stream_plan
 
