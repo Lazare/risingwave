@@ -243,6 +243,12 @@ fn table_constraint_facts(scan: &LogicalScan) -> ColumnFacts {
     facts
 }
 
+/// The columns of a scanned table that its predicate fixes to a constant, indexed by the columns
+/// of the table, whether the scan outputs them or not.
+pub(super) fn scan_predicate_constant_columns(scan: &LogicalScan) -> BTreeSet<usize> {
+    predicate_facts(&scan.predicate().conjunctions).constant_columns()
+}
+
 /// Derives the [`ColumnFacts`] of a plan node from those of its inputs. A node that is not
 /// listed here has no known facts, which is always safe.
 ///

@@ -25,13 +25,15 @@ use risingwave_common::types::DataType;
 use risingwave_expr::aggregate::{AggType, PbAggKind};
 use risingwave_pb::plan_common::JoinType;
 
-use super::column_facts_simplify_rule::column_facts;
+use super::column_facts_simplify_rule::{column_facts, scan_predicate_constant_columns};
 use super::never_true_predicate_rule::is_simple_type;
 use super::prelude::{PlanRef, *};
+use crate::catalog::table_catalog::TableType;
 use crate::expr::{Expr, ExprImpl, ExprType, FunctionCall, InputRef};
 use crate::optimizer::plan_node::generic::{GenericPlanRef, PlanAggCall};
 use crate::optimizer::plan_node::{
-    LogicalAgg, LogicalJoin, LogicalProject, PlanNodeId, PlanTreeNodeBinary, PlanTreeNodeUnary,
+    LogicalAgg, LogicalJoin, LogicalProject, LogicalScan, PlanNodeId, PlanTreeNodeBinary,
+    PlanTreeNodeUnary,
 };
 
 /// A set of columns on which no two rows agree. The empty set means at most one row.
@@ -43,7 +45,8 @@ type Key = BTreeSet<usize>;
 /// The stream key of a logical node is *not* used: before the plan is rewritten for streaming,
 /// the stream key of a union is not a key yet, and every node above the union inherits it.
 ///
-/// - `Scan`: the key of the table, if its columns are read.
+/// - `Scan`: the key of the table, if its columns are read or fixed by the predicate (see
+///   [`scan_keys`]).
 /// - `Values` with at most one row, `Limit` of at most one row: the empty key.
 /// - `Filter`, `Share`, `Limit`: the keys of the input, whose rows they only select.
 /// - `TopN`: the keys of the input, and the group key if it keeps one row per group.
@@ -66,13 +69,34 @@ fn unique_keys(plan: &PlanRef, memo: &mut HashMap<PlanNodeId, Vec<Key>>) -> Vec<
     keys
 }
 
+/// The key of a scanned table, on the output columns of the scan.
+///
+/// A key column that the predicate of the scan fixes to a constant is not needed to tell two rows
+/// apart, and the scan usually does not output it any more: `d.id = 7` pushed into the scan of
+/// `d` leaves at most one row, whatever the columns that are read.
+fn scan_keys(scan: &LogicalScan) -> Vec<Key> {
+    let table = scan.table();
+    if matches!(table.table_type(), TableType::Internal) {
+        return vec![];
+    }
+    let constants = scan_predicate_constant_columns(scan);
+    table
+        .stream_key()
+        .into_iter()
+        .filter(|column| !constants.contains(column))
+        .map(|column| {
+            scan.output_col_idx()
+                .iter()
+                .position(|&output| output == column)
+        })
+        .collect::<Option<Key>>()
+        .into_iter()
+        .collect()
+}
+
 fn derive_unique_keys(plan: &PlanRef, memo: &mut HashMap<PlanNodeId, Vec<Key>>) -> Vec<Key> {
-    if plan.as_logical_scan().is_some() {
-        return plan
-            .stream_key()
-            .map(|key| key.iter().copied().collect())
-            .into_iter()
-            .collect();
+    if let Some(scan) = plan.as_logical_scan() {
+        return scan_keys(scan);
     }
     if let Some(values) = plan.as_logical_values() {
         return if values.rows().len() <= 1 {
