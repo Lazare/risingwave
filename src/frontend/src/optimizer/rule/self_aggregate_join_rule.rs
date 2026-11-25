@@ -25,7 +25,8 @@ use risingwave_pb::plan_common::JoinType;
 
 use super::lateral_table_function_rule::{PaddingTest, padding_test, per_row_agg_call, supported};
 use super::prelude::{PlanRef, *};
-use super::repeated_lookup_merge_rule::{map_input_refs, pure_scan, referred_columns};
+use super::repeated_lookup_merge_rule::{map_input_refs, referred_columns};
+use crate::catalog::table_catalog::TableType;
 use crate::expr::{
     Expr, ExprImpl, ExprType, FunctionCall, InputRef, TableFunction, TableFunctionType,
 };
@@ -122,14 +123,8 @@ fn rewrite(join: &LogicalJoin) -> Option<PlanRef> {
         return None;
     }
     let left_len = left.schema().len();
-    let pure = pure_scan(&left)?;
-    let table = pure.scan.table().clone();
-    let key: Vec<usize> = table.stream_key();
-    if key.is_empty() {
-        return None;
-    }
 
-    // The right side: an aggregation, maybe under a projection.
+    // The right side: an aggregation, maybe under a projection, of rows derived from a table.
     let (agg_plan, right_exprs) = match right.as_logical_project() {
         Some(project) => (project.input(), Some(project.exprs().clone())),
         None => (right.clone(), None),
@@ -138,8 +133,17 @@ fn rewrite(join: &LogicalJoin) -> Option<PlanRef> {
     if !agg.grouping_sets().is_empty() || !agg.agg_calls().iter().all(per_row_agg_call) {
         return None;
     }
-    let group_key: Vec<usize> = agg.group_key().indices().collect();
     let derived = agg.input();
+    let leaf = leaf_scan(&derived)?;
+    if leaf.as_of().is_some() || matches!(leaf.table().table_type(), TableType::Internal) {
+        return None;
+    }
+    let table = leaf.table().clone();
+    let key: Vec<usize> = table.stream_key();
+    if key.is_empty() {
+        return None;
+    }
+    let group_key: Vec<usize> = agg.group_key().indices().collect();
     // Each column of the group key, as an expression of the row of the table it comes from.
     let group_traces: Vec<ExprImpl> = group_key
         .iter()
@@ -156,9 +160,10 @@ fn rewrite(join: &LogicalJoin) -> Option<PlanRef> {
         key.contains(&column).then_some(column)
     };
 
-    // The condition: only equalities of a key column of the table on both sides, covering the
-    // whole key.
-    let mut covered = BTreeSet::new();
+    // The condition: only equalities between a column of the left side and a key column of the
+    // table in the group key, covering the whole key. The columns of the left side must be the
+    // key columns of a row of the same table that the left side carries, see `widen`.
+    let mut compared = vec![];
     // The key columns compared with `=`, which a NULL never matches.
     let mut compared_with_equal = BTreeSet::new();
     for conjunct in &on.conjunctions {
@@ -181,45 +186,33 @@ fn rewrite(join: &LogicalJoin) -> Option<PlanRef> {
         } else {
             return None;
         };
-        let left_column = pure.exprs[l].as_input_ref()?.index();
-        if !key.contains(&left_column) || right_key_column(r) != Some(left_column) {
-            return None;
-        }
-        covered.insert(left_column);
+        let column = right_key_column(r)?;
+        compared.push((l, column));
         if call.func_type() == ExprType::Equal {
-            compared_with_equal.insert(left_column);
+            compared_with_equal.insert(column);
         }
     }
+    let covered: BTreeSet<usize> = compared.iter().map(|&(_, c)| c).collect();
     if covered.len() != key.len() {
         return None;
     }
-
-    // The rows of the table, read once, with the columns that both sides need.
-    let mut needed: BTreeSet<usize> = key.iter().copied().collect();
-    needed.extend(referred_columns(&pure.exprs));
-    needed.extend(referred_columns(&pure.predicate));
-    needed.extend(referred_columns(&group_traces));
-    let leaf = leaf_scan(&derived)?;
-    if leaf.table().id != table.id || leaf.as_of().is_some() {
+    // A group per row of the left side.
+    let mut group: Vec<usize> = left.stream_key()?.to_vec();
+    group.sort_unstable();
+    group.dedup();
+    if group.is_empty() {
         return None;
     }
+
+    // The columns of the table that the derived rows need, carried by the left side.
+    let mut needed: BTreeSet<usize> = key.iter().copied().collect();
+    needed.extend(referred_columns(&group_traces));
     needed.extend(leaf.output_col_idx().iter().copied());
     needed.extend(referred_columns(&leaf.predicate().conjunctions));
-    let needed: Vec<usize> = needed.into_iter().collect();
-    let position: HashMap<usize, usize> = needed.iter().enumerate().map(|(p, &c)| (c, p)).collect();
-    let to_rows = |expr: &ExprImpl| {
-        map_input_refs(expr, |r| {
-            InputRef::new(position[&r.index()], r.return_type()).into()
-        })
-    };
-    let scan: PlanRef = pure.scan.clone_with_output_indices(needed.clone()).into();
-    let rows: PlanRef = LogicalFilter::create(
-        scan,
-        Condition {
-            conjunctions: pure.predicate.iter().map(to_rows).collect(),
-        },
-    );
-    let rows_len = needed.len();
+    let widened = widen(&left, &compared, &needed, table.id)?;
+    let rows = widened.plan;
+    let position = widened.positions;
+    let rows_len = rows.schema().len();
     let ctx = Ctx {
         rows: rows.clone(),
         rows_len,
@@ -227,11 +220,11 @@ fn rewrite(join: &LogicalJoin) -> Option<PlanRef> {
         table_id: table.id,
     };
 
-    // The derived rows of each row of the table: [table columns, flag, derived columns].
+    // The derived rows of each row of the left side: [its columns, flag, derived columns].
     let per_row = derive(&derived, &ctx)?;
     let offset = rows_len + 1;
 
-    // The aggregation grouped by the key of the table.
+    // The aggregation grouped by the stream key of the left side.
     let flag = Condition::with_expr(InputRef::new(rows_len, DataType::Boolean).into());
     let mut calls = vec![];
     let mut guards = vec![];
@@ -262,8 +255,6 @@ fn rewrite(join: &LogicalJoin) -> Option<PlanRef> {
         }
         calls.push(call);
     }
-    let mut group: Vec<usize> = key.iter().map(|c| position[c]).collect();
-    group.sort_unstable();
     let key_len = group.len();
     let calls_len = calls.len();
     let mut call_values: Vec<ExprImpl> = calls
@@ -283,7 +274,7 @@ fn rewrite(join: &LogicalJoin) -> Option<PlanRef> {
     }
     let matched_rows = InputRef::new(key_len + calls.len(), DataType::Int64);
     calls.push(count_call(vec![], flag));
-    // The value of each column of the rows of the table after the aggregation.
+    // The value of each column of the rows after the aggregation.
     let mut row_values: Vec<ExprImpl> = vec![];
     for p in 0..rows_len {
         let data_type = rows.schema()[p].data_type();
@@ -322,7 +313,7 @@ fn rewrite(join: &LogicalJoin) -> Option<PlanRef> {
     let of_table = |expr: &ExprImpl| -> ExprImpl {
         map_input_refs(expr, |r| row_values[position[&r.index()]].clone())
     };
-    let mut columns: Vec<ExprImpl> = pure.exprs.iter().map(of_table).collect();
+    let mut columns: Vec<ExprImpl> = row_values[..left_len].to_vec();
     let agg_values: Vec<ExprImpl> = group_traces
         .iter()
         .map(of_table)
@@ -345,6 +336,165 @@ fn rewrite(join: &LogicalJoin) -> Option<PlanRef> {
     }
     let exprs = output_indices.iter().map(|&i| columns[i].clone()).collect();
     Some(LogicalProject::new(result, exprs).into())
+}
+
+/// The left side with the columns of a row of the table appended to its output.
+struct Widened {
+    plan: PlanRef,
+    /// The position in the output of `plan` of each appended column of the table.
+    positions: HashMap<usize, usize>,
+}
+
+/// Appends to the output of `plan` the `needed` columns of the row of the table whose key columns
+/// are the given output columns of `plan` (`(output column, key column of the table)`).
+///
+/// The row is found down a path of projections that pass the key columns as they are, filters,
+/// and joins that keep every row of the side of the path (inner joins, the outer side of an outer
+/// join), to a scan of the table or a share of such a scan. On that path every row of `plan`
+/// carries one real row of the table, whose key columns are the given output columns. A scan
+/// reads the needed columns; a shared scan must already read them, as the share is not changed.
+fn widen(
+    plan: &PlanRef,
+    columns: &[(usize, usize)],
+    needed: &BTreeSet<usize>,
+    table_id: TableId,
+) -> Option<Widened> {
+    if let Some(scan) = plan.as_logical_scan() {
+        if scan.table().id != table_id || scan.as_of().is_some() {
+            return None;
+        }
+        let output = scan.output_col_idx();
+        if !columns.iter().all(|&(o, c)| output[o] == c) {
+            return None;
+        }
+        let mut new_output = output.clone();
+        for &c in needed {
+            if !new_output.contains(&c) {
+                new_output.push(c);
+            }
+        }
+        let positions = needed
+            .iter()
+            .map(|&c| (c, new_output.iter().position(|&o| o == c).unwrap()))
+            .collect();
+        return Some(Widened {
+            plan: scan.clone_with_output_indices(new_output).into(),
+            positions,
+        });
+    }
+    if let Some(share) = plan.as_logical_share() {
+        // The share is kept as it is: its scan must already read the needed columns.
+        let input = share.input();
+        let scan = input.as_logical_scan()?;
+        if scan.table().id != table_id || scan.as_of().is_some() {
+            return None;
+        }
+        let output = scan.output_col_idx();
+        if !columns.iter().all(|&(o, c)| output[o] == c) {
+            return None;
+        }
+        let positions = needed
+            .iter()
+            .map(|&c| Some((c, output.iter().position(|&o| o == c)?)))
+            .collect::<Option<_>>()?;
+        return Some(Widened {
+            plan: plan.clone(),
+            positions,
+        });
+    }
+    if let Some(project) = plan.as_logical_project() {
+        let inner_columns = columns
+            .iter()
+            .map(|&(o, c)| Some((project.exprs()[o].as_input_ref()?.index(), c)))
+            .collect::<Option<Vec<_>>>()?;
+        let input = widen(&project.input(), &inner_columns, needed, table_id)?;
+        let mut exprs = project.exprs().clone();
+        let mut positions = HashMap::new();
+        for &c in needed {
+            let at = input.positions[&c];
+            positions.insert(c, exprs.len());
+            exprs.push(InputRef::new(at, input.plan.schema()[at].data_type()).into());
+        }
+        return Some(Widened {
+            plan: LogicalProject::new(input.plan, exprs).into(),
+            positions,
+        });
+    }
+    if let Some(filter) = plan.as_logical_filter() {
+        let input = widen(&filter.input(), columns, needed, table_id)?;
+        return Some(Widened {
+            plan: LogicalFilter::new(input.plan, filter.predicate().clone()).into(),
+            positions: input.positions,
+        });
+    }
+    if let Some(join) = plan.as_logical_join() {
+        let (join_left, join_right, on, join_type, output_indices) = join.clone().decompose();
+        let join_left_len = join_left.schema().len();
+        let inner: Vec<(usize, usize)> = columns
+            .iter()
+            .map(|&(o, c)| (output_indices[o], c))
+            .collect();
+        let on_left = inner.iter().all(|&(i, _)| i < join_left_len)
+            && matches!(join_type, JoinType::Inner | JoinType::LeftOuter);
+        let on_right = inner.iter().all(|&(i, _)| i >= join_left_len)
+            && matches!(join_type, JoinType::Inner | JoinType::RightOuter);
+        let (new_left, new_right, moved_on, mut new_output, carried): (
+            PlanRef,
+            PlanRef,
+            Condition,
+            Vec<usize>,
+            HashMap<usize, usize>,
+        ) = if on_left {
+            let widened = widen(&join_left, &inner, needed, table_id)?;
+            let added = widened.plan.schema().len() - join_left_len;
+            let moved = |i: usize| if i < join_left_len { i } else { i + added };
+            let on = Condition {
+                conjunctions: on
+                    .conjunctions
+                    .iter()
+                    .map(|e| {
+                        map_input_refs(e, |r| {
+                            InputRef::new(moved(r.index()), r.return_type()).into()
+                        })
+                    })
+                    .collect(),
+            };
+            let output = output_indices.iter().map(|&i| moved(i)).collect();
+            (widened.plan, join_right, on, output, widened.positions)
+        } else if on_right {
+            let inner: Vec<(usize, usize)> =
+                inner.iter().map(|&(i, c)| (i - join_left_len, c)).collect();
+            let widened = widen(&join_right, &inner, needed, table_id)?;
+            let carried = widened
+                .positions
+                .iter()
+                .map(|(&c, &p)| (c, join_left_len + p))
+                .collect();
+            (join_left, widened.plan, on, output_indices.clone(), carried)
+        } else {
+            return None;
+        };
+        let mut positions = HashMap::new();
+        for &c in needed {
+            let at = carried[&c];
+            let position = match new_output.iter().position(|&i| i == at) {
+                Some(position) => position,
+                None => {
+                    new_output.push(at);
+                    new_output.len() - 1
+                }
+            };
+            positions.insert(c, position);
+        }
+        let new: PlanRef =
+            LogicalJoin::with_output_indices(new_left, new_right, join_type, moved_on, new_output)
+                .into();
+        return Some(Widened {
+            plan: new,
+            positions,
+        });
+    }
+    None
 }
 
 struct Ctx<'a> {
