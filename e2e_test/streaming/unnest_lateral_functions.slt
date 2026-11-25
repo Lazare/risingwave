@@ -92,6 +92,16 @@ create materialized view ulf_sum_coalesce_off as select t.id, coalesce((select s
 statement ok
 create materialized view ulf_sum_raw_off as select t.id, (select sum((e ->> 'a')::bigint) from jsonb_array_elements(t.j -> 'ys') as e) as total from ulf_t t;
 
+# count over unnest
+
+statement ok
+create materialized view ulf_count_off as select t.id, (select count(*) from unnest(t.arr) as v) as c from ulf_t t;
+
+# EXISTS over unnest
+
+statement ok
+create materialized view ulf_exists_off as select t.id, exists (select 1 from unnest(t.arr) as v) as e from ulf_t t;
+
 # count and EXISTS over unnest in one select list
 
 statement ok
@@ -199,6 +209,16 @@ create materialized view ulf_sum_coalesce_on as select t.id, coalesce((select su
 
 statement ok
 create materialized view ulf_sum_raw_on as select t.id, (select sum((e ->> 'a')::bigint) from jsonb_array_elements(t.j -> 'ys') as e) as total from ulf_t t;
+
+# count over unnest
+
+statement ok
+create materialized view ulf_count_on as select t.id, (select count(*) from unnest(t.arr) as v) as c from ulf_t t;
+
+# EXISTS over unnest
+
+statement ok
+create materialized view ulf_exists_on as select t.id, exists (select 1 from unnest(t.arr) as v) as e from ulf_t t;
 
 # count and EXISTS over unnest in one select list
 
@@ -337,9 +357,17 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_count_exists_on except select * from ulf_count_exists_off) x),
-  (select count(*) from (select * from ulf_count_exists_off except select * from ulf_count_exists_on) y),
-  (select count(*) from ulf_count_exists_on) - (select count(*) from ulf_count_exists_off);
+  (select count(*) from (select * from ulf_count_on except select * from ulf_count_off) x),
+  (select count(*) from (select * from ulf_count_off except select * from ulf_count_on) y),
+  (select count(*) from ulf_count_on) - (select count(*) from ulf_count_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ulf_exists_on except select * from ulf_exists_off) x),
+  (select count(*) from (select * from ulf_exists_off except select * from ulf_exists_on) y),
+  (select count(*) from ulf_exists_on) - (select count(*) from ulf_exists_off);
 ----
 0 0 0
 
@@ -507,9 +535,17 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_count_exists_on except select * from (select t.id, (select count(*) from unnest(t.arr) as v) as c, exists (select 1 from unnest(t.arr) as v) as e from ulf_t t) q) x),
-  (select count(*) from (select * from (select t.id, (select count(*) from unnest(t.arr) as v) as c, exists (select 1 from unnest(t.arr) as v) as e from ulf_t t) q except select * from ulf_count_exists_on) y),
-  (select count(*) from ulf_count_exists_on) - (select count(*) from (select t.id, (select count(*) from unnest(t.arr) as v) as c, exists (select 1 from unnest(t.arr) as v) as e from ulf_t t) q);
+  (select count(*) from (select * from ulf_count_on except select * from (select t.id, (select count(*) from unnest(t.arr) as v) as c from ulf_t t) q) x),
+  (select count(*) from (select * from (select t.id, (select count(*) from unnest(t.arr) as v) as c from ulf_t t) q except select * from ulf_count_on) y),
+  (select count(*) from ulf_count_on) - (select count(*) from (select t.id, (select count(*) from unnest(t.arr) as v) as c from ulf_t t) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ulf_exists_on except select * from (select t.id, exists (select 1 from unnest(t.arr) as v) as e from ulf_t t) q) x),
+  (select count(*) from (select * from (select t.id, exists (select 1 from unnest(t.arr) as v) as e from ulf_t t) q except select * from ulf_exists_on) y),
+  (select count(*) from ulf_exists_on) - (select count(*) from (select t.id, exists (select 1 from unnest(t.arr) as v) as e from ulf_t t) q);
 ----
 0 0 0
 
@@ -558,6 +594,16 @@ select
   (select count(*) from (select * from ulf_window_on except select * from (select t.id, x.v, x.run from ulf_t t cross join lateral (select v, sum(v) over (order by o rows unbounded preceding) as run from unnest(t.arr) with ordinality as w(v, o)) as x) q) x),
   (select count(*) from (select * from (select t.id, x.v, x.run from ulf_t t cross join lateral (select v, sum(v) over (order by o rows unbounded preceding) as run from unnest(t.arr) with ordinality as w(v, o)) as x) q except select * from ulf_window_on) y),
   (select count(*) from ulf_window_on) - (select count(*) from (select t.id, x.v, x.run from ulf_t t cross join lateral (select v, sum(v) over (order by o rows unbounded preceding) as run from unnest(t.arr) with ordinality as w(v, o)) as x) q);
+----
+0 0 0
+
+# After the backfill: with the variable, every materialized view holds the rows of its reference.
+
+query III
+select
+  (select count(*) from (select * from ulf_count_exists_on except select * from (select a.id, a.c, b.e from ulf_count_off a join ulf_exists_off b on a.id = b.id) q) x),
+  (select count(*) from (select * from (select a.id, a.c, b.e from ulf_count_off a join ulf_exists_off b on a.id = b.id) q except select * from ulf_count_exists_on) y),
+  (select count(*) from ulf_count_exists_on) - (select count(*) from (select a.id, a.c, b.e from ulf_count_off a join ulf_exists_off b on a.id = b.id) q);
 ----
 0 0 0
 
@@ -698,9 +744,17 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_count_exists_on except select * from ulf_count_exists_off) x),
-  (select count(*) from (select * from ulf_count_exists_off except select * from ulf_count_exists_on) y),
-  (select count(*) from ulf_count_exists_on) - (select count(*) from ulf_count_exists_off);
+  (select count(*) from (select * from ulf_count_on except select * from ulf_count_off) x),
+  (select count(*) from (select * from ulf_count_off except select * from ulf_count_on) y),
+  (select count(*) from ulf_count_on) - (select count(*) from ulf_count_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ulf_exists_on except select * from ulf_exists_off) x),
+  (select count(*) from (select * from ulf_exists_off except select * from ulf_exists_on) y),
+  (select count(*) from ulf_exists_on) - (select count(*) from ulf_exists_off);
 ----
 0 0 0
 
@@ -868,9 +922,17 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_count_exists_on except select * from (select t.id, (select count(*) from unnest(t.arr) as v) as c, exists (select 1 from unnest(t.arr) as v) as e from ulf_t t) q) x),
-  (select count(*) from (select * from (select t.id, (select count(*) from unnest(t.arr) as v) as c, exists (select 1 from unnest(t.arr) as v) as e from ulf_t t) q except select * from ulf_count_exists_on) y),
-  (select count(*) from ulf_count_exists_on) - (select count(*) from (select t.id, (select count(*) from unnest(t.arr) as v) as c, exists (select 1 from unnest(t.arr) as v) as e from ulf_t t) q);
+  (select count(*) from (select * from ulf_count_on except select * from (select t.id, (select count(*) from unnest(t.arr) as v) as c from ulf_t t) q) x),
+  (select count(*) from (select * from (select t.id, (select count(*) from unnest(t.arr) as v) as c from ulf_t t) q except select * from ulf_count_on) y),
+  (select count(*) from ulf_count_on) - (select count(*) from (select t.id, (select count(*) from unnest(t.arr) as v) as c from ulf_t t) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ulf_exists_on except select * from (select t.id, exists (select 1 from unnest(t.arr) as v) as e from ulf_t t) q) x),
+  (select count(*) from (select * from (select t.id, exists (select 1 from unnest(t.arr) as v) as e from ulf_t t) q except select * from ulf_exists_on) y),
+  (select count(*) from ulf_exists_on) - (select count(*) from (select t.id, exists (select 1 from unnest(t.arr) as v) as e from ulf_t t) q);
 ----
 0 0 0
 
@@ -919,6 +981,16 @@ select
   (select count(*) from (select * from ulf_window_on except select * from (select t.id, x.v, x.run from ulf_t t cross join lateral (select v, sum(v) over (order by o rows unbounded preceding) as run from unnest(t.arr) with ordinality as w(v, o)) as x) q) x),
   (select count(*) from (select * from (select t.id, x.v, x.run from ulf_t t cross join lateral (select v, sum(v) over (order by o rows unbounded preceding) as run from unnest(t.arr) with ordinality as w(v, o)) as x) q except select * from ulf_window_on) y),
   (select count(*) from ulf_window_on) - (select count(*) from (select t.id, x.v, x.run from ulf_t t cross join lateral (select v, sum(v) over (order by o rows unbounded preceding) as run from unnest(t.arr) with ordinality as w(v, o)) as x) q);
+----
+0 0 0
+
+# After the inserts: with the variable, every materialized view holds the rows of its reference.
+
+query III
+select
+  (select count(*) from (select * from ulf_count_exists_on except select * from (select a.id, a.c, b.e from ulf_count_off a join ulf_exists_off b on a.id = b.id) q) x),
+  (select count(*) from (select * from (select a.id, a.c, b.e from ulf_count_off a join ulf_exists_off b on a.id = b.id) q except select * from ulf_count_exists_on) y),
+  (select count(*) from ulf_count_exists_on) - (select count(*) from (select a.id, a.c, b.e from ulf_count_off a join ulf_exists_off b on a.id = b.id) q);
 ----
 0 0 0
 
@@ -1045,9 +1117,17 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_count_exists_on except select * from ulf_count_exists_off) x),
-  (select count(*) from (select * from ulf_count_exists_off except select * from ulf_count_exists_on) y),
-  (select count(*) from ulf_count_exists_on) - (select count(*) from ulf_count_exists_off);
+  (select count(*) from (select * from ulf_count_on except select * from ulf_count_off) x),
+  (select count(*) from (select * from ulf_count_off except select * from ulf_count_on) y),
+  (select count(*) from ulf_count_on) - (select count(*) from ulf_count_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ulf_exists_on except select * from ulf_exists_off) x),
+  (select count(*) from (select * from ulf_exists_off except select * from ulf_exists_on) y),
+  (select count(*) from ulf_exists_on) - (select count(*) from ulf_exists_off);
 ----
 0 0 0
 
@@ -1215,9 +1295,17 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_count_exists_on except select * from (select t.id, (select count(*) from unnest(t.arr) as v) as c, exists (select 1 from unnest(t.arr) as v) as e from ulf_t t) q) x),
-  (select count(*) from (select * from (select t.id, (select count(*) from unnest(t.arr) as v) as c, exists (select 1 from unnest(t.arr) as v) as e from ulf_t t) q except select * from ulf_count_exists_on) y),
-  (select count(*) from ulf_count_exists_on) - (select count(*) from (select t.id, (select count(*) from unnest(t.arr) as v) as c, exists (select 1 from unnest(t.arr) as v) as e from ulf_t t) q);
+  (select count(*) from (select * from ulf_count_on except select * from (select t.id, (select count(*) from unnest(t.arr) as v) as c from ulf_t t) q) x),
+  (select count(*) from (select * from (select t.id, (select count(*) from unnest(t.arr) as v) as c from ulf_t t) q except select * from ulf_count_on) y),
+  (select count(*) from ulf_count_on) - (select count(*) from (select t.id, (select count(*) from unnest(t.arr) as v) as c from ulf_t t) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ulf_exists_on except select * from (select t.id, exists (select 1 from unnest(t.arr) as v) as e from ulf_t t) q) x),
+  (select count(*) from (select * from (select t.id, exists (select 1 from unnest(t.arr) as v) as e from ulf_t t) q except select * from ulf_exists_on) y),
+  (select count(*) from ulf_exists_on) - (select count(*) from (select t.id, exists (select 1 from unnest(t.arr) as v) as e from ulf_t t) q);
 ----
 0 0 0
 
@@ -1266,6 +1354,16 @@ select
   (select count(*) from (select * from ulf_window_on except select * from (select t.id, x.v, x.run from ulf_t t cross join lateral (select v, sum(v) over (order by o rows unbounded preceding) as run from unnest(t.arr) with ordinality as w(v, o)) as x) q) x),
   (select count(*) from (select * from (select t.id, x.v, x.run from ulf_t t cross join lateral (select v, sum(v) over (order by o rows unbounded preceding) as run from unnest(t.arr) with ordinality as w(v, o)) as x) q except select * from ulf_window_on) y),
   (select count(*) from ulf_window_on) - (select count(*) from (select t.id, x.v, x.run from ulf_t t cross join lateral (select v, sum(v) over (order by o rows unbounded preceding) as run from unnest(t.arr) with ordinality as w(v, o)) as x) q);
+----
+0 0 0
+
+# After the updates and deletes: with the variable, every materialized view holds the rows of its reference.
+
+query III
+select
+  (select count(*) from (select * from ulf_count_exists_on except select * from (select a.id, a.c, b.e from ulf_count_off a join ulf_exists_off b on a.id = b.id) q) x),
+  (select count(*) from (select * from (select a.id, a.c, b.e from ulf_count_off a join ulf_exists_off b on a.id = b.id) q except select * from ulf_count_exists_on) y),
+  (select count(*) from ulf_count_exists_on) - (select count(*) from (select a.id, a.c, b.e from ulf_count_off a join ulf_exists_off b on a.id = b.id) q);
 ----
 0 0 0
 
@@ -1369,9 +1467,17 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_count_exists_on except select * from ulf_count_exists_off) x),
-  (select count(*) from (select * from ulf_count_exists_off except select * from ulf_count_exists_on) y),
-  (select count(*) from ulf_count_exists_on) - (select count(*) from ulf_count_exists_off);
+  (select count(*) from (select * from ulf_count_on except select * from ulf_count_off) x),
+  (select count(*) from (select * from ulf_count_off except select * from ulf_count_on) y),
+  (select count(*) from ulf_count_on) - (select count(*) from ulf_count_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ulf_exists_on except select * from ulf_exists_off) x),
+  (select count(*) from (select * from ulf_exists_off except select * from ulf_exists_on) y),
+  (select count(*) from ulf_exists_on) - (select count(*) from ulf_exists_off);
 ----
 0 0 0
 
@@ -1539,9 +1645,17 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_count_exists_on except select * from (select t.id, (select count(*) from unnest(t.arr) as v) as c, exists (select 1 from unnest(t.arr) as v) as e from ulf_t t) q) x),
-  (select count(*) from (select * from (select t.id, (select count(*) from unnest(t.arr) as v) as c, exists (select 1 from unnest(t.arr) as v) as e from ulf_t t) q except select * from ulf_count_exists_on) y),
-  (select count(*) from ulf_count_exists_on) - (select count(*) from (select t.id, (select count(*) from unnest(t.arr) as v) as c, exists (select 1 from unnest(t.arr) as v) as e from ulf_t t) q);
+  (select count(*) from (select * from ulf_count_on except select * from (select t.id, (select count(*) from unnest(t.arr) as v) as c from ulf_t t) q) x),
+  (select count(*) from (select * from (select t.id, (select count(*) from unnest(t.arr) as v) as c from ulf_t t) q except select * from ulf_count_on) y),
+  (select count(*) from ulf_count_on) - (select count(*) from (select t.id, (select count(*) from unnest(t.arr) as v) as c from ulf_t t) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ulf_exists_on except select * from (select t.id, exists (select 1 from unnest(t.arr) as v) as e from ulf_t t) q) x),
+  (select count(*) from (select * from (select t.id, exists (select 1 from unnest(t.arr) as v) as e from ulf_t t) q except select * from ulf_exists_on) y),
+  (select count(*) from ulf_exists_on) - (select count(*) from (select t.id, exists (select 1 from unnest(t.arr) as v) as e from ulf_t t) q);
 ----
 0 0 0
 
@@ -1590,6 +1704,16 @@ select
   (select count(*) from (select * from ulf_window_on except select * from (select t.id, x.v, x.run from ulf_t t cross join lateral (select v, sum(v) over (order by o rows unbounded preceding) as run from unnest(t.arr) with ordinality as w(v, o)) as x) q) x),
   (select count(*) from (select * from (select t.id, x.v, x.run from ulf_t t cross join lateral (select v, sum(v) over (order by o rows unbounded preceding) as run from unnest(t.arr) with ordinality as w(v, o)) as x) q except select * from ulf_window_on) y),
   (select count(*) from ulf_window_on) - (select count(*) from (select t.id, x.v, x.run from ulf_t t cross join lateral (select v, sum(v) over (order by o rows unbounded preceding) as run from unnest(t.arr) with ordinality as w(v, o)) as x) q);
+----
+0 0 0
+
+# After the outer tables are emptied: with the variable, every materialized view holds the rows of its reference.
+
+query III
+select
+  (select count(*) from (select * from ulf_count_exists_on except select * from (select a.id, a.c, b.e from ulf_count_off a join ulf_exists_off b on a.id = b.id) q) x),
+  (select count(*) from (select * from (select a.id, a.c, b.e from ulf_count_off a join ulf_exists_off b on a.id = b.id) q except select * from ulf_count_exists_on) y),
+  (select count(*) from ulf_count_exists_on) - (select count(*) from (select a.id, a.c, b.e from ulf_count_off a join ulf_exists_off b on a.id = b.id) q);
 ----
 0 0 0
 
@@ -1693,9 +1817,17 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_count_exists_on except select * from ulf_count_exists_off) x),
-  (select count(*) from (select * from ulf_count_exists_off except select * from ulf_count_exists_on) y),
-  (select count(*) from ulf_count_exists_on) - (select count(*) from ulf_count_exists_off);
+  (select count(*) from (select * from ulf_count_on except select * from ulf_count_off) x),
+  (select count(*) from (select * from ulf_count_off except select * from ulf_count_on) y),
+  (select count(*) from ulf_count_on) - (select count(*) from ulf_count_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ulf_exists_on except select * from ulf_exists_off) x),
+  (select count(*) from (select * from ulf_exists_off except select * from ulf_exists_on) y),
+  (select count(*) from ulf_exists_on) - (select count(*) from ulf_exists_off);
 ----
 0 0 0
 
@@ -1863,9 +1995,17 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_count_exists_on except select * from (select t.id, (select count(*) from unnest(t.arr) as v) as c, exists (select 1 from unnest(t.arr) as v) as e from ulf_t t) q) x),
-  (select count(*) from (select * from (select t.id, (select count(*) from unnest(t.arr) as v) as c, exists (select 1 from unnest(t.arr) as v) as e from ulf_t t) q except select * from ulf_count_exists_on) y),
-  (select count(*) from ulf_count_exists_on) - (select count(*) from (select t.id, (select count(*) from unnest(t.arr) as v) as c, exists (select 1 from unnest(t.arr) as v) as e from ulf_t t) q);
+  (select count(*) from (select * from ulf_count_on except select * from (select t.id, (select count(*) from unnest(t.arr) as v) as c from ulf_t t) q) x),
+  (select count(*) from (select * from (select t.id, (select count(*) from unnest(t.arr) as v) as c from ulf_t t) q except select * from ulf_count_on) y),
+  (select count(*) from ulf_count_on) - (select count(*) from (select t.id, (select count(*) from unnest(t.arr) as v) as c from ulf_t t) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ulf_exists_on except select * from (select t.id, exists (select 1 from unnest(t.arr) as v) as e from ulf_t t) q) x),
+  (select count(*) from (select * from (select t.id, exists (select 1 from unnest(t.arr) as v) as e from ulf_t t) q except select * from ulf_exists_on) y),
+  (select count(*) from ulf_exists_on) - (select count(*) from (select t.id, exists (select 1 from unnest(t.arr) as v) as e from ulf_t t) q);
 ----
 0 0 0
 
@@ -1917,6 +2057,16 @@ select
 ----
 0 0 0
 
+# After the outer tables are filled again: with the variable, every materialized view holds the rows of its reference.
+
+query III
+select
+  (select count(*) from (select * from ulf_count_exists_on except select * from (select a.id, a.c, b.e from ulf_count_off a join ulf_exists_off b on a.id = b.id) q) x),
+  (select count(*) from (select * from (select a.id, a.c, b.e from ulf_count_off a join ulf_exists_off b on a.id = b.id) q except select * from ulf_count_exists_on) y),
+  (select count(*) from ulf_count_exists_on) - (select count(*) from (select a.id, a.c, b.e from ulf_count_off a join ulf_exists_off b on a.id = b.id) q);
+----
+0 0 0
+
 # Cleanup.
 
 statement ok
@@ -1945,6 +2095,12 @@ drop materialized view ulf_string_agg_on;
 
 statement ok
 drop materialized view ulf_count_exists_on;
+
+statement ok
+drop materialized view ulf_exists_on;
+
+statement ok
+drop materialized view ulf_count_on;
 
 statement ok
 drop materialized view ulf_sum_raw_on;
@@ -2008,6 +2164,12 @@ drop materialized view ulf_string_agg_off;
 
 statement ok
 drop materialized view ulf_count_exists_off;
+
+statement ok
+drop materialized view ulf_exists_off;
+
+statement ok
+drop materialized view ulf_count_off;
 
 statement ok
 drop materialized view ulf_sum_raw_off;

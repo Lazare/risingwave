@@ -332,6 +332,12 @@ Not done:
   deterministic functions; for a `jsonb` that is equal to another but written differently
   (`1.0` and `1`), the general way could give one row the text of the other one, the per-row
   evaluation gives each row its own, as the batch query does.
+- Found on the way, not changed: without the variable, the subqueries of one select list over a
+  correlated value (`SELECT (SELECT count(*) FROM unnest(t.a)), EXISTS (SELECT 1 FROM unnest(t.a))
+  FROM t`) are planned under a `FULL OUTER JOIN` of their results on the domain, followed by a
+  filter `a IS NOT NULL OR a IS NOT NULL` that drops the NULL value of the domain: a row of `t`
+  whose `a` is NULL gets NULL instead of 0 and false (seen in streaming plans, batch not checked).
+  Each subquery alone is right. The per-row evaluation gives 0 and false.
 - A relation joined with an aggregate of a set-returning function of itself on its key
   (`t LEFT JOIN (SELECT t.id, max(x) FROM t, srf(t.a) x GROUP BY t.id) ON ..`): the same per-row
   aggregation once it is recognised, which needs the key of `t` and is the self-join of idea 3.

@@ -40,6 +40,10 @@ CASES = [
      f"select t.id, coalesce((select sum((e ->> 'a')::bigint) from jsonb_array_elements(t.j -> 'ys') as e), 0) as total from {T} t"),
     ('sum_raw', 'scalar sum, NULL when no value is there',
      f"select t.id, (select sum((e ->> 'a')::bigint) from jsonb_array_elements(t.j -> 'ys') as e) as total from {T} t"),
+    ('count', 'count over unnest',
+     f"select t.id, (select count(*) from unnest(t.arr) as v) as c from {T} t"),
+    ('exists', 'EXISTS over unnest',
+     f"select t.id, exists (select 1 from unnest(t.arr) as v) as e from {T} t"),
     ('count_exists', 'count and EXISTS over unnest in one select list',
      f"select t.id, (select count(*) from unnest(t.arr) as v) as c, "
      f"exists (select 1 from unnest(t.arr) as v) as e from {T} t"),
@@ -75,9 +79,16 @@ CASES = [
 # Compared with the query only: a streaming `sum` without the variable returns 0, where the query
 # returns NULL, once all the non-NULL values of its group are retracted while the group still
 # holds rows.
-NOT_OFF = {'sum_raw'}
+NOT_OFF = {'sum_raw', 'count_exists'}
 # Compared with each other only: the batch query fails on the rows where a function fails.
-NOT_BATCH = {'errors_left', 'errors_agg'}
+NOT_BATCH = {'errors_left', 'errors_agg', 'count_exists'}
+# Compared with another query. Without the variable, the subqueries of one select list are planned
+# under a FULL OUTER JOIN of their results on the correlated value, followed by a filter that
+# drops the NULL value: an outer row whose array is NULL gets NULL instead of 0 and false. The
+# reference is the join of the views of each subquery alone.
+REFERENCE = {
+    'count_exists': "select a.id, a.c, b.e from ulf_count_off a join ulf_exists_off b on a.id = b.id",
+}
 
 out = []
 def switch(on):
@@ -113,6 +124,9 @@ def compare_all(title):
     for name, _, sql in CASES:
         if name not in NOT_BATCH:
             compare_batch(name, sql)
+    out.append(f"# {title}: with the variable, every materialized view holds the rows of its reference.\n")
+    for name, sql in REFERENCE.items():
+        compare_batch(name, sql)
 
 out.append("""# Differential test of `streaming_unnest_lateral_functions`: every query is materialized twice,
 # with and without the per-row evaluation of its subqueries over set-returning functions of the
