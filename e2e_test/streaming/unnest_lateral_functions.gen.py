@@ -83,8 +83,11 @@ CASES = [
 # returns NULL, once all the non-NULL values of its group are retracted while the group still
 # holds rows.
 NOT_OFF = {'sum_raw', 'count_exists'}
-# Compared with each other only: the batch query fails on the rows where a function fails.
-NOT_BATCH = {'errors_left', 'errors_count', 'errors_array', 'count_exists'}
+# Compared with each other only: the batch query fails on the rows where a function fails; and
+# a batch `ARRAY(..)` without `ORDER BY` does not keep the order of the rows of the function, which
+# both streaming plans keep.
+NOT_BATCH = {'errors_left', 'errors_count', 'errors_array', 'count_exists',
+             'array', 'array_coalesce', 'nokey_array', 'unnest_array_kept'}
 # Compared with another query. Without the variable, the subqueries of one select list are planned
 # under a FULL OUTER JOIN of their results on the correlated value, followed by a filter that
 # drops the NULL value: an outer row whose array is NULL gets NULL instead of 0 and false. The

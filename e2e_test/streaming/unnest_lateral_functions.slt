@@ -523,22 +523,6 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_array_on except select * from (select t.id, array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))) as xs from ulf_t t) q) x),
-  (select count(*) from (select * from (select t.id, array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))) as xs from ulf_t t) q except select * from ulf_array_on) y),
-  (select count(*) from ulf_array_on) - (select count(*) from (select t.id, array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))) as xs from ulf_t t) q);
-----
-0 0 0
-
-query III
-select
-  (select count(*) from (select * from ulf_array_coalesce_on except select * from (select id, coalesce(array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))), array[]::text[]) as xs from ulf_t t) q) x),
-  (select count(*) from (select * from (select id, coalesce(array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))), array[]::text[]) as xs from ulf_t t) q except select * from ulf_array_coalesce_on) y),
-  (select count(*) from ulf_array_coalesce_on) - (select count(*) from (select id, coalesce(array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))), array[]::text[]) as xs from ulf_t t) q);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select * from ulf_array_ordered_on except select * from (select t.id, array(select v from unnest(t.arr) as v order by v desc) as a from ulf_t t) q) x),
   (select count(*) from (select * from (select t.id, array(select v from unnest(t.arr) as v order by v desc) as a from ulf_t t) q except select * from ulf_array_ordered_on) y),
   (select count(*) from ulf_array_ordered_on) - (select count(*) from (select t.id, array(select v from unnest(t.arr) as v order by v desc) as a from ulf_t t) q);
@@ -611,25 +595,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_nokey_array_on except select * from (select u.k, u.arr, array(select unnest(u.arr)) as a from ulf_u u) q) x),
-  (select count(*) from (select * from (select u.k, u.arr, array(select unnest(u.arr)) as a from ulf_u u) q except select * from ulf_nokey_array_on) y),
-  (select count(*) from ulf_nokey_array_on) - (select count(*) from (select u.k, u.arr, array(select unnest(u.arr)) as a from ulf_u u) q);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select * from ulf_unnest_array_on except select * from (select t1.id, x.v from (select id, coalesce(array(select jsonb_array_elements_text(coalesce(j -> 'xs', '[]'::jsonb))), array[]::text[]) as arr from ulf_t) as t1 join unnest(t1.arr) as x(v) on true) q) x),
   (select count(*) from (select * from (select t1.id, x.v from (select id, coalesce(array(select jsonb_array_elements_text(coalesce(j -> 'xs', '[]'::jsonb))), array[]::text[]) as arr from ulf_t) as t1 join unnest(t1.arr) as x(v) on true) q except select * from ulf_unnest_array_on) y),
   (select count(*) from ulf_unnest_array_on) - (select count(*) from (select t1.id, x.v from (select id, coalesce(array(select jsonb_array_elements_text(coalesce(j -> 'xs', '[]'::jsonb))), array[]::text[]) as arr from ulf_t) as t1 join unnest(t1.arr) as x(v) on true) q);
-----
-0 0 0
-
-query III
-select
-  (select count(*) from (select * from ulf_unnest_array_kept_on except select * from (select t1.id, t1.arr, x.v from (select id, array(select jsonb_array_elements_text(j -> 'xs')) as arr from ulf_t) as t1 join unnest(t1.arr) as x(v) on true) q) x),
-  (select count(*) from (select * from (select t1.id, t1.arr, x.v from (select id, array(select jsonb_array_elements_text(j -> 'xs')) as arr from ulf_t) as t1 join unnest(t1.arr) as x(v) on true) q except select * from ulf_unnest_array_kept_on) y),
-  (select count(*) from ulf_unnest_array_kept_on) - (select count(*) from (select t1.id, t1.arr, x.v from (select id, array(select jsonb_array_elements_text(j -> 'xs')) as arr from ulf_t) as t1 join unnest(t1.arr) as x(v) on true) q);
 ----
 0 0 0
 
@@ -934,22 +902,6 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_array_on except select * from (select t.id, array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))) as xs from ulf_t t) q) x),
-  (select count(*) from (select * from (select t.id, array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))) as xs from ulf_t t) q except select * from ulf_array_on) y),
-  (select count(*) from ulf_array_on) - (select count(*) from (select t.id, array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))) as xs from ulf_t t) q);
-----
-0 0 0
-
-query III
-select
-  (select count(*) from (select * from ulf_array_coalesce_on except select * from (select id, coalesce(array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))), array[]::text[]) as xs from ulf_t t) q) x),
-  (select count(*) from (select * from (select id, coalesce(array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))), array[]::text[]) as xs from ulf_t t) q except select * from ulf_array_coalesce_on) y),
-  (select count(*) from ulf_array_coalesce_on) - (select count(*) from (select id, coalesce(array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))), array[]::text[]) as xs from ulf_t t) q);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select * from ulf_array_ordered_on except select * from (select t.id, array(select v from unnest(t.arr) as v order by v desc) as a from ulf_t t) q) x),
   (select count(*) from (select * from (select t.id, array(select v from unnest(t.arr) as v order by v desc) as a from ulf_t t) q except select * from ulf_array_ordered_on) y),
   (select count(*) from ulf_array_ordered_on) - (select count(*) from (select t.id, array(select v from unnest(t.arr) as v order by v desc) as a from ulf_t t) q);
@@ -1022,25 +974,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_nokey_array_on except select * from (select u.k, u.arr, array(select unnest(u.arr)) as a from ulf_u u) q) x),
-  (select count(*) from (select * from (select u.k, u.arr, array(select unnest(u.arr)) as a from ulf_u u) q except select * from ulf_nokey_array_on) y),
-  (select count(*) from ulf_nokey_array_on) - (select count(*) from (select u.k, u.arr, array(select unnest(u.arr)) as a from ulf_u u) q);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select * from ulf_unnest_array_on except select * from (select t1.id, x.v from (select id, coalesce(array(select jsonb_array_elements_text(coalesce(j -> 'xs', '[]'::jsonb))), array[]::text[]) as arr from ulf_t) as t1 join unnest(t1.arr) as x(v) on true) q) x),
   (select count(*) from (select * from (select t1.id, x.v from (select id, coalesce(array(select jsonb_array_elements_text(coalesce(j -> 'xs', '[]'::jsonb))), array[]::text[]) as arr from ulf_t) as t1 join unnest(t1.arr) as x(v) on true) q except select * from ulf_unnest_array_on) y),
   (select count(*) from ulf_unnest_array_on) - (select count(*) from (select t1.id, x.v from (select id, coalesce(array(select jsonb_array_elements_text(coalesce(j -> 'xs', '[]'::jsonb))), array[]::text[]) as arr from ulf_t) as t1 join unnest(t1.arr) as x(v) on true) q);
-----
-0 0 0
-
-query III
-select
-  (select count(*) from (select * from ulf_unnest_array_kept_on except select * from (select t1.id, t1.arr, x.v from (select id, array(select jsonb_array_elements_text(j -> 'xs')) as arr from ulf_t) as t1 join unnest(t1.arr) as x(v) on true) q) x),
-  (select count(*) from (select * from (select t1.id, t1.arr, x.v from (select id, array(select jsonb_array_elements_text(j -> 'xs')) as arr from ulf_t) as t1 join unnest(t1.arr) as x(v) on true) q except select * from ulf_unnest_array_kept_on) y),
-  (select count(*) from ulf_unnest_array_kept_on) - (select count(*) from (select t1.id, t1.arr, x.v from (select id, array(select jsonb_array_elements_text(j -> 'xs')) as arr from ulf_t) as t1 join unnest(t1.arr) as x(v) on true) q);
 ----
 0 0 0
 
@@ -1331,22 +1267,6 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_array_on except select * from (select t.id, array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))) as xs from ulf_t t) q) x),
-  (select count(*) from (select * from (select t.id, array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))) as xs from ulf_t t) q except select * from ulf_array_on) y),
-  (select count(*) from ulf_array_on) - (select count(*) from (select t.id, array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))) as xs from ulf_t t) q);
-----
-0 0 0
-
-query III
-select
-  (select count(*) from (select * from ulf_array_coalesce_on except select * from (select id, coalesce(array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))), array[]::text[]) as xs from ulf_t t) q) x),
-  (select count(*) from (select * from (select id, coalesce(array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))), array[]::text[]) as xs from ulf_t t) q except select * from ulf_array_coalesce_on) y),
-  (select count(*) from ulf_array_coalesce_on) - (select count(*) from (select id, coalesce(array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))), array[]::text[]) as xs from ulf_t t) q);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select * from ulf_array_ordered_on except select * from (select t.id, array(select v from unnest(t.arr) as v order by v desc) as a from ulf_t t) q) x),
   (select count(*) from (select * from (select t.id, array(select v from unnest(t.arr) as v order by v desc) as a from ulf_t t) q except select * from ulf_array_ordered_on) y),
   (select count(*) from ulf_array_ordered_on) - (select count(*) from (select t.id, array(select v from unnest(t.arr) as v order by v desc) as a from ulf_t t) q);
@@ -1419,25 +1339,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_nokey_array_on except select * from (select u.k, u.arr, array(select unnest(u.arr)) as a from ulf_u u) q) x),
-  (select count(*) from (select * from (select u.k, u.arr, array(select unnest(u.arr)) as a from ulf_u u) q except select * from ulf_nokey_array_on) y),
-  (select count(*) from ulf_nokey_array_on) - (select count(*) from (select u.k, u.arr, array(select unnest(u.arr)) as a from ulf_u u) q);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select * from ulf_unnest_array_on except select * from (select t1.id, x.v from (select id, coalesce(array(select jsonb_array_elements_text(coalesce(j -> 'xs', '[]'::jsonb))), array[]::text[]) as arr from ulf_t) as t1 join unnest(t1.arr) as x(v) on true) q) x),
   (select count(*) from (select * from (select t1.id, x.v from (select id, coalesce(array(select jsonb_array_elements_text(coalesce(j -> 'xs', '[]'::jsonb))), array[]::text[]) as arr from ulf_t) as t1 join unnest(t1.arr) as x(v) on true) q except select * from ulf_unnest_array_on) y),
   (select count(*) from ulf_unnest_array_on) - (select count(*) from (select t1.id, x.v from (select id, coalesce(array(select jsonb_array_elements_text(coalesce(j -> 'xs', '[]'::jsonb))), array[]::text[]) as arr from ulf_t) as t1 join unnest(t1.arr) as x(v) on true) q);
-----
-0 0 0
-
-query III
-select
-  (select count(*) from (select * from ulf_unnest_array_kept_on except select * from (select t1.id, t1.arr, x.v from (select id, array(select jsonb_array_elements_text(j -> 'xs')) as arr from ulf_t) as t1 join unnest(t1.arr) as x(v) on true) q) x),
-  (select count(*) from (select * from (select t1.id, t1.arr, x.v from (select id, array(select jsonb_array_elements_text(j -> 'xs')) as arr from ulf_t) as t1 join unnest(t1.arr) as x(v) on true) q except select * from ulf_unnest_array_kept_on) y),
-  (select count(*) from ulf_unnest_array_kept_on) - (select count(*) from (select t1.id, t1.arr, x.v from (select id, array(select jsonb_array_elements_text(j -> 'xs')) as arr from ulf_t) as t1 join unnest(t1.arr) as x(v) on true) q);
 ----
 0 0 0
 
@@ -1705,22 +1609,6 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_array_on except select * from (select t.id, array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))) as xs from ulf_t t) q) x),
-  (select count(*) from (select * from (select t.id, array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))) as xs from ulf_t t) q except select * from ulf_array_on) y),
-  (select count(*) from ulf_array_on) - (select count(*) from (select t.id, array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))) as xs from ulf_t t) q);
-----
-0 0 0
-
-query III
-select
-  (select count(*) from (select * from ulf_array_coalesce_on except select * from (select id, coalesce(array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))), array[]::text[]) as xs from ulf_t t) q) x),
-  (select count(*) from (select * from (select id, coalesce(array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))), array[]::text[]) as xs from ulf_t t) q except select * from ulf_array_coalesce_on) y),
-  (select count(*) from ulf_array_coalesce_on) - (select count(*) from (select id, coalesce(array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))), array[]::text[]) as xs from ulf_t t) q);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select * from ulf_array_ordered_on except select * from (select t.id, array(select v from unnest(t.arr) as v order by v desc) as a from ulf_t t) q) x),
   (select count(*) from (select * from (select t.id, array(select v from unnest(t.arr) as v order by v desc) as a from ulf_t t) q except select * from ulf_array_ordered_on) y),
   (select count(*) from ulf_array_ordered_on) - (select count(*) from (select t.id, array(select v from unnest(t.arr) as v order by v desc) as a from ulf_t t) q);
@@ -1793,25 +1681,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_nokey_array_on except select * from (select u.k, u.arr, array(select unnest(u.arr)) as a from ulf_u u) q) x),
-  (select count(*) from (select * from (select u.k, u.arr, array(select unnest(u.arr)) as a from ulf_u u) q except select * from ulf_nokey_array_on) y),
-  (select count(*) from ulf_nokey_array_on) - (select count(*) from (select u.k, u.arr, array(select unnest(u.arr)) as a from ulf_u u) q);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select * from ulf_unnest_array_on except select * from (select t1.id, x.v from (select id, coalesce(array(select jsonb_array_elements_text(coalesce(j -> 'xs', '[]'::jsonb))), array[]::text[]) as arr from ulf_t) as t1 join unnest(t1.arr) as x(v) on true) q) x),
   (select count(*) from (select * from (select t1.id, x.v from (select id, coalesce(array(select jsonb_array_elements_text(coalesce(j -> 'xs', '[]'::jsonb))), array[]::text[]) as arr from ulf_t) as t1 join unnest(t1.arr) as x(v) on true) q except select * from ulf_unnest_array_on) y),
   (select count(*) from ulf_unnest_array_on) - (select count(*) from (select t1.id, x.v from (select id, coalesce(array(select jsonb_array_elements_text(coalesce(j -> 'xs', '[]'::jsonb))), array[]::text[]) as arr from ulf_t) as t1 join unnest(t1.arr) as x(v) on true) q);
-----
-0 0 0
-
-query III
-select
-  (select count(*) from (select * from ulf_unnest_array_kept_on except select * from (select t1.id, t1.arr, x.v from (select id, array(select jsonb_array_elements_text(j -> 'xs')) as arr from ulf_t) as t1 join unnest(t1.arr) as x(v) on true) q) x),
-  (select count(*) from (select * from (select t1.id, t1.arr, x.v from (select id, array(select jsonb_array_elements_text(j -> 'xs')) as arr from ulf_t) as t1 join unnest(t1.arr) as x(v) on true) q except select * from ulf_unnest_array_kept_on) y),
-  (select count(*) from ulf_unnest_array_kept_on) - (select count(*) from (select t1.id, t1.arr, x.v from (select id, array(select jsonb_array_elements_text(j -> 'xs')) as arr from ulf_t) as t1 join unnest(t1.arr) as x(v) on true) q);
 ----
 0 0 0
 
@@ -2079,22 +1951,6 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_array_on except select * from (select t.id, array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))) as xs from ulf_t t) q) x),
-  (select count(*) from (select * from (select t.id, array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))) as xs from ulf_t t) q except select * from ulf_array_on) y),
-  (select count(*) from ulf_array_on) - (select count(*) from (select t.id, array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))) as xs from ulf_t t) q);
-----
-0 0 0
-
-query III
-select
-  (select count(*) from (select * from ulf_array_coalesce_on except select * from (select id, coalesce(array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))), array[]::text[]) as xs from ulf_t t) q) x),
-  (select count(*) from (select * from (select id, coalesce(array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))), array[]::text[]) as xs from ulf_t t) q except select * from ulf_array_coalesce_on) y),
-  (select count(*) from ulf_array_coalesce_on) - (select count(*) from (select id, coalesce(array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))), array[]::text[]) as xs from ulf_t t) q);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select * from ulf_array_ordered_on except select * from (select t.id, array(select v from unnest(t.arr) as v order by v desc) as a from ulf_t t) q) x),
   (select count(*) from (select * from (select t.id, array(select v from unnest(t.arr) as v order by v desc) as a from ulf_t t) q except select * from ulf_array_ordered_on) y),
   (select count(*) from ulf_array_ordered_on) - (select count(*) from (select t.id, array(select v from unnest(t.arr) as v order by v desc) as a from ulf_t t) q);
@@ -2167,25 +2023,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_nokey_array_on except select * from (select u.k, u.arr, array(select unnest(u.arr)) as a from ulf_u u) q) x),
-  (select count(*) from (select * from (select u.k, u.arr, array(select unnest(u.arr)) as a from ulf_u u) q except select * from ulf_nokey_array_on) y),
-  (select count(*) from ulf_nokey_array_on) - (select count(*) from (select u.k, u.arr, array(select unnest(u.arr)) as a from ulf_u u) q);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select * from ulf_unnest_array_on except select * from (select t1.id, x.v from (select id, coalesce(array(select jsonb_array_elements_text(coalesce(j -> 'xs', '[]'::jsonb))), array[]::text[]) as arr from ulf_t) as t1 join unnest(t1.arr) as x(v) on true) q) x),
   (select count(*) from (select * from (select t1.id, x.v from (select id, coalesce(array(select jsonb_array_elements_text(coalesce(j -> 'xs', '[]'::jsonb))), array[]::text[]) as arr from ulf_t) as t1 join unnest(t1.arr) as x(v) on true) q except select * from ulf_unnest_array_on) y),
   (select count(*) from ulf_unnest_array_on) - (select count(*) from (select t1.id, x.v from (select id, coalesce(array(select jsonb_array_elements_text(coalesce(j -> 'xs', '[]'::jsonb))), array[]::text[]) as arr from ulf_t) as t1 join unnest(t1.arr) as x(v) on true) q);
-----
-0 0 0
-
-query III
-select
-  (select count(*) from (select * from ulf_unnest_array_kept_on except select * from (select t1.id, t1.arr, x.v from (select id, array(select jsonb_array_elements_text(j -> 'xs')) as arr from ulf_t) as t1 join unnest(t1.arr) as x(v) on true) q) x),
-  (select count(*) from (select * from (select t1.id, t1.arr, x.v from (select id, array(select jsonb_array_elements_text(j -> 'xs')) as arr from ulf_t) as t1 join unnest(t1.arr) as x(v) on true) q except select * from ulf_unnest_array_kept_on) y),
-  (select count(*) from ulf_unnest_array_kept_on) - (select count(*) from (select t1.id, t1.arr, x.v from (select id, array(select jsonb_array_elements_text(j -> 'xs')) as arr from ulf_t) as t1 join unnest(t1.arr) as x(v) on true) q);
 ----
 0 0 0
 
