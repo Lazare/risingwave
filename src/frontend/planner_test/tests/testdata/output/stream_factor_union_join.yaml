@@ -7,6 +7,12 @@
     create table e (id int primary key, code varchar, ref int);
     create table g (id int primary key, a int, b int);
     create view da as select * from d where active;
+    create view dj as select d.id, d.name, d.grp, g.a from d join g on d.grp = g.b;
+    create view dagg as select grp, count(*) as cnt, max(name) as mx from d group by grp;
+    create table h (id int primary key, ts timestamptz, v int);
+    create view hrecent as select id, v from h where ts > now() - interval '1 hour';
+    create view dnames as select grp, string_agg(name, ',') as names from d group by grp;
+    create view dtop as select id, name from d order by grp limit 3;
 - id: setup_off
   sql: |
     create table f (id int primary key, dim_id int, other_id int, amt int, label varchar);
@@ -291,6 +297,247 @@
     │ └─LogicalProject { exprs: [e.ref, e.id] }
     │   └─LogicalScan { table: e, columns: [e.id, e.ref] }
     └─LogicalScan { table: d, columns: [d.id, d.name] }
+- name: derived side - a view with a join, inner joins
+  before:
+  - setup
+  sql: |
+    select f.id, v.name from f join dj v on f.dim_id = v.id
+    union all
+    select e.id, v.name from e join dj v on e.ref = v.id;
+  optimized_logical_plan_for_stream: |-
+    LogicalJoin { type: Inner, on: (f.dim_id = d.id), output: [f.id, d.name] }
+    ├─LogicalUnion { all: true }
+    │ ├─LogicalProject { exprs: [f.dim_id, f.id] }
+    │ │ └─LogicalScan { table: f, columns: [f.id, f.dim_id] }
+    │ └─LogicalProject { exprs: [e.ref, e.id] }
+    │   └─LogicalScan { table: e, columns: [e.id, e.ref] }
+    └─LogicalJoin { type: Inner, on: (d.grp = g.b), output: [d.id, d.name] }
+      ├─LogicalScan { table: d, columns: [d.id, d.name, d.grp] }
+      └─LogicalScan { table: g, columns: [g.b] }
+  stream_plan: |-
+    StreamMaterialize { columns: [id, name, $src(hidden), f.dim_id(hidden), d.id(hidden), g.id(hidden), d.grp(hidden)], stream_key: [id, $src, g.id, d.grp, f.dim_id], pk_columns: [id, $src, g.id, d.grp, f.dim_id], pk_conflict: NoCheck }
+    └─StreamExchange { dist: HashShard(f.id, $src, f.dim_id, g.id, d.grp) }
+      └─StreamHashJoin { type: Inner, predicate: f.dim_id = d.id, output: [f.id, d.name, $src, f.dim_id, d.id, g.id, d.grp] }
+        ├─StreamExchange { dist: HashShard(f.dim_id) }
+        │ └─StreamUnion { all: true }
+        │   ├─StreamExchange { dist: HashShard(f.id, 0:Int32) }
+        │   │ └─StreamProject { exprs: [f.dim_id, f.id, 0:Int32] }
+        │   │   └─StreamTableScan { table: f, columns: [f.id, f.dim_id], stream_scan_type: SnapshotBackfill, stream_key: [f.id], pk: [id], dist: UpstreamHashShard(f.id) }
+        │   └─StreamExchange { dist: HashShard(e.id, 1:Int32) }
+        │     └─StreamProject { exprs: [e.ref, e.id, 1:Int32] }
+        │       └─StreamTableScan { table: e, columns: [e.id, e.ref], stream_scan_type: SnapshotBackfill, stream_key: [e.id], pk: [id], dist: UpstreamHashShard(e.id) }
+        └─StreamExchange { dist: HashShard(d.id) }
+          └─StreamHashJoin { type: Inner, predicate: d.grp = g.b, output: [d.id, d.name, d.grp, g.id] }
+            ├─StreamExchange { dist: HashShard(d.grp) }
+            │ └─StreamTableScan { table: d, columns: [d.id, d.name, d.grp], stream_scan_type: SnapshotBackfill, stream_key: [d.id], pk: [id], dist: UpstreamHashShard(d.id) }
+            └─StreamExchange { dist: HashShard(g.b) }
+              └─StreamTableScan { table: g, columns: [g.b, g.id], stream_scan_type: SnapshotBackfill, stream_key: [g.id], pk: [id], dist: UpstreamHashShard(g.id) }
+- name: derived side - an aggregating view, left joins
+  before:
+  - setup
+  sql: |
+    select f.id, v.cnt, v.mx from f left join dagg v on f.amt = v.grp
+    union all
+    select e.id, v.cnt, e.code from e left join dagg v on e.ref = v.grp;
+  optimized_logical_plan_for_stream: |-
+    LogicalProject { exprs: [f.id, count, Case((0:Int32 = 0:Int32), max(d.name), (0:Int32 = 1:Int32), null:Varchar) as $expr1] }
+    └─LogicalJoin { type: LeftOuter, on: (f.amt = d.grp), output: [0:Int32, f.id, null:Varchar, count, max(d.name)] }
+      ├─LogicalUnion { all: true }
+      │ ├─LogicalProject { exprs: [f.amt, 0:Int32, f.id, null:Varchar] }
+      │ │ └─LogicalScan { table: f, columns: [f.id, f.amt] }
+      │ └─LogicalProject { exprs: [e.ref, 1:Int32, e.id, e.code] }
+      │   └─LogicalScan { table: e, columns: [e.id, e.code, e.ref] }
+      └─LogicalAgg { group_key: [d.grp], aggs: [count, max(d.name)] }
+        └─LogicalScan { table: d, columns: [d.name, d.grp] }
+  stream_plan: |-
+    StreamMaterialize { columns: [id, cnt, mx, $src(hidden), f.amt(hidden)], stream_key: [id, $src, f.amt], pk_columns: [id, $src, f.amt], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [f.id, count, Case((0:Int32 = 0:Int32), max(d.name), (0:Int32 = 1:Int32), null:Varchar) as $expr1, $src, f.amt] }
+      └─StreamHashJoin { type: LeftOuter, predicate: f.amt = d.grp, output: [0:Int32, f.id, null:Varchar, count, max(d.name), $src, f.amt, d.grp] }
+        ├─StreamExchange { dist: HashShard(f.amt) }
+        │ └─StreamUnion { all: true }
+        │   ├─StreamExchange { dist: HashShard(f.id, 0:Int32) }
+        │   │ └─StreamProject { exprs: [f.amt, 0:Int32, f.id, null:Varchar, 0:Int32] }
+        │   │   └─StreamTableScan { table: f, columns: [f.id, f.amt], stream_scan_type: SnapshotBackfill, stream_key: [f.id], pk: [id], dist: UpstreamHashShard(f.id) }
+        │   └─StreamExchange { dist: HashShard(e.id, 1:Int32) }
+        │     └─StreamProject { exprs: [e.ref, 1:Int32, e.id, e.code, 1:Int32] }
+        │       └─StreamTableScan { table: e, columns: [e.id, e.code, e.ref], stream_scan_type: SnapshotBackfill, stream_key: [e.id], pk: [id], dist: UpstreamHashShard(e.id) }
+        └─StreamHashAgg { group_key: [d.grp], aggs: [count, max(d.name)] }
+          └─StreamExchange { dist: HashShard(d.grp) }
+            └─StreamTableScan { table: d, columns: [d.name, d.grp, d.id], stream_scan_type: SnapshotBackfill, stream_key: [d.id], pk: [id], dist: UpstreamHashShard(d.id) }
+- name: derived side - anti joins with a view with a join
+  before:
+  - setup
+  sql: |
+    select f.id, f.label from f where not exists (select 1 from dj v where v.id = f.dim_id)
+    union all
+    select e.id, e.code from e where not exists (select 1 from dj v where v.id = e.ref);
+  optimized_logical_plan_for_stream: |-
+    LogicalJoin { type: LeftAnti, on: (f.dim_id = d.id), output: [f.id, f.label] }
+    ├─LogicalUnion { all: true }
+    │ ├─LogicalProject { exprs: [f.dim_id, f.id, f.label] }
+    │ │ └─LogicalScan { table: f, columns: [f.id, f.dim_id, f.label] }
+    │ └─LogicalProject { exprs: [e.ref, e.id, e.code] }
+    │   └─LogicalScan { table: e, columns: [e.id, e.code, e.ref] }
+    └─LogicalJoin { type: Inner, on: (d.grp = g.b), output: [d.id] }
+      ├─LogicalScan { table: d, columns: [d.id, d.grp] }
+      └─LogicalScan { table: g, columns: [g.b] }
+- name: derived side - a different filter of the view in each branch
+  before:
+  - setup
+  sql: |
+    select f.id, v.cnt from f join dagg v on f.amt = v.grp where v.cnt > 1
+    union all
+    select e.id, v.cnt from e join dagg v on e.ref = v.grp where v.mx is not null;
+  optimized_logical_plan_for_stream: |-
+    LogicalJoin { type: Inner, on: (f.amt = d.grp) AND (((0:Int32 = 0:Int32) AND $expr1) OR ((0:Int32 = 1:Int32) AND $expr2)), output: [f.id, count] }
+    ├─LogicalUnion { all: true }
+    │ ├─LogicalProject { exprs: [f.amt, 0:Int32, f.id] }
+    │ │ └─LogicalScan { table: f, columns: [f.id, f.amt] }
+    │ └─LogicalProject { exprs: [e.ref, 1:Int32, e.id] }
+    │   └─LogicalScan { table: e, columns: [e.id, e.ref] }
+    └─LogicalProject { exprs: [d.grp, count, (count > 1:Int32) as $expr1, IsNotNull(max(d.name)) as $expr2] }
+      └─LogicalFilter { predicate: ((count > 1:Int32) OR IsNotNull(max(d.name))) }
+        └─LogicalAgg { group_key: [d.grp], aggs: [count, max(d.name)] }
+          └─LogicalScan { table: d, columns: [d.name, d.grp] }
+- name: derived side - an extra condition on the view in one branch
+  before:
+  - setup
+  sql: |
+    select f.id, v.name from f join dj v on f.dim_id = v.id and v.a > f.amt
+    union all
+    select e.id, v.name from e join dj v on e.ref = v.id;
+  optimized_logical_plan_for_stream: |-
+    LogicalJoin { type: Inner, on: (f.dim_id = d.id) AND (((0:Int32 = 0:Int32) AND (g.a > f.amt)) OR (0:Int32 = 1:Int32)), output: [f.id, d.name] }
+    ├─LogicalUnion { all: true }
+    │ ├─LogicalProject { exprs: [f.dim_id, 0:Int32, f.id, f.amt] }
+    │ │ └─LogicalScan { table: f, columns: [f.id, f.dim_id, f.amt] }
+    │ └─LogicalProject { exprs: [e.ref, 1:Int32, e.id, null:Int32] }
+    │   └─LogicalScan { table: e, columns: [e.id, e.ref] }
+    └─LogicalJoin { type: Inner, on: (d.grp = g.b), output: [d.id, g.a, d.name] }
+      ├─LogicalScan { table: d, columns: [d.id, d.name, d.grp] }
+      └─LogicalScan { table: g, columns: [g.a, g.b] }
+- name: derived side - the same subquery written in each branch
+  before:
+  - setup
+  sql: |
+    select f.id, v.cnt from f join (select grp, count(*) as cnt from d group by grp) v on f.amt = v.grp
+    union all
+    select e.id, v.cnt from e join (select grp, count(*) as cnt from d group by grp) v on e.ref = v.grp;
+  optimized_logical_plan_for_stream: |-
+    LogicalJoin { type: Inner, on: (f.amt = d.grp), output: [f.id, count] }
+    ├─LogicalUnion { all: true }
+    │ ├─LogicalProject { exprs: [f.amt, f.id] }
+    │ │ └─LogicalScan { table: f, columns: [f.id, f.amt] }
+    │ └─LogicalProject { exprs: [e.ref, e.id] }
+    │   └─LogicalScan { table: e, columns: [e.id, e.ref] }
+    └─LogicalAgg { group_key: [d.grp], aggs: [count] }
+      └─LogicalScan { table: d, columns: [d.grp] }
+- name: two joins common to the branches
+  before:
+  - setup
+  sql: |
+    select f.id, g.a from f join d on f.dim_id = d.id join g on d.grp = g.b and g.a > 0
+    union all
+    select e.id, g.a from e join d on e.ref = d.id join g on d.grp = g.b and g.a > 0;
+  optimized_logical_plan_for_stream: |-
+    LogicalJoin { type: Inner, on: (d.grp = g.b), output: [f.id, g.a] }
+    ├─LogicalJoin { type: Inner, on: (f.dim_id = d.id), output: [d.grp, f.id] }
+    │ ├─LogicalUnion { all: true }
+    │ │ ├─LogicalProject { exprs: [f.dim_id, f.id] }
+    │ │ │ └─LogicalScan { table: f, columns: [f.id, f.dim_id] }
+    │ │ └─LogicalProject { exprs: [e.ref, e.id] }
+    │ │   └─LogicalScan { table: e, columns: [e.id, e.ref] }
+    │ └─LogicalScan { table: d, columns: [d.id, d.grp] }
+    └─LogicalScan { table: g, columns: [g.a, g.b], predicate: (g.a > 0:Int32) }
+  stream_plan: |-
+    StreamMaterialize { columns: [id, a, $src(hidden), f.dim_id(hidden), d.grp(hidden), g.id(hidden)], stream_key: [id, $src, f.dim_id, g.id, d.grp], pk_columns: [id, $src, f.dim_id, g.id, d.grp], pk_conflict: NoCheck }
+    └─StreamExchange { dist: HashShard(f.id, $src, f.dim_id, d.grp, g.id) }
+      └─StreamHashJoin { type: Inner, predicate: d.grp = g.b, output: [f.id, g.a, $src, f.dim_id, d.grp, g.id] }
+        ├─StreamExchange { dist: HashShard(d.grp) }
+        │ └─StreamHashJoin { type: Inner, predicate: f.dim_id = d.id, output: [d.grp, f.id, $src, f.dim_id, d.id] }
+        │   ├─StreamExchange { dist: HashShard(f.dim_id) }
+        │   │ └─StreamUnion { all: true }
+        │   │   ├─StreamExchange { dist: HashShard(f.id, 0:Int32) }
+        │   │   │ └─StreamProject { exprs: [f.dim_id, f.id, 0:Int32] }
+        │   │   │   └─StreamTableScan { table: f, columns: [f.id, f.dim_id], stream_scan_type: SnapshotBackfill, stream_key: [f.id], pk: [id], dist: UpstreamHashShard(f.id) }
+        │   │   └─StreamExchange { dist: HashShard(e.id, 1:Int32) }
+        │   │     └─StreamProject { exprs: [e.ref, e.id, 1:Int32] }
+        │   │       └─StreamTableScan { table: e, columns: [e.id, e.ref], stream_scan_type: SnapshotBackfill, stream_key: [e.id], pk: [id], dist: UpstreamHashShard(e.id) }
+        │   └─StreamExchange { dist: HashShard(d.id) }
+        │     └─StreamTableScan { table: d, columns: [d.id, d.grp], stream_scan_type: SnapshotBackfill, stream_key: [d.id], pk: [id], dist: UpstreamHashShard(d.id) }
+        └─StreamExchange { dist: HashShard(g.b) }
+          └─StreamFilter { predicate: (g.a > 0:Int32) }
+            └─StreamTableScan { table: g, columns: [g.a, g.b, g.id], stream_scan_type: SnapshotBackfill, stream_key: [g.id], pk: [id], dist: UpstreamHashShard(g.id) }
+- name: two anti joins in each branch
+  before:
+  - setup
+  sql: |
+    select f.id, f.label from f
+    where not exists (select 1 from g where g.a = f.other_id and g.b > 0) and not exists (select 1 from d where d.id = f.other_id)
+    union all
+    select e.id, e.code from e
+    where not exists (select 1 from g where g.a = e.ref and g.b > 0) and not exists (select 1 from d where d.id = e.ref);
+  optimized_logical_plan_for_stream: |-
+    LogicalJoin { type: LeftAnti, on: (f.other_id = d.id), output: [f.id, f.label] }
+    ├─LogicalJoin { type: LeftAnti, on: (f.other_id = g.a), output: [f.other_id, f.id, f.label] }
+    │ ├─LogicalUnion { all: true }
+    │ │ ├─LogicalProject { exprs: [f.other_id, f.id, f.other_id, f.label] }
+    │ │ │ └─LogicalScan { table: f, columns: [f.id, f.other_id, f.label] }
+    │ │ └─LogicalProject { exprs: [e.ref, e.id, e.ref, e.code] }
+    │ │   └─LogicalScan { table: e, columns: [e.id, e.code, e.ref] }
+    │ └─LogicalScan { table: g, output_columns: [g.a], required_columns: [g.a, g.b], predicate: (g.b > 0:Int32) }
+    └─LogicalScan { table: d, columns: [d.id] }
+- name: anti join on the other input above a left join in one branch
+  before:
+  - setup
+  sql: |
+    select f.id, d.name from f left join d on f.dim_id = d.id where not exists (select 1 from g where g.a = f.other_id)
+    union all
+    select e.id, d.name from e left join d on e.ref = d.id;
+  optimized_logical_plan_for_stream: |-
+    LogicalJoin { type: LeftOuter, on: (f.dim_id = d.id), output: [f.id, d.name] }
+    ├─LogicalUnion { all: true }
+    │ ├─LogicalJoin { type: LeftAnti, on: (g.a = f.other_id), output: [f.dim_id, f.id] }
+    │ │ ├─LogicalScan { table: f, columns: [f.id, f.dim_id, f.other_id] }
+    │ │ └─LogicalScan { table: g, columns: [g.a] }
+    │ └─LogicalProject { exprs: [e.ref, e.id] }
+    │   └─LogicalScan { table: e, columns: [e.id, e.ref] }
+    └─LogicalScan { table: d, columns: [d.id, d.name] }
+  stream_plan: |-
+    StreamMaterialize { columns: [id, name, f.id(hidden), f.other_id(hidden), $src(hidden), f.dim_id(hidden), d.id(hidden)], stream_key: [f.id, f.other_id, $src, f.dim_id], pk_columns: [f.id, f.other_id, $src, f.dim_id], pk_conflict: NoCheck }
+    └─StreamExchange { dist: HashShard(f.id, f.other_id, $src, f.dim_id) }
+      └─StreamHashJoin { type: LeftOuter, predicate: f.dim_id = d.id, output: [f.id, d.name, f.id, f.other_id, $src, f.dim_id, d.id] }
+        ├─StreamExchange { dist: HashShard(f.dim_id) }
+        │ └─StreamUnion { all: true }
+        │   ├─StreamExchange { dist: HashShard(f.id, f.other_id, 0:Int32) }
+        │   │ └─StreamProject { exprs: [f.dim_id, f.id, f.id, f.other_id, 0:Int32] }
+        │   │   └─StreamHashJoin { type: LeftAnti, predicate: f.other_id = g.a, output: [f.dim_id, f.id, f.other_id] }
+        │   │     ├─StreamExchange { dist: HashShard(f.other_id) }
+        │   │     │ └─StreamTableScan { table: f, columns: [f.id, f.dim_id, f.other_id], stream_scan_type: SnapshotBackfill, stream_key: [f.id], pk: [id], dist: UpstreamHashShard(f.id) }
+        │   │     └─StreamExchange { dist: HashShard(g.a) }
+        │   │       └─StreamTableScan { table: g, columns: [g.a, g.id], stream_scan_type: SnapshotBackfill, stream_key: [g.id], pk: [id], dist: UpstreamHashShard(g.id) }
+        │   └─StreamExchange { dist: HashShard(e.id, null:Int32, 1:Int32) }
+        │     └─StreamProject { exprs: [e.ref, e.id, e.id, null:Int32, 1:Int32] }
+        │       └─StreamTableScan { table: e, columns: [e.id, e.ref], stream_scan_type: SnapshotBackfill, stream_key: [e.id], pk: [id], dist: UpstreamHashShard(e.id) }
+        └─StreamExchange { dist: HashShard(d.id) }
+          └─StreamTableScan { table: d, columns: [d.id, d.name], stream_scan_type: SnapshotBackfill, stream_key: [d.id], pk: [id], dist: UpstreamHashShard(d.id) }
+- name: semi join on the joined table above inner joins
+  before:
+  - setup
+  sql: |
+    select f.id, d.name from f join d on f.dim_id = d.id where exists (select 1 from g where g.b = d.grp)
+    union all
+    select e.id, d.name from e join d on e.ref = d.id where exists (select 1 from g where g.b = d.grp);
+  optimized_logical_plan_for_stream: |-
+    LogicalJoin { type: LeftSemi, on: (d.grp = g.b), output: [f.id, d.name] }
+    ├─LogicalJoin { type: Inner, on: (f.dim_id = d.id), output: [d.grp, f.id, d.name] }
+    │ ├─LogicalUnion { all: true }
+    │ │ ├─LogicalProject { exprs: [f.dim_id, f.id] }
+    │ │ │ └─LogicalScan { table: f, columns: [f.id, f.dim_id] }
+    │ │ └─LogicalProject { exprs: [e.ref, e.id] }
+    │ │   └─LogicalScan { table: e, columns: [e.id, e.ref] }
+    │ └─LogicalScan { table: d, columns: [d.id, d.name, d.grp] }
+    └─LogicalScan { table: g, columns: [g.b] }
 - name: kept - an inner join and a left join
   before:
   - setup
@@ -353,3 +600,119 @@
         └─LogicalJoin { type: Inner, on: (e.ref = d.id), output: [d.name, e.id] }
           ├─LogicalScan { table: e, columns: [e.id, e.ref] }
           └─LogicalScan { table: d, columns: [d.id, d.name] }
+- name: kept - a view with a temporal filter
+  before:
+  - setup
+  sql: |
+    select f.id, v.v from f join hrecent v on f.dim_id = v.id
+    union all
+    select e.id, v.v from e join hrecent v on e.ref = v.id;
+  optimized_logical_plan_for_stream: |-
+    LogicalUnion { all: true }
+    ├─LogicalJoin { type: Inner, on: (f.dim_id = h.id), output: [f.id, h.v] }
+    │ ├─LogicalScan { table: f, columns: [f.id, f.dim_id] }
+    │ └─LogicalShare { id: 3 }
+    │   └─LogicalJoin { type: LeftSemi, on: (h.ts > $expr1), output: [h.id, h.v] }
+    │     ├─LogicalScan { table: h, columns: [h.id, h.ts, h.v] }
+    │     └─LogicalProject { exprs: [(now - '01:00:00':Interval) as $expr1] }
+    │       └─LogicalNow { output: [now] }
+    └─LogicalJoin { type: Inner, on: (e.ref = h.id), output: [e.id, h.v] }
+      ├─LogicalScan { table: e, columns: [e.id, e.ref] }
+      └─LogicalShare { id: 3 }
+        └─LogicalJoin { type: LeftSemi, on: (h.ts > $expr1), output: [h.id, h.v] }
+          ├─LogicalScan { table: h, columns: [h.id, h.ts, h.v] }
+          └─LogicalProject { exprs: [(now - '01:00:00':Interval) as $expr1] }
+            └─LogicalNow { output: [now] }
+- name: kept - a view with an aggregate that depends on the order of the rows
+  before:
+  - setup
+  sql: |
+    select f.id, v.names from f join dnames v on f.amt = v.grp
+    union all
+    select e.id, v.names from e join dnames v on e.ref = v.grp;
+  optimized_logical_plan_for_stream: |-
+    LogicalUnion { all: true }
+    ├─LogicalJoin { type: Inner, on: (f.amt = d.grp), output: [f.id, string_agg(d.name, ',':Varchar)] }
+    │ ├─LogicalScan { table: f, columns: [f.id, f.amt] }
+    │ └─LogicalShare { id: 3 }
+    │   └─LogicalAgg { group_key: [d.grp], aggs: [string_agg(d.name, ',':Varchar)] }
+    │     └─LogicalProject { exprs: [d.grp, d.name, ',':Varchar] }
+    │       └─LogicalScan { table: d, columns: [d.name, d.grp] }
+    └─LogicalJoin { type: Inner, on: (e.ref = d.grp), output: [e.id, string_agg(d.name, ',':Varchar)] }
+      ├─LogicalScan { table: e, columns: [e.id, e.ref] }
+      └─LogicalShare { id: 3 }
+        └─LogicalAgg { group_key: [d.grp], aggs: [string_agg(d.name, ',':Varchar)] }
+          └─LogicalProject { exprs: [d.grp, d.name, ',':Varchar] }
+            └─LogicalScan { table: d, columns: [d.name, d.grp] }
+- name: kept - a view with a top-n
+  before:
+  - setup
+  sql: |
+    select f.id, v.name from f join dtop v on f.dim_id = v.id
+    union all
+    select e.id, v.name from e join dtop v on e.ref = v.id;
+  optimized_logical_plan_for_stream: |-
+    LogicalUnion { all: true }
+    ├─LogicalJoin { type: Inner, on: (f.dim_id = d.id), output: [f.id, d.name] }
+    │ ├─LogicalScan { table: f, columns: [f.id, f.dim_id] }
+    │ └─LogicalShare { id: 3 }
+    │   └─LogicalProject { exprs: [d.id, d.name] }
+    │     └─LogicalTopN { order: [d.grp ASC], limit: 3, offset: 0 }
+    │       └─LogicalScan { table: d, columns: [d.id, d.name, d.grp] }
+    └─LogicalJoin { type: Inner, on: (e.ref = d.id), output: [e.id, d.name] }
+      ├─LogicalScan { table: e, columns: [e.id, e.ref] }
+      └─LogicalShare { id: 3 }
+        └─LogicalProject { exprs: [d.id, d.name] }
+          └─LogicalTopN { order: [d.grp ASC], limit: 3, offset: 0 }
+            └─LogicalScan { table: d, columns: [d.id, d.name, d.grp] }
+- name: kept - two different views
+  before:
+  - setup
+  sql: |
+    select f.id, v.name from f join dj v on f.dim_id = v.id
+    union all
+    select e.id, v.name from e join da v on e.ref = v.id;
+  optimized_logical_plan_for_stream: |-
+    LogicalUnion { all: true }
+    ├─LogicalJoin { type: Inner, on: (d.grp = g.b), output: [f.id, d.name] }
+    │ ├─LogicalJoin { type: Inner, on: (f.dim_id = d.id), output: [f.id, d.name, d.grp] }
+    │ │ ├─LogicalScan { table: f, columns: [f.id, f.dim_id] }
+    │ │ └─LogicalScan { table: d, columns: [d.id, d.name, d.grp] }
+    │ └─LogicalScan { table: g, columns: [g.b] }
+    └─LogicalJoin { type: Inner, on: (e.ref = d.id), output: [e.id, d.name] }
+      ├─LogicalScan { table: e, columns: [e.id, e.ref] }
+      └─LogicalScan { table: d, output_columns: [d.id, d.name], required_columns: [d.id, d.name, d.active], predicate: d.active }
+- name: kept - anti join on both inputs of the join below
+  before:
+  - setup
+  sql: |
+    select f.id, d.name from f left join d on f.dim_id = d.id where not exists (select 1 from g where g.a = f.amt and g.b = d.grp)
+    union all
+    select e.id, d.name from e left join d on e.ref = d.id;
+  optimized_logical_plan_for_stream: |-
+    LogicalUnion { all: true }
+    ├─LogicalJoin { type: LeftAnti, on: (g.a = f.amt) AND (g.b = d.grp), output: [f.id, d.name] }
+    │ ├─LogicalJoin { type: LeftOuter, on: (f.dim_id = d.id), output: [f.id, f.amt, d.name, d.grp] }
+    │ │ ├─LogicalScan { table: f, columns: [f.id, f.dim_id, f.amt] }
+    │ │ └─LogicalScan { table: d, columns: [d.id, d.name, d.grp] }
+    │ └─LogicalScan { table: g, columns: [g.a, g.b] }
+    └─LogicalJoin { type: LeftOuter, on: (e.ref = d.id), output: [e.id, d.name] }
+      ├─LogicalScan { table: e, columns: [e.id, e.ref] }
+      └─LogicalScan { table: d, columns: [d.id, d.name] }
+- name: kept - anti join on the padded side of a left join
+  before:
+  - setup
+  sql: |
+    select f.id, d.name from f left join d on f.dim_id = d.id where not exists (select 1 from g where g.a = d.grp)
+    union all
+    select e.id, d.name from e left join d on e.ref = d.id;
+  optimized_logical_plan_for_stream: |-
+    LogicalUnion { all: true }
+    ├─LogicalJoin { type: LeftAnti, on: (g.a = d.grp), output: [f.id, d.name] }
+    │ ├─LogicalJoin { type: LeftOuter, on: (f.dim_id = d.id), output: [f.id, d.name, d.grp] }
+    │ │ ├─LogicalScan { table: f, columns: [f.id, f.dim_id] }
+    │ │ └─LogicalScan { table: d, columns: [d.id, d.name, d.grp] }
+    │ └─LogicalScan { table: g, columns: [g.a] }
+    └─LogicalJoin { type: LeftOuter, on: (e.ref = d.id), output: [e.id, d.name] }
+      ├─LogicalScan { table: e, columns: [e.id, e.ref] }
+      └─LogicalScan { table: d, columns: [d.id, d.name] }
