@@ -6,6 +6,8 @@
     create table u (k int primary key, a int, c int);
     create table w (k int, v int, ts timestamp, watermark for ts as ts - interval '1' second) append only;
     create table h (r int primary key, k int, a int);
+    create table m (r int primary key, g int, v int);
+    create table j (r int primary key, kind varchar, f jsonb);
 - id: setup_off
   sql: |
     create table t (k int primary key, a int, b int, x varchar, y varchar, flag boolean, ts timestamptz);
@@ -326,7 +328,7 @@
                 └─StreamExpand { column_subsets: [[h.k, h.a], [h.k, h.a]] }
                   └─StreamFilter { predicate: ((h.a > 0:Int32) OR (h.a > 10:Int32)) }
                     └─StreamTableScan { table: h, columns: [h.k, h.a, h.r], stream_scan_type: SnapshotBackfill, stream_key: [h.r], pk: [r], dist: UpstreamHashShard(h.r) }
-- name: kept - a branch with a temporal filter, the other two are merged
+- name: a branch with a temporal filter, the other two are merged, the table is shared
   before:
   - setup
   sql: |
@@ -341,9 +343,13 @@
     │ └─LogicalFilter { predicate: Case((flag = 0:Int64), (t.a > 0:Int32), (flag = 1:Int64), (t.b > 0:Int32)) }
     │   └─LogicalProject { exprs: [t.k, t.a, t.b, flag] }
     │     └─LogicalExpand { column_subsets: [[t.k, t.a, t.b], [t.k, t.a, t.b]] }
-    │       └─LogicalScan { table: t, columns: [t.k, t.a, t.b], predicate: ((t.a > 0:Int32) OR (t.b > 0:Int32)) }
+    │       └─LogicalFilter { predicate: ((t.a > 0:Int32) OR (t.b > 0:Int32)) }
+    │         └─LogicalProject { exprs: [t.k, t.a, t.b] }
+    │           └─LogicalShare { id: 1 }
+    │             └─LogicalScan { table: t, columns: [t.k, t.a, t.b, t.ts] }
     └─LogicalJoin { type: LeftSemi, on: (t.ts > $expr2), output: [t.k, t.a] }
-      ├─LogicalScan { table: t, columns: [t.k, t.a, t.ts] }
+      ├─LogicalShare { id: 1 }
+      │ └─LogicalScan { table: t, columns: [t.k, t.a, t.b, t.ts] }
       └─LogicalProject { exprs: [(now - '1 day':Interval) as $expr2] }
         └─LogicalNow { output: [now] }
 - name: kept - a table with a watermark
@@ -368,7 +374,7 @@
     LogicalUnion { all: true }
     ├─LogicalScan { table: t, columns: [t.k, t.a], predicate: (t.a > 0:Int32) }
     └─LogicalScan { table: u, columns: [u.k, u.a], predicate: (u.a > 0:Int32) }
-- name: kept - a branch with a join
+- name: a branch with a join shares the scan of the other branch
   before:
   - setup
   sql: |
@@ -377,11 +383,30 @@
     select t.k, u.c from t join u on t.k = u.k;
   optimized_logical_plan_for_stream: |-
     LogicalUnion { all: true }
-    ├─LogicalScan { table: t, columns: [t.k, t.a], predicate: (t.a > 0:Int32) }
+    ├─LogicalFilter { predicate: (t.a > 0:Int32) }
+    │ └─LogicalShare { id: 1 }
+    │   └─LogicalScan { table: t, columns: [t.k, t.a] }
     └─LogicalJoin { type: Inner, on: (t.k = u.k), output: [t.k, u.c] }
-      ├─LogicalScan { table: t, columns: [t.k] }
+      ├─LogicalShare { id: 1 }
+      │ └─LogicalScan { table: t, columns: [t.k, t.a] }
       └─LogicalScan { table: u, columns: [u.k, u.c] }
-- name: kept - a branch with a table function
+  stream_plan: |-
+    StreamMaterialize { columns: [k, a, $src(hidden)], stream_key: [k, $src], pk_columns: [k, $src], pk_conflict: NoCheck }
+    └─StreamUnion { all: true }
+      ├─StreamExchange { dist: HashShard(t.k, 0:Int32) }
+      │ └─StreamProject { exprs: [t.k, t.a, 0:Int32] }
+      │   └─StreamFilter { predicate: (t.a > 0:Int32) }
+      │     └─StreamShare { id: 1 }
+      │       └─StreamTableScan { table: t, columns: [t.k, t.a], stream_scan_type: SnapshotBackfill, stream_key: [t.k], pk: [k], dist: UpstreamHashShard(t.k) }
+      └─StreamExchange { dist: HashShard(t.k, 1:Int32) }
+        └─StreamProject { exprs: [t.k, u.c, 1:Int32] }
+          └─StreamHashJoin { type: Inner, predicate: t.k = u.k, output: [t.k, u.c, u.k] }
+            ├─StreamExchange { dist: HashShard(t.k) }
+            │ └─StreamShare { id: 1 }
+            │   └─StreamTableScan { table: t, columns: [t.k, t.a], stream_scan_type: SnapshotBackfill, stream_key: [t.k], pk: [k], dist: UpstreamHashShard(t.k) }
+            └─StreamExchange { dist: HashShard(u.k) }
+              └─StreamTableScan { table: u, columns: [u.k, u.c], stream_scan_type: SnapshotBackfill, stream_key: [u.k], pk: [k], dist: UpstreamHashShard(u.k) }
+- name: a branch with a table function shares the scan of the other branch
   before:
   - setup
   sql: |
@@ -392,9 +417,13 @@
     LogicalUnion { all: true }
     ├─LogicalProject { exprs: [t.k, Unnest(Array($1, $2))] }
     │ └─LogicalProjectSet { select_list: [$0, Unnest(Array($1, $2))] }
-    │   └─LogicalScan { table: t, columns: [t.k, t.a, t.b] }
-    └─LogicalScan { table: t, columns: [t.k, t.a], predicate: IsNull(t.a) }
-- name: kept - a shared sub-plan that is not a scan
+    │   └─LogicalShare { id: 1 }
+    │     └─LogicalScan { table: t, columns: [t.k, t.a, t.b] }
+    └─LogicalFilter { predicate: IsNull(t.a) }
+      └─LogicalProject { exprs: [t.k, t.a] }
+        └─LogicalShare { id: 1 }
+          └─LogicalScan { table: t, columns: [t.k, t.a, t.b] }
+- name: branches over a shared join
   before:
   - setup
   sql: |
@@ -403,16 +432,238 @@
     union all
     select k, c from c where a > 0;
   optimized_logical_plan_for_stream: |-
+    LogicalProject { exprs: [t.k, Case((flag = 0:Int64), t.a, u.c) as $expr1] }
+    └─LogicalFilter { predicate: Case((flag = 0:Int64), (u.c > 0:Int32), (flag = 1:Int64), (t.a > 0:Int32)) }
+      └─LogicalProject { exprs: [t.k, t.a, u.c, flag] }
+        └─LogicalExpand { column_subsets: [[t.k, t.a, u.c], [t.k, t.a, u.c]] }
+          └─LogicalJoin { type: Inner, on: (t.a = u.a) AND ((u.c > 0:Int32) OR (t.a > 0:Int32)), output: [t.k, t.a, u.c] }
+            ├─LogicalScan { table: t, columns: [t.k, t.a] }
+            └─LogicalScan { table: u, columns: [u.a, u.c] }
+  stream_plan: |-
+    StreamMaterialize { columns: [k, a, u.k(hidden), t.a(hidden), flag(hidden)], stream_key: [k, u.k, t.a, flag], pk_columns: [k, u.k, t.a, flag], pk_conflict: NoCheck }
+    └─StreamExchange { dist: HashShard(t.k, u.k, t.a, flag) }
+      └─StreamProject { exprs: [t.k, Case((flag = 0:Int64), t.a, u.c) as $expr1, u.k, t.a, flag] }
+        └─StreamFilter { predicate: Case((flag = 0:Int64), (u.c > 0:Int32), (flag = 1:Int64), (t.a > 0:Int32)) }
+          └─StreamProject { exprs: [t.k, t.a, u.c, flag, u.k] }
+            └─StreamExpand { column_subsets: [[t.k, t.a, u.c], [t.k, t.a, u.c]] }
+              └─StreamProject { exprs: [t.k, t.a, u.c, u.k] }
+                └─StreamFilter { predicate: ((u.c > 0:Int32) OR (t.a > 0:Int32)) }
+                  └─StreamHashJoin { type: Inner, predicate: t.a = u.a, output: all }
+                    ├─StreamExchange { dist: HashShard(t.a) }
+                    │ └─StreamTableScan { table: t, columns: [t.k, t.a], stream_scan_type: SnapshotBackfill, stream_key: [t.k], pk: [k], dist: UpstreamHashShard(t.k) }
+                    └─StreamExchange { dist: HashShard(u.a) }
+                      └─StreamTableScan { table: u, columns: [u.a, u.c, u.k], stream_scan_type: SnapshotBackfill, stream_key: [u.k], pk: [k], dist: UpstreamHashShard(u.k) }
+- name: branches over a shared aggregation
+  before:
+  - setup
+  sql: |
+    with c as (select a, count(*) as n from t group by a)
+    select a, n from c where n > 1
+    union all
+    select n, a from c where a > 0;
+  optimized_logical_plan_for_stream: |-
+    LogicalProject { exprs: [Case((flag = 0:Int64), t.a::Int64, count) as $expr1, Case((flag = 0:Int64), count, t.a::Int64) as $expr2] }
+    └─LogicalFilter { predicate: Case((flag = 0:Int64), (count > 1:Int32), (flag = 1:Int64), (t.a > 0:Int32)) }
+      └─LogicalProject { exprs: [t.a, count, flag] }
+        └─LogicalExpand { column_subsets: [[t.a, count], [t.a, count]] }
+          └─LogicalFilter { predicate: ((count > 1:Int32) OR (t.a > 0:Int32)) }
+            └─LogicalAgg { group_key: [t.a], aggs: [count] }
+              └─LogicalScan { table: t, columns: [t.a] }
+  stream_plan: |-
+    StreamMaterialize { columns: [a, n, t.a(hidden), flag(hidden)], stream_key: [t.a, flag], pk_columns: [t.a, flag], pk_conflict: NoCheck }
+    └─StreamExchange { dist: HashShard(t.a, flag) }
+      └─StreamProject { exprs: [Case((flag = 0:Int64), t.a::Int64, count) as $expr1, Case((flag = 0:Int64), count, t.a::Int64) as $expr2, t.a, flag] }
+        └─StreamFilter { predicate: Case((flag = 0:Int64), (count > 1:Int32), (flag = 1:Int64), (t.a > 0:Int32)) }
+          └─StreamProject { exprs: [t.a, count, flag] }
+            └─StreamExpand { column_subsets: [[t.a, count], [t.a, count]] }
+              └─StreamFilter { predicate: ((count > 1:Int32) OR (t.a > 0:Int32)) }
+                └─StreamHashAgg { group_key: [t.a], aggs: [count] }
+                  └─StreamExchange { dist: HashShard(t.a) }
+                    └─StreamTableScan { table: t, columns: [t.a, t.k], stream_scan_type: SnapshotBackfill, stream_key: [t.k], pk: [k], dist: UpstreamHashShard(t.k) }
+- name: kept - a shared sub-plan with a temporal filter
+  before:
+  - setup
+  sql: |
+    with c as (select k, a from t where ts > now() - interval '1 day')
+    select k, a from c where a > 0
+    union all
+    select a, k from c where k > 0;
+  optimized_logical_plan_for_stream: |-
     LogicalUnion { all: true }
-    ├─LogicalProject { exprs: [t.k, t.a] }
+    ├─LogicalFilter { predicate: (t.a > 0:Int32) }
+    │ └─LogicalShare { id: 3 }
+    │   └─LogicalJoin { type: LeftSemi, on: (t.ts > $expr1), output: [t.k, t.a] }
+    │     ├─LogicalScan { table: t, columns: [t.k, t.a, t.ts], predicate: ((t.a > 0:Int32) OR (t.k > 0:Int32)) }
+    │     └─LogicalProject { exprs: [(now - '1 day':Interval) as $expr1] }
+    │       └─LogicalNow { output: [now] }
+    └─LogicalProject { exprs: [t.a, t.k] }
+      └─LogicalFilter { predicate: (t.k > 0:Int32) }
+        └─LogicalShare { id: 3 }
+          └─LogicalJoin { type: LeftSemi, on: (t.ts > $expr1), output: [t.k, t.a] }
+            ├─LogicalScan { table: t, columns: [t.k, t.a, t.ts], predicate: ((t.a > 0:Int32) OR (t.k > 0:Int32)) }
+            └─LogicalProject { exprs: [(now - '1 day':Interval) as $expr1] }
+              └─LogicalNow { output: [now] }
+- name: a plain branch and a left join branch share the scan
+  before:
+  - setup
+  sql: |
+    select t.k, coalesce(m.v, 0) as v from t left join m on t.k = m.g where t.x = 'a'
+    union all
+    select t.k, 1 from t where t.x = 'b';
+  optimized_logical_plan_for_stream: |-
+    LogicalUnion { all: true }
+    ├─LogicalProject { exprs: [t.k, Coalesce(m.v, 0:Int32) as $expr1] }
+    │ └─LogicalJoin { type: LeftOuter, on: (t.k = m.g), output: [t.k, m.v] }
+    │   ├─LogicalFilter { predicate: (t.x = 'a':Varchar) }
+    │   │ └─LogicalShare { id: 1 }
+    │   │   └─LogicalScan { table: t, columns: [t.k, t.x], predicate: ((t.x = 'a':Varchar) OR (t.x = 'b':Varchar)) }
+    │   └─LogicalScan { table: m, columns: [m.g, m.v] }
+    └─LogicalProject { exprs: [t.k, 1:Int32] }
+      └─LogicalFilter { predicate: (t.x = 'b':Varchar) }
+        └─LogicalShare { id: 1 }
+          └─LogicalScan { table: t, columns: [t.k, t.x], predicate: ((t.x = 'a':Varchar) OR (t.x = 'b':Varchar)) }
+  stream_plan: |-
+    StreamMaterialize { columns: [k, v, t.k(hidden), m.r(hidden), $src(hidden)], stream_key: [t.k, m.r, $src], pk_columns: [t.k, m.r, $src], pk_conflict: NoCheck }
+    └─StreamUnion { all: true }
+      ├─StreamExchange { dist: HashShard(t.k, m.r, 0:Int32) }
+      │ └─StreamProject { exprs: [t.k, Coalesce(m.v, 0:Int32) as $expr1, t.k, m.r, 0:Int32] }
+      │   └─StreamHashJoin { type: LeftOuter, predicate: t.k = m.g, output: [t.k, m.v, m.r] }
+      │     ├─StreamExchange { dist: HashShard(t.k) }
+      │     │ └─StreamFilter { predicate: (t.x = 'a':Varchar) }
+      │     │   └─StreamShare { id: 2 }
+      │     │     └─StreamFilter { predicate: ((t.x = 'a':Varchar) OR (t.x = 'b':Varchar)) }
+      │     │       └─StreamTableScan { table: t, columns: [t.k, t.x], stream_scan_type: SnapshotBackfill, stream_key: [t.k], pk: [k], dist: UpstreamHashShard(t.k) }
+      │     └─StreamExchange { dist: HashShard(m.g) }
+      │       └─StreamTableScan { table: m, columns: [m.g, m.v, m.r], stream_scan_type: SnapshotBackfill, stream_key: [m.r], pk: [r], dist: UpstreamHashShard(m.r) }
+      └─StreamExchange { dist: HashShard(t.k, null:Int32, 1:Int32) }
+        └─StreamProject { exprs: [t.k, 1:Int32, t.k, null:Int32, 1:Int32] }
+          └─StreamFilter { predicate: (t.x = 'b':Varchar) }
+            └─StreamShare { id: 2 }
+              └─StreamFilter { predicate: ((t.x = 'a':Varchar) OR (t.x = 'b':Varchar)) }
+                └─StreamTableScan { table: t, columns: [t.k, t.x], stream_scan_type: SnapshotBackfill, stream_key: [t.k], pk: [k], dist: UpstreamHashShard(t.k) }
+- name: two joins on different columns share the scans of both tables
+  before:
+  - setup
+  sql: |
+    select t.k, m.v from t join m on t.a = m.g and m.v > 0
+    union all
+    select t.k, m.v from t join m on t.b = m.g and m.v < 0;
+  optimized_logical_plan_for_stream: |-
+    LogicalUnion { all: true }
+    ├─LogicalJoin { type: Inner, on: (t.a = m.g), output: [t.k, m.v] }
+    │ ├─LogicalShare { id: 1 }
+    │ │ └─LogicalScan { table: t, columns: [t.k, t.a, t.b] }
+    │ └─LogicalFilter { predicate: (m.v > 0:Int32) }
+    │   └─LogicalShare { id: 2 }
+    │     └─LogicalScan { table: m, columns: [m.g, m.v], predicate: ((m.v > 0:Int32) OR (m.v < 0:Int32)) }
+    └─LogicalJoin { type: Inner, on: (t.b = m.g), output: [t.k, m.v] }
+      ├─LogicalShare { id: 1 }
+      │ └─LogicalScan { table: t, columns: [t.k, t.a, t.b] }
+      └─LogicalFilter { predicate: (m.v < 0:Int32) }
+        └─LogicalShare { id: 2 }
+          └─LogicalScan { table: m, columns: [m.g, m.v], predicate: ((m.v > 0:Int32) OR (m.v < 0:Int32)) }
+- name: two table functions and a plain branch share the scan
+  before:
+  - setup
+  sql: |
+    select x.key as v from j cross join jsonb_each_text(j.f -> 'a') as x where kind in ('e', 'p')
+    union all
+    select x.key from j cross join jsonb_each_text(j.f -> 'b') as x where kind in ('e', 'p')
+    union all
+    select kind from j where kind = 'p' and f ? 'a';
+  optimized_logical_plan_for_stream: |-
+    LogicalUnion { all: true }
+    ├─LogicalProject { exprs: [Field(JsonbEachText(JsonbAccess($0, 'a':Varchar)), 0:Int32) as $expr1] }
+    │ └─LogicalProjectSet { select_list: [JsonbEachText(JsonbAccess($0, 'a':Varchar))] }
+    │   └─LogicalProject { exprs: [j.f] }
+    │     └─LogicalFilter { predicate: In(j.kind, 'e':Varchar, 'p':Varchar) }
+    │       └─LogicalShare { id: 1 }
+    │         └─LogicalScan { table: j, columns: [j.kind, j.f], predicate: (In(j.kind, 'e':Varchar, 'p':Varchar) OR ((j.kind = 'p':Varchar) AND JsonbExists(j.f, 'a':Varchar))) }
+    ├─LogicalProject { exprs: [Field(JsonbEachText(JsonbAccess($0, 'b':Varchar)), 0:Int32) as $expr2] }
+    │ └─LogicalProjectSet { select_list: [JsonbEachText(JsonbAccess($0, 'b':Varchar))] }
+    │   └─LogicalProject { exprs: [j.f] }
+    │     └─LogicalFilter { predicate: In(j.kind, 'e':Varchar, 'p':Varchar) }
+    │       └─LogicalShare { id: 1 }
+    │         └─LogicalScan { table: j, columns: [j.kind, j.f], predicate: (In(j.kind, 'e':Varchar, 'p':Varchar) OR ((j.kind = 'p':Varchar) AND JsonbExists(j.f, 'a':Varchar))) }
+    └─LogicalProject { exprs: [j.kind] }
+      └─LogicalFilter { predicate: (j.kind = 'p':Varchar) AND JsonbExists(j.f, 'a':Varchar) }
+        └─LogicalShare { id: 1 }
+          └─LogicalScan { table: j, columns: [j.kind, j.f], predicate: (In(j.kind, 'e':Varchar, 'p':Varchar) OR ((j.kind = 'p':Varchar) AND JsonbExists(j.f, 'a':Varchar))) }
+  stream_plan: |-
+    StreamMaterialize { columns: [v, j.r(hidden), _rw_projected_row_id(hidden), $src(hidden)], stream_key: [j.r, _rw_projected_row_id, $src], pk_columns: [j.r, _rw_projected_row_id, $src], pk_conflict: NoCheck }
+    └─StreamUnion { all: true }
+      ├─StreamExchange { dist: HashShard(j.r, _rw_projected_row_id, 0:Int32) }
+      │ └─StreamProject { exprs: [Field(JsonbEachText(JsonbAccess($0, 'a':Varchar)), 0:Int32) as $expr1, j.r, _rw_projected_row_id, 0:Int32] }
+      │   └─StreamProjectSet { select_list: [JsonbEachText(JsonbAccess($0, 'a':Varchar)), $1] }
+      │     └─StreamProject { exprs: [j.f, j.r] }
+      │       └─StreamFilter { predicate: In(j.kind, 'e':Varchar, 'p':Varchar) }
+      │         └─StreamShare { id: 2 }
+      │           └─StreamFilter { predicate: (In(j.kind, 'e':Varchar, 'p':Varchar) OR ((j.kind = 'p':Varchar) AND JsonbExists(j.f, 'a':Varchar))) }
+      │             └─StreamTableScan { table: j, columns: [j.kind, j.f, j.r], stream_scan_type: SnapshotBackfill, stream_key: [j.r], pk: [r], dist: UpstreamHashShard(j.r) }
+      ├─StreamExchange { dist: HashShard(j.r, _rw_projected_row_id, 1:Int32) }
+      │ └─StreamProject { exprs: [Field(JsonbEachText(JsonbAccess($0, 'b':Varchar)), 0:Int32) as $expr2, j.r, _rw_projected_row_id, 1:Int32] }
+      │   └─StreamProjectSet { select_list: [JsonbEachText(JsonbAccess($0, 'b':Varchar)), $1] }
+      │     └─StreamProject { exprs: [j.f, j.r] }
+      │       └─StreamFilter { predicate: In(j.kind, 'e':Varchar, 'p':Varchar) }
+      │         └─StreamShare { id: 2 }
+      │           └─StreamFilter { predicate: (In(j.kind, 'e':Varchar, 'p':Varchar) OR ((j.kind = 'p':Varchar) AND JsonbExists(j.f, 'a':Varchar))) }
+      │             └─StreamTableScan { table: j, columns: [j.kind, j.f, j.r], stream_scan_type: SnapshotBackfill, stream_key: [j.r], pk: [r], dist: UpstreamHashShard(j.r) }
+      └─StreamExchange { dist: HashShard(j.r, null:Int64, 2:Int32) }
+        └─StreamProject { exprs: [j.kind, j.r, null:Int64, 2:Int32] }
+          └─StreamFilter { predicate: (j.kind = 'p':Varchar) AND JsonbExists(j.f, 'a':Varchar) }
+            └─StreamShare { id: 2 }
+              └─StreamFilter { predicate: (In(j.kind, 'e':Varchar, 'p':Varchar) OR ((j.kind = 'p':Varchar) AND JsonbExists(j.f, 'a':Varchar))) }
+                └─StreamTableScan { table: j, columns: [j.kind, j.f, j.r], stream_scan_type: SnapshotBackfill, stream_key: [j.r], pk: [r], dist: UpstreamHashShard(j.r) }
+- name: an anti join in one branch shares the scan of the other branch
+  before:
+  - setup
+  sql: |
+    select k, 'u' as st from u
+    union all
+    select t.k, 't' from t where not exists (select 1 from u where u.k = t.k);
+  optimized_logical_plan_for_stream: |-
+    LogicalUnion { all: true }
+    ├─LogicalProject { exprs: [u.k, 'u':Varchar] }
+    │ └─LogicalShare { id: 1 }
+    │   └─LogicalScan { table: u, columns: [u.k] }
+    └─LogicalProject { exprs: [t.k, 't':Varchar] }
+      └─LogicalJoin { type: LeftAnti, on: (u.k = t.k), output: all }
+        ├─LogicalScan { table: t, columns: [t.k] }
+        └─LogicalShare { id: 1 }
+          └─LogicalScan { table: u, columns: [u.k] }
+- name: kept - a self-join inside one branch only
+  before:
+  - setup
+  sql: |
+    select t1.k, t2.a from t t1 join t t2 on t1.a = t2.k
+    union all
+    select k, c from u;
+  optimized_logical_plan_for_stream: |-
+    LogicalUnion { all: true }
+    ├─LogicalJoin { type: Inner, on: (t.a = t.k), output: [t.k, t.a] }
+    │ ├─LogicalScan { table: t, columns: [t.k, t.a] }
+    │ └─LogicalScan { table: t, columns: [t.k, t.a] }
+    └─LogicalScan { table: u, columns: [u.k, u.c] }
+- name: kept - the shared join is already read once, the join above it is not merged
+  before:
+  - setup
+  sql: |
+    with c as (select t.k, t.a, u.c from t join u on t.a = u.a)
+    select k, a, null::int as v from c where c > 0
+    union all
+    select c.k, c.a, m.v from c left join m on c.c = m.g where c.a > 0;
+  optimized_logical_plan_for_stream: |-
+    LogicalUnion { all: true }
+    ├─LogicalProject { exprs: [t.k, t.a, null:Int32] }
     │ └─LogicalFilter { predicate: (u.c > 0:Int32) }
     │   └─LogicalShare { id: 2 }
     │     └─LogicalJoin { type: Inner, on: (t.a = u.a) AND ((u.c > 0:Int32) OR (t.a > 0:Int32)), output: [t.k, t.a, u.c] }
     │       ├─LogicalScan { table: t, columns: [t.k, t.a] }
     │       └─LogicalScan { table: u, columns: [u.a, u.c] }
-    └─LogicalProject { exprs: [t.k, u.c] }
-      └─LogicalFilter { predicate: (t.a > 0:Int32) }
-        └─LogicalShare { id: 2 }
-          └─LogicalJoin { type: Inner, on: (t.a = u.a) AND ((u.c > 0:Int32) OR (t.a > 0:Int32)), output: [t.k, t.a, u.c] }
-            ├─LogicalScan { table: t, columns: [t.k, t.a] }
-            └─LogicalScan { table: u, columns: [u.a, u.c] }
+    └─LogicalJoin { type: LeftOuter, on: (u.c = m.g), output: [t.k, t.a, m.v] }
+      ├─LogicalFilter { predicate: (t.a > 0:Int32) }
+      │ └─LogicalShare { id: 2 }
+      │   └─LogicalJoin { type: Inner, on: (t.a = u.a) AND ((u.c > 0:Int32) OR (t.a > 0:Int32)), output: [t.k, t.a, u.c] }
+      │     ├─LogicalScan { table: t, columns: [t.k, t.a] }
+      │     └─LogicalScan { table: u, columns: [u.a, u.c] }
+      └─LogicalScan { table: m, columns: [m.g, m.v] }
