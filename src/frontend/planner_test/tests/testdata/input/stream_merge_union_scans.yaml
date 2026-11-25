@@ -1,0 +1,223 @@
+# Tests for the single read of a table that several branches of a union read in streaming plans
+# (`streaming_merge_union_scans`): `UnionScanMergeRule`.
+- id: setup
+  sql: |
+    set streaming_merge_union_scans = true;
+    create table t (k int primary key, a int, b int, x varchar, y varchar, flag boolean, ts timestamptz);
+    create table u (k int primary key, a int, c int);
+    create table w (k int, v int, ts timestamp, watermark for ts as ts - interval '1' second) append only;
+    create table h (r int primary key, k int, a int);
+  expected_outputs: []
+- id: setup_off
+  sql: |
+    create table t (k int primary key, a int, b int, x varchar, y varchar, flag boolean, ts timestamptz);
+  expected_outputs: []
+
+- name: off by default - each branch scans the table
+  before: [setup_off]
+  sql: |
+    select a, x from t where a > 0
+    union all
+    select b, y from t where b > 0;
+  expected_outputs:
+  - stream_plan
+
+- name: two branches with a different filter and projection
+  before: [setup]
+  sql: |
+    select a, x from t where a > 0
+    union all
+    select b, y from t where b > 0;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: the batch plan does not change
+  before: [setup]
+  sql: |
+    select a, x from t where a > 0
+    union all
+    select b, y from t where b > 0;
+  expected_outputs:
+  - batch_plan
+- name: exclusive filters on a boolean column, constants per branch
+  before: [setup]
+  sql: |
+    select k, 'yes' as s, 5 as p from t where flag
+    union all
+    select k, 'no' as s, 4 as p from t where not flag;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: three branches without a filter
+  before: [setup]
+  sql: |
+    select k, 'r1' as role from t
+    union all
+    select k, 'r2' from t
+    union all
+    select k, 'r3' from t;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: one branch without a filter and one with a filter
+  before: [setup]
+  sql: |
+    select k, 'all' as st, 1 as p from t
+    union all
+    select k, 'nulls' as st, 2 as p from t where a is null;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: a conjunct common to every branch is checked once
+  before: [setup]
+  sql: |
+    select k, a from t where a > 0 and b > 1
+    union all
+    select k, b from t where b < 5 and a > 0;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: branches over the same shared sub-plan
+  before: [setup]
+  sql: |
+    with c as (select k, a, b from t where a is not null)
+    select k, a from c where b > 1
+    union all
+    select k, b from c where b < 5
+    union all
+    select a, b from c;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: the shared sub-plan stays shared with its other consumers
+  before: [setup]
+  sql: |
+    with c as (select k, a, b from t where a is not null)
+    select s.k, s.v, c.b from (
+      select k, a as v from c where b > 1
+      union all
+      select k, b from c where b < 5
+    ) s join c on s.k = c.k;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: the same branch twice keeps its duplicates
+  before: [setup]
+  sql: |
+    select k, a from t where a > 0
+    union all
+    select k, a from t where a > 0;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: two tables, two branches each
+  before: [setup]
+  sql: |
+    select k, a from t where a > 0
+    union all
+    select k, c from u where c > 0
+    union all
+    select k, b from t where b > 0
+    union all
+    select k, a from u where a < 0;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: three branches, two of them read the same table
+  before: [setup]
+  sql: |
+    select k, a, 't' as src from t where a > 0
+    union all
+    select k, c, 'u' from u
+    union all
+    select k, b, 't2' from t where b > 0;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: computed columns differ between branches
+  before: [setup]
+  sql: |
+    select k, greatest(a, 0) as v, 'x' as kind from t where x = 'A'
+    union all
+    select k, b + 1, 'y' from t where x = 'B';
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: union without all
+  before: [setup]
+  sql: |
+    select a, x as r, 'x' as kind from t where x is not null
+    union
+    select a, y, 'y' from t where y is not null;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: aggregation above the union
+  before: [setup]
+  sql: |
+    select acc, sum(v) as total from (
+      select a as acc, -b as v from t where x <> 'in'
+      union all
+      select b, b from t where x <> 'out'
+    ) s group by acc;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: top-1 per key above the union
+  before: [setup]
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select k, 'low' as st, 1 as p from h where a > 0
+        union all
+        select k, 'high' as st, 2 as p from h where a > 10
+      ) as v
+    ) as r where rn = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+
+- name: kept - a branch with a temporal filter, the other two are merged
+  before: [setup]
+  sql: |
+    select k, a from t where a > 0
+    union all
+    select k, b from t where b > 0
+    union all
+    select k, a from t where ts > now() - interval '1 day';
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - a table with a watermark
+  before: [setup]
+  sql: |
+    select k, ts from w where v > 0
+    union all
+    select v, ts from w where v < 0;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - branches over different tables
+  before: [setup]
+  sql: |
+    select k, a from t where a > 0
+    union all
+    select k, a from u where a > 0;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - a branch with a join
+  before: [setup]
+  sql: |
+    select t.k, t.a from t where t.a > 0
+    union all
+    select t.k, u.c from t join u on t.k = u.k;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - a branch with a table function
+  before: [setup]
+  sql: |
+    select k, unnest(array[a, b]) as v from t
+    union all
+    select k, a from t where a is null;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - a shared sub-plan that is not a scan
+  before: [setup]
+  sql: |
+    with c as (select t.k, t.a, u.c from t join u on t.a = u.a)
+    select k, a from c where c > 0
+    union all
+    select k, c from c where a > 0;
+  expected_outputs:
+  - optimized_logical_plan_for_stream

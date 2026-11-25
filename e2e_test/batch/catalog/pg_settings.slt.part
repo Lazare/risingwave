@@ -83,6 +83,7 @@ user streaming_force_filter_inside_join
 user streaming_join_encoding
 user streaming_max_parallelism
 user streaming_merge_repeated_lookups
+user streaming_merge_union_scans
 user streaming_over_window_cache_policy
 user streaming_parallelism
 user streaming_parallelism_for_backfill

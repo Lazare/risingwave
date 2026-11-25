@@ -219,6 +219,9 @@ mod common_join_over_union_rule;
 pub use common_join_over_union_rule::*;
 mod apply_one_row_join_split_rule;
 pub use apply_one_row_join_split_rule::*;
+// Rule `UnionScanMergeRule` (`streaming_merge_union_scans`).
+mod union_scan_merge_rule;
+pub use union_scan_merge_rule::*;
 mod repeated_lookup_merge_rule;
 pub use repeated_lookup_merge_rule::*;
 mod unique_key_simplify_rule;
@@ -372,6 +375,7 @@ macro_rules! for_all_rules {
             , { RepeatedLookupMergeRule }
             , { CommonJoinOverUnionRule }
             , { ApplyOneRowJoinSplitRule }
+            , { UnionScanMergeRule }
             , { BushyTreeJoinOrderingRule }
             , { StreamProjectMergeRule }
             , { StreamProjectSplitRule }

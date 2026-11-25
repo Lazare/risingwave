@@ -31,6 +31,7 @@ own rules.
 | 7 | Join common to the branches of a `UNION ALL` joined once above the union | done (prototype, branch of idea 3) |
 | 8 | Aggregate of a constant over a group | done (prototype, branch of idea 3) |
 | 9 | Leftovers of subquery decorrelation (domain re-scan, aggregation and null-safe join back) | aggregating subqueries done (prototype, branch `proto/streaming-simplify-subquery-unnesting`); laterals without a table not started |
+| US | Branches of a `UNION ALL` that read the same table read it once (`Expand` per branch) | done (prototype, branch `proto/plan-reduction-union-scans`); dominance under a top-1 not done |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -271,6 +272,59 @@ as a semi join on `r.k = t.k`, and `NOT EXISTS` of the same as an anti join: the
 drops the rows of `t` without a match where the query keeps every row, the anti join keeps them
 where the query returns none (seen in streaming plans, batch not checked). The rule checks the null-rejection of a filter above the apply but not the join
 type of the apply.
+
+### US. Branches of a `UNION ALL` that read the same table (added on 2026-11-25, done on the branch)
+
+Variable `streaming_merge_union_scans`, rule `UnionScanMergeRule`. Views often split one table into
+several branches of a `UNION ALL`, each with its own filter and projection (one branch per status,
+per role, per kind of row). Each branch scans and backfills the table again. The rule
+reads it once:
+
+```text
+select a, x from t where p0            Project(CASE WHEN flag = 0 THEN a ELSE b END, ..)
+union all                         =>   └─Filter(CASE WHEN flag = 0 THEN p0 WHEN flag = 1 THEN p1 END)
+select b, y from t where p1              └─Expand(two copies of each row, flag = 0 and 1)
+                                           └─Scan(t, predicate: p0 OR p1)
+```
+
+- Exact bag semantics, no assumption on the filters: a row gives one copy per branch, the copy
+  of a branch is kept when the filter of the branch is true (`NULL` drops it, as a filter does),
+  so a row that passes two filters gives two rows and a duplicate row gives duplicate rows. The
+  filters need not be exclusive; with exclusive filters a single `CASE` without copies would
+  do, but proving exclusivity is not needed for the gain, which is the scan.
+- `LogicalExpand` (used for grouping sets and distinct aggregates, stateless) makes the copies,
+  every subset keeping every column, so no `NULL` column is built. Its stream key is the key of
+  the input and the flag, as the key of the union was the key of the branch and its number: the
+  materialized view keeps the same number of hidden columns. Its output distribution is
+  `SomeShard`, so an exchange follows where the union had one per branch.
+- `CASE` evaluates the condition and the expressions of a branch on the copies of that branch
+  only, so an expression that fails on rows its branch never sees is not evaluated on them. The
+  conjuncts common to every branch and the `OR` of the others go into the single scan.
+- Merged: branches of the form `(Project | Filter)*` over a scan of the same table, or over the
+  same shared sub-plan (`Share`) of a scan, which then stays shared with its other consumers.
+  Several groups of one union are merged separately; the other branches stay in the union.
+- Kept: a branch with a join, an aggregation or a table function above the scan, an impure
+  expression or `now()` (a temporal filter is a join with `Now` at this stage), a scan `AS OF`,
+  a table with a watermark (a column taken from different columns per branch would lose the
+  watermark that the union derived), a shared sub-plan that is not a scan.
+- Rows per branch: the `Expand` emits one copy per branch before the filter, a transient cost
+  in the same fragment; nothing is kept in state.
+
+Not done, the "status ladder" under a top-1 per key (`row_number() OVER (PARTITION BY k ORDER BY
+priority DESC) = 1` above a union of constant-priority branches):
+
+- *Dominated branches.* Under the top-1 only the highest priority per key matters, so two
+  branches over the same row could emit one row with a `CASE` on the priority, and an anti join
+  `NOT EXISTS (r)` in a lower branch is useless when a higher branch emits every key of `r`.
+  Correct only when the top-1 keeps nothing but the priority-determined columns, when ties
+  cannot change the result, and when no other consumer sees the union; the rule would have to
+  match the window, its partition, its order and the branches together. The merge above
+  already removes the extra scans of such branches; what remains is rows and an anti join.
+- *Default branch.* A lowest-priority branch `select k, 'init' from t` under a top-1 that is
+  joined back to `t` on `k` could become a `LEFT JOIN` with `coalesce(status, 'init')`. This
+  rewrites a join above the top-1 from a fact about a branch below it, and only holds when the
+  joined relation is exactly the scan of that branch (same filters, `k` not `NULL`). Both are
+  left for a dedicated rule after the prototype.
 
 ### 5. Aggregation pushed below a join onto the unique side
 
