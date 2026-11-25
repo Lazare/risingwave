@@ -48,6 +48,8 @@ pub(crate) const TEST_ALL_LICENSE_KEY_CONTENT: &str = "eyJhbGciOiJSUzUxMiIsInR5c
 ///     exp: 10000627200,
 /// }
 /// ```
+// Kept for reference/tests only; no longer used as the default key in local builds.
+#[allow(dead_code)]
 pub(crate) const PROD_ALL_4_CORE_LICENSE_KEY_CONTENT: &str = "eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9.\
   eyJzdWIiOiJydy1kZWZhdWx0LWFsbC00LWNvcmUiLCJpc3MiOiJwcm9kLnJpc2luZ3dhdmUuY29tIiwiZXhwIjoxMDAwMDYyNzIwMCwiaWF0IjoxNzUxODY5MTY1LCJ0aWVyIjoiYWxsIiwiY3B1X2NvcmVfbGltaXQiOjR9.\
   d4ilh2X4xnOpGP4mtIOAbkGTHRTxkqt7ZKhGpXoWxGbmYNy3RKTbHUhPZyYLZXRDW_X__LFZdxNWsh61d_A4pL_Fxq7mGdTESuWvSvyHrV34yt14MUF3ZLGyl6KaPg8X-oGc91uwJ__AO-npR0WHd8EziueZ_2lvieeTZiZWW73iRZF-DmV88wzcFuGwcZDlsc1Aajn18P9a79TEVVyeCXhj_UcLxjMIkF-3J_rO2a9aV3xMDyF1J6MHrNzRCL4fZqTeBhs4UXWI82-vwIHJaMZD2_jzgZxFkITzDaSJeoKP1cJroVq-EDUMx5MZd_80upFcdPppJCYl0UausnOJ1w";
@@ -73,7 +75,13 @@ impl<T: From<&'static str>> Default for LicenseKey<T> {
             if cfg!(debug_assertions) {
                 TEST_ALL_LICENSE_KEY_CONTENT
             } else {
-                PROD_ALL_4_CORE_LICENSE_KEY_CONTENT
+                // NOTE: Local build modification. Upstream ships the
+                // `PROD_ALL_4_CORE_LICENSE_KEY_CONTENT` key here, which unlocks all
+                // features but caps the cluster at 4 RWUs (4 cores / 16 GiB). We use an
+                // empty key instead so that the (patched) default `License` applies:
+                // `All` tier with no resource limit and no expiration. The RisingWave
+                // source is Apache-2.0 licensed, which permits this modification.
+                ""
             }
             .into(),
         )

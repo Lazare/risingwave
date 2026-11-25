@@ -1,0 +1,182 @@
+# Extension types with the native engine of Postgres CDC (`cdc.engine = 'native'`): pgvector
+# vectors and PostGIS geometries. The same upstream tables are ingested with both engines.
+
+control substitution on
+
+statement ok
+drop source if exists pg_native_ext_src_native cascade;
+
+statement ok
+drop source if exists pg_native_ext_src_dbz cascade;
+
+system ok
+PGDATABASE=${PGDATABASE:-postgres} psql -c "
+    SELECT pg_terminate_backend(active_pid)
+    FROM pg_replication_slots
+    WHERE slot_name LIKE 'pg_native_ext_slot_%' AND active_pid IS NOT NULL;
+    SELECT pg_sleep(1);
+    SELECT pg_drop_replication_slot(slot_name)
+    FROM pg_replication_slots
+    WHERE slot_name LIKE 'pg_native_ext_slot_%';
+    DROP PUBLICATION IF EXISTS pg_native_ext_pub;
+    CREATE EXTENSION IF NOT EXISTS vector;
+    CREATE EXTENSION IF NOT EXISTS postgis;
+    DROP TABLE IF EXISTS public.pg_native_ext_vec CASCADE;
+    DROP TABLE IF EXISTS public.pg_native_ext_geo CASCADE;
+    CREATE TABLE public.pg_native_ext_vec (
+        id int PRIMARY KEY, name text, embedding vector(3), big vector(1500)
+    );
+    CREATE TABLE public.pg_native_ext_geo (
+        id int PRIMARY KEY, name text,
+        pt geometry(Point, 4326), poly geometry(Polygon, 4326), nosrid geometry,
+        pts geometry(Point, 4326)[]
+    );
+    INSERT INTO public.pg_native_ext_vec VALUES
+        (1, 'snapshot', '[1,2,3]', (SELECT array_agg(i)::vector(1500) FROM generate_series(1, 1500) i));
+    INSERT INTO public.pg_native_ext_geo (id, name, pt) VALUES
+        (1, 'snapshot', ST_SetSRID(ST_MakePoint(2.3522, 48.8566), 4326));
+    CREATE PUBLICATION pg_native_ext_pub
+        FOR TABLE public.pg_native_ext_vec, public.pg_native_ext_geo;
+    "
+
+statement ok
+create source pg_native_ext_src_native with (
+    connector = 'postgres-cdc',
+    hostname = '${PGHOST:localhost}',
+    port = '${PGPORT:5432}',
+    username = '${PGUSER:$USER}',
+    password = '${PGPASSWORD:}',
+    database.name = '${PGDATABASE:postgres}',
+    schema.name = 'public',
+    publication.name = 'pg_native_ext_pub',
+    publication.create.enable = 'false',
+    slot.name = 'pg_native_ext_slot_native',
+    cdc.engine = 'native'
+);
+
+statement ok
+create source pg_native_ext_src_dbz with (
+    connector = 'postgres-cdc',
+    hostname = '${PGHOST:localhost}',
+    port = '${PGPORT:5432}',
+    username = '${PGUSER:$USER}',
+    password = '${PGPASSWORD:}',
+    database.name = '${PGDATABASE:postgres}',
+    schema.name = 'public',
+    publication.name = 'pg_native_ext_pub',
+    publication.create.enable = 'false',
+    slot.name = 'pg_native_ext_slot_dbz'
+);
+
+statement ok
+create table pg_native_ext_vec_native (id int primary key, name varchar, embedding vector(3), big vector(1500))
+from pg_native_ext_src_native table 'public.pg_native_ext_vec';
+
+statement ok
+create table pg_native_ext_vec_dbz (id int primary key, name varchar, embedding vector(3), big vector(1500))
+from pg_native_ext_src_dbz table 'public.pg_native_ext_vec';
+
+statement ok
+create table pg_native_ext_geo_native (id int primary key, name varchar, pt bytea, poly bytea, nosrid bytea, pts bytea[])
+from pg_native_ext_src_native table 'public.pg_native_ext_geo';
+
+statement ok
+create table pg_native_ext_geo_dbz (id int primary key, name varchar, pt bytea, poly bytea, nosrid bytea, pts bytea[])
+from pg_native_ext_src_dbz table 'public.pg_native_ext_geo';
+
+# The dimension of a vector is validated.
+statement error Incompatible vector dimension
+create table pg_native_ext_vec_bad_dim (id int primary key, name varchar, embedding vector(2), big vector(1500))
+from pg_native_ext_src_native table 'public.pg_native_ext_vec';
+
+query I retry 30 backoff 1s
+select count(*) from pg_native_ext_vec_native;
+----
+1
+
+query I retry 30 backoff 1s
+select count(*) from pg_native_ext_geo_native;
+----
+1
+
+# The update of `name` leaves the large vector unchanged, which is not sent by the upstream.
+system ok
+PGDATABASE=${PGDATABASE:-postgres} psql -c "
+    INSERT INTO public.pg_native_ext_vec VALUES
+        (2, 'two', '[0.5,-1.25,3e10]', (SELECT array_agg(i * 0.5)::vector(1500) FROM generate_series(1, 1500) i)),
+        (3, 'nulls', NULL, NULL);
+    UPDATE public.pg_native_ext_vec SET name = 'renamed' WHERE id = 2;
+    UPDATE public.pg_native_ext_vec SET embedding = '[9,8,7]' WHERE id = 1;
+    INSERT INTO public.pg_native_ext_geo VALUES
+        (2, 'london', ST_SetSRID(ST_MakePoint(-0.1278, 51.5074), 4326),
+         ST_GeomFromText('POLYGON((0 0,0 1,1 1,1 0,0 0))', 4326), NULL,
+         ARRAY[ST_SetSRID(ST_MakePoint(1, 2), 4326), ST_SetSRID(ST_MakePoint(3, 4), 4326)]::geometry(Point, 4326)[]),
+        (3, 'no srid', NULL, NULL, ST_MakePoint(1, 2), NULL);
+    UPDATE public.pg_native_ext_geo SET name = 'paris' WHERE id = 1;
+    "
+
+query ITTI retry 30 backoff 1s
+select id, name, embedding, array_length(big::real[], 1) from pg_native_ext_vec_native order by id;
+----
+1 snapshot [9,8,7] 1500
+2 renamed [0.5,-1.25,30000000000] 1500
+3 nulls NULL NULL
+
+# The geometries are stored as EWKB. The elements of an array of geometries are separated by
+# colons in the text format of Postgres.
+query ITTTTIT retry 30 backoff 1s
+select id, name, encode(pt, 'hex'), encode(poly, 'hex'), encode(nosrid, 'hex'), array_length(pts, 1), encode(pts[2], 'hex')
+from pg_native_ext_geo_native order by id;
+----
+1 paris 0101000020e6100000a835cd3b4ed1024076e09c11a56d4840 NULL NULL NULL NULL
+2 london 0101000020e6100000ebe2361ac05bc0bfc5feb27bf2c04940 0103000020e61000000100000005000000000000000000000000000000000000000000000000000000000000000000f03f000000000000f03f000000000000f03f000000000000f03f000000000000000000000000000000000000000000000000 NULL 2 0101000020e610000000000000000008400000000000001040
+3 no srid NULL NULL 0101000000000000000000f03f0000000000000040 NULL NULL
+
+# The two engines produce the same tables, except that a geometry without SRID is NULL with
+# the Debezium based engine.
+query I retry 30 backoff 1s
+select count(*) from pg_native_ext_vec_dbz where name in ('renamed', 'nulls') or embedding::text = '[9,8,7]';
+----
+3
+
+query I retry 30 backoff 1s
+select count(*) from pg_native_ext_geo_dbz where name in ('paris', 'london', 'no srid');
+----
+3
+
+query I
+select count(*) from pg_native_ext_vec_native n join pg_native_ext_vec_dbz d using (id)
+where (n.name is distinct from d.name)
+   or (n.embedding::text is distinct from d.embedding::text)
+   or (n.big::text is distinct from d.big::text);
+----
+0
+
+query I
+select count(*) from pg_native_ext_geo_native n join pg_native_ext_geo_dbz d using (id)
+where (n.name is distinct from d.name)
+   or (n.pt is distinct from d.pt)
+   or (n.poly is distinct from d.poly)
+   or (n.pts::text is distinct from d.pts::text);
+----
+0
+
+statement ok
+drop source pg_native_ext_src_native cascade;
+
+statement ok
+drop source pg_native_ext_src_dbz cascade;
+
+system ok
+PGDATABASE=${PGDATABASE:-postgres} psql -c "
+    SELECT pg_terminate_backend(active_pid)
+    FROM pg_replication_slots
+    WHERE slot_name LIKE 'pg_native_ext_slot_%' AND active_pid IS NOT NULL;
+    SELECT pg_sleep(1);
+    SELECT pg_drop_replication_slot(slot_name)
+    FROM pg_replication_slots
+    WHERE slot_name LIKE 'pg_native_ext_slot_%';
+    DROP PUBLICATION IF EXISTS pg_native_ext_pub;
+    DROP TABLE IF EXISTS public.pg_native_ext_vec CASCADE;
+    DROP TABLE IF EXISTS public.pg_native_ext_geo CASCADE;
+    "

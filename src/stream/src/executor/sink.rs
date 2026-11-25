@@ -65,6 +65,13 @@ pub struct SinkExecutor<F: LogStoreFactory> {
     chunk_size: usize,
     input_data_types: Vec<DataType>,
     non_append_only_behavior: Option<NonAppendOnlyBehavior>,
+    /// Whether an append-only sink with `ignore_delete` (`force_append_only`) buffers all chunks
+    /// between two barriers and only emits the net changes of the epoch. Enabled by the
+    /// `force_compaction` option.
+    ///
+    /// Without it, a row inserted and then retracted within the same epoch is still sent to the
+    /// downstream, since only its `DELETE` is dropped.
+    compact_before_ignore_delete: bool,
     rate_limit: Option<u32>,
 }
 
@@ -298,15 +305,16 @@ impl<F: LogStoreFactory> SinkExecutor<F> {
             assert_eq!(sink_input_schema.data_types(), info.schema.data_types());
         }
 
+        let force_compaction = sink_param
+            .properties
+            .get(SINK_USER_FORCE_COMPACTION)
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
         let non_append_only_behavior = if !sink_param.sink_type.is_append_only() {
             let stream_key = &info.stream_key;
             let pk_specified_and_matched = (sink_param.downstream_pk.as_ref())
                 .is_some_and(|downstream_pk| stream_key.iter().all(|i| downstream_pk.contains(i)));
-            let force_compaction = sink_param
-                .properties
-                .get(SINK_USER_FORCE_COMPACTION)
-                .map(|v| v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
             Some(NonAppendOnlyBehavior {
                 pk_specified_and_matched,
                 force_compaction,
@@ -315,10 +323,16 @@ impl<F: LogStoreFactory> SinkExecutor<F> {
             None
         };
 
+        // For a real append-only input there is nothing to compact, so only buffer when the sink
+        // drops the retractions of a non-append-only input.
+        let compact_before_ignore_delete =
+            sink_param.sink_type.is_append_only() && sink_param.ignore_delete && force_compaction;
+
         tracing::info!(
             sink_id = %sink_param.sink_id,
             actor_id = %actor_context.id,
             ?non_append_only_behavior,
+            compact_before_ignore_delete,
             "Sink executor info"
         );
 
@@ -334,6 +348,7 @@ impl<F: LogStoreFactory> SinkExecutor<F> {
             chunk_size,
             input_data_types,
             non_append_only_behavior,
+            compact_before_ignore_delete,
             rate_limit,
         })
     }
@@ -378,6 +393,7 @@ impl<F: LogStoreFactory> SinkExecutor<F> {
             input_is_upsert,
             self.sink_param.downstream_pk.clone(),
             self.non_append_only_behavior,
+            self.compact_before_ignore_delete,
             metrics.sink_chunk_buffer_size,
             self.sink_param
                 .properties
@@ -601,6 +617,7 @@ impl<F: LogStoreFactory> SinkExecutor<F> {
         input_is_upsert: bool,
         downstream_pk: Option<Vec<usize>>,
         non_append_only_behavior: Option<NonAppendOnlyBehavior>,
+        compact_before_ignore_delete: bool,
         sink_chunk_buffer_size_metrics: LabelGuardedIntGauge,
         preserve_row_level_changes: bool,
         skip_compact: bool,
@@ -705,6 +722,46 @@ impl<F: LogStoreFactory> SinkExecutor<F> {
                         };
 
                         // 3. Forward watermark and barrier.
+                        if let Some(w) = mem::take(&mut watermark) {
+                            yield Message::Watermark(w)
+                        }
+                        yield Message::Barrier(barrier);
+                    }
+                }
+            }
+        } else if compact_before_ignore_delete {
+            // Append-only sink over a non-append-only input, with `force_compaction`: buffer the
+            // chunks of the entire epoch and compact them based on the **stream key**, so that only
+            // the net change of each row survives. A row inserted and then retracted between two
+            // consecutive barriers is thus not emitted at all. The remaining `DELETE`s are then
+            // dropped and `UPDATE`s converted into `INSERT`s, as for any `ignore_delete` sink.
+            assert_matches!(sink_type, SinkType::AppendOnly);
+
+            let mut chunk_buffer = EstimatedVec::new();
+            let mut watermark: Option<super::Watermark> = None;
+            #[for_await]
+            for msg in input {
+                match msg? {
+                    Message::Watermark(w) => watermark = Some(w),
+                    Message::Chunk(c) => {
+                        chunk_buffer.push(c);
+                        sink_chunk_buffer_size_metrics.set(chunk_buffer.estimated_size() as i64);
+                    }
+                    Message::Barrier(barrier) => {
+                        let chunks = mem::take(&mut chunk_buffer).into_inner();
+                        sink_chunk_buffer_size_metrics.set(0);
+
+                        let compacted = StreamChunkCompactor::new(stream_key.clone(), chunks)
+                            .into_compacted_chunks_inline::<{ output_kind::RETRACT }>(
+                                input_compact_ib,
+                            );
+                        for c in compacted {
+                            let c = force_append_only(c);
+                            if c.cardinality() > 0 {
+                                yield Message::Chunk(c);
+                            }
+                        }
+
                         if let Some(w) = mem::take(&mut watermark) {
                             yield Message::Watermark(w)
                         }
@@ -2015,6 +2072,7 @@ mod test {
             },
             MockSource::with_messages(input).boxed(),
         );
+        let ignore_delete = properties.contains_key("force_append_only");
         let sink_param = SinkParam {
             sink_id: 0.into(),
             sink_name: "test".into(),
@@ -2022,7 +2080,7 @@ mod test {
             columns: columns.iter().map(|col| col.column_desc.clone()).collect(),
             downstream_pk: Some(downstream_pk),
             sink_type,
-            ignore_delete: false,
+            ignore_delete,
             format_desc: None,
             db_name: "test".into(),
             sink_from_name: "test".into(),
@@ -2261,6 +2319,105 @@ mod test {
                 StreamChunk::from_pretty(
                     " I I I I
                     + 1 1 8 10",
+                ),
+            ]
+        );
+    }
+
+    /// The changes of an epoch, on stream key `(0)`: one row is inserted and retracted, one is
+    /// inserted and updated, one is only inserted, and an existing one is deleted.
+    fn force_append_only_input() -> Vec<Message> {
+        use risingwave_common::array::StreamChunkTestExt;
+
+        vec![
+            Message::Barrier(Barrier::new_test_barrier(test_epoch(1))),
+            Message::Chunk(StreamChunk::from_pretty(
+                " I I
+                + 1 10
+                + 2 20",
+            )),
+            Message::Chunk(StreamChunk::from_pretty(
+                "  I I
+                -  1 10
+                U- 2 20
+                U+ 2 21
+                +  3 30
+                -  4 40",
+            )),
+            Message::Barrier(Barrier::new_test_barrier(test_epoch(2))),
+            // A retraction in a later epoch cannot cancel a row that is already emitted.
+            Message::Chunk(StreamChunk::from_pretty(
+                " I I
+                - 3 30",
+            )),
+            Message::Barrier(Barrier::new_test_barrier(test_epoch(3))),
+        ]
+    }
+
+    /// With `force_compaction`, a `force_append_only` sink only emits the net inserts of an epoch.
+    #[tokio::test]
+    async fn test_force_append_only_with_force_compaction() {
+        use risingwave_common::array::StreamChunkTestExt;
+
+        let output = run_sink_executor(
+            maplit::btreemap! {
+                "connector".into() => "blackhole".into(),
+                "type".into() => "append-only".into(),
+                "force_append_only".into() => "true".into(),
+                "force_compaction".into() => "true".into()
+            },
+            SinkType::AppendOnly,
+            StreamKind::Retract,
+            vec![0],
+            vec![0],
+            force_append_only_input(),
+        )
+        .await;
+
+        assert_eq!(
+            output,
+            vec![StreamChunk::from_pretty(
+                " I I
+                    + 2 21
+                    + 3 30",
+            ),]
+        );
+    }
+
+    /// Without `force_compaction`, every insert is emitted as it comes.
+    #[tokio::test]
+    async fn test_force_append_only_without_force_compaction() {
+        use risingwave_common::array::StreamChunkTestExt;
+
+        let output = run_sink_executor(
+            maplit::btreemap! {
+                "connector".into() => "blackhole".into(),
+                "type".into() => "append-only".into(),
+                "force_append_only".into() => "true".into()
+            },
+            SinkType::AppendOnly,
+            StreamKind::Retract,
+            vec![0],
+            vec![0],
+            force_append_only_input(),
+        )
+        .await;
+
+        assert_eq!(
+            output
+                .into_iter()
+                .filter(|c| c.cardinality() > 0)
+                .collect_vec(),
+            vec![
+                StreamChunk::from_pretty(
+                    " I I
+                    + 1 10
+                    + 2 20",
+                ),
+                StreamChunk::from_pretty(
+                    " I I
+                    + 2 21
+                    + 3 30",
                 ),
             ]
         );

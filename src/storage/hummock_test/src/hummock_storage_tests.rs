@@ -120,6 +120,80 @@ async fn test_batch_query_wait_epoch_ignores_unrelated_versions() {
         .unwrap();
 }
 
+/// The snapshot of a batch query keeps the version that it reads: it stays readable after the
+/// node dropped that version from its recent ones. A snapshot created too late for the same
+/// epoch fails with an explicit error, instead of fetching the version from the meta node for
+/// each of its reads.
+#[tokio::test]
+async fn test_batch_query_snapshot_older_than_recent_versions() {
+    use risingwave_storage::store::ReadOptions;
+
+    let table_id = TableId::new(233);
+    let test_env = prepare_hummock_test_env().await;
+    test_env.register_table_id(table_id).await;
+    let storage = &test_env.storage;
+    let version = storage.get_pinned_version();
+    let query_epoch = version.table_committed_epoch(table_id).unwrap();
+    let read_epoch = HummockReadEpoch::BatchQueryCommitted(query_epoch, version.id);
+    let new_snapshot = || {
+        storage.new_read_snapshot(
+            read_epoch,
+            NewReadSnapshotOptions {
+                table_id,
+                table_option: TableOption::default(),
+            },
+        )
+    };
+    let key_range = || {
+        prefixed_range_with_vnode(
+            (Bound::<Bytes>::Unbounded, Bound::<Bytes>::Unbounded),
+            VirtualNode::ZERO,
+        )
+    };
+    let early_snapshot = new_snapshot().await.unwrap();
+    early_snapshot
+        .iter(key_range(), ReadOptions::default())
+        .await
+        .expect("the snapshot is readable while the node keeps its version");
+
+    // The table commits more epochs than the node keeps versions.
+    let kept_versions = test_env
+        .storage
+        .storage_opts()
+        .max_cached_recent_versions_number as u64;
+    let mut updated_version = version.to_protobuf();
+    let mut committed_epoch = query_epoch;
+    for i in 1..=kept_versions + 2 {
+        committed_epoch = committed_epoch.next_epoch();
+        updated_version.id = version.id + i;
+        updated_version
+            .state_table_info
+            .get_mut(&table_id)
+            .unwrap()
+            .committed_epoch = committed_epoch;
+        storage
+            .update_version_and_wait(HummockVersion::from_rpc_protobuf(&updated_version))
+            .await;
+    }
+
+    // The snapshot created in time, and its clones, still read their version.
+    early_snapshot
+        .clone()
+        .iter(key_range(), ReadOptions::default())
+        .await
+        .expect("the snapshot keeps the version that it reads");
+
+    // A snapshot created now finds no version to read.
+    let late_snapshot = new_snapshot().await.unwrap();
+    let error = late_snapshot
+        .iter(key_range(), ReadOptions::default())
+        .await
+        .err()
+        .expect("the node no longer keeps the version of the epoch");
+    let message = format!("{error} {error:?}");
+    assert!(message.contains("the query took too long"), "{message}");
+}
+
 #[tokio::test]
 async fn test_batch_query_wait_epoch_delayed_registration() {
     let table_id = TableId::new(233);

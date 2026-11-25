@@ -1,0 +1,9 @@
+# Cluster configuration for testing selective barriers with `checkpoint_frequency > 1`:
+# a checkpoint every 30 barriers, with a short barrier interval so that a checkpoint window
+# (3 s) fits in the pauses of the tests.
+[meta.developer]
+enable_selective_barrier = true
+
+[system]
+barrier_interval_ms = 100
+checkpoint_frequency = 30

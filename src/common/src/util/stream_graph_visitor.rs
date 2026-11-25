@@ -223,6 +223,9 @@ pub fn visit_stream_node_tables_inner<F>(
             NodeBody::SourceBackfill(node) => {
                 always!(node.state_table, "SourceBackfill")
             }
+            NodeBody::CdcFilter(node) => {
+                optional!(node.state_table, "CdcFilter")
+            }
 
             // Sink
             NodeBody::Sink(node) => {

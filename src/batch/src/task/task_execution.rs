@@ -388,6 +388,22 @@ impl BatchTaskExecution {
             serde_json::to_string_pretty(self.plan.get_root()?).unwrap()
         );
 
+        // Wait for the memory that the query reserves on this node, unless the task is cancelled
+        // in the meantime.
+        // The reservation is held until the execution of the task ends.
+        let admission_guard = match self.context.query_memory() {
+            Some(query_memory) => {
+                let mut shutdown_rx = self.shutdown_rx.clone();
+                tokio::select! {
+                    guard = query_memory.admit() => Some(guard),
+                    _ = shutdown_rx.cancelled() => {
+                        bail!("task {:?} cancelled while waiting for memory", self.task_id);
+                    }
+                }
+            }
+            None => None,
+        };
+
         let exec = expr_context_scope(
             expr_context.clone(),
             ExecutorBuilder::new(
@@ -436,6 +452,7 @@ impl BatchTaskExecution {
         }
         // Spawn task for real execution.
         let fut = async move {
+            let _admission_guard = admission_guard;
             trace!("Executing plan [{:?}]", task_id);
             let sender = sender;
             let mut state_tx_1 = state_tx.clone();

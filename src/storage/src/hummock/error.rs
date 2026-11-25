@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use risingwave_common::util::epoch::Epoch;
 use risingwave_object_store::object::ObjectError;
 use risingwave_pb::id::TableId;
 use thiserror::Error;
@@ -52,6 +53,15 @@ pub enum HummockErrorInner {
     ChangeLogRetentionMiss { table_id: TableId, epoch: u64 },
     #[error("Time-travel version expired: table {table_id}, epoch {epoch}")]
     TimeTravelVersionExpired { table_id: TableId, epoch: u64 },
+    #[error(
+        "the query took too long: the snapshot it reads (table {table_id}, epoch {epoch}, taken {age_secs}s ago) is older than the last {kept_versions} checkpoints kept by the compute node, and reading it through the meta node would be extremely slow. Rerun the query, with fewer concurrent queries if needed, or raise `storage.max_cached_recent_versions_number`"
+    )]
+    BatchSnapshotTooOld {
+        table_id: TableId,
+        epoch: u64,
+        age_secs: u64,
+        kept_versions: usize,
+    },
     #[error(
         "Committed epoch mismatch: table {table_id}, committed_epoch {committed_epoch}, read_epoch {read_epoch}"
     )]
@@ -127,6 +137,25 @@ impl HummockError {
 
     pub fn time_travel_version_expired(table_id: TableId, epoch: u64) -> HummockError {
         HummockErrorInner::TimeTravelVersionExpired { table_id, epoch }.into()
+    }
+
+    /// A batch query reads a snapshot that the node no longer keeps among its recent versions.
+    pub fn batch_snapshot_too_old(
+        table_id: TableId,
+        epoch: u64,
+        kept_versions: usize,
+    ) -> HummockError {
+        let age_secs = Epoch::now()
+            .physical_time()
+            .saturating_sub(Epoch(epoch).physical_time())
+            / 1000;
+        HummockErrorInner::BatchSnapshotTooOld {
+            table_id,
+            epoch,
+            age_secs,
+            kept_versions,
+        }
+        .into()
     }
 
     pub fn committed_epoch_mismatch(

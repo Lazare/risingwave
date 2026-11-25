@@ -175,7 +175,8 @@ impl ExecutorBuilder for StreamCdcScanExecutorBuilder {
                 scan_options,
                 properties,
                 Some(progress),
-            );
+            )
+            .with_pending_input_reporter(params.local_barrier_manager.clone());
             Ok((params.info, exec).into())
         } else {
             let vnodes = params.vnode_bitmap.map(Arc::new);
@@ -197,7 +198,8 @@ impl ExecutorBuilder for StreamCdcScanExecutorBuilder {
                 node.rate_limit,
                 scan_options,
                 properties,
-            );
+            )
+            .with_pending_input_reporter(params.local_barrier_manager.clone());
             Ok((params.info, exec).into())
         }
     }

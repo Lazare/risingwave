@@ -20,7 +20,8 @@ use risingwave_pb::expr::{ExprNode, FunctionCall};
 use risingwave_pb::stream_plan::CdcFilterNode;
 
 use super::*;
-use crate::executor::FilterExecutor;
+use crate::common::table::state_table::StateTableBuilder;
+use crate::executor::{CdcFilterGateExecutor, FilterExecutor};
 
 pub struct CdcFilterExecutorBuilder;
 
@@ -39,14 +40,29 @@ impl ExecutorBuilder for CdcFilterExecutorBuilder {
     async fn new_boxed_executor(
         params: ExecutorParams,
         node: &Self::Node,
-        _store: impl StateStore,
+        store: impl StateStore,
     ) -> StreamResult<Executor> {
         let [input]: [_; 1] = params.input.try_into().unwrap();
         let search_condition_proto = build_search_condition_with_compat(node)?;
         let search_condition =
             build_non_strict_from_prost(&search_condition_proto, params.eval_error_report)?;
 
-        let exec = FilterExecutor::new(params.actor_context, input, search_condition);
+        let exec = FilterExecutor::new(params.actor_context.clone(), input, search_condition);
+        let Some(state_table) = &node.state_table else {
+            return Ok((params.info, exec).into());
+        };
+        // Selective barriers: hold the rows of the table while it sleeps.
+        let filter = Executor::new(params.info.clone(), exec.boxed());
+        let state_table = StateTableBuilder::new(state_table, store, None)
+            .forbid_preload_all_rows()
+            .build()
+            .await;
+        let exec = CdcFilterGateExecutor::new(
+            params.actor_context,
+            filter,
+            state_table,
+            params.local_barrier_manager.clone(),
+        );
         Ok((params.info, exec).into())
     }
 }

@@ -122,6 +122,7 @@ paste = "1"
 pg_bigdecimal = { git = "https://github.com/risingwavelabs/rust-pg_bigdecimal", rev = "0b7893d88894ca082b4525f94f812da034486f7c" }
 phf = { version = "0.13", features = ["macros"] }
 postgres-openssl = "0.5.0"
+postgres-protocol = "0.6"
 prometheus = { version = "0.14", features = ["process"] }
 prost = { workspace = true, features = ["no-recursion-limit"] }
 prost-013 = { package = "prost", version = "0.13.4" }
@@ -194,6 +195,7 @@ tiberius = { git = "https://github.com/risingwavelabs/tiberius.git", rev = "cd69
 ] }
 time = "0.3.47"
 tokio = { workspace = true, features = ["fs"] }
+tokio-openssl = "0.6.3"
 tokio-postgres = { version = "0.7", features = ["with-uuid-1"] }
 tokio-retry = "0.3"
 tokio-stream = { workspace = true }

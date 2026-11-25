@@ -1,0 +1,125 @@
+# The native engine of Postgres CDC (`cdc.engine = 'native'`) resumes from the offset persisted
+# by the last checkpoint: no change is lost when the reader is restarted, including in the
+# middle of a large upstream transaction.
+
+control substitution on
+
+statement ok
+drop source if exists pg_native_recovery_src cascade;
+
+system ok
+PGDATABASE=${PGDATABASE:-postgres} psql -c "
+    SELECT pg_terminate_backend(active_pid)
+    FROM pg_replication_slots
+    WHERE slot_name = 'pg_native_recovery_slot' AND active_pid IS NOT NULL;
+    SELECT pg_sleep(1);
+    SELECT pg_drop_replication_slot(slot_name)
+    FROM pg_replication_slots
+    WHERE slot_name = 'pg_native_recovery_slot';
+    DROP PUBLICATION IF EXISTS pg_native_recovery_pub;
+    DROP TABLE IF EXISTS public.pg_native_recovery CASCADE;
+    CREATE TABLE public.pg_native_recovery (id int PRIMARY KEY, v int);
+    INSERT INTO public.pg_native_recovery SELECT i, 0 FROM generate_series(1, 1000) i;
+    CREATE PUBLICATION pg_native_recovery_pub FOR TABLE public.pg_native_recovery;
+    "
+
+statement ok
+create source pg_native_recovery_src with (
+    connector = 'postgres-cdc',
+    hostname = '${PGHOST:localhost}',
+    port = '${PGPORT:5432}',
+    username = '${PGUSER:$USER}',
+    password = '${PGPASSWORD:}',
+    database.name = '${PGDATABASE:postgres}',
+    schema.name = 'public',
+    publication.name = 'pg_native_recovery_pub',
+    publication.create.enable = 'false',
+    slot.name = 'pg_native_recovery_slot',
+    cdc.engine = 'native'
+);
+
+statement ok
+create table pg_native_recovery_rw (*)
+from pg_native_recovery_src table 'public.pg_native_recovery';
+
+query II retry 30 backoff 1s
+select count(*), sum(v) from pg_native_recovery_rw;
+----
+1000 0
+
+# Restart while idle.
+system ok
+PGDATABASE=${PGDATABASE:-postgres} psql -c "
+    INSERT INTO public.pg_native_recovery SELECT i, 0 FROM generate_series(1001, 2000) i;
+    UPDATE public.pg_native_recovery SET v = 1 WHERE id <= 500;
+    "
+
+query II retry 30 backoff 1s
+select count(*), sum(v) from pg_native_recovery_rw;
+----
+2000 500
+
+statement ok
+flush;
+
+onlyif can-use-recover
+statement ok
+recover;
+
+system ok
+PGDATABASE=${PGDATABASE:-postgres} psql -c "
+    DELETE FROM public.pg_native_recovery WHERE id > 1900;
+    UPDATE public.pg_native_recovery SET v = 2 WHERE id <= 100;
+    "
+
+query II retry 60 backoff 1s
+select count(*), sum(v) from pg_native_recovery_rw;
+----
+1900 600
+
+# Restart while a large upstream transaction, followed by small ones, is being consumed.
+system ok
+PGDATABASE=${PGDATABASE:-postgres} psql -c "
+    BEGIN;
+    INSERT INTO public.pg_native_recovery SELECT i, 0 FROM generate_series(10001, 210000) i;
+    UPDATE public.pg_native_recovery SET v = 3 WHERE id <= 100;
+    COMMIT;
+    INSERT INTO public.pg_native_recovery VALUES (300001, 10);
+    INSERT INTO public.pg_native_recovery VALUES (300002, 10);
+    UPDATE public.pg_native_recovery SET v = 20 WHERE id = 300001;
+    "
+
+onlyif can-use-recover
+sleep 2s
+
+onlyif can-use-recover
+statement ok
+recover;
+
+onlyif can-use-recover
+sleep 3s
+
+onlyif can-use-recover
+statement ok
+recover;
+
+query II retry 120 backoff 1s
+select count(*), sum(v) from pg_native_recovery_rw;
+----
+201902 730
+
+statement ok
+drop source pg_native_recovery_src cascade;
+
+system ok
+PGDATABASE=${PGDATABASE:-postgres} psql -c "
+    SELECT pg_terminate_backend(active_pid)
+    FROM pg_replication_slots
+    WHERE slot_name = 'pg_native_recovery_slot' AND active_pid IS NOT NULL;
+    SELECT pg_sleep(1);
+    SELECT pg_drop_replication_slot(slot_name)
+    FROM pg_replication_slots
+    WHERE slot_name = 'pg_native_recovery_slot';
+    DROP PUBLICATION IF EXISTS pg_native_recovery_pub;
+    DROP TABLE IF EXISTS public.pg_native_recovery CASCADE;
+    "

@@ -60,6 +60,7 @@ use crate::optimizer::plan_node::{
 };
 use crate::optimizer::property::Distribution;
 use crate::scheduler::SchedulerResult;
+use crate::scheduler::batch_limits::{BatchLimits, ParallelismDecision};
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub struct QueryId {
@@ -195,12 +196,65 @@ impl Default for QueryId {
     }
 }
 
+/// Moves the operators of the root stage that hold rows in memory to a compute node.
+///
+/// The root stage of a distributed query runs in the frontend, where the memory limits of batch
+/// queries on compute nodes do not apply. When it contains such operators, an exchange is added
+/// on top of the plan: the operators then run in a stage of their own on a compute node, and the
+/// root stage only forwards their output.
+pub fn move_stateful_operators_out_of_root_stage(plan: PlanRef) -> PlanRef {
+    use BatchPlanNodeType::*;
+
+    /// Visits the nodes of the root stage. Returns `false` when one of them may have to run in
+    /// the frontend.
+    fn visit(node: &PlanRef, stateful: &mut bool) -> bool {
+        match node.node_type() {
+            // The boundary of the root stage.
+            BatchExchange => return true,
+            BatchHashJoin | BatchHashAgg | BatchSort | BatchNestedLoopJoin | BatchTopN
+            | BatchGroupTopN => *stateful = true,
+            BatchSimpleAgg | BatchSortAgg | BatchProject | BatchFilter | BatchLimit
+            | BatchUnion | BatchHopWindow | BatchExpand | BatchProjectSet | BatchOverWindow
+            | BatchMaxOneRow | BatchValues => {}
+            _ => return false,
+        }
+        node.inputs().iter().all(|input| visit(input, stateful))
+    }
+
+    let mut stateful = false;
+    if visit(&plan, &mut stateful) && stateful {
+        let order = crate::optimizer::plan_node::batch::BatchPlanNodeMetadata::order(&plan).clone();
+        crate::optimizer::plan_node::BatchExchange::new(plan, order, Distribution::Single).into()
+    } else {
+        plan
+    }
+}
+
 impl BatchPlanFragmenter {
     pub fn new(
         worker_node_manager: WorkerNodeSelector,
         catalog_reader: CatalogReader,
         batch_parallelism: Option<NonZeroU64>,
         batch_node: PlanRef,
+    ) -> SchedulerResult<Self> {
+        Self::new_with_limits(
+            worker_node_manager,
+            catalog_reader,
+            batch_parallelism,
+            batch_node,
+            None,
+        )
+    }
+
+    /// Same as [`BatchPlanFragmenter::new`], but lowers the parallelism until the spillable
+    /// operators of the query all get their minimum of memory within what a query may use on a
+    /// compute node, and rejects the query when that is impossible even without parallelism.
+    pub fn new_with_limits(
+        worker_node_manager: WorkerNodeSelector,
+        catalog_reader: CatalogReader,
+        batch_parallelism: Option<NonZeroU64>,
+        batch_node: PlanRef,
+        limits: Option<BatchLimits>,
     ) -> SchedulerResult<Self> {
         // if batch_parallelism is None, it means no limit, we will use the available nodes count as
         // parallelism.
@@ -226,7 +280,44 @@ impl BatchPlanFragmenter {
             stage_graph_builder: Some(StageGraphBuilder::new(batch_parallelism)),
             stage_graph: None,
         };
-        plan_fragmenter.split_into_stage(batch_node)?;
+        plan_fragmenter.split_into_stage(batch_node.clone())?;
+
+        let Some(limits) = limits else {
+            return Ok(plan_fragmenter);
+        };
+        let initial_parallelism = plan_fragmenter.batch_parallelism;
+        loop {
+            let parallelism = plan_fragmenter.batch_parallelism;
+            let instances = plan_fragmenter
+                .stage_graph
+                .as_ref()
+                .unwrap()
+                .spillable_operator_instances();
+            match limits.decide(parallelism, instances) {
+                ParallelismDecision::Keep => break,
+                ParallelismDecision::Lower(lower) => {
+                    plan_fragmenter.batch_parallelism = lower;
+                    plan_fragmenter.next_stage_id = 0.into();
+                    plan_fragmenter.stage_graph_builder = Some(StageGraphBuilder::new(lower));
+                    plan_fragmenter.stage_graph = None;
+                    plan_fragmenter.split_into_stage(batch_node.clone())?;
+                }
+                ParallelismDecision::Reject { needed, allowed } => {
+                    return Err(SchedulerError::QueryNeedsTooMuchMemory(
+                        needed >> 20,
+                        allowed >> 20,
+                    ));
+                }
+            }
+        }
+        if plan_fragmenter.batch_parallelism != initial_parallelism {
+            tracing::info!(
+                query_id = plan_fragmenter.query_id.id,
+                from = initial_parallelism,
+                to = plan_fragmenter.batch_parallelism,
+                "lowered the parallelism of a batch query to fit its memory limit"
+            );
+        }
         Ok(plan_fragmenter)
     }
 
@@ -261,6 +352,12 @@ pub struct Query {
 }
 
 impl Query {
+    /// The number of instances of spillable operators (hash agg, hash join, sort) that the query
+    /// runs, over all stages and tasks. Compute nodes split the memory of the query among them.
+    pub fn spillable_operator_instances(&self) -> u32 {
+        self.stage_graph.spillable_operator_instances()
+    }
+
     pub fn leaf_stages(&self) -> Vec<StageId> {
         let mut ret_leaf_stages = Vec::new();
         for stage_id in self.stage_graph.stages.keys() {
@@ -751,6 +848,28 @@ enum StageCompleteInfo {
 }
 
 impl StageGraph {
+    /// The number of instances of spillable operators (hash agg, hash join, sort), over all
+    /// stages and tasks. A stage whose parallelism is not decided yet counts for the parallelism
+    /// of the query.
+    pub fn spillable_operator_instances(&self) -> u32 {
+        fn count(node: &ExecutionPlanNode) -> u32 {
+            let own = matches!(
+                node.plan_node_type,
+                BatchPlanNodeType::BatchHashAgg
+                    | BatchPlanNodeType::BatchHashJoin
+                    | BatchPlanNodeType::BatchSort
+            ) as u32;
+            own + node.children.iter().map(count).sum::<u32>()
+        }
+        let default_parallelism = self.batch_parallelism.max(1) as u32;
+        self.stages
+            .values()
+            .map(|stage| {
+                count(&stage.root).saturating_mul(stage.parallelism.unwrap_or(default_parallelism))
+            })
+            .fold(0, u32::saturating_add)
+    }
+
     pub fn get_child_stages_unchecked(&self, stage_id: &StageId) -> &HashSet<StageId> {
         self.child_edges.get(stage_id).unwrap()
     }

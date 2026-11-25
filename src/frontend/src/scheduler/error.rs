@@ -48,6 +48,11 @@ pub enum SchedulerError {
     )]
     QueryReachLimit(QueryMode, u64),
 
+    #[error(
+        "Reject query: its hash aggregations, hash joins and sorts need at least {0} MB of memory even without parallelism, and a query may use at most {1} MB of a compute node. Simplify the query or materialize parts of it."
+    )]
+    QueryNeedsTooMuchMemory(u64, u64),
+
     #[error(transparent)]
     BatchError(
         #[from]

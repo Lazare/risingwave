@@ -159,3 +159,12 @@
   expected_outputs:
     - batch_plan
     - stream_plan
+
+- name: union with a filtered scan of a materialized view ordered by a non-stream-key column
+  sql: |
+    create table t (id int primary key, k int, v int);
+    create table u (id int primary key, k int);
+    create materialized view mv as select id, k, v from t order by v;
+    select id from u union all select k from mv where v = 1;
+  expected_outputs:
+    - stream_plan

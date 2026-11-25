@@ -19,7 +19,7 @@ use risingwave_common::types::DataType;
 use risingwave_common::util::epoch::Epoch;
 use risingwave_pb::catalog::PbFunction;
 use risingwave_pb::catalog::function::PbKind;
-use risingwave_pb::expr::{PbUdfExprVersion, PbUserDefinedFunctionMetadata};
+use risingwave_pb::expr::{PbUdfExprVersion, PbUdfVolatility, PbUserDefinedFunctionMetadata};
 use risingwave_pb::id::UserId;
 
 use crate::catalog::OwnedByUserCatalog;
@@ -42,6 +42,8 @@ pub struct FunctionCatalog {
     pub always_retry_on_network_error: bool,
     pub is_async: Option<bool>,
     pub is_batched: Option<bool>,
+    /// The volatility declared by the user. `Unspecified` is treated as volatile.
+    pub volatility: PbUdfVolatility,
     pub created_at_epoch: Option<Epoch>,
     pub created_at_cluster_version: Option<String>,
 }
@@ -84,6 +86,7 @@ impl From<&PbFunction> for FunctionCatalog {
             always_retry_on_network_error: prost.always_retry_on_network_error,
             is_async: prost.is_async,
             is_batched: prost.is_batched,
+            volatility: prost.volatility(),
             created_at_epoch: prost.created_at_epoch.map(Epoch::from),
             created_at_cluster_version: prost.created_at_cluster_version.clone(),
         }
@@ -106,6 +109,18 @@ impl From<&FunctionCatalog> for PbUserDefinedFunctionMetadata {
             is_async: c.is_async,
             is_batched: c.is_batched,
         }
+    }
+}
+
+impl FunctionCatalog {
+    /// Whether the function is declared as `IMMUTABLE` by the user, i.e., it is guaranteed to
+    /// always return the same result for the same arguments.
+    ///
+    /// Only immutable functions are considered pure. `STABLE` functions may still return
+    /// different results across statements (and thus across epochs in streaming), so they're
+    /// treated the same as `VOLATILE` ones.
+    pub fn is_immutable(&self) -> bool {
+        self.volatility == PbUdfVolatility::Immutable
     }
 }
 

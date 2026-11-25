@@ -16,6 +16,7 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 use futures_async_stream::try_stream;
+use risingwave_batch::task::ExecutorMemory;
 use risingwave_common::array::DataChunk;
 use risingwave_common::catalog::Schema;
 use risingwave_common::memory::{MemMonitoredHeap, MemoryContext};
@@ -44,6 +45,7 @@ pub struct TopNExecutor {
     identity: String,
     chunk_size: usize,
     mem_ctx: MemoryContext,
+    memory: ExecutorMemory,
 }
 
 impl BoxedExecutorBuilder for TopNExecutor {
@@ -72,7 +74,7 @@ impl BoxedExecutorBuilder for TopNExecutor {
             top_n_node.get_with_ties(),
             identity.clone(),
             source.context().get_config().developer.chunk_size,
-            source.context().create_executor_mem_context(identity),
+            source.context().create_executor_memory(identity),
         )))
     }
 }
@@ -86,9 +88,11 @@ impl TopNExecutor {
         with_ties: bool,
         identity: String,
         chunk_size: usize,
-        mem_ctx: MemoryContext,
+        memory: impl Into<ExecutorMemory>,
     ) -> Self {
         let schema = child.schema().clone();
+        let memory = memory.into();
+        let mem_ctx = memory.meter();
         Self {
             child,
             column_orders,
@@ -99,6 +103,7 @@ impl TopNExecutor {
             identity,
             chunk_size,
             mem_ctx,
+            memory,
         }
     }
 }
@@ -258,6 +263,7 @@ impl TopNExecutor {
             self.with_ties,
             self.mem_ctx.clone(),
         );
+        let mut memory = self.memory;
 
         #[for_await]
         for chunk in self.child.execute() {
@@ -271,6 +277,7 @@ impl TopNExecutor {
                     row: chunk.row_at(row_id).0.to_owned_row(),
                 });
             }
+            memory.settle().await?;
         }
 
         let mut chunk_builder = DataChunkBuilder::new(self.schema.data_types(), self.chunk_size);
