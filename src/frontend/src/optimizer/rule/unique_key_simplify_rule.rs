@@ -69,6 +69,12 @@ fn unique_keys(plan: &PlanRef, memo: &mut HashMap<PlanNodeId, Vec<Key>>) -> Vec<
     keys
 }
 
+/// The known unique keys of a plan node, for `RepeatedLookupMergeRule`: the unique key of a shared
+/// sub-plan read twice designates the same row in both reads.
+pub(super) fn unique_keys_of(plan: &PlanRef) -> Vec<Key> {
+    unique_keys(plan, &mut HashMap::new())
+}
+
 /// The key of a scanned table, on the output columns of the scan.
 ///
 /// A key column that the predicate of the scan fixes to a constant is not needed to tell two rows

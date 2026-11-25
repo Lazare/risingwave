@@ -242,10 +242,29 @@ input joined on their group key: one aggregation with a `FILTER` per call.
   - A semi or anti join whose right side is a shared sub-plan (a view used twice) is looked into
     too, but only rewritten when nothing of the sub-plan is left in it: the rest would otherwise
     be computed a second time next to the shared one.
-  - Not handled, deliberately: a lookup in the padded side of a left join of the tree (it is
-    not pulled above the outer join), a lookup of a derived relation (aggregation, distinct or
-    top-1 of a shared sub-plan), a lookup whose row is designated through a lifted left join,
-    a key compared on a computed expression. An unused inner join on the key is never removed:
+  - Second round:
+    - *Derived relations*: a shared sub-plan with a unique key (the group key of an
+      aggregation, the columns of a `DISTINCT`, the group key of a top-1, as the unique keys of
+      idea 4 derive them) is a relation like a table: two reads of the *same* `Share` node read
+      the same rows, so a read on its whole key is a lookup, and the `Share` node carries an
+      instance whose output columns are bound. A sub-plan that is not shared is never matched
+      with another one: two equal sub-plans are not proven to be equal.
+    - A left join that looks a row up by its key, from the column that a lookup is compared
+      with, searched the same rows when both have the same filter: the lookup finds a row
+      exactly when the instance is matched, which a bound column of the key tells. Used for
+      shared sub-plans (which can not be widened) and for the nested lookups.
+    - *Padded lookups*: a lookup that is the padded side of a left join of the tree. Under an
+      inner join, the left join is lifted and the lookup merged into it (`merge_lookup` handles
+      a left lookup). In the right side of a left join, its columns are those of the carried row
+      when the condition of its left join and its filter hold, `NULL` otherwise; the proof that
+      it reads the carried row may use the condition of its own left join, which holds whenever
+      it finds a row.
+    - The merge stage runs up to three passes: a join rewritten in a pass is not looked at again
+      in that pass, and may still hold a second lookup.
+    - The conditions that a rewrite builds are tidied: repeated conjuncts go, `x = x` becomes
+      `x IS NOT NULL`.
+  - Not handled, deliberately: a lookup whose row is designated through a lifted left join, a
+    key compared on a computed expression, two equal sub-plans that are not shared. An unused inner join on the key is never removed:
     the row may be missing, which the join filters (an unused left join on a unique key is
     removed by idea 1). Redundancies that hold only because a consumer is insensitive to
     duplicates (a top-1 or a `min` above) are not used either.
