@@ -239,6 +239,32 @@ fn rewrite(join: &LogicalJoin) -> Option<PlanRef> {
     Some(LogicalProject::new(result, exprs).into())
 }
 
+/// The column of the table that each output column of the input of a share is, when the input is
+/// the scan of the table under projections that pick columns and filters: one row per row of the
+/// table that it reads.
+fn shared_table_columns(plan: &PlanRef, table_id: TableId) -> Option<Vec<Option<usize>>> {
+    if let Some(scan) = plan.as_logical_scan() {
+        if scan.table().id != table_id || scan.as_of().is_some() {
+            return None;
+        }
+        return Some(scan.output_col_idx().iter().map(|&c| Some(c)).collect());
+    }
+    if let Some(project) = plan.as_logical_project() {
+        let input = shared_table_columns(&project.input(), table_id)?;
+        return Some(
+            project
+                .exprs()
+                .iter()
+                .map(|e| e.as_input_ref().and_then(|r| input[r.index()]))
+                .collect(),
+        );
+    }
+    if let Some(filter) = plan.as_logical_filter() {
+        return shared_table_columns(&filter.input(), table_id);
+    }
+    None
+}
+
 /// What the aggregation of the right side needs to be computed on the rows of the table.
 struct PerRow<'a> {
     table_id: TableId,
@@ -433,18 +459,18 @@ fn attach(
         return Some(appended(new, output.len()));
     }
     if let Some(share) = plan.as_logical_share() {
-        let input = share.input();
-        let scan = input.as_logical_scan()?;
-        if !leaf_scan_of(scan) {
+        // The share is kept as it is: the table columns of its output must hold what is needed.
+        let columns_of_share = shared_table_columns(&share.input(), per_row.table_id)?;
+        if !columns.iter().all(|&(o, c)| columns_of_share[o] == Some(c)) {
             return None;
         }
-        let output = scan.output_col_idx();
         let mut position = HashMap::new();
         for &c in per_row.needed {
-            position.insert(c, output.iter().position(|&o| o == c)?);
+            position.insert(c, columns_of_share.iter().position(|&o| o == Some(c))?);
         }
-        let new = per_row.build(plan.clone(), &position, output.len())?;
-        return Some(appended(new, output.len()));
+        let len = columns_of_share.len();
+        let new = per_row.build(plan.clone(), &position, len)?;
+        return Some(appended(new, len));
     }
     if let Some(project) = plan.as_logical_project() {
         let inner_columns = columns
