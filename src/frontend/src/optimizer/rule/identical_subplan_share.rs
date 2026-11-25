@@ -112,6 +112,8 @@ fn is_worth_sharing(plan: &PlanRef) -> bool {
 #[allow(clippy::mutable_key_type)]
 struct Merger {
     cache: HashMap<PlanRef, LogicalShare>,
+    /// The result for each share of the input plan, so that its input is looked up once.
+    shares: HashMap<PlanNodeId, PlanRef>,
     kept: HashSet<PlanNodeId>,
 }
 
@@ -119,8 +121,12 @@ struct Merger {
 impl Endo<PlanRef> for Merger {
     fn apply(&mut self, t: PlanRef) -> PlanRef {
         if let Some(share) = t.as_logical_share() {
+            if let Some(shared) = self.shares.get(&share.id()) {
+                return shared.clone();
+            }
             let shared = self.apply(share.input());
             self.kept.insert(shared.id());
+            self.shares.insert(share.id(), shared.clone());
             return shared;
         }
         if let Some(share) = self.cache.get(&t) {

@@ -18,9 +18,12 @@ CASES = [
     ('share_agg', 'the same aggregation, from a view whose other aggregate is pruned',
      f"select a.id, g1.c from {A} a join {G1} g1 on a.k = g1.sid "
      f"union all select b.id, x.c from {B} b join (select sid, count(*) as c from {H} group by sid) x on b.k = x.sid"),
+    # The count is wrapped in `coalesce`: with and without the variables, the streaming plan of
+    # two select-list subqueries gives NULL instead of 0 for an outer row whose correlated column
+    # is NULL (the domains are joined back after a filter that drops the NULL key).
     ('share_domain', 'the domain of two subqueries with the same correlation',
      f"select a.id, (select max(v) from {H} h where h.sid = a.k) as m1, "
-     f"(select count(*) from {H} h where h.sid = a.k and h.st = 'x') as c2 from {A} a"),
+     f"coalesce((select count(*) from {H} h where h.sid = a.k and h.st = 'x'), 0) as c2 from {A} a"),
     ('share_cte', 'a sub-plan shared at the beginning',
      f"with j as (select a.id, h.v from {A} a join {H} h on a.k = h.sid where h.v > 0) "
      f"select id, v from j union all select id, v + 1 from j"),

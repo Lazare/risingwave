@@ -239,13 +239,13 @@ impl Rule<Logical> for StackedAggMergeRule {
         }
 
         let new_input = if extra_exprs.is_empty() {
-            input.clone()
+            input
         } else {
             let exprs: Vec<ExprImpl> = (0..input_len)
                 .map(|index| InputRef::new(index, input.schema()[index].data_type.clone()).into())
                 .chain(extra_exprs)
                 .collect();
-            LogicalProject::create(input.clone(), exprs)
+            LogicalProject::create(input, exprs)
         };
         let group_key_len = new_group_key.len();
         let group_key_positions: Vec<usize> = new_group_key.indices().collect();

@@ -371,6 +371,11 @@ consumer and do not rewrite a shared sub-plan.
   the scan and every consumer, so it is left duplicated, as the early sharing leaves a bare scan.
 - The shares that existed before are kept as they are, and a plan without a new duplicate is
   returned unchanged.
+- Found on the way, not changed (with and without the variable): `SELECT a.id, (SELECT max(v)
+  FROM h WHERE h.sid = a.k), (SELECT count(*) FROM h WHERE h.sid = a.k AND ...) FROM a` gives
+  `NULL` instead of 0 for the count of a row whose `a.k` is `NULL` in streaming: the two domains
+  are full-outer-joined, filtered on `a.k IS NOT NULL`, then joined back with `IS NOT DISTINCT
+  FROM`, so the row finds no match. Batch returns 0.
 - Not done: reads of the same table that differ by their columns or by a filter (one scan of the
   union of the columns, each consumer projecting and filtering its part), and joins that differ
   by a filter that commutes with them. Both need a widening of the shared sub-plan, and for scans

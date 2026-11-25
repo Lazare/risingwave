@@ -71,7 +71,7 @@ create materialized view ssa_share_agg_off as select a.id, g1.c from ssa_a a joi
 # the domain of two subqueries with the same correlation
 
 statement ok
-create materialized view ssa_share_domain_off as select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, (select count(*) from ssa_h h where h.sid = a.k and h.st = 'x') as c2 from ssa_a a;
+create materialized view ssa_share_domain_off as select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, coalesce((select count(*) from ssa_h h where h.sid = a.k and h.st = 'x'), 0) as c2 from ssa_a a;
 
 # a sub-plan shared at the beginning
 
@@ -202,7 +202,7 @@ create materialized view ssa_share_agg_on as select a.id, g1.c from ssa_a a join
 # the domain of two subqueries with the same correlation
 
 statement ok
-create materialized view ssa_share_domain_on as select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, (select count(*) from ssa_h h where h.sid = a.k and h.st = 'x') as c2 from ssa_a a;
+create materialized view ssa_share_domain_on as select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, coalesce((select count(*) from ssa_h h where h.sid = a.k and h.st = 'x'), 0) as c2 from ssa_a a;
 
 # a sub-plan shared at the beginning
 
@@ -542,9 +542,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssa_share_domain_on except select * from (select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, (select count(*) from ssa_h h where h.sid = a.k and h.st = 'x') as c2 from ssa_a a) q) x),
-  (select count(*) from (select * from (select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, (select count(*) from ssa_h h where h.sid = a.k and h.st = 'x') as c2 from ssa_a a) q except select * from ssa_share_domain_on) y),
-  (select count(*) from ssa_share_domain_on) - (select count(*) from (select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, (select count(*) from ssa_h h where h.sid = a.k and h.st = 'x') as c2 from ssa_a a) q);
+  (select count(*) from (select * from ssa_share_domain_on except select * from (select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, coalesce((select count(*) from ssa_h h where h.sid = a.k and h.st = 'x'), 0) as c2 from ssa_a a) q) x),
+  (select count(*) from (select * from (select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, coalesce((select count(*) from ssa_h h where h.sid = a.k and h.st = 'x'), 0) as c2 from ssa_a a) q except select * from ssa_share_domain_on) y),
+  (select count(*) from ssa_share_domain_on) - (select count(*) from (select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, coalesce((select count(*) from ssa_h h where h.sid = a.k and h.st = 'x'), 0) as c2 from ssa_a a) q);
 ----
 0 0 0
 
@@ -998,9 +998,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssa_share_domain_on except select * from (select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, (select count(*) from ssa_h h where h.sid = a.k and h.st = 'x') as c2 from ssa_a a) q) x),
-  (select count(*) from (select * from (select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, (select count(*) from ssa_h h where h.sid = a.k and h.st = 'x') as c2 from ssa_a a) q except select * from ssa_share_domain_on) y),
-  (select count(*) from ssa_share_domain_on) - (select count(*) from (select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, (select count(*) from ssa_h h where h.sid = a.k and h.st = 'x') as c2 from ssa_a a) q);
+  (select count(*) from (select * from ssa_share_domain_on except select * from (select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, coalesce((select count(*) from ssa_h h where h.sid = a.k and h.st = 'x'), 0) as c2 from ssa_a a) q) x),
+  (select count(*) from (select * from (select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, coalesce((select count(*) from ssa_h h where h.sid = a.k and h.st = 'x'), 0) as c2 from ssa_a a) q except select * from ssa_share_domain_on) y),
+  (select count(*) from ssa_share_domain_on) - (select count(*) from (select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, coalesce((select count(*) from ssa_h h where h.sid = a.k and h.st = 'x'), 0) as c2 from ssa_a a) q);
 ----
 0 0 0
 
@@ -1450,9 +1450,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssa_share_domain_on except select * from (select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, (select count(*) from ssa_h h where h.sid = a.k and h.st = 'x') as c2 from ssa_a a) q) x),
-  (select count(*) from (select * from (select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, (select count(*) from ssa_h h where h.sid = a.k and h.st = 'x') as c2 from ssa_a a) q except select * from ssa_share_domain_on) y),
-  (select count(*) from ssa_share_domain_on) - (select count(*) from (select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, (select count(*) from ssa_h h where h.sid = a.k and h.st = 'x') as c2 from ssa_a a) q);
+  (select count(*) from (select * from ssa_share_domain_on except select * from (select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, coalesce((select count(*) from ssa_h h where h.sid = a.k and h.st = 'x'), 0) as c2 from ssa_a a) q) x),
+  (select count(*) from (select * from (select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, coalesce((select count(*) from ssa_h h where h.sid = a.k and h.st = 'x'), 0) as c2 from ssa_a a) q except select * from ssa_share_domain_on) y),
+  (select count(*) from ssa_share_domain_on) - (select count(*) from (select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, coalesce((select count(*) from ssa_h h where h.sid = a.k and h.st = 'x'), 0) as c2 from ssa_a a) q);
 ----
 0 0 0
 
@@ -1865,9 +1865,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssa_share_domain_on except select * from (select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, (select count(*) from ssa_h h where h.sid = a.k and h.st = 'x') as c2 from ssa_a a) q) x),
-  (select count(*) from (select * from (select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, (select count(*) from ssa_h h where h.sid = a.k and h.st = 'x') as c2 from ssa_a a) q except select * from ssa_share_domain_on) y),
-  (select count(*) from ssa_share_domain_on) - (select count(*) from (select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, (select count(*) from ssa_h h where h.sid = a.k and h.st = 'x') as c2 from ssa_a a) q);
+  (select count(*) from (select * from ssa_share_domain_on except select * from (select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, coalesce((select count(*) from ssa_h h where h.sid = a.k and h.st = 'x'), 0) as c2 from ssa_a a) q) x),
+  (select count(*) from (select * from (select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, coalesce((select count(*) from ssa_h h where h.sid = a.k and h.st = 'x'), 0) as c2 from ssa_a a) q except select * from ssa_share_domain_on) y),
+  (select count(*) from ssa_share_domain_on) - (select count(*) from (select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, coalesce((select count(*) from ssa_h h where h.sid = a.k and h.st = 'x'), 0) as c2 from ssa_a a) q);
 ----
 0 0 0
 
@@ -2278,9 +2278,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssa_share_domain_on except select * from (select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, (select count(*) from ssa_h h where h.sid = a.k and h.st = 'x') as c2 from ssa_a a) q) x),
-  (select count(*) from (select * from (select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, (select count(*) from ssa_h h where h.sid = a.k and h.st = 'x') as c2 from ssa_a a) q except select * from ssa_share_domain_on) y),
-  (select count(*) from ssa_share_domain_on) - (select count(*) from (select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, (select count(*) from ssa_h h where h.sid = a.k and h.st = 'x') as c2 from ssa_a a) q);
+  (select count(*) from (select * from ssa_share_domain_on except select * from (select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, coalesce((select count(*) from ssa_h h where h.sid = a.k and h.st = 'x'), 0) as c2 from ssa_a a) q) x),
+  (select count(*) from (select * from (select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, coalesce((select count(*) from ssa_h h where h.sid = a.k and h.st = 'x'), 0) as c2 from ssa_a a) q except select * from ssa_share_domain_on) y),
+  (select count(*) from ssa_share_domain_on) - (select count(*) from (select a.id, (select max(v) from ssa_h h where h.sid = a.k) as m1, coalesce((select count(*) from ssa_h h where h.sid = a.k and h.st = 'x'), 0) as c2 from ssa_a a) q);
 ----
 0 0 0
 
