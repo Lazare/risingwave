@@ -121,6 +121,11 @@ create materialized view mlf_semi_witness_off as select f.id as fid, h.rid, h.x 
 statement ok
 create materialized view mlf_anti_witness_padded_off as select f.id as fid, h.rid, h.x from mlf_f f left join mlf_h h on f.other_id = h.id where not exists (select 1 from mlf_h h2 where h2.id = h.id);
 
+# lookup above an aggregation over a table function of the row
+
+statement ok
+create materialized view mlf_project_set_off as select g.id as gid, g.v, g.c, d2.name from (select d.id, x.v, count(*) as c from mlf_d d cross join unnest(array[d.grp, d.id]) as x(v) group by d.id, x.v) g join mlf_d d2 on g.id = d2.id;
+
 # exists with a filter that the carried row may fail
 
 statement ok
@@ -218,6 +223,11 @@ create materialized view mlf_semi_witness_on as select f.id as fid, h.rid, h.x f
 
 statement ok
 create materialized view mlf_anti_witness_padded_on as select f.id as fid, h.rid, h.x from mlf_f f left join mlf_h h on f.other_id = h.id where not exists (select 1 from mlf_h h2 where h2.id = h.id);
+
+# lookup above an aggregation over a table function of the row
+
+statement ok
+create materialized view mlf_project_set_on as select g.id as gid, g.v, g.c, d2.name from (select d.id, x.v, count(*) as c from mlf_d d cross join unnest(array[d.grp, d.id]) as x(v) group by d.id, x.v) g join mlf_d d2 on g.id = d2.id;
 
 # exists with a filter that the carried row may fail
 
@@ -352,6 +362,14 @@ select
   (select count(*) from (select * from mlf_anti_witness_padded_on except select * from mlf_anti_witness_padded_off) x),
   (select count(*) from (select * from mlf_anti_witness_padded_off except select * from mlf_anti_witness_padded_on) y),
   (select count(*) from mlf_anti_witness_padded_on) - (select count(*) from mlf_anti_witness_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mlf_project_set_on except select * from mlf_project_set_off) x),
+  (select count(*) from (select * from mlf_project_set_off except select * from mlf_project_set_on) y),
+  (select count(*) from mlf_project_set_on) - (select count(*) from mlf_project_set_off);
 ----
 0 0 0
 
@@ -506,6 +524,14 @@ select
   (select count(*) from (select * from mlf_anti_witness_padded_on except select * from (select f.id as fid, h.rid, h.x from mlf_f f left join mlf_h h on f.other_id = h.id where not exists (select 1 from mlf_h h2 where h2.id = h.id)) q) x),
   (select count(*) from (select * from (select f.id as fid, h.rid, h.x from mlf_f f left join mlf_h h on f.other_id = h.id where not exists (select 1 from mlf_h h2 where h2.id = h.id)) q except select * from mlf_anti_witness_padded_on) y),
   (select count(*) from mlf_anti_witness_padded_on) - (select count(*) from (select f.id as fid, h.rid, h.x from mlf_f f left join mlf_h h on f.other_id = h.id where not exists (select 1 from mlf_h h2 where h2.id = h.id)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mlf_project_set_on except select * from (select g.id as gid, g.v, g.c, d2.name from (select d.id, x.v, count(*) as c from mlf_d d cross join unnest(array[d.grp, d.id]) as x(v) group by d.id, x.v) g join mlf_d d2 on g.id = d2.id) q) x),
+  (select count(*) from (select * from (select g.id as gid, g.v, g.c, d2.name from (select d.id, x.v, count(*) as c from mlf_d d cross join unnest(array[d.grp, d.id]) as x(v) group by d.id, x.v) g join mlf_d d2 on g.id = d2.id) q except select * from mlf_project_set_on) y),
+  (select count(*) from mlf_project_set_on) - (select count(*) from (select g.id as gid, g.v, g.c, d2.name from (select d.id, x.v, count(*) as c from mlf_d d cross join unnest(array[d.grp, d.id]) as x(v) group by d.id, x.v) g join mlf_d d2 on g.id = d2.id) q);
 ----
 0 0 0
 
@@ -688,6 +714,14 @@ select
 
 query III
 select
+  (select count(*) from (select * from mlf_project_set_on except select * from mlf_project_set_off) x),
+  (select count(*) from (select * from mlf_project_set_off except select * from mlf_project_set_on) y),
+  (select count(*) from mlf_project_set_on) - (select count(*) from mlf_project_set_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from mlf_kept_witness_filter_on except select * from mlf_kept_witness_filter_off) x),
   (select count(*) from (select * from mlf_kept_witness_filter_off except select * from mlf_kept_witness_filter_on) y),
   (select count(*) from mlf_kept_witness_filter_on) - (select count(*) from mlf_kept_witness_filter_off);
@@ -837,6 +871,14 @@ select
   (select count(*) from (select * from mlf_anti_witness_padded_on except select * from (select f.id as fid, h.rid, h.x from mlf_f f left join mlf_h h on f.other_id = h.id where not exists (select 1 from mlf_h h2 where h2.id = h.id)) q) x),
   (select count(*) from (select * from (select f.id as fid, h.rid, h.x from mlf_f f left join mlf_h h on f.other_id = h.id where not exists (select 1 from mlf_h h2 where h2.id = h.id)) q except select * from mlf_anti_witness_padded_on) y),
   (select count(*) from mlf_anti_witness_padded_on) - (select count(*) from (select f.id as fid, h.rid, h.x from mlf_f f left join mlf_h h on f.other_id = h.id where not exists (select 1 from mlf_h h2 where h2.id = h.id)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mlf_project_set_on except select * from (select g.id as gid, g.v, g.c, d2.name from (select d.id, x.v, count(*) as c from mlf_d d cross join unnest(array[d.grp, d.id]) as x(v) group by d.id, x.v) g join mlf_d d2 on g.id = d2.id) q) x),
+  (select count(*) from (select * from (select g.id as gid, g.v, g.c, d2.name from (select d.id, x.v, count(*) as c from mlf_d d cross join unnest(array[d.grp, d.id]) as x(v) group by d.id, x.v) g join mlf_d d2 on g.id = d2.id) q except select * from mlf_project_set_on) y),
+  (select count(*) from mlf_project_set_on) - (select count(*) from (select g.id as gid, g.v, g.c, d2.name from (select d.id, x.v, count(*) as c from mlf_d d cross join unnest(array[d.grp, d.id]) as x(v) group by d.id, x.v) g join mlf_d d2 on g.id = d2.id) q);
 ----
 0 0 0
 
@@ -1037,6 +1079,14 @@ select
 
 query III
 select
+  (select count(*) from (select * from mlf_project_set_on except select * from mlf_project_set_off) x),
+  (select count(*) from (select * from mlf_project_set_off except select * from mlf_project_set_on) y),
+  (select count(*) from mlf_project_set_on) - (select count(*) from mlf_project_set_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from mlf_kept_witness_filter_on except select * from mlf_kept_witness_filter_off) x),
   (select count(*) from (select * from mlf_kept_witness_filter_off except select * from mlf_kept_witness_filter_on) y),
   (select count(*) from mlf_kept_witness_filter_on) - (select count(*) from mlf_kept_witness_filter_off);
@@ -1186,6 +1236,14 @@ select
   (select count(*) from (select * from mlf_anti_witness_padded_on except select * from (select f.id as fid, h.rid, h.x from mlf_f f left join mlf_h h on f.other_id = h.id where not exists (select 1 from mlf_h h2 where h2.id = h.id)) q) x),
   (select count(*) from (select * from (select f.id as fid, h.rid, h.x from mlf_f f left join mlf_h h on f.other_id = h.id where not exists (select 1 from mlf_h h2 where h2.id = h.id)) q except select * from mlf_anti_witness_padded_on) y),
   (select count(*) from mlf_anti_witness_padded_on) - (select count(*) from (select f.id as fid, h.rid, h.x from mlf_f f left join mlf_h h on f.other_id = h.id where not exists (select 1 from mlf_h h2 where h2.id = h.id)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mlf_project_set_on except select * from (select g.id as gid, g.v, g.c, d2.name from (select d.id, x.v, count(*) as c from mlf_d d cross join unnest(array[d.grp, d.id]) as x(v) group by d.id, x.v) g join mlf_d d2 on g.id = d2.id) q) x),
+  (select count(*) from (select * from (select g.id as gid, g.v, g.c, d2.name from (select d.id, x.v, count(*) as c from mlf_d d cross join unnest(array[d.grp, d.id]) as x(v) group by d.id, x.v) g join mlf_d d2 on g.id = d2.id) q except select * from mlf_project_set_on) y),
+  (select count(*) from mlf_project_set_on) - (select count(*) from (select g.id as gid, g.v, g.c, d2.name from (select d.id, x.v, count(*) as c from mlf_d d cross join unnest(array[d.grp, d.id]) as x(v) group by d.id, x.v) g join mlf_d d2 on g.id = d2.id) q);
 ----
 0 0 0
 
@@ -1350,6 +1408,14 @@ select
 
 query III
 select
+  (select count(*) from (select * from mlf_project_set_on except select * from mlf_project_set_off) x),
+  (select count(*) from (select * from mlf_project_set_off except select * from mlf_project_set_on) y),
+  (select count(*) from mlf_project_set_on) - (select count(*) from mlf_project_set_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from mlf_kept_witness_filter_on except select * from mlf_kept_witness_filter_off) x),
   (select count(*) from (select * from mlf_kept_witness_filter_off except select * from mlf_kept_witness_filter_on) y),
   (select count(*) from mlf_kept_witness_filter_on) - (select count(*) from mlf_kept_witness_filter_off);
@@ -1499,6 +1565,14 @@ select
   (select count(*) from (select * from mlf_anti_witness_padded_on except select * from (select f.id as fid, h.rid, h.x from mlf_f f left join mlf_h h on f.other_id = h.id where not exists (select 1 from mlf_h h2 where h2.id = h.id)) q) x),
   (select count(*) from (select * from (select f.id as fid, h.rid, h.x from mlf_f f left join mlf_h h on f.other_id = h.id where not exists (select 1 from mlf_h h2 where h2.id = h.id)) q except select * from mlf_anti_witness_padded_on) y),
   (select count(*) from mlf_anti_witness_padded_on) - (select count(*) from (select f.id as fid, h.rid, h.x from mlf_f f left join mlf_h h on f.other_id = h.id where not exists (select 1 from mlf_h h2 where h2.id = h.id)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mlf_project_set_on except select * from (select g.id as gid, g.v, g.c, d2.name from (select d.id, x.v, count(*) as c from mlf_d d cross join unnest(array[d.grp, d.id]) as x(v) group by d.id, x.v) g join mlf_d d2 on g.id = d2.id) q) x),
+  (select count(*) from (select * from (select g.id as gid, g.v, g.c, d2.name from (select d.id, x.v, count(*) as c from mlf_d d cross join unnest(array[d.grp, d.id]) as x(v) group by d.id, x.v) g join mlf_d d2 on g.id = d2.id) q except select * from mlf_project_set_on) y),
+  (select count(*) from mlf_project_set_on) - (select count(*) from (select g.id as gid, g.v, g.c, d2.name from (select d.id, x.v, count(*) as c from mlf_d d cross join unnest(array[d.grp, d.id]) as x(v) group by d.id, x.v) g join mlf_d d2 on g.id = d2.id) q);
 ----
 0 0 0
 
@@ -1661,6 +1735,14 @@ select
 
 query III
 select
+  (select count(*) from (select * from mlf_project_set_on except select * from mlf_project_set_off) x),
+  (select count(*) from (select * from mlf_project_set_off except select * from mlf_project_set_on) y),
+  (select count(*) from mlf_project_set_on) - (select count(*) from mlf_project_set_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from mlf_kept_witness_filter_on except select * from mlf_kept_witness_filter_off) x),
   (select count(*) from (select * from mlf_kept_witness_filter_off except select * from mlf_kept_witness_filter_on) y),
   (select count(*) from mlf_kept_witness_filter_on) - (select count(*) from mlf_kept_witness_filter_off);
@@ -1815,6 +1897,14 @@ select
 
 query III
 select
+  (select count(*) from (select * from mlf_project_set_on except select * from (select g.id as gid, g.v, g.c, d2.name from (select d.id, x.v, count(*) as c from mlf_d d cross join unnest(array[d.grp, d.id]) as x(v) group by d.id, x.v) g join mlf_d d2 on g.id = d2.id) q) x),
+  (select count(*) from (select * from (select g.id as gid, g.v, g.c, d2.name from (select d.id, x.v, count(*) as c from mlf_d d cross join unnest(array[d.grp, d.id]) as x(v) group by d.id, x.v) g join mlf_d d2 on g.id = d2.id) q except select * from mlf_project_set_on) y),
+  (select count(*) from mlf_project_set_on) - (select count(*) from (select g.id as gid, g.v, g.c, d2.name from (select d.id, x.v, count(*) as c from mlf_d d cross join unnest(array[d.grp, d.id]) as x(v) group by d.id, x.v) g join mlf_d d2 on g.id = d2.id) q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from mlf_kept_witness_filter_on except select * from (select f.id as fid, h.rid from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id and h2.x > 0)) q) x),
   (select count(*) from (select * from (select f.id as fid, h.rid from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id and h2.x > 0)) q except select * from mlf_kept_witness_filter_on) y),
   (select count(*) from mlf_kept_witness_filter_on) - (select count(*) from (select f.id as fid, h.rid from mlf_f f join mlf_h h on f.dim_id = h.id where exists (select 1 from mlf_h h2 where h2.id = f.dim_id and h2.x > 0)) q);
@@ -1882,6 +1972,9 @@ statement ok
 drop materialized view mlf_kept_witness_filter_on;
 
 statement ok
+drop materialized view mlf_project_set_on;
+
+statement ok
 drop materialized view mlf_anti_witness_padded_on;
 
 statement ok
@@ -1937,6 +2030,9 @@ drop materialized view mlf_kept_shared_off;
 
 statement ok
 drop materialized view mlf_kept_witness_filter_off;
+
+statement ok
+drop materialized view mlf_project_set_off;
 
 statement ok
 drop materialized view mlf_anti_witness_padded_off;

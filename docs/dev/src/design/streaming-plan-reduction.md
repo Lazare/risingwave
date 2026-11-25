@@ -237,6 +237,11 @@ input joined on their group key: one aggregation with a `FILTER` per call.
   - The columns bound to the same column of an instance hold the same value or are all `NULL`,
     so an inner join binds an instance of one side through the bound columns of the other side
     too: the equalities of the joins below are not lost when the instance is met higher.
+  - The instance is also followed through a table function in the select list (`ProjectSet`):
+    each of its rows comes from one row of its input.
+  - A semi or anti join whose right side is a shared sub-plan (a view used twice) is looked into
+    too, but only rewritten when nothing of the sub-plan is left in it: the rest would otherwise
+    be computed a second time next to the shared one.
   - Not handled, deliberately: a lookup in the padded side of a left join of the tree (it is
     not pulled above the outer join), a lookup of a derived relation (aggregation, distinct or
     top-1 of a shared sub-plan), a lookup whose row is designated through a lifted left join,

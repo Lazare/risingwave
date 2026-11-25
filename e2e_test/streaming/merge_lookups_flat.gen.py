@@ -60,6 +60,9 @@ CASES = [
     ('anti_witness_padded', 'not exists on a column that is not a key, carried by the padded side',
      f"select f.id as fid, h.rid, h.x from {F} f left join {H} h on f.other_id = h.id "
      f"where not exists (select 1 from {H} h2 where h2.id = h.id)"),
+    ('project_set', 'lookup above an aggregation over a table function of the row',
+     f"select g.id as gid, g.v, g.c, d2.name from (select d.id, x.v, count(*) as c from {D} d "
+     f"cross join unnest(array[d.grp, d.id]) as x(v) group by d.id, x.v) g join {D} d2 on g.id = d2.id"),
     # Kept.
     ('kept_witness_filter', 'exists with a filter that the carried row may fail',
      f"select f.id as fid, h.rid from {F} f join {H} h on f.dim_id = h.id "

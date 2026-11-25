@@ -73,8 +73,8 @@ use crate::catalog::table_catalog::TableType;
 use crate::expr::{Expr, ExprImpl, ExprRewriter, ExprType, FunctionCall, InputRef};
 use crate::optimizer::plan_node::generic::{Agg, GenericPlanRef, PlanAggCall};
 use crate::optimizer::plan_node::{
-    LogicalFilter, LogicalJoin, LogicalProject, LogicalScan, PlanNodeId, PlanTreeNodeBinary,
-    PlanTreeNodeUnary,
+    LogicalFilter, LogicalJoin, LogicalProject, LogicalProjectSet, LogicalScan, PlanNodeId,
+    PlanTreeNodeBinary, PlanTreeNodeUnary,
 };
 use crate::utils::Condition;
 
@@ -353,6 +353,7 @@ fn is_row_selection(plan: &PlanRef) -> bool {
 /// - `Scan`: itself, bound to the columns that it reads.
 /// - `Share`, `Project`, `Filter`: those of the input. A filter binds the columns that it
 ///   compares with a bound column.
+/// - `ProjectSet`: those of the input, as each row comes from one row of the input.
 /// - `TopN`, `Limit`, `Dedup`: those of the input, whose rows they only select.
 /// - `Agg` without grouping sets: those of the input that the group key designates. When the
 ///   group key holds, for every column of the key of the table, a column that is bound to it or
@@ -436,6 +437,23 @@ fn derive_carried(plan: &PlanRef, memo: &mut Memo) -> Vec<Carried> {
             }
         }
         return carried(&project.input(), memo)
+            .into_iter()
+            .map(|instance| instance.map(&positions))
+            .collect();
+    }
+    if let Some(project_set) = plan.as_logical_project_set() {
+        // Every row comes from one row of the input. The first column is the projected row id,
+        // then come the expressions of the select list.
+        let mut positions: HashMap<usize, Vec<usize>> = HashMap::new();
+        for (index, expr) in project_set.select_list().iter().enumerate() {
+            if let Some(input_ref) = expr.as_input_ref() {
+                positions
+                    .entry(input_ref.index())
+                    .or_default()
+                    .push(index + 1);
+            }
+        }
+        return carried(&project_set.input(), memo)
             .into_iter()
             .map(|instance| instance.map(&positions))
             .collect();
@@ -687,6 +705,22 @@ fn expose(plan: &PlanRef, request: &Request<'_>, memo: &mut Memo) -> Option<Expo
         }
         return Some(Exposed {
             plan: LogicalProject::new(input.plan, exprs).into(),
+            positions,
+            predicate: input.predicate,
+        });
+    }
+    if let Some(project_set) = plan.as_logical_project_set() {
+        let input = expose(&project_set.input(), request, memo)?;
+        let mut select_list = project_set.select_list().clone();
+        let mut positions = BTreeMap::new();
+        for (&column, &position) in &input.positions {
+            // After the projected row id and the former select list.
+            positions.insert(column, select_list.len() + 1);
+            let data_type = input.plan.schema().fields()[position].data_type();
+            select_list.push(InputRef::new(position, data_type).into());
+        }
+        return Some(Exposed {
+            plan: LogicalProjectSet::new(input.plan, select_list).into(),
             positions,
             predicate: input.predicate,
         });

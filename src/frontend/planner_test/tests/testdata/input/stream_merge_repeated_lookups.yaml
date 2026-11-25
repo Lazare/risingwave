@@ -481,6 +481,15 @@
     select f.id, h.x from f join h on f.dim_id = h.id where exists (select 1 from h h2 where h2.id = f.dim_id and h2.x > 0);
   expected_outputs:
   - optimized_logical_plan_for_stream
+- name: lookup above an aggregation over a table function of the row
+  before: [setup_flat]
+  sql: |
+    select g.id, g.v, g.c, d2.name from (
+      select d.id, x.v, count(*) as c from d cross join unnest(array[d.grp, d.id]) as x(v) group by d.id, x.v
+    ) g join d d2 on g.id = d2.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
 - name: kept - nested lookup compared on a column that is not its key
   before: [setup_flat]
   sql: |
