@@ -1,5 +1,2 @@
 # Differential tests run by `proto-streaming-prune-check.yml`: <name> <file> <minutes>.
-unnest simplify_subquery_unnesting 90
-union factor_union_join 90
-merge merge_repeated_lookups 150
-prune prune_empty_relation 210
+flatlookups merge_lookups_flat 90

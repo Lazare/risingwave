@@ -349,3 +349,156 @@
     select f.id, a.name, b.grp from f left join d a on f.dim_id = a.id full join d b on f.dim_id = b.id;
   expected_outputs:
   - optimized_logical_plan_for_stream
+
+# Lookups nested in a tree of joins: the removed lookup is a leaf of a tree of inner joins, or of
+# the preserved side of a left outer join of the tree, and the equality that designates its row
+# may come from any inner join of the tree.
+- id: setup_flat
+  sql: |
+    set streaming_merge_repeated_lookups = true;
+    create table f (id int primary key, dim_id int, other_id int, amt int, label varchar);
+    create table d (id int primary key, name varchar, grp int, active boolean);
+    create table e (id int primary key, code varchar);
+    create table g (id int primary key, a int, b int);
+    create table s (sid int primary key, id int, ts int);
+    create table h (rid int primary key, id int, x int);
+    create view sd as select s.sid, s.id, s.ts, d.name, d.active from s join d on s.id = d.id;
+  expected_outputs: []
+- name: nested inner lookup - the equality comes from the join above
+  before: [setup_flat]
+  sql: |
+    select f.id, d.grp, x.ts, x.name from f join d on f.dim_id = d.id join sd x on d.id = x.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: nested inner lookup - the equality comes from a sibling join
+  before: [setup_flat]
+  sql: |
+    select f.id, d.grp, d2.name, s.ts from f join d on f.dim_id = d.id join s on s.id = f.dim_id join d d2 on d2.id = s.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: nested inner lookup with a filter on the removed side
+  before: [setup_flat]
+  sql: |
+    select f.id, d.grp, x.ts, x.name from f join d on f.dim_id = d.id join sd x on d.id = x.id where x.active;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: two left-joined copies of a table joined on its key
+  before: [setup_flat]
+  sql: |
+    select d.id, e.code, g.a, d2.name from d left join e on d.grp = e.id
+    join (d d2 left join g on d2.grp = g.id) on d.id = d2.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: left join of a chain that looks up the row of the left side
+  before: [setup_flat]
+  sql: |
+    select f.id, d.name, r.v, r.a from f join d on f.dim_id = d.id left join (
+      select d2.id, case when d2.active then 0 else coalesce(g.a, d2.grp) end as v, g.a
+      from d d2 join s on d2.id = s.id left join g on d2.id = g.id
+    ) r on d.id = r.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: left join of a chain whose joins all compare the removed lookup
+  before: [setup_flat]
+  sql: |
+    select f.id, d.name, y.sid, y.z from f join d on f.dim_id = d.id left join (
+      select g.id, s.sid, g.a + d2.grp as z from g join d d2 on g.id = d2.id join s on d2.id = s.id
+    ) y on d.id = y.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: left join of a left-joined copy of the table of the left side
+  before: [setup_flat]
+  sql: |
+    select f.id, r.name, r.code from f left join d on f.dim_id = d.id left join (
+      select d2.id, d2.name, e.code from d d2 left join e on d2.grp = e.id where d2.active
+    ) r on d.id = r.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: not exists on a chain that looks up the row of the left side
+  before: [setup_flat]
+  sql: |
+    select f.id from f join d on f.dim_id = d.id
+    where d.grp < 10 and not exists (
+      select 1 from s join d d2 on s.id = d2.id and d2.active left join e on s.id = e.id where s.id = f.dim_id
+    );
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: not exists on a chain whose rows the left side all carries
+  before: [setup_flat]
+  sql: |
+    select f.id from f join d on f.dim_id = d.id join h on h.id = d.id
+    where not exists (
+      select 1 from h h2 join d d2 on h2.id = d2.id and d2.active left join e on h2.id = e.id where h2.id = f.dim_id
+    );
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: exists on a column that is not a key, carried by the left side
+  before: [setup_flat]
+  sql: |
+    select f.id, h.x from f join h on f.dim_id = h.id where exists (select 1 from h h2 where h2.id = f.dim_id);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: not exists on a column that is not a key, carried by the padded side of an outer join
+  before: [setup_flat]
+  sql: |
+    select f.id, h.x from f left join h on f.other_id = h.id where not exists (select 1 from h h2 where h2.id = h.id);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - not exists on a column that the outer join compares but does not bind
+  before: [setup_flat]
+  sql: |
+    select f.id, h.x from f left join h on f.other_id = h.id where not exists (select 1 from h h2 where h2.id = f.other_id);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - exists on a column that is not a key, with a filter that the carried row may fail
+  before: [setup_flat]
+  sql: |
+    select f.id, h.x from f join h on f.dim_id = h.id where exists (select 1 from h h2 where h2.id = f.dim_id and h2.x > 0);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - nested lookup compared on a column that is not its key
+  before: [setup_flat]
+  sql: |
+    select f.id, d.grp, x.ts, x.name from f join d on f.dim_id = d.id
+    join (select s.id, s.ts, d2.name from s join d d2 on s.id = d2.grp) x on d.id = x.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - nested lookup in the padded side of a left join of the tree
+  before: [setup_flat]
+  sql: |
+    select f.id, d.grp, x.ts, x.name from f join d on f.dim_id = d.id
+    join (select s.id, s.ts, d2.name from s left join d d2 on s.id = d2.id) x on d.id = x.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - left join whose condition tests a column of a left join of its right side
+  before: [setup_flat]
+  sql: |
+    select f.id, r.name, r.code from f left join d on f.dim_id = d.id left join (
+      select d2.id, d2.name, e.code from d d2 left join e on d2.grp = e.id
+    ) r on d.id = r.id and r.code = 'x';
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - nested lookups of two different rows
+  before: [setup_flat]
+  sql: |
+    select f.id, d.grp, x.ts, x.name from f join d on f.dim_id = d.id join sd x on f.other_id = x.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - unused inner join on the key - its row may be missing
+  before: [setup_flat]
+  sql: |
+    select f.id, f.amt from f join d on f.dim_id = d.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: unused left join on the key - removed by the simplification on unique keys
+  before: [setup_flat]
+  sql: |
+    set streaming_simplify_on_unique_key = true;
+    select f.id, f.amt from f left join d on f.dim_id = d.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
