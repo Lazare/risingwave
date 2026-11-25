@@ -52,7 +52,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use risingwave_common::catalog::TableId;
-use risingwave_common::types::DataType;
+use risingwave_common::types::{DataType, StructType};
 use risingwave_expr::aggregate::PbAggKind;
 use risingwave_pb::plan_common::JoinType;
 
@@ -343,7 +343,8 @@ fn is_row_selection(plan: &PlanRef) -> bool {
 /// - `Agg` without grouping sets: those of the input that the group key designates. When the
 ///   group key holds, for every column of the key of the table, a column that is bound to it or
 ///   that an outer lookup compares with it, all the rows of a group carry the same row of the
-///   table, and so does the row of the group.
+///   table, and so does the row of the group. Its other columns are read with
+///   `internal_last_seen_value`, see [`expose`].
 /// - Inner join: those of both sides, and the condition binds columns as a filter does.
 /// - Left and full outer joins: those of both sides. The columns of the padded side are `NULL`
 ///   in a padded row, as a bound column must be when the instance is not matched. A left outer
@@ -572,28 +573,78 @@ fn expose(plan: &PlanRef, request: &Request<'_>, memo: &mut Memo) -> Option<Expo
         });
     }
     if let Some(agg) = plan.as_logical_agg() {
-        // The rows of a group all carry the same row of the table (see `carried`): any of
-        // them gives its columns.
+        // The rows of a group all carry the same row of the table (see `carried`): any of them
+        // gives its columns, and the last one seen is the cheapest to keep.
+        //
+        // `internal_last_seen_value` skips the `NULL`s, so it would keep the former value of a
+        // column that becomes `NULL`, or of a row that is not matched any more. The columns
+        // are therefore packed into one `ROW(...)`, which is never `NULL` itself, below the
+        // aggregation, and unpacked above it.
         let input = expose(&agg.input(), request, memo)?;
         let (mut agg_calls, group_key, _, _, enable_two_phase) = agg.clone().decompose();
+        let input_len = input.plan.schema().len();
+        let packed: Vec<(usize, ExprImpl)> = input
+            .positions
+            .iter()
+            .map(|(&column, &position)| {
+                let data_type = input.plan.schema().fields()[position].data_type();
+                (column, InputRef::new(position, data_type).into())
+            })
+            .collect();
+        let field_types: Vec<DataType> =
+            packed.iter().map(|(_, expr)| expr.return_type()).collect();
+        let row_type = DataType::Struct(StructType::unnamed(field_types));
+        let mut below: Vec<ExprImpl> = (0..input_len)
+            .map(|index| {
+                InputRef::new(index, input.plan.schema().fields()[index].data_type()).into()
+            })
+            .collect();
+        below.push(
+            FunctionCall::new_unchecked(
+                ExprType::Row,
+                packed.iter().map(|(_, expr)| expr.clone()).collect(),
+                row_type.clone(),
+            )
+            .into(),
+        );
+        let row_call = group_key.len() + agg_calls.len();
+        agg_calls.push(PlanAggCall {
+            agg_type: PbAggKind::InternalLastSeenValue.into(),
+            return_type: row_type.clone(),
+            inputs: vec![InputRef::new(input_len, row_type.clone())],
+            distinct: false,
+            order_by: vec![],
+            filter: Condition::true_cond(),
+            direct_args: vec![],
+        });
+        let new_agg: PlanRef = Agg::new(
+            agg_calls,
+            group_key,
+            LogicalProject::new(input.plan, below).into(),
+        )
+        .with_enable_two_phase(enable_two_phase)
+        .into();
+        // The former output columns, then each column of the table, unpacked.
+        let mut above: Vec<ExprImpl> = (0..row_call)
+            .map(|index| InputRef::new(index, new_agg.schema().fields()[index].data_type()).into())
+            .collect();
         let mut positions = BTreeMap::new();
-        for (&column, &position) in &input.positions {
-            positions.insert(column, group_key.len() + agg_calls.len());
-            let data_type = input.plan.schema().fields()[position].data_type();
-            agg_calls.push(PlanAggCall {
-                agg_type: PbAggKind::InternalLastSeenValue.into(),
-                return_type: data_type.clone(),
-                inputs: vec![InputRef::new(position, data_type)],
-                distinct: false,
-                order_by: vec![],
-                filter: Condition::true_cond(),
-                direct_args: vec![],
-            });
+        for (field, (column, expr)) in packed.iter().enumerate() {
+            positions.insert(*column, above.len());
+            above.push(
+                FunctionCall::new_unchecked(
+                    ExprType::Field,
+                    vec![
+                        InputRef::new(row_call, row_type.clone()).into(),
+                        ExprImpl::literal_int(field as i32),
+                    ],
+                    expr.return_type(),
+                )
+                .into(),
+            );
         }
         return Some(Exposed {
-            plan: Agg::new(agg_calls, group_key, input.plan)
-                .with_enable_two_phase(enable_two_phase)
-                .into(),
+            plan: LogicalProject::new(new_agg, above).into(),
             positions,
             predicate: input.predicate,
         });

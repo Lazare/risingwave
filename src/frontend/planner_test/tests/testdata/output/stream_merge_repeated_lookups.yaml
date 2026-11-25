@@ -366,19 +366,22 @@
     from (select f.dim_id, sum(f.amt) as total from f join d a on f.dim_id = a.id group by f.dim_id) t
     left join d b on t.dim_id = b.id;
   optimized_logical_plan_for_stream: |-
-    LogicalAgg { group_key: [f.dim_id], aggs: [sum(f.amt), internal_last_seen_value(d.grp)] }
-    └─LogicalJoin { type: Inner, on: (f.dim_id = d.id), output: [f.dim_id, f.amt, d.grp] }
-      ├─LogicalScan { table: f, columns: [f.dim_id, f.amt] }
-      └─LogicalScan { table: d, columns: [d.id, d.grp] }
+    LogicalProject { exprs: [f.dim_id, sum(f.amt), Field(internal_last_seen_value($expr1), 0:Int32) as $expr2] }
+    └─LogicalAgg { group_key: [f.dim_id], aggs: [sum(f.amt), internal_last_seen_value($expr1)] }
+      └─LogicalProject { exprs: [f.dim_id, f.amt, Row(d.grp) as $expr1] }
+        └─LogicalJoin { type: Inner, on: (f.dim_id = d.id), output: [f.dim_id, f.amt, d.grp] }
+          ├─LogicalScan { table: f, columns: [f.dim_id, f.amt] }
+          └─LogicalScan { table: d, columns: [d.id, d.grp] }
   stream_plan: |-
     StreamMaterialize { columns: [dim_id, total, grp], stream_key: [dim_id], pk_columns: [dim_id], pk_conflict: NoCheck }
-    └─StreamProject { exprs: [f.dim_id, sum(f.amt), internal_last_seen_value(d.grp)] }
-      └─StreamHashAgg { group_key: [f.dim_id], aggs: [sum(f.amt), internal_last_seen_value(d.grp), count] }
-        └─StreamHashJoin { type: Inner, predicate: f.dim_id = d.id, output: [f.dim_id, f.amt, d.grp, f.id, d.id] }
-          ├─StreamExchange { dist: HashShard(f.dim_id) }
-          │ └─StreamTableScan { table: f, columns: [f.dim_id, f.amt, f.id], stream_scan_type: SnapshotBackfill, stream_key: [f.id], pk: [id], dist: UpstreamHashShard(f.id) }
-          └─StreamExchange { dist: HashShard(d.id) }
-            └─StreamTableScan { table: d, columns: [d.id, d.grp], stream_scan_type: SnapshotBackfill, stream_key: [d.id], pk: [id], dist: UpstreamHashShard(d.id) }
+    └─StreamProject { exprs: [f.dim_id, sum(f.amt), Field(internal_last_seen_value($expr1), 0:Int32) as $expr2] }
+      └─StreamHashAgg { group_key: [f.dim_id], aggs: [sum(f.amt), internal_last_seen_value($expr1), count] }
+        └─StreamProject { exprs: [f.dim_id, f.amt, Row(d.grp) as $expr1, f.id] }
+          └─StreamHashJoin { type: Inner, predicate: f.dim_id = d.id, output: [f.dim_id, f.amt, d.grp, f.id, d.id] }
+            ├─StreamExchange { dist: HashShard(f.dim_id) }
+            │ └─StreamTableScan { table: f, columns: [f.dim_id, f.amt, f.id], stream_scan_type: SnapshotBackfill, stream_key: [f.id], pk: [id], dist: UpstreamHashShard(f.id) }
+            └─StreamExchange { dist: HashShard(d.id) }
+              └─StreamTableScan { table: d, columns: [d.id, d.grp], stream_scan_type: SnapshotBackfill, stream_key: [d.id], pk: [id], dist: UpstreamHashShard(d.id) }
 - name: lookup above an aggregation grouped by the key and another column
   before:
   - setup
@@ -387,11 +390,12 @@
     from (select f.dim_id, f.label, sum(f.amt) as total from f join d a on f.dim_id = a.id where a.active group by f.dim_id, f.label) t
     join d b on t.dim_id = b.id;
   optimized_logical_plan_for_stream: |-
-    LogicalProject { exprs: [f.dim_id, f.label, sum(f.amt), internal_last_seen_value(d.grp), internal_last_seen_value(d.name)] }
-    └─LogicalAgg { group_key: [f.dim_id, f.label], aggs: [sum(f.amt), internal_last_seen_value(d.name), internal_last_seen_value(d.grp)] }
-      └─LogicalJoin { type: Inner, on: (f.dim_id = d.id), output: [f.dim_id, f.amt, f.label, d.name, d.grp] }
-        ├─LogicalScan { table: f, columns: [f.dim_id, f.amt, f.label] }
-        └─LogicalScan { table: d, output_columns: [d.id, d.name, d.grp], required_columns: [d.id, d.name, d.grp, d.active], predicate: d.active }
+    LogicalProject { exprs: [f.dim_id, f.label, sum(f.amt), Field(internal_last_seen_value($expr1), 1:Int32) as $expr2, Field(internal_last_seen_value($expr1), 0:Int32) as $expr3] }
+    └─LogicalAgg { group_key: [f.dim_id, f.label], aggs: [sum(f.amt), internal_last_seen_value($expr1)] }
+      └─LogicalProject { exprs: [f.dim_id, f.amt, f.label, Row(d.name, d.grp) as $expr1] }
+        └─LogicalJoin { type: Inner, on: (f.dim_id = d.id), output: [f.dim_id, f.amt, f.label, d.name, d.grp] }
+          ├─LogicalScan { table: f, columns: [f.dim_id, f.amt, f.label] }
+          └─LogicalScan { table: d, output_columns: [d.id, d.name, d.grp], required_columns: [d.id, d.name, d.grp, d.active], predicate: d.active }
 - name: left lookup above an aggregation over a left lookup of the same row
   before:
   - setup
@@ -400,10 +404,12 @@
     from (select f.dim_id, max(a.name) as n, sum(f.amt) as total from f left join d a on f.dim_id = a.id group by f.dim_id) t
     left join d b on t.dim_id = b.id;
   optimized_logical_plan_for_stream: |-
-    LogicalAgg { group_key: [f.dim_id], aggs: [max(d.name), sum(f.amt), internal_last_seen_value(d.grp)] }
-    └─LogicalJoin { type: LeftOuter, on: (f.dim_id = d.id), output: [f.dim_id, d.name, f.amt, d.grp] }
-      ├─LogicalScan { table: f, columns: [f.dim_id, f.amt] }
-      └─LogicalScan { table: d, columns: [d.id, d.name, d.grp] }
+    LogicalProject { exprs: [f.dim_id, max(d.name), sum(f.amt), Field(internal_last_seen_value($expr1), 1:Int32) as $expr2] }
+    └─LogicalAgg { group_key: [f.dim_id], aggs: [max(d.name), sum(f.amt), internal_last_seen_value($expr1)] }
+      └─LogicalProject { exprs: [f.dim_id, d.name, f.amt, Row(d.id, d.grp) as $expr1] }
+        └─LogicalJoin { type: LeftOuter, on: (f.dim_id = d.id), output: [f.dim_id, d.name, f.amt, d.id, d.grp] }
+          ├─LogicalScan { table: f, columns: [f.dim_id, f.amt] }
+          └─LogicalScan { table: d, columns: [d.id, d.name, d.grp] }
 - name: kept - lookup above an aggregation that is not grouped by the key
   before:
   - setup
