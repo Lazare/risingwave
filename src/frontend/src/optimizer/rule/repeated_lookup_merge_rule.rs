@@ -1030,7 +1030,9 @@ pub fn diagnose_repeated_reads(plan: &PlanRef) {
 /// not listed.
 fn relation_paths(plan: &PlanRef) -> BTreeMap<String, Vec<String>> {
     if let Some(scan) = plan.as_logical_scan() {
-        return BTreeMap::from([(format!("table {}", scan.table().name), vec![])]);
+        // The name alone is ambiguous: two schemas can hold a relation of the same name.
+        let table = scan.table();
+        return BTreeMap::from([(format!("table {} #{}", table.name, table.id()), vec![])]);
     }
     if let Some(share) = plan.as_logical_share() {
         let kind = format!("{:?}", share.input().node_type()).replace("Logical", "");

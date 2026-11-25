@@ -303,6 +303,41 @@ create materialized view per_const_join_off as select t.v1 as tv, s.w as sw, t.v
 statement ok
 create materialized view per_const_left_off as select t.v1 as tv, s.w as sw, s.w + 1 as w1, s.w is null as missing from per_t t left join (select * from per_s where w = 1) s on t.v1 = s.k;
 
+# last_value of a constant, packed with another last_value
+
+statement ok
+create materialized view per_agg_const_last_off as select v1, x from (select v1, last_value('set' order by ts) as op, last_value(v2 order by ts) as x from per_t group by v1) z where op = 'set';
+
+# last_value of the tag of a view over one table
+
+statement ok
+create materialized view per_agg_const_ops_off as with ops(op, k, x, ts) as (select 'set', v1, v2, ts from per_t), last as (select k, last_value(op order by ts) as op, last_value(x order by ts) as x, first_value(ts order by ts) as created from ops group by k) select k, x, created from last where op = 'set';
+
+# max and min of a constant
+
+statement ok
+create materialized view per_agg_const_minmax_off as select v1 from (select v1, max('a') as hi, min(1) as lo from per_t group by v1) z where hi = 'a' and lo = 1;
+
+# aggregate of a constant compared with another value
+
+statement ok
+create materialized view per_agg_const_other_off as select v1 from (select v1, last_value('set' order by ts) as op from per_t group by v1) z where op = 'delete';
+
+# kept: last_value of a tag that differs between the branches of a union
+
+statement ok
+create materialized view per_agg_const_union_off as with ops(op, k, ts) as (select 'set', v1, ts from per_t union all select 'delete', v1, ts from per_t where b) select k from (select k, last_value(op order by ts) as op from ops group by k) z where op = 'set';
+
+# kept: aggregate of a constant with a filter clause
+
+statement ok
+create materialized view per_agg_const_filter_off as select v1 from (select v1, max('a') filter (where v2 > 3) as hi from per_t group by v1) z where hi = 'a';
+
+# aggregate of a constant on the optional side of a left join
+
+statement ok
+create materialized view per_agg_const_left_off as select s.k as sk, z.op is null as missing, z.op = 'set' as is_set from per_s s left join (select v1, last_value('set' order by ts) as op from per_t group by v1) z on s.k = z.v1;
+
 # is null on a count
 
 statement ok
@@ -788,6 +823,41 @@ create materialized view per_const_join_on as select t.v1 as tv, s.w as sw, t.v2
 
 statement ok
 create materialized view per_const_left_on as select t.v1 as tv, s.w as sw, s.w + 1 as w1, s.w is null as missing from per_t t left join (select * from per_s where w = 1) s on t.v1 = s.k;
+
+# last_value of a constant, packed with another last_value
+
+statement ok
+create materialized view per_agg_const_last_on as select v1, x from (select v1, last_value('set' order by ts) as op, last_value(v2 order by ts) as x from per_t group by v1) z where op = 'set';
+
+# last_value of the tag of a view over one table
+
+statement ok
+create materialized view per_agg_const_ops_on as with ops(op, k, x, ts) as (select 'set', v1, v2, ts from per_t), last as (select k, last_value(op order by ts) as op, last_value(x order by ts) as x, first_value(ts order by ts) as created from ops group by k) select k, x, created from last where op = 'set';
+
+# max and min of a constant
+
+statement ok
+create materialized view per_agg_const_minmax_on as select v1 from (select v1, max('a') as hi, min(1) as lo from per_t group by v1) z where hi = 'a' and lo = 1;
+
+# aggregate of a constant compared with another value
+
+statement ok
+create materialized view per_agg_const_other_on as select v1 from (select v1, last_value('set' order by ts) as op from per_t group by v1) z where op = 'delete';
+
+# kept: last_value of a tag that differs between the branches of a union
+
+statement ok
+create materialized view per_agg_const_union_on as with ops(op, k, ts) as (select 'set', v1, ts from per_t union all select 'delete', v1, ts from per_t where b) select k from (select k, last_value(op order by ts) as op from ops group by k) z where op = 'set';
+
+# kept: aggregate of a constant with a filter clause
+
+statement ok
+create materialized view per_agg_const_filter_on as select v1 from (select v1, max('a') filter (where v2 > 3) as hi from per_t group by v1) z where hi = 'a';
+
+# aggregate of a constant on the optional side of a left join
+
+statement ok
+create materialized view per_agg_const_left_on as select s.k as sk, z.op is null as missing, z.op = 'set' as is_set from per_s s left join (select v1, last_value('set' order by ts) as op from per_t group by v1) z on s.k = z.v1;
 
 # is null on a count
 
@@ -1452,6 +1522,62 @@ select
   (select count(*) from (select * from per_const_left_on except select * from per_const_left_off) x),
   (select count(*) from (select * from per_const_left_off except select * from per_const_left_on) y),
   (select count(*) from per_const_left_on) - (select count(*) from per_const_left_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_const_last_on except select * from per_agg_const_last_off) x),
+  (select count(*) from (select * from per_agg_const_last_off except select * from per_agg_const_last_on) y),
+  (select count(*) from per_agg_const_last_on) - (select count(*) from per_agg_const_last_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_const_ops_on except select * from per_agg_const_ops_off) x),
+  (select count(*) from (select * from per_agg_const_ops_off except select * from per_agg_const_ops_on) y),
+  (select count(*) from per_agg_const_ops_on) - (select count(*) from per_agg_const_ops_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_const_minmax_on except select * from per_agg_const_minmax_off) x),
+  (select count(*) from (select * from per_agg_const_minmax_off except select * from per_agg_const_minmax_on) y),
+  (select count(*) from per_agg_const_minmax_on) - (select count(*) from per_agg_const_minmax_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_const_other_on except select * from per_agg_const_other_off) x),
+  (select count(*) from (select * from per_agg_const_other_off except select * from per_agg_const_other_on) y),
+  (select count(*) from per_agg_const_other_on) - (select count(*) from per_agg_const_other_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_const_union_on except select * from per_agg_const_union_off) x),
+  (select count(*) from (select * from per_agg_const_union_off except select * from per_agg_const_union_on) y),
+  (select count(*) from per_agg_const_union_on) - (select count(*) from per_agg_const_union_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_const_filter_on except select * from per_agg_const_filter_off) x),
+  (select count(*) from (select * from per_agg_const_filter_off except select * from per_agg_const_filter_on) y),
+  (select count(*) from per_agg_const_filter_on) - (select count(*) from per_agg_const_filter_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_const_left_on except select * from per_agg_const_left_off) x),
+  (select count(*) from (select * from per_agg_const_left_off except select * from per_agg_const_left_on) y),
+  (select count(*) from per_agg_const_left_on) - (select count(*) from per_agg_const_left_off);
 ----
 0 0 0
 
@@ -2346,6 +2472,62 @@ select
 
 query III
 select
+  (select count(*) from (select * from per_agg_const_last_on except select * from per_agg_const_last_off) x),
+  (select count(*) from (select * from per_agg_const_last_off except select * from per_agg_const_last_on) y),
+  (select count(*) from per_agg_const_last_on) - (select count(*) from per_agg_const_last_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_const_ops_on except select * from per_agg_const_ops_off) x),
+  (select count(*) from (select * from per_agg_const_ops_off except select * from per_agg_const_ops_on) y),
+  (select count(*) from per_agg_const_ops_on) - (select count(*) from per_agg_const_ops_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_const_minmax_on except select * from per_agg_const_minmax_off) x),
+  (select count(*) from (select * from per_agg_const_minmax_off except select * from per_agg_const_minmax_on) y),
+  (select count(*) from per_agg_const_minmax_on) - (select count(*) from per_agg_const_minmax_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_const_other_on except select * from per_agg_const_other_off) x),
+  (select count(*) from (select * from per_agg_const_other_off except select * from per_agg_const_other_on) y),
+  (select count(*) from per_agg_const_other_on) - (select count(*) from per_agg_const_other_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_const_union_on except select * from per_agg_const_union_off) x),
+  (select count(*) from (select * from per_agg_const_union_off except select * from per_agg_const_union_on) y),
+  (select count(*) from per_agg_const_union_on) - (select count(*) from per_agg_const_union_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_const_filter_on except select * from per_agg_const_filter_off) x),
+  (select count(*) from (select * from per_agg_const_filter_off except select * from per_agg_const_filter_on) y),
+  (select count(*) from per_agg_const_filter_on) - (select count(*) from per_agg_const_filter_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_const_left_on except select * from per_agg_const_left_off) x),
+  (select count(*) from (select * from per_agg_const_left_off except select * from per_agg_const_left_on) y),
+  (select count(*) from per_agg_const_left_on) - (select count(*) from per_agg_const_left_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from per_null_count_on except select * from per_null_count_off) x),
   (select count(*) from (select * from per_null_count_off except select * from per_null_count_on) y),
   (select count(*) from per_null_count_on) - (select count(*) from per_null_count_off);
@@ -3206,6 +3388,62 @@ select
 
 query III
 select
+  (select count(*) from (select * from per_agg_const_last_on except select * from per_agg_const_last_off) x),
+  (select count(*) from (select * from per_agg_const_last_off except select * from per_agg_const_last_on) y),
+  (select count(*) from per_agg_const_last_on) - (select count(*) from per_agg_const_last_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_const_ops_on except select * from per_agg_const_ops_off) x),
+  (select count(*) from (select * from per_agg_const_ops_off except select * from per_agg_const_ops_on) y),
+  (select count(*) from per_agg_const_ops_on) - (select count(*) from per_agg_const_ops_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_const_minmax_on except select * from per_agg_const_minmax_off) x),
+  (select count(*) from (select * from per_agg_const_minmax_off except select * from per_agg_const_minmax_on) y),
+  (select count(*) from per_agg_const_minmax_on) - (select count(*) from per_agg_const_minmax_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_const_other_on except select * from per_agg_const_other_off) x),
+  (select count(*) from (select * from per_agg_const_other_off except select * from per_agg_const_other_on) y),
+  (select count(*) from per_agg_const_other_on) - (select count(*) from per_agg_const_other_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_const_union_on except select * from per_agg_const_union_off) x),
+  (select count(*) from (select * from per_agg_const_union_off except select * from per_agg_const_union_on) y),
+  (select count(*) from per_agg_const_union_on) - (select count(*) from per_agg_const_union_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_const_filter_on except select * from per_agg_const_filter_off) x),
+  (select count(*) from (select * from per_agg_const_filter_off except select * from per_agg_const_filter_on) y),
+  (select count(*) from per_agg_const_filter_on) - (select count(*) from per_agg_const_filter_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_agg_const_left_on except select * from per_agg_const_left_off) x),
+  (select count(*) from (select * from per_agg_const_left_off except select * from per_agg_const_left_on) y),
+  (select count(*) from per_agg_const_left_on) - (select count(*) from per_agg_const_left_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from per_null_count_on except select * from per_null_count_off) x),
   (select count(*) from (select * from per_null_count_off except select * from per_null_count_on) y),
   (select count(*) from per_null_count_on) - (select count(*) from per_null_count_off);
@@ -3861,6 +4099,27 @@ statement ok
 drop materialized view per_null_count_on;
 
 statement ok
+drop materialized view per_agg_const_left_on;
+
+statement ok
+drop materialized view per_agg_const_filter_on;
+
+statement ok
+drop materialized view per_agg_const_union_on;
+
+statement ok
+drop materialized view per_agg_const_other_on;
+
+statement ok
+drop materialized view per_agg_const_minmax_on;
+
+statement ok
+drop materialized view per_agg_const_ops_on;
+
+statement ok
+drop materialized view per_agg_const_last_on;
+
+statement ok
 drop materialized view per_const_left_on;
 
 statement ok
@@ -4147,6 +4406,27 @@ drop materialized view per_null_count_proj_off;
 
 statement ok
 drop materialized view per_null_count_off;
+
+statement ok
+drop materialized view per_agg_const_left_off;
+
+statement ok
+drop materialized view per_agg_const_filter_off;
+
+statement ok
+drop materialized view per_agg_const_union_off;
+
+statement ok
+drop materialized view per_agg_const_other_off;
+
+statement ok
+drop materialized view per_agg_const_minmax_off;
+
+statement ok
+drop materialized view per_agg_const_ops_off;
+
+statement ok
+drop materialized view per_agg_const_last_off;
 
 statement ok
 drop materialized view per_const_left_off;

@@ -435,7 +435,7 @@
   stream_plan: |-
     StreamMaterialize { columns: [v1, w, s._row_id(hidden)], stream_key: [s._row_id], pk_columns: [s._row_id], pk_conflict: NoCheck }
     └─StreamProject { exprs: [null:Int32, s.w, s._row_id] }
-      └─StreamTableScan { table: s, columns: [s.k, s.w, s._row_id], stream_scan_type: SnapshotBackfill, stream_key: [s._row_id], pk: [_row_id], dist: UpstreamHashShard(s._row_id) }
+      └─StreamTableScan { table: s, columns: [s.w, s._row_id], stream_scan_type: SnapshotBackfill, stream_key: [s._row_id], pk: [_row_id], dist: UpstreamHashShard(s._row_id) }
 - name: full join - both sides are empty
   before:
   - setup
@@ -477,7 +477,7 @@
   stream_plan: |-
     StreamMaterialize { columns: [v1, w, t._row_id(hidden)], stream_key: [t._row_id], pk_columns: [t._row_id], pk_conflict: NoCheck }
     └─StreamProject { exprs: [t.v1, null:Int32, t._row_id] }
-      └─StreamTableScan { table: t, columns: [t.v1, t.v2, t._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }
+      └─StreamTableScan { table: t, columns: [t.v1, t._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }
 - name: kept - full join whose condition is never true
   before:
   - setup
@@ -502,7 +502,7 @@
   stream_plan: |-
     StreamMaterialize { columns: [v1, w, x, t._row_id(hidden), s._row_id(hidden)], stream_key: [t._row_id, s._row_id, v1], pk_columns: [t._row_id, s._row_id, v1], pk_conflict: NoCheck }
     └─StreamProject { exprs: [t.v1, s.w, null:Int32, t._row_id, s._row_id] }
-      └─StreamHashJoin { type: Inner, predicate: t.v1 = s.k, output: [t.v1, s.k, s.w, t._row_id, s._row_id] }
+      └─StreamHashJoin { type: Inner, predicate: t.v1 = s.k, output: [t.v1, s.w, t._row_id, s._row_id] }
         ├─StreamExchange { dist: HashShard(t.v1) }
         │ └─StreamTableScan { table: t, columns: [t.v1, t._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }
         └─StreamExchange { dist: HashShard(s.k) }
@@ -524,11 +524,11 @@
     from t where v1 = 1 and v1 = 2;
   optimized_logical_plan_for_stream: |-
     LogicalProject { exprs: [count, count(t.v1), sum(t.v1), min(t.v3), max(t.ts), null:Decimal, bool_and(t.b), string_agg(t.v3, ',':Varchar order_by(t.v3 ASC))] }
-    └─LogicalValues { rows: [[0:Int64, 0:Int64, null:Int64, null:Varchar, null:Timestamp, null:Int64, 0:Int64, null:Boolean, null:Varchar]], schema: Schema { fields: [count:Int64, count(t.v1):Int64, sum(t.v1):Int64, min(t.v3):Varchar, max(t.ts):Timestamp, sum(t.v2):Int64, count(t.v2):Int64, bool_and(t.b):Boolean, string_agg(t.v3, ',':Varchar order_by(t.v3 ASC)):Varchar] } }
+    └─LogicalValues { rows: [[0:Int64, 0:Int64, null:Int64, null:Varchar, null:Timestamp, null:Boolean, null:Varchar]], schema: Schema { fields: [count:Int64, count(t.v1):Int64, sum(t.v1):Int64, min(t.v3):Varchar, max(t.ts):Timestamp, bool_and(t.b):Boolean, string_agg(t.v3, ',':Varchar order_by(t.v3 ASC)):Varchar] } }
   stream_plan: |-
     StreamMaterialize { columns: [c1, c2, s1, m1, m2, a1, b1, sa, _row_id(hidden)], stream_key: [_row_id], pk_columns: [_row_id], pk_conflict: NoCheck }
     └─StreamProject { exprs: [count, count(t.v1), sum(t.v1), min(t.v3), max(t.ts), null:Decimal, bool_and(t.b), string_agg(t.v3, ',':Varchar order_by(t.v3 ASC)), _row_id] }
-      └─StreamValues { rows: [[0:Int64, 0:Int64, null:Int64, null:Varchar, null:Timestamp, null:Int64, 0:Int64, null:Boolean, null:Varchar, 0:Int64]] }
+      └─StreamValues { rows: [[0:Int64, 0:Int64, null:Int64, null:Varchar, null:Timestamp, null:Boolean, null:Varchar, 0:Int64]] }
 - name: distinct agg without group key over an empty input
   before:
   - setup
@@ -617,9 +617,8 @@
   stream_plan: |-
     StreamMaterialize { columns: [v1, v2, t._row_id(hidden)], stream_key: [t._row_id], pk_columns: [t._row_id], pk_conflict: NoCheck }
     └─StreamFilter { predicate: (t.v2 = 7:Int32) }
-      └─StreamShare { id: 2 }
-        └─StreamFilter { predicate: (((t.v1 = 1:Int32) AND (t.v1 = 2:Int32)) OR (t.v2 = 7:Int32)) }
-          └─StreamTableScan { table: t, columns: [t.v1, t.v2, t._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }
+      └─StreamFilter { predicate: (((t.v1 = 1:Int32) AND (t.v1 = 2:Int32)) OR (t.v2 = 7:Int32)) }
+        └─StreamTableScan { table: t, columns: [t.v1, t.v2, t._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }
 - name: constant propagated into another conjunct
   before:
   - setup
@@ -682,7 +681,7 @@
   stream_plan: |-
     StreamMaterialize { columns: [v1, w, total, t._row_id(hidden), s._row_id(hidden)], stream_key: [t._row_id, s._row_id, v1], pk_columns: [t._row_id, s._row_id, v1], pk_conflict: NoCheck }
     └─StreamProject { exprs: [t.v1, s.w, (t.v2 + 3:Int32) as $expr1, t._row_id, s._row_id] }
-      └─StreamHashJoin { type: Inner, predicate: t.v1 = s.k, output: [t.v1, t.v2, s.k, s.w, t._row_id, s._row_id] }
+      └─StreamHashJoin { type: Inner, predicate: t.v1 = s.k, output: [t.v1, t.v2, s.w, t._row_id, s._row_id] }
         ├─StreamExchange { dist: HashShard(t.v1) }
         │ └─StreamFilter { predicate: (t.v1 = 3:Int32) }
         │   └─StreamTableScan { table: t, columns: [t.v1, t.v2, t._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }
@@ -743,7 +742,7 @@
     select v1, c is null as missing, c is not null as present from (select v1, count(*) as c from t group by v1) x;
   stream_plan: |-
     StreamMaterialize { columns: [v1, missing, present], stream_key: [v1], pk_columns: [v1], pk_conflict: NoCheck }
-    └─StreamProject { exprs: [t.v1, false:Boolean, true:Boolean] }
+    └─StreamProject { exprs: [t.v1, false:Boolean, true:Boolean], noop_update_hint: true }
       └─StreamHashAgg { group_key: [t.v1], aggs: [count] }
         └─StreamExchange { dist: HashShard(t.v1) }
           └─StreamTableScan { table: t, columns: [t.v1, t._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }
@@ -848,7 +847,7 @@
   stream_plan: |-
     StreamMaterialize { columns: [a, m1, m2, m3, m4, nn._row_id(hidden)], stream_key: [nn._row_id], pk_columns: [nn._row_id], pk_conflict: NoCheck }
     └─StreamProject { exprs: [nn.a, false:Boolean, false:Boolean, false:Boolean, IsNull(nn.b) as $expr1, nn._row_id] }
-      └─StreamTableScan { table: nn, columns: [nn.a, nn.b, nn.c, nn._row_id], stream_scan_type: SnapshotBackfill, stream_key: [nn._row_id], pk: [_row_id], dist: UpstreamHashShard(nn._row_id) }
+      └─StreamTableScan { table: nn, columns: [nn.a, nn.b, nn._row_id], stream_scan_type: SnapshotBackfill, stream_key: [nn._row_id], pk: [_row_id], dist: UpstreamHashShard(nn._row_id) }
 - name: is null on a not null column with a default
   before:
   - setup
@@ -1010,3 +1009,98 @@
         │ └─StreamTableScan { table: t, columns: [t.v1, t._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }
         └─StreamExchange { dist: HashShard(*VALUES*_0.column_0) }
           └─StreamValues { rows: [[1:Int32, 0:Int64]] }
+- name: last_value of a constant, packed by the planner with another last_value
+  before:
+  - setup
+  sql: |
+    select v1, x from (
+      select v1, last_value('set' order by ts) as op, last_value(v2 order by ts) as x from t group by v1
+    ) z where op = 'set';
+  optimized_logical_plan_for_stream: |-
+    LogicalProject { exprs: [t.v1, Field(last_value($expr1 order_by(t.ts ASC)), 1:Int32) as $expr2] }
+    └─LogicalAgg { group_key: [t.v1], aggs: [last_value($expr1 order_by(t.ts ASC))] }
+      └─LogicalProject { exprs: [t.v1, t.ts, Row('set':Varchar, t.v2) as $expr1] }
+        └─LogicalScan { table: t, columns: [t.v1, t.v2, t.ts] }
+  stream_plan: |-
+    StreamMaterialize { columns: [v1, x], stream_key: [v1], pk_columns: [v1], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [t.v1, Field(last_value($expr1 order_by(t.ts ASC)), 1:Int32) as $expr2] }
+      └─StreamHashAgg { group_key: [t.v1], aggs: [last_value($expr1 order_by(t.ts ASC)), count] }
+        └─StreamExchange { dist: HashShard(t.v1) }
+          └─StreamProject { exprs: [t.v1, t.ts, Row('set':Varchar, t.v2) as $expr1, t._row_id] }
+            └─StreamTableScan { table: t, columns: [t.v1, t.v2, t.ts, t._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }
+- name: last_value of a constant column of a view that tags its rows
+  before:
+  - setup
+  sql: |
+    with ops(op, k, x, ts) as (select 'set', v1, v2, ts from t),
+    last as (select k, last_value(op order by ts) as op, last_value(x order by ts) as x, first_value(ts order by ts) as created from ops group by k)
+    select k, x, created from last where op = 'set';
+  optimized_logical_plan_for_stream: |-
+    LogicalProject { exprs: [t.v1, Field(last_value($expr1 order_by(t.ts ASC)), 1:Int32) as $expr2, first_value(t.ts order_by(t.ts ASC))] }
+    └─LogicalAgg { group_key: [t.v1], aggs: [last_value($expr1 order_by(t.ts ASC)), first_value(t.ts order_by(t.ts ASC))] }
+      └─LogicalProject { exprs: [t.v1, t.ts, Row('set':Varchar, t.v2) as $expr1] }
+        └─LogicalScan { table: t, columns: [t.v1, t.v2, t.ts] }
+- name: max and min of a constant - the group becomes a distinct
+  before:
+  - setup
+  sql: |
+    select v1 from (select v1, max('a') as hi, min(1) as lo from t group by v1) z where hi = 'a' and lo = 1;
+  optimized_logical_plan_for_stream: |-
+    LogicalAgg { group_key: [t.v1], aggs: [] }
+    └─LogicalScan { table: t, columns: [t.v1] }
+- name: aggregate of a constant compared with another value - the group is empty
+  before:
+  - setup
+  sql: |
+    select v1 from (select v1, last_value('set' order by ts) as op from t group by v1) z where op = 'delete';
+  optimized_logical_plan_for_stream: 'LogicalValues { rows: [], schema: Schema { fields: [t.v1:Int32] } }'
+- name: kept - aggregate of a constant with a filter clause, which can be NULL
+  before:
+  - setup
+  sql: |
+    select v1 from (select v1, max('a') filter (where v2 > 0) as hi from t group by v1) z where hi = 'a';
+  optimized_logical_plan_for_stream: |-
+    LogicalProject { exprs: [t.v1] }
+    └─LogicalFilter { predicate: (max('a':Varchar) filter((t.v2 > 0:Int32)) = 'a':Varchar) }
+      └─LogicalAgg { group_key: [t.v1], aggs: [max('a':Varchar) filter((t.v2 > 0:Int32))] }
+        └─LogicalProject { exprs: [t.v1, t.v2, 'a':Varchar] }
+          └─LogicalScan { table: t, columns: [t.v1, t.v2] }
+- name: kept - aggregate of a constant without group key, which is NULL over no row
+  before:
+  - setup
+  sql: |
+    select hi from (select max('a') as hi from t) z where hi = 'a';
+  optimized_logical_plan_for_stream: |-
+    LogicalFilter { predicate: (max('a':Varchar) = 'a':Varchar) }
+    └─LogicalAgg { aggs: [max('a':Varchar)] }
+      └─LogicalProject { exprs: ['a':Varchar] }
+        └─LogicalScan { table: t, columns: [] }
+- name: kept - last_value of a value that differs between the branches of a union
+  before:
+  - setup
+  sql: |
+    with ops(op, k, ts) as (select 'set', v1, ts from t union all select 'delete', v1, ts from t where b)
+    select k from (select k, last_value(op order by ts) as op from ops group by k) z where op = 'set';
+  optimized_logical_plan_for_stream: |-
+    LogicalProject { exprs: [t.v1] }
+    └─LogicalFilter { predicate: (last_value('set':Varchar order_by(t.ts ASC)) = 'set':Varchar) }
+      └─LogicalAgg { group_key: [t.v1], aggs: [last_value('set':Varchar order_by(t.ts ASC))] }
+        └─LogicalUnion { all: true }
+          ├─LogicalProject { exprs: ['set':Varchar, t.v1, t.ts] }
+          │ └─LogicalScan { table: t, columns: [t.v1, t.ts] }
+          └─LogicalProject { exprs: ['delete':Varchar, t.v1, t.ts] }
+            └─LogicalScan { table: t, output_columns: [t.v1, t.ts], required_columns: [t.v1, t.ts, t.b], predicate: t.b }
+- name: aggregate of a constant on the optional side of a left join stays nullable
+  before:
+  - setup
+  sql: |
+    select s.k, z.op is null as missing, z.op = 'set' as is_set from s left join (
+      select v1, last_value('set' order by ts) as op from t group by v1
+    ) z on s.k = z.v1;
+  optimized_logical_plan_for_stream: |-
+    LogicalProject { exprs: [s.k, IsNull(last_value('set':Varchar order_by(t.ts ASC))) as $expr1, (last_value('set':Varchar order_by(t.ts ASC)) = 'set':Varchar) as $expr2] }
+    └─LogicalJoin { type: LeftOuter, on: (s.k = t.v1), output: [s.k, last_value('set':Varchar order_by(t.ts ASC))] }
+      ├─LogicalScan { table: s, columns: [s.k] }
+      └─LogicalAgg { group_key: [t.v1], aggs: [last_value('set':Varchar order_by(t.ts ASC))] }
+        └─LogicalProject { exprs: [t.v1, 'set':Varchar, t.ts] }
+          └─LogicalScan { table: t, columns: [t.v1, t.ts] }

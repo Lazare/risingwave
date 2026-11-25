@@ -793,3 +793,69 @@
     select t.v1, c.x from t left join (values (1)) as c(x) on t.v1 = c.x;
   expected_outputs:
   - stream_plan
+
+# An aggregate of a constant over a group is the constant.
+- name: last_value of a constant, packed by the planner with another last_value
+  before:
+  - setup
+  sql: |
+    select v1, x from (
+      select v1, last_value('set' order by ts) as op, last_value(v2 order by ts) as x from t group by v1
+    ) z where op = 'set';
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: last_value of a constant column of a view that tags its rows
+  before:
+  - setup
+  sql: |
+    with ops(op, k, x, ts) as (select 'set', v1, v2, ts from t),
+    last as (select k, last_value(op order by ts) as op, last_value(x order by ts) as x, first_value(ts order by ts) as created from ops group by k)
+    select k, x, created from last where op = 'set';
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: max and min of a constant - the group becomes a distinct
+  before:
+  - setup
+  sql: |
+    select v1 from (select v1, max('a') as hi, min(1) as lo from t group by v1) z where hi = 'a' and lo = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: aggregate of a constant compared with another value - the group is empty
+  before:
+  - setup
+  sql: |
+    select v1 from (select v1, last_value('set' order by ts) as op from t group by v1) z where op = 'delete';
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - aggregate of a constant with a filter clause, which can be NULL
+  before:
+  - setup
+  sql: |
+    select v1 from (select v1, max('a') filter (where v2 > 0) as hi from t group by v1) z where hi = 'a';
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - aggregate of a constant without group key, which is NULL over no row
+  before:
+  - setup
+  sql: |
+    select hi from (select max('a') as hi from t) z where hi = 'a';
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - last_value of a value that differs between the branches of a union
+  before:
+  - setup
+  sql: |
+    with ops(op, k, ts) as (select 'set', v1, ts from t union all select 'delete', v1, ts from t where b)
+    select k from (select k, last_value(op order by ts) as op from ops group by k) z where op = 'set';
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: aggregate of a constant on the optional side of a left join stays nullable
+  before:
+  - setup
+  sql: |
+    select s.k, z.op is null as missing, z.op = 'set' as is_set from s left join (
+      select v1, last_value('set' order by ts) as op from t group by v1
+    ) z on s.k = z.v1;
+  expected_outputs:
+  - optimized_logical_plan_for_stream

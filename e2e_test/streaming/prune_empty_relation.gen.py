@@ -100,6 +100,27 @@ CASES = [
     ('const_left', 'constant of the optional side of a left join',
      f"select t.v1 as tv, s.w as sw, s.w + 1 as w1, s.w is null as missing from {T} t "
      f"left join (select * from {SS} where w = 1) s on t.v1 = s.k"),
+    # An aggregate of a constant over a group is the constant.
+    ('agg_const_last', 'last_value of a constant, packed with another last_value',
+     f"select v1, x from (select v1, last_value('set' order by ts) as op, last_value(v2 order by ts) as x "
+     f"from {T} group by v1) z where op = 'set'"),
+    ('agg_const_ops', 'last_value of the tag of a view over one table',
+     f"with ops(op, k, x, ts) as (select 'set', v1, v2, ts from {T}), "
+     f"last as (select k, last_value(op order by ts) as op, last_value(x order by ts) as x, "
+     f"first_value(ts order by ts) as created from ops group by k) "
+     f"select k, x, created from last where op = 'set'"),
+    ('agg_const_minmax', 'max and min of a constant',
+     f"select v1 from (select v1, max('a') as hi, min(1) as lo from {T} group by v1) z where hi = 'a' and lo = 1"),
+    ('agg_const_other', 'aggregate of a constant compared with another value',
+     f"select v1 from (select v1, last_value('set' order by ts) as op from {T} group by v1) z where op = 'delete'"),
+    ('agg_const_union', 'kept: last_value of a tag that differs between the branches of a union',
+     f"with ops(op, k, ts) as (select 'set', v1, ts from {T} union all select 'delete', v1, ts from {T} where b) "
+     f"select k from (select k, last_value(op order by ts) as op from ops group by k) z where op = 'set'"),
+    ('agg_const_filter', 'kept: aggregate of a constant with a filter clause',
+     f"select v1 from (select v1, max('a') filter (where v2 > 3) as hi from {T} group by v1) z where hi = 'a'"),
+    ('agg_const_left', 'aggregate of a constant on the optional side of a left join',
+     f"select s.k as sk, z.op is null as missing, z.op = 'set' as is_set from {SS} s left join "
+     f"(select v1, last_value('set' order by ts) as op from {T} group by v1) z on s.k = z.v1"),
     # Known nullability.
     ('null_count', 'is null on a count', f"select v1, c from (select v1, count(*) as c from {T} group by v1) x where c is null"),
     ('null_count_proj', 'is null on a count in a projection',

@@ -884,7 +884,13 @@ impl LogicalOptimizer {
         {
             let applied_before = ctx.total_rule_applied();
             plan = plan.optimize_by_rules(&STREAM_PRUNE_EMPTY_RELATION)?;
-            ctx.add_stream_prune_rule_applied(ctx.total_rule_applied() - applied_before);
+            let applied = ctx.total_rule_applied() - applied_before;
+            ctx.add_stream_prune_rule_applied(applied);
+            if applied > 0 {
+                // A simplified filter or projection may not use a column any more: an aggregate
+                // call, or a whole side of a join, can then be pruned.
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+            }
         }
 
         // Remove the operators that the unique keys of their inputs make useless: an outer join

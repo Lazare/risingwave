@@ -46,6 +46,11 @@ pub(super) struct ColumnFacts {
     constants: BTreeMap<usize, Literal>,
     /// The columns that are never `NULL`, besides the constant ones.
     non_null: BTreeSet<usize>,
+    /// The fields of struct columns that hold the same non-`NULL` constant in every row, by
+    /// column and field position; the struct itself is then never `NULL`. This is how a constant
+    /// survives when several values are packed into one `ROW(...)`, as the planner does for the
+    /// `first_value` / `last_value` calls of an aggregation that share their ordering.
+    field_constants: BTreeMap<(usize, usize), Literal>,
 }
 
 impl ColumnFacts {
@@ -62,12 +67,35 @@ impl ColumnFacts {
         self.non_null.contains(&index) || self.constants.contains_key(&index)
     }
 
+    /// The constant fields of a struct column, by field position.
+    fn fields_of(&self, index: usize) -> impl Iterator<Item = (usize, &Literal)> {
+        self.field_constants
+            .range((index, 0)..=(index, usize::MAX))
+            .map(|((_, field), literal)| (*field, literal))
+    }
+
+    /// Records the facts of a column of another set as those of the column `output` here.
+    fn copy_column(&mut self, output: usize, other: &ColumnFacts, input: usize) {
+        if let Some(literal) = other.constant(input) {
+            self.constants.insert(output, literal.clone());
+        } else if other.is_non_null(input) {
+            self.non_null.insert(output);
+        }
+        for (field, literal) in other.fields_of(input) {
+            self.field_constants
+                .insert((output, field), literal.clone());
+        }
+    }
+
     /// Adds the facts of another set about the same columns.
     fn merge(&mut self, other: ColumnFacts) {
         for (index, literal) in other.constants {
             self.constants.entry(index).or_insert(literal);
         }
         self.non_null.extend(other.non_null);
+        for (key, literal) in other.field_constants {
+            self.field_constants.entry(key).or_insert(literal);
+        }
     }
 
     /// The same facts, with every column index moved by `offset`.
@@ -83,6 +111,11 @@ impl ColumnFacts {
                 .into_iter()
                 .map(|index| index + offset)
                 .collect(),
+            field_constants: self
+                .field_constants
+                .into_iter()
+                .map(|((index, field), literal)| ((index + offset, field), literal))
+                .collect(),
         }
     }
 
@@ -91,11 +124,7 @@ impl ColumnFacts {
     fn select(&self, mapping: impl IntoIterator<Item = usize>) -> Self {
         let mut facts = Self::default();
         for (output, input) in mapping.into_iter().enumerate() {
-            if let Some(literal) = self.constant(input) {
-                facts.constants.insert(output, literal.clone());
-            } else if self.is_non_null(input) {
-                facts.non_null.insert(output);
-            }
+            facts.copy_column(output, self, input);
         }
         facts
     }
@@ -113,6 +142,11 @@ impl ColumnFacts {
         for index in self.non_null {
             if other.is_non_null(index) {
                 facts.non_null.insert(index);
+            }
+        }
+        for (key, literal) in self.field_constants {
+            if other.field_constants.get(&key) == Some(&literal) {
+                facts.field_constants.insert(key, literal);
             }
         }
         facts
@@ -207,6 +241,21 @@ fn agg_is_non_null(agg_type: &AggType) -> bool {
     )
 }
 
+/// Returns whether the result of an aggregate function over a group is always the argument of
+/// one of the rows of the group, when no argument is `NULL`.
+fn agg_returns_an_input(agg_type: &AggType) -> bool {
+    matches!(
+        agg_type,
+        AggType::Builtin(
+            PbAggKind::Min
+                | PbAggKind::Max
+                | PbAggKind::FirstValue
+                | PbAggKind::LastValue
+                | PbAggKind::InternalLastSeenValue
+        )
+    )
+}
+
 /// Returns whether a column of a table declared `NOT NULL` never holds a `NULL`.
 ///
 /// A table drops the rows that violate its `NOT NULL` constraints, whatever writes them (DML, its
@@ -257,13 +306,15 @@ pub(super) fn scan_predicate_constant_columns(scan: &LogicalScan) -> BTreeSet<us
 ///   the input for a filter. For the scan of a table, the columns declared `NOT NULL` are never
 ///   `NULL` (see [`is_not_null_column`]); not for a table with a generated column, whose
 ///   constraints are checked on the columns that accept DML only.
-/// - `Project`: see [`expr_facts`].
+/// - `Project`: see [`expr_facts`]. `ROW(...)` is never `NULL` and keeps the constants among its
+///   fields.
 /// - `Join`: the facts of a side hold for its columns in the output, unless the join pads the
 ///   side with `NULL` (the right side of a left outer join, the left side of a right outer join,
 ///   both sides of a full outer join). The facts of the condition of an inner join hold too.
 /// - `Union`: the facts that hold for every input.
 /// - `Agg` without grouping sets: the facts of the group key columns, and the counting
-///   aggregates are never `NULL`.
+///   aggregates are never `NULL`. With a group key, an aggregate that returns one of its inputs
+///   (`min`, `max`, `first_value`, `last_value`) has the facts of its argument.
 /// - `Share`, `Dedup`, `TopN`, `Limit`: the facts of the input, whose rows they only select.
 pub(super) fn column_facts(plan: &PlanRef) -> ColumnFacts {
     column_facts_inner(plan, &mut HashMap::new())
@@ -317,6 +368,10 @@ fn derive_column_facts(plan: &PlanRef, memo: &mut HashMap<PlanNodeId, ColumnFact
         let input = column_facts_inner(&project.input(), memo);
         let mut facts = ColumnFacts::default();
         for (index, expr) in project.exprs().iter().enumerate() {
+            if let Some(input_ref) = expr.as_input_ref() {
+                facts.copy_column(index, &input, input_ref.index());
+                continue;
+            }
             match expr_facts(expr, &input) {
                 (Some(literal), _) => {
                     facts.constants.insert(index, literal);
@@ -325,6 +380,17 @@ fn derive_column_facts(plan: &PlanRef, memo: &mut HashMap<PlanNodeId, ColumnFact
                     facts.non_null.insert(index);
                 }
                 (None, false) => {}
+            }
+            // `ROW(...)` is never `NULL`, and each of its fields is the value of an argument.
+            if let Some(call) = expr.as_function_call()
+                && call.func_type() == ExprType::Row
+            {
+                facts.non_null.insert(index);
+                for (field, argument) in call.inputs().iter().enumerate() {
+                    if let (Some(literal), _) = expr_facts(argument, &input) {
+                        facts.field_constants.insert((index, field), literal);
+                    }
+                }
             }
         }
         return facts;
@@ -366,11 +432,21 @@ fn derive_column_facts(plan: &PlanRef, memo: &mut HashMap<PlanNodeId, ColumnFact
             return ColumnFacts::default();
         }
         // The output columns are the group key columns, then the aggregate calls.
-        let mut facts = column_facts_inner(&agg.input(), memo).select(agg.group_key().indices());
+        let input = column_facts_inner(&agg.input(), memo);
+        let mut facts = input.select(agg.group_key().indices());
         let group_key_len = agg.group_key().len();
         for (index, call) in agg.agg_calls().iter().enumerate() {
             if agg_is_non_null(&call.agg_type) {
                 facts.non_null.insert(group_key_len + index);
+            }
+            // A group holds at least one row, and the aggregate returns the value of one of
+            // them: what holds for the argument in every row holds for the result.
+            if group_key_len > 0
+                && agg_returns_an_input(&call.agg_type)
+                && call.filter.always_true()
+                && let [argument] = &call.inputs[..]
+            {
+                facts.copy_column(group_key_len + index, &input, argument.index());
             }
         }
         return facts;
@@ -409,6 +485,16 @@ impl ExprRewriter for FactsRewriter<'_> {
             && expr_facts(input, self.facts).1
         {
             return ExprImpl::literal_bool(func_type == ExprType::IsNotNull);
+        }
+        // A field of a struct column that is known to be constant.
+        if func_type == ExprType::Field
+            && let [input, field] = func_call.inputs()
+            && let Some(input_ref) = input.as_input_ref()
+            && let Some(Some(ScalarImpl::Int32(field))) = constant_value(field)
+            && let Ok(field) = usize::try_from(field)
+            && let Some(literal) = self.facts.field_constants.get(&(input_ref.index(), field))
+        {
+            return literal.clone().into();
         }
         let (func_type, inputs, return_type) = func_call.decompose();
         let inputs = inputs
