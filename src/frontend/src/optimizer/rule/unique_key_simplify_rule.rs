@@ -25,6 +25,7 @@ use risingwave_common::types::DataType;
 use risingwave_expr::aggregate::{AggType, PbAggKind};
 use risingwave_pb::plan_common::JoinType;
 
+use super::column_facts_simplify_rule::column_facts;
 use super::never_true_predicate_rule::is_simple_type;
 use super::prelude::{PlanRef, *};
 use crate::expr::{Expr, ExprImpl, ExprType, FunctionCall, InputRef};
@@ -54,7 +55,13 @@ fn unique_keys(plan: &PlanRef, memo: &mut HashMap<PlanNodeId, Vec<Key>>) -> Vec<
     if let Some(keys) = memo.get(&plan.id()) {
         return keys.clone();
     }
-    let keys = derive_unique_keys(plan, memo);
+    let mut keys = derive_unique_keys(plan, memo);
+    // A column that holds the same value in every row does not tell two rows apart: a table read
+    // with `id = 7` on its key holds at most one row.
+    let constants = column_facts(plan).constant_columns();
+    for key in &mut keys {
+        key.retain(|column| !constants.contains(column));
+    }
     memo.insert(plan.id(), keys.clone());
     keys
 }
@@ -377,7 +384,8 @@ fn case_when(condition: ExprImpl, then: ExprImpl, otherwise: ExprImpl) -> ExprIm
 ///
 /// - `count(*)` is `1`, `count(x)` is `1` if `x` is not `NULL` and `0` otherwise;
 /// - `sum`, `min`, `max`, `first_value`, `last_value`, `bool_and`, `bool_or`, `bit_and`, `bit_or`,
-///   `bit_xor` of `x` are `x`, cast to the type of the aggregate;
+///   `bit_xor` of `x` are `x`, cast to the type of the aggregate; so is the internal aggregate
+///   that carries a column that the group key determines;
 /// - `string_agg(x, delimiter)` is `x`.
 ///
 /// With a `FILTER` clause that is not `TRUE` for the row, the group is empty for the call: a
@@ -417,6 +425,7 @@ fn agg_over_one_row(call: &PlanAggCall) -> Option<ExprImpl> {
             | PbAggKind::Max
             | PbAggKind::FirstValue
             | PbAggKind::LastValue
+            | PbAggKind::InternalLastSeenValue
             | PbAggKind::BoolAnd
             | PbAggKind::BoolOr
             | PbAggKind::BitAnd

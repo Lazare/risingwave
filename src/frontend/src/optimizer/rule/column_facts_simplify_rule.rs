@@ -53,6 +53,11 @@ impl ColumnFacts {
         self.constants.get(&index)
     }
 
+    /// The columns that hold the same non-`NULL` constant in every row.
+    pub(super) fn constant_columns(&self) -> BTreeSet<usize> {
+        self.constants.keys().copied().collect()
+    }
+
     fn is_non_null(&self, index: usize) -> bool {
         self.non_null.contains(&index) || self.constants.contains_key(&index)
     }
