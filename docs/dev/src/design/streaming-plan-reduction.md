@@ -349,6 +349,9 @@ other stages of the prototype (three levels merge into one).
   moving between groups need nothing special. The known `sum` quirk (0 instead of `NULL` once the
   non-`NULL` values of a group are retracted) can differ in place between the two plans: the
   differential test wraps such sums in `coalesce`.
+- Found on the way, not changed (without the variable): `SELECT sum(c) FROM (SELECT g, count(*) AS
+  c FROM t GROUP BY g)` returns 0 in streaming once `t` is emptied, `NULL` in batch (the two-phase
+  plan sums the counts with a sum that does not return to `NULL`).
 
 ### 10. Sharing again the sub-plans that became identical (added on 2026-11-25, done on the branch)
 
