@@ -59,7 +59,7 @@ use crate::utils::{Condition, IndexSet};
 /// - An outer aggregation without aggregate (a `DISTINCT` or a `GROUP BY` on fewer columns above
 ///   another one) is a plain dedup of the input on the outer group key.
 ///
-/// A projection of columns between the two aggregations is looked through. A `HAVING` of the inner
+/// Projections of columns between the two aggregations are looked through. A `HAVING` of the inner
 /// aggregation is a filter between them and stops the rule, so does a shared inner aggregation.
 /// Grouping sets are not merged.
 ///
@@ -83,22 +83,20 @@ impl Rule<Logical> for StackedAggMergeRule {
         if !outer.grouping_sets().is_empty() {
             return None;
         }
-        let outer_input = outer.input();
-        // The output column of the inner aggregation that each column of the outer input is.
-        let (inner_plan, to_inner): (PlanRef, Vec<usize>) =
-            if let Some(project) = outer_input.as_logical_project() {
-                let columns = project
-                    .exprs()
-                    .iter()
-                    .map(|expr| expr.as_input_ref().map(|input_ref| input_ref.index()))
-                    .collect::<Option<Vec<_>>>()?;
-                (project.input(), columns)
-            } else {
-                (
-                    outer_input.clone(),
-                    (0..outer_input.schema().len()).collect(),
-                )
-            };
+        // The output column of the inner aggregation that each column of the outer input is,
+        // through the projections of columns in between (column pruning leaves one per level).
+        let mut inner_plan = outer.input();
+        let mut to_inner: Vec<usize> = (0..inner_plan.schema().len()).collect();
+        while let Some(project) = inner_plan.as_logical_project() {
+            let columns = project
+                .exprs()
+                .iter()
+                .map(|expr| expr.as_input_ref().map(|input_ref| input_ref.index()))
+                .collect::<Option<Vec<_>>>()?;
+            to_inner = to_inner.iter().map(|&column| columns[column]).collect();
+            let next = project.input();
+            inner_plan = next;
+        }
         let inner = inner_plan.as_logical_agg()?;
         if !inner.grouping_sets().is_empty() || inner.group_key().is_empty() {
             return None;

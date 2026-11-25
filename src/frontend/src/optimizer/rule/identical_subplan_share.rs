@@ -62,7 +62,9 @@ pub fn share_identical_subplans(plan: PlanRef) -> (PlanRef, usize) {
         .counts
         .iter()
         .filter(|(id, count)| {
-            **count >= 2 && !merger.kept.contains(*id) && is_worth_sharing(&counter.inputs[*id])
+            **count >= 2
+                && !merger.kept.contains(*id)
+                && is_worth_sharing(&counter.inputs[*id], &merger.kept)
         })
         .map(|(id, _)| *id)
         .collect();
@@ -79,14 +81,16 @@ pub fn share_identical_subplans(plan: PlanRef) -> (PlanRef, usize) {
     (pruner.apply(merged), count)
 }
 
-/// Whether a sub-plan holds a stateful operator and reads a table or a source.
-fn is_worth_sharing(plan: &PlanRef) -> bool {
+/// Whether a sub-plan holds a stateful operator and reads a table or a source, outside of the
+/// shares that already existed (`kept`): a projection or a filter above an existing share is
+/// cheaper to compute twice than to put behind one more fragment boundary.
+fn is_worth_sharing(plan: &PlanRef, kept: &HashSet<PlanNodeId>) -> bool {
     let mut has_state = false;
     let mut reads = false;
     let mut visited = HashSet::new();
     let mut stack = vec![plan.clone()];
     while let Some(node) = stack.pop() {
-        if !visited.insert(node.id()) {
+        if !visited.insert(node.id()) || kept.contains(&node.id()) {
             continue;
         }
         has_state |= node.as_logical_join().is_some()

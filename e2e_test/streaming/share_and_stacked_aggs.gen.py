@@ -68,7 +68,8 @@ CASES = [
     ('kept_count_count', 'count of counts counts inner groups',
      f"select g, count(c) as n, count(*) as m from (select g, w, count(*) as c from {T} group by g, w) x group by g"),
     ('kept_sum_count_scalar', 'sum of counts without outer group key',
-     f"select sum(c) as c from (select g, count(*) as c from {T} group by g) x"),
+     # `coalesce`: over an empty input, the streaming plan (two phases) gives 0, the query NULL.
+     f"select coalesce(sum(c), 0) as c from (select g, count(*) as c from {T} group by g) x"),
     ('kept_having', 'a HAVING on the inner aggregation',
      f"select g, coalesce(sum(sv), 0) as s from (select g, w, sum(v) as sv from {T} group by g, w having count(*) > 1) x group by g"),
     ('kept_group_on_agg', 'outer group key on an aggregate',

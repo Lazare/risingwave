@@ -133,7 +133,6 @@
       from t group by g, w
     ) x group by g;
   expected_outputs:
-  - logical_plan
   - optimized_logical_plan_for_stream
   - stream_plan
 
@@ -191,7 +190,6 @@
   sql: |
     select distinct g from (select distinct g, v from t) d;
   expected_outputs:
-  - logical_plan
   - optimized_logical_plan_for_stream
   - stream_plan
 

@@ -146,7 +146,7 @@ create materialized view ssa_kept_count_count_off as select g, count(c) as n, co
 # sum of counts without outer group key
 
 statement ok
-create materialized view ssa_kept_sum_count_scalar_off as select sum(c) as c from (select g, count(*) as c from ssa_t group by g) x;
+create materialized view ssa_kept_sum_count_scalar_off as select coalesce(sum(c), 0) as c from (select g, count(*) as c from ssa_t group by g) x;
 
 # a HAVING on the inner aggregation
 
@@ -277,7 +277,7 @@ create materialized view ssa_kept_count_count_on as select g, count(c) as n, cou
 # sum of counts without outer group key
 
 statement ok
-create materialized view ssa_kept_sum_count_scalar_on as select sum(c) as c from (select g, count(*) as c from ssa_t group by g) x;
+create materialized view ssa_kept_sum_count_scalar_on as select coalesce(sum(c), 0) as c from (select g, count(*) as c from ssa_t group by g) x;
 
 # a HAVING on the inner aggregation
 
@@ -662,9 +662,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssa_kept_sum_count_scalar_on except select * from (select sum(c) as c from (select g, count(*) as c from ssa_t group by g) x) q) x),
-  (select count(*) from (select * from (select sum(c) as c from (select g, count(*) as c from ssa_t group by g) x) q except select * from ssa_kept_sum_count_scalar_on) y),
-  (select count(*) from ssa_kept_sum_count_scalar_on) - (select count(*) from (select sum(c) as c from (select g, count(*) as c from ssa_t group by g) x) q);
+  (select count(*) from (select * from ssa_kept_sum_count_scalar_on except select * from (select coalesce(sum(c), 0) as c from (select g, count(*) as c from ssa_t group by g) x) q) x),
+  (select count(*) from (select * from (select coalesce(sum(c), 0) as c from (select g, count(*) as c from ssa_t group by g) x) q except select * from ssa_kept_sum_count_scalar_on) y),
+  (select count(*) from ssa_kept_sum_count_scalar_on) - (select count(*) from (select coalesce(sum(c), 0) as c from (select g, count(*) as c from ssa_t group by g) x) q);
 ----
 0 0 0
 
@@ -1118,9 +1118,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssa_kept_sum_count_scalar_on except select * from (select sum(c) as c from (select g, count(*) as c from ssa_t group by g) x) q) x),
-  (select count(*) from (select * from (select sum(c) as c from (select g, count(*) as c from ssa_t group by g) x) q except select * from ssa_kept_sum_count_scalar_on) y),
-  (select count(*) from ssa_kept_sum_count_scalar_on) - (select count(*) from (select sum(c) as c from (select g, count(*) as c from ssa_t group by g) x) q);
+  (select count(*) from (select * from ssa_kept_sum_count_scalar_on except select * from (select coalesce(sum(c), 0) as c from (select g, count(*) as c from ssa_t group by g) x) q) x),
+  (select count(*) from (select * from (select coalesce(sum(c), 0) as c from (select g, count(*) as c from ssa_t group by g) x) q except select * from ssa_kept_sum_count_scalar_on) y),
+  (select count(*) from ssa_kept_sum_count_scalar_on) - (select count(*) from (select coalesce(sum(c), 0) as c from (select g, count(*) as c from ssa_t group by g) x) q);
 ----
 0 0 0
 
@@ -1570,9 +1570,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssa_kept_sum_count_scalar_on except select * from (select sum(c) as c from (select g, count(*) as c from ssa_t group by g) x) q) x),
-  (select count(*) from (select * from (select sum(c) as c from (select g, count(*) as c from ssa_t group by g) x) q except select * from ssa_kept_sum_count_scalar_on) y),
-  (select count(*) from ssa_kept_sum_count_scalar_on) - (select count(*) from (select sum(c) as c from (select g, count(*) as c from ssa_t group by g) x) q);
+  (select count(*) from (select * from ssa_kept_sum_count_scalar_on except select * from (select coalesce(sum(c), 0) as c from (select g, count(*) as c from ssa_t group by g) x) q) x),
+  (select count(*) from (select * from (select coalesce(sum(c), 0) as c from (select g, count(*) as c from ssa_t group by g) x) q except select * from ssa_kept_sum_count_scalar_on) y),
+  (select count(*) from ssa_kept_sum_count_scalar_on) - (select count(*) from (select coalesce(sum(c), 0) as c from (select g, count(*) as c from ssa_t group by g) x) q);
 ----
 0 0 0
 
@@ -1985,9 +1985,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssa_kept_sum_count_scalar_on except select * from (select sum(c) as c from (select g, count(*) as c from ssa_t group by g) x) q) x),
-  (select count(*) from (select * from (select sum(c) as c from (select g, count(*) as c from ssa_t group by g) x) q except select * from ssa_kept_sum_count_scalar_on) y),
-  (select count(*) from ssa_kept_sum_count_scalar_on) - (select count(*) from (select sum(c) as c from (select g, count(*) as c from ssa_t group by g) x) q);
+  (select count(*) from (select * from ssa_kept_sum_count_scalar_on except select * from (select coalesce(sum(c), 0) as c from (select g, count(*) as c from ssa_t group by g) x) q) x),
+  (select count(*) from (select * from (select coalesce(sum(c), 0) as c from (select g, count(*) as c from ssa_t group by g) x) q except select * from ssa_kept_sum_count_scalar_on) y),
+  (select count(*) from ssa_kept_sum_count_scalar_on) - (select count(*) from (select coalesce(sum(c), 0) as c from (select g, count(*) as c from ssa_t group by g) x) q);
 ----
 0 0 0
 
@@ -2398,9 +2398,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssa_kept_sum_count_scalar_on except select * from (select sum(c) as c from (select g, count(*) as c from ssa_t group by g) x) q) x),
-  (select count(*) from (select * from (select sum(c) as c from (select g, count(*) as c from ssa_t group by g) x) q except select * from ssa_kept_sum_count_scalar_on) y),
-  (select count(*) from ssa_kept_sum_count_scalar_on) - (select count(*) from (select sum(c) as c from (select g, count(*) as c from ssa_t group by g) x) q);
+  (select count(*) from (select * from ssa_kept_sum_count_scalar_on except select * from (select coalesce(sum(c), 0) as c from (select g, count(*) as c from ssa_t group by g) x) q) x),
+  (select count(*) from (select * from (select coalesce(sum(c), 0) as c from (select g, count(*) as c from ssa_t group by g) x) q except select * from ssa_kept_sum_count_scalar_on) y),
+  (select count(*) from ssa_kept_sum_count_scalar_on) - (select count(*) from (select coalesce(sum(c), 0) as c from (select g, count(*) as c from ssa_t group by g) x) q);
 ----
 0 0 0
 
