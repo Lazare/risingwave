@@ -224,6 +224,8 @@ mod stacked_agg_merge_rule;
 pub use stacked_agg_merge_rule::*;
 mod identical_subplan_share;
 pub use identical_subplan_share::*;
+mod widened_subplan_share;
+pub use widened_subplan_share::*;
 mod repeated_lookup_merge_rule;
 pub use repeated_lookup_merge_rule::*;
 mod unique_key_simplify_rule;
@@ -378,6 +380,7 @@ macro_rules! for_all_rules {
             , { CommonJoinOverUnionRule }
             , { ApplyOneRowJoinSplitRule }
             , { StackedAggMergeRule }
+            , { StackedAggOverUnionMergeRule }
             , { BushyTreeJoinOrderingRule }
             , { StreamProjectMergeRule }
             , { StreamProjectSplitRule }

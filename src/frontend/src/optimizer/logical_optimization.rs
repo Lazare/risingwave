@@ -253,7 +253,10 @@ static STREAM_SIMPLE_UNNESTING_AGG: LazyLock<OptimizationStage> = LazyLock::new(
 static STREAM_MERGE_STACKED_AGGS: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Merge Stacked Aggregations For Stream",
-        vec![StackedAggMergeRule::create()],
+        vec![
+            StackedAggMergeRule::create(),
+            StackedAggOverUnionMergeRule::create(),
+        ],
         // Bottom-up: an aggregation merged below can be merged again with the one above.
         ApplyOrder::BottomUp,
     )
@@ -1021,6 +1024,19 @@ impl LogicalOptimizer {
                 .streaming_share_identical_subplans()
             && !ctx.is_stream_prune_baseline()
         {
+            // Copies that differ by their columns or by filters that commute with them first:
+            // column pruning then narrows each shared core to the columns its consumers read.
+            let (shared, merged_copies) = share_widened_subplans(plan);
+            plan = shared;
+            if merged_copies > 0 {
+                ctx.add_stream_prune_rule_applied(merged_copies);
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
+                if explain_trace {
+                    ctx.trace("Share Widened Sub-plans:");
+                    ctx.trace(plan.explain_to_string());
+                }
+            }
             let (shared, new_shares) = share_identical_subplans(plan);
             plan = shared;
             if new_shares > 0 {

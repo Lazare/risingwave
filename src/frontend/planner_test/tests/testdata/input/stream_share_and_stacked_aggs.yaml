@@ -9,6 +9,11 @@
     create table b (id int primary key, k int, y int);
     create view v1 as select a.id, a.k, h.v from a join h on a.k = h.sid;
     create view g1 as select sid, count(*) as c, max(v) as m from h group by sid;
+    create table m (id int primary key, code varchar, dir varchar);
+    create table r (id varchar primary key, code varchar, x int);
+    create table p (id int primary key);
+    create table c (id int primary key, pid int, amt int, st varchar);
+    create table tg (k varchar primary key, tags jsonb);
   expected_outputs: []
 - id: setup_share_off
   sql: |
@@ -89,7 +94,7 @@
   expected_outputs:
   - stream_plan
 
-- name: kept - the same join with different filters is not identical
+- name: the same join with different filters on one side is shared, each copy filters above
   before: [setup_share]
   sql: |
     select a.id, h.v from a join h on a.k = h.sid where h.v > 0
@@ -98,7 +103,7 @@
   expected_outputs:
   - stream_plan
 
-- name: kept - the same join reading other columns is not identical
+- name: the same join reading other columns is shared with the columns of both
   before: [setup_share]
   sql: |
     select a.id, h.v from a join h on a.k = h.sid
@@ -112,6 +117,51 @@
   sql: |
     with j as (select a.id, h.v from a join h on a.k = h.sid where h.v > 0)
     select id, v from j union all select id, v + 1 from j;
+  expected_outputs:
+  - stream_plan
+
+- name: a left join filtered on its preserved side in one copy is shared
+  before: [setup_share]
+  sql: |
+    select m.id, r.id as rid from m left join r on m.code = r.code where m.dir = 'c'
+    union all
+    select m.id, r.x::varchar from m left join r on m.code = r.code where m.id > 5;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - a left join filtered on its optional side in one copy
+  before: [setup_share]
+  sql: |
+    select m.id, r.id as rid from m left join r on m.code = r.code
+    union all
+    select m.id, x.id from m left join (select * from r where r.x > 0) x on m.code = x.code;
+  expected_outputs:
+  - stream_plan
+
+- name: two aggregations of the same input and key with different filters become one with FILTER
+  before: [setup_share]
+  sql: |
+    select p.id, a1.s1, a2.s2 from p
+    left join (select pid, sum(amt) as s1 from c where amt is not null group by pid) a1 on p.id = a1.pid
+    left join (select pid, sum(amt) as s2 from c where amt is not null and st not in ('x', 'y') group by pid) a2 on p.id = a2.pid;
+  expected_outputs:
+  - stream_plan
+
+- name: aggregations without group key with different filters become one with FILTER
+  before: [setup_share]
+  sql: |
+    select a.id, s.n from a cross join (select max(k) as n from tg where tags @> '["p"]') s
+    union all
+    select b.id, s2.n from b cross join (select max(k) as n from tg where tags @> '["q"]') s2;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - aggregations of the same input on different group keys
+  before: [setup_share]
+  sql: |
+    select a.id, x.c from a join (select sid, count(*) as c from h group by sid) x on a.k = x.c
+    union all
+    select b.id, y.c from b join (select v, count(*) as c from h group by v) y on b.k = y.v;
   expected_outputs:
   - stream_plan
 
@@ -209,6 +259,46 @@
   expected_outputs:
   - stream_plan
 
+- name: outer group key computed from inner group key columns
+  before: [setup_aggs]
+  sql: |
+    select g + w as gw, sum(sv) as s from (select g, w, v, sum(v) as sv from t group by g, w, v) x group by g + w;
+  expected_outputs:
+  - stream_plan
+
+- name: union of an aggregation and of rows, min and max
+  before: [setup_aggs]
+  sql: |
+    select g, min(mv) as mn, max(xv) as mx from (
+      select g, min(v) as mv, max(v) as xv from t group by g
+      union all
+      select g, v, v from s
+    ) u group by g;
+  expected_outputs:
+  - stream_plan
+
+- name: union of aggregations with FILTER and of an aggregation with HAVING, which stays
+  before: [setup_aggs]
+  sql: |
+    select g, sum(sv) as s, sum(c) as c from (
+      select g, sum(v) filter (where w > 0) as sv, count(*) as c from t group by g
+      union all
+      select g, sum(v), count(*) from s group by g having count(*) > 1
+    ) u group by g;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - count over a union of aggregations
+  before: [setup_aggs]
+  sql: |
+    select g, count(sv) as n from (
+      select g, sum(v) as sv from t group by g
+      union all
+      select g, sum(v) as sv from s group by g
+    ) u group by g;
+  expected_outputs:
+  - stream_plan
+
 - name: kept - avg of avg
   before: [setup_aggs]
   sql: |
@@ -282,7 +372,7 @@
   expected_outputs:
   - stream_plan
 
-- name: kept - sums of the aggregations of the branches of a union
+- name: sums of the aggregations of the branches of a union
   before: [setup_aggs]
   sql: |
     select g, sum(sv) as s from (

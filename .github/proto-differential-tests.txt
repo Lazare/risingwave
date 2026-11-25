@@ -1,2 +1,1 @@
 # Differential tests run by `proto-streaming-prune-check.yml`: <name> <file> <minutes>.
-sharedaggs share_and_stacked_aggs 90
