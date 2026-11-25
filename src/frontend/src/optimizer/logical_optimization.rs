@@ -854,8 +854,12 @@ impl LogicalOptimizer {
         // merged into the same filter, scan or join. Remove the sub-plans that are proven to be
         // empty, so that their fragments, backfills and states are never created. On demand
         // only: the plan of a streaming job is frozen when the job is created.
-        if ctx.session_ctx().config().streaming_prune_empty_relation() {
+        if ctx.session_ctx().config().streaming_prune_empty_relation()
+            && !ctx.is_stream_prune_baseline()
+        {
+            let applied_before = ctx.total_rule_applied();
             plan = plan.optimize_by_rules(&STREAM_PRUNE_EMPTY_RELATION)?;
+            ctx.add_stream_prune_rule_applied(ctx.total_rule_applied() - applied_before);
         }
 
         plan = plan.optimize_by_rules(&CONSTANT_OUTPUT_REMOVE)?;

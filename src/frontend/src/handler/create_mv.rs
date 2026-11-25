@@ -20,8 +20,10 @@ use pgwire::pg_response::{PgResponse, StatementType};
 use risingwave_common::catalog::{FunctionId, ObjectId, SecretId};
 use risingwave_common::license::Feature;
 use risingwave_pb::ddl_service::streaming_job_resource_type;
-use risingwave_pb::stream_plan::PbStreamFragmentGraph;
+use risingwave_pb::stream_plan::stream_node::NodeBody;
+use risingwave_pb::stream_plan::{PbStreamFragmentGraph, PbStreamNode};
 use risingwave_sqlparser::ast::{EmitMode, Ident, ObjectName, Query};
+use thiserror_ext::AsReport;
 
 use super::RwPgResponse;
 use crate::binder::{Binder, BoundQuery, BoundSetExpr};
@@ -369,6 +371,21 @@ pub(crate) fn gen_create_mv_graph(
         ))));
     }
 
+    // Kept to plan the job again without pruning, see `report_stream_prune_savings`.
+    let baseline_args = handler_args
+        .session
+        .config()
+        .streaming_prune_empty_relation()
+        .then(|| {
+            (
+                handler_args.clone(),
+                query.clone(),
+                name.clone(),
+                columns.clone(),
+                emit_mode.clone(),
+            )
+        });
+
     let context = OptimizerContext::from_handler_args(handler_args);
     let has_order_by = !query.order.is_empty();
     if has_order_by {
@@ -415,6 +432,21 @@ It only indicates the physical clustering of the data, which may improve the per
         Some(backfill_order),
     )?;
 
+    let rules_applied = context.stream_prune_rule_applied();
+    if rules_applied > 0
+        && let Some((handler_args, query, name, columns, emit_mode)) = baseline_args
+    {
+        let baseline = gen_create_mv_graph_without_pruning(
+            handler_args,
+            query,
+            name,
+            columns,
+            emit_mode,
+            refresh_interval_sec,
+        );
+        report_stream_prune_savings(session, &table.name, rules_applied, &graph, baseline);
+    }
+
     Ok((
         table,
         graph,
@@ -422,6 +454,124 @@ It only indicates the physical clustering of the data, which may improve the per
         resource_type,
         refresh_interval_sec,
     ))
+}
+
+/// Plans a materialized view without the pruning of the sub-plans proven empty
+/// (`streaming_prune_empty_relation`), only to compare its fragment graph with the pruned one.
+fn gen_create_mv_graph_without_pruning(
+    handler_args: HandlerArgs,
+    query: BoundQuery,
+    name: ObjectName,
+    columns: Vec<Ident>,
+    emit_mode: Option<EmitMode>,
+    refresh_interval_sec: Option<u64>,
+) -> Result<PbStreamFragmentGraph> {
+    let context = OptimizerContext::from_handler_args(handler_args);
+    context.set_stream_prune_baseline();
+    let context: OptimizerContextRef = context.into();
+    let session = context.session_ctx().as_ref();
+    let (plan, _table) = gen_create_mv_plan_bound(
+        session,
+        context.clone(),
+        query,
+        name,
+        columns,
+        emit_mode,
+        refresh_interval_sec,
+    )?;
+    build_graph_with_strategy(plan, Some(GraphJobType::MaterializedView), None)
+}
+
+/// Size of a fragment graph.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FragmentGraphSize {
+    pub fragments: usize,
+    pub operators: usize,
+    /// Scans of an upstream table or materialized view, each with its backfill.
+    pub table_scans: usize,
+}
+
+impl FragmentGraphSize {
+    pub(crate) fn of(graph: &PbStreamFragmentGraph) -> Self {
+        fn visit(node: &PbStreamNode, size: &mut FragmentGraphSize) {
+            size.operators += 1;
+            if matches!(node.node_body, Some(NodeBody::StreamScan(_))) {
+                size.table_scans += 1;
+            }
+            for input in &node.input {
+                visit(input, size);
+            }
+        }
+        let mut size = FragmentGraphSize {
+            fragments: graph.fragments.len(),
+            ..Default::default()
+        };
+        for fragment in graph.fragments.values() {
+            if let Some(node) = &fragment.node {
+                visit(node, &mut size);
+            }
+        }
+        size
+    }
+}
+
+/// Logs, and tells the user, what the pruning of the sub-plans proven empty saves for a streaming
+/// job: the size of its fragment graph, compared with the graph planned without pruning.
+pub(crate) fn report_stream_prune_savings(
+    session: &SessionImpl,
+    job_name: &str,
+    rules_applied: usize,
+    pruned: &PbStreamFragmentGraph,
+    baseline: Result<PbStreamFragmentGraph>,
+) {
+    let pruned = FragmentGraphSize::of(pruned);
+    match baseline {
+        Ok(baseline) => {
+            let baseline = FragmentGraphSize::of(&baseline);
+            let fragments_saved = baseline.fragments.saturating_sub(pruned.fragments);
+            tracing::info!(
+                job_name,
+                rules_applied,
+                fragments = pruned.fragments,
+                fragments_without_pruning = baseline.fragments,
+                fragments_saved,
+                operators = pruned.operators,
+                operators_without_pruning = baseline.operators,
+                table_scans = pruned.table_scans,
+                table_scans_without_pruning = baseline.table_scans,
+                "pruned the sub-plans proven empty of a streaming job"
+            );
+            session.notice_to_user(format!(
+                "streaming_prune_empty_relation: {} fragment(s) instead of {} ({} saved), \
+                 {} operator(s) instead of {}, {} table scan(s) instead of {}",
+                pruned.fragments,
+                baseline.fragments,
+                fragments_saved,
+                pruned.operators,
+                baseline.operators,
+                pruned.table_scans,
+                baseline.table_scans,
+            ));
+        }
+        // The plan without pruning may be rejected, e.g. `LIMIT 0`.
+        Err(error) => {
+            tracing::info!(
+                job_name,
+                rules_applied,
+                fragments = pruned.fragments,
+                operators = pruned.operators,
+                table_scans = pruned.table_scans,
+                error = %error.as_report(),
+                "pruned the sub-plans proven empty of a streaming job, whose plan without \
+                 pruning is rejected"
+            );
+            session.notice_to_user(format!(
+                "streaming_prune_empty_relation: {} fragment(s), {} operator(s), {} table scan(s); \
+                 the plan without pruning is rejected",
+                pruned.fragments, pruned.operators, pruned.table_scans,
+            ));
+        }
+    }
 }
 
 #[cfg(test)]
