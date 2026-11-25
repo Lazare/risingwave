@@ -268,6 +268,49 @@ impl Lifter {
         }
         let join = plan.as_logical_join()?;
         let (left, right) = (join.left(), join.right());
+        if join.join_type() == JoinType::LeftOuter && right.id() == self.target {
+            // The lookup is the padded side of a left outer join: the join is lifted, to be
+            // applied above with the lookup merged into it.
+            let other = self.place(left);
+            let internal: Vec<ExprImpl> = other
+                .layout
+                .iter()
+                .zip_eq_fast(other.plan.schema().fields())
+                .map(|(&column, field)| InputRef::new(column, field.data_type()).into())
+                .chain(
+                    right
+                        .schema()
+                        .fields()
+                        .iter()
+                        .enumerate()
+                        .map(|(index, field)| InputRef::new(index, field.data_type()).into()),
+                )
+                .collect();
+            let on = join
+                .on()
+                .conjunctions
+                .iter()
+                .map(|conjunct| substitute(conjunct, &internal))
+                .collect();
+            let outputs = join
+                .output_indices()
+                .iter()
+                .map(|&index| internal[index].clone())
+                .collect();
+            let layout = (0..right.schema().len()).collect();
+            return Some(Lifted {
+                rest: Some(other),
+                outputs,
+                lifted: vec![],
+                exts: vec![Ext {
+                    right: Placed {
+                        plan: right,
+                        layout,
+                    },
+                    on,
+                }],
+            });
+        }
         let in_left = reaches(&left, self.target);
         match join.join_type() {
             JoinType::Inner => {}
@@ -424,13 +467,16 @@ impl Lifter {
     }
 }
 
-/// The lookups that a tree of joins holds: the [`PureScan`]s reached through projections,
+/// The lookups that a tree of joins holds (see [`lookup_of`]): reached through projections,
 /// filters, inner joins and the preserved side of left outer joins, and shared sub-plans if
-/// `through_share`.
+/// `through_share`. A lookup may also be the padded side of a left outer join of the tree.
 fn nested_lookups(plan: &PlanRef, through_share: bool, lookups: &mut Vec<PlanRef>) {
-    if pure_scan(plan).is_some() {
+    if lookup_of(plan).is_some() {
         lookups.push(plan.clone());
-        return;
+        // A shared sub-plan with a key may hold other lookups, looked for below.
+        if pure_scan(plan).is_some() || !through_share {
+            return;
+        }
     }
     if let Some(project) = plan.as_logical_project() {
         nested_lookups(&project.input(), through_share, lookups);
@@ -446,27 +492,36 @@ fn nested_lookups(plan: &PlanRef, through_share: bool, lookups: &mut Vec<PlanRef
                 nested_lookups(&join.left(), through_share, lookups);
                 nested_lookups(&join.right(), through_share, lookups);
             }
-            JoinType::LeftOuter => nested_lookups(&join.left(), through_share, lookups),
+            JoinType::LeftOuter => {
+                nested_lookups(&join.left(), through_share, lookups);
+                let right = join.right();
+                if lookup_of(&right).is_some() {
+                    lookups.push(right);
+                }
+            }
             _ => {}
         }
     }
 }
 
-/// The tables that a plan scans, with the number of times that each is read: a scan under a
+/// The relations that a plan reads, with the number of times that each is read: a read under a
 /// shared sub-plan counts once per consumer.
-fn scanned_tables(
+fn read_relations(
     plan: &PlanRef,
-    memo: &mut HashMap<PlanNodeId, HashMap<TableId, usize>>,
-) -> HashMap<TableId, usize> {
+    memo: &mut HashMap<PlanNodeId, HashMap<Relation, usize>>,
+) -> HashMap<Relation, usize> {
     if let Some(tables) = memo.get(&plan.id()) {
         return tables.clone();
     }
-    let mut tables: HashMap<TableId, usize> = HashMap::new();
+    let mut tables: HashMap<Relation, usize> = HashMap::new();
     if let Some(scan) = plan.as_logical_scan() {
-        tables.insert(scan.table().id(), 1);
+        tables.insert(Relation::Table(scan.table().id()), 1);
+    }
+    if plan.as_logical_share().is_some() {
+        tables.insert(Relation::Share(plan.id()), 1);
     }
     for input in plan.inputs() {
-        for (table, count) in scanned_tables(&input, memo) {
+        for (table, count) in read_relations(&input, memo) {
             *tables.entry(table).or_default() += count;
         }
     }
@@ -490,13 +545,10 @@ pub(super) fn merge_nested_lookup(plan: &PlanRef, join: &LogicalJoin) -> Option<
         return None;
     }
     // Only a table that is read twice can be looked up twice.
-    let tables = scanned_tables(plan, &mut HashMap::new());
+    let tables = read_relations(plan, &mut HashMap::new());
     for lookup in lookups {
-        let pure = pure_scan(&lookup)?;
-        if tables
-            .get(&pure.scan.table().id())
-            .is_none_or(|&count| count < 2)
-        {
+        let pure = lookup_of(&lookup)?;
+        if tables.get(&pure.relation).is_none_or(|&count| count < 2) {
             continue;
         }
         let merged = if join.join_type() == JoinType::Inner {
@@ -513,22 +565,28 @@ pub(super) fn merge_nested_lookup(plan: &PlanRef, join: &LogicalJoin) -> Option<
 
 /// Runs the [`Lifter`] twice: once to find the classes of equal columns of the tree, once to
 /// take the lookup out. `extra` gives the conjuncts of the condition of the join above the tree,
-/// from the outputs of the tree. Also returns whether the lookup was in a shared sub-plan.
+/// from the outputs of the tree. Also returns the conjuncts that hold in every row of the tree
+/// (and of the join above), and whether the lookup was in a shared sub-plan.
 fn lift_twice(
     tree: &PlanRef,
     lookup: &PlanRef,
     next: usize,
     through_share: bool,
     extra: impl Fn(&[ExprImpl]) -> Vec<ExprImpl>,
-) -> Option<(Lifted, Vec<BTreeSet<usize>>, bool)> {
+) -> Option<(Lifted, Vec<ExprImpl>, bool)> {
     let mut lifter = Lifter::new(lookup.id(), next, vec![], through_share);
     let first = lifter.lift(tree)?;
     let mut conjuncts = lifter.seen;
     conjuncts.extend(extra(&first.outputs));
     let classes = equal_classes(&conjuncts);
-    let mut lifter = Lifter::new(lookup.id(), next, classes.clone(), through_share);
+    let mut lifter = Lifter::new(lookup.id(), next, classes, through_share);
     let lifted = lifter.lift(tree)?;
-    Some((lifted, classes, lifter.crossed_share))
+    Some((lifted, conjuncts, lifter.crossed_share))
+}
+
+/// Whether a lifted left outer join is the one whose padded side is the lookup.
+fn is_lookup_ext(ext: &Ext, lookup: &PlanRef) -> bool {
+    ext.right.plan.id() == lookup.id()
 }
 
 /// The lookup is in the tree of inner joins `plan`: joined with the rest of the tree, it is a side
@@ -542,28 +600,68 @@ fn merge_in_inner_tree(plan: &PlanRef, lookup: &PlanRef) -> Option<PlanRef> {
         .iter()
         .flat_map(|ext| ext.right.layout.iter().copied())
         .collect();
-    let (after, before): (Vec<ExprImpl>, Vec<ExprImpl>) = lifted
-        .lifted
-        .into_iter()
-        .partition(|conjunct| !columns_of(conjunct).is_disjoint(&ext_columns));
-    let layout: Vec<usize> = rest.layout.iter().copied().chain(0..lookup_len).collect();
-    let position = |column: usize| layout.iter().position(|&other| other == column);
-    let conjunctions = before
-        .iter()
-        .map(|conjunct| to_positions(conjunct, position))
-        .collect::<Option<Vec<_>>>()?;
-    let join = LogicalJoin::new(
-        rest.plan,
-        lookup.clone(),
-        JoinType::Inner,
-        Condition { conjunctions },
-    );
-    let merged = merge_lookup(&join)?;
-    let mut current = Placed {
-        plan: merged,
-        layout,
+    let padded = lifted.exts.iter().any(|ext| is_lookup_ext(ext, lookup));
+    let (after, before): (Vec<ExprImpl>, Vec<ExprImpl>) =
+        lifted.lifted.into_iter().partition(|conjunct| {
+            // Without an inner join with the lookup, every conjunct is applied at the end.
+            padded || !columns_of(conjunct).is_disjoint(&ext_columns)
+        });
+    let mut current = if padded {
+        rest
+    } else {
+        let layout: Vec<usize> = rest.layout.iter().copied().chain(0..lookup_len).collect();
+        let position = |column: usize| layout.iter().position(|&other| other == column);
+        let conjunctions = before
+            .iter()
+            .map(|conjunct| to_positions(conjunct, position))
+            .collect::<Option<Vec<_>>>()?;
+        let join = LogicalJoin::new(
+            rest.plan,
+            lookup.clone(),
+            JoinType::Inner,
+            Condition {
+                conjunctions: tidy(conjunctions),
+            },
+        );
+        Placed {
+            plan: merge_lookup(&join)?,
+            layout,
+        }
     };
     for ext in lifted.exts {
+        if is_lookup_ext(&ext, lookup) {
+            // The left outer join of the lookup, which `merge_lookup` removes.
+            let left_len = current.layout.len();
+            let position = |column: usize| {
+                current
+                    .position(column)
+                    .or_else(|| Some(left_len + ext.right.position(column)?))
+            };
+            let conjunctions = ext
+                .on
+                .iter()
+                .map(|conjunct| to_positions(conjunct, position))
+                .collect::<Option<Vec<_>>>()?;
+            let layout = current
+                .layout
+                .iter()
+                .chain(&ext.right.layout)
+                .copied()
+                .collect();
+            let join = LogicalJoin::new(
+                current.plan,
+                lookup.clone(),
+                JoinType::LeftOuter,
+                Condition {
+                    conjunctions: tidy(conjunctions),
+                },
+            );
+            current = Placed {
+                plan: merge_lookup(&join)?,
+                layout,
+            };
+            continue;
+        }
         current = apply_ext(current, ext)?;
     }
     finish(current, &after, &lifted.outputs)
@@ -620,9 +718,20 @@ fn finish(current: Placed, conjuncts: &[ExprImpl], outputs: &[ExprImpl]) -> Opti
     Some(LogicalProject::new(input, exprs).into())
 }
 
+/// How the row of a lookup is known to be the one of an instance, for a column of the key.
+enum Found {
+    /// A column of the left side bound to the column of the key: the row is found when it is not
+    /// `NULL`.
+    Bound(usize),
+    /// The left outer join of the instance searched the same rows from the same column (see
+    /// [`searched_same_rows`]): the row is found when the instance is matched, which its column
+    /// of the key tells.
+    Searched(usize),
+}
+
 /// The lookup is in the right side of a left outer, left semi or left anti join, and its row is
 /// carried by the left side.
-fn merge_in_right_side(join: &LogicalJoin, lookup: &PlanRef, pure: &PureScan) -> Option<PlanRef> {
+fn merge_in_right_side(join: &LogicalJoin, lookup: &PlanRef, pure: &Lookup) -> Option<PlanRef> {
     let join_type = join.join_type();
     let (left, right) = (join.left(), join.right());
     let left_len = left.schema().len();
@@ -644,7 +753,7 @@ fn merge_in_right_side(join: &LogicalJoin, lookup: &PlanRef, pure: &PureScan) ->
             .collect()
     };
     let through_share = join_type != JoinType::LeftOuter;
-    let (lifted, classes, crossed_share) = lift_twice(
+    let (lifted, mut proof, crossed_share) = lift_twice(
         &right,
         lookup,
         lookup_len + left_len,
@@ -670,32 +779,55 @@ fn merge_in_right_side(join: &LogicalJoin, lookup: &PlanRef, pure: &PureScan) ->
         // The right side is the lookup itself: the case of `merge_lookup`.
         return None;
     }
+    // The lookup may be the padded side of a left outer join of the right side: when it finds a
+    // row, the condition of that join holds too.
+    let lookup_ext = lifted.exts.iter().find(|ext| is_lookup_ext(ext, lookup));
+    if let Some(ext) = lookup_ext {
+        proof.extend(ext.on.iter().cloned());
+    }
+    let classes = equal_classes(&proof);
 
     // An instance of the table in the left side whose key designates the row of the lookup: each
     // column of the key of the lookup is in a class with a column of the left side that is bound
     // to the same column of the key.
     let is_left = |column: usize| (lookup_len..lookup_len + left_len).contains(&column);
     let mut memo = Memo::new();
-    let key = pure.key();
-    let chosen_for = |instance: &Carried| -> Option<Vec<usize>> {
+    let key = pure.key.clone();
+    let chosen_for = |instance: &Carried| -> Option<Vec<Found>> {
         key.iter()
             .map(|&key_column| {
                 let lookup_columns: Vec<usize> = (0..lookup_len)
                     .filter(|&output| pure.key_column_at(output) == Some(key_column))
                     .collect();
-                let bound = instance.bound.get(&key_column)?;
-                classes
+                let bound = instance.bound.get(&key_column);
+                let mut class_columns = classes
                     .iter()
                     .filter(|class| lookup_columns.iter().any(|c| class.contains(c)))
                     .flat_map(|class| class.iter().copied())
-                    .find(|&column| is_left(column) && bound.contains(&(column - lookup_len)))
-                    .map(|column| column - lookup_len)
+                    .filter(|&column| is_left(column))
+                    .map(|column| column - lookup_len);
+                // A column bound to the key, or the column that the left outer join of the
+                // instance searched the same rows with (see `searched_same_rows`).
+                let searched = instance
+                    .outer_lookup
+                    .as_ref()
+                    .and_then(|lookup| lookup.keys.get(&key_column).copied())
+                    .filter(|_| searched_same_rows(instance, &pure.predicate));
+                class_columns.find_map(|column| {
+                    if bound.is_some_and(|bound| bound.contains(&column)) {
+                        Some(Found::Bound(column))
+                    } else if searched == Some(column) {
+                        Some(Found::Searched(key_column))
+                    } else {
+                        None
+                    }
+                })
             })
             .collect()
     };
     let (instance, chosen) = carried(&left, &mut memo)
         .into_iter()
-        .filter(|instance| instance.table_id == pure.scan.table().id())
+        .filter(|instance| instance.relation == pure.relation)
         .find_map(|instance| {
             let chosen = chosen_for(&instance)?;
             Some((instance, chosen))
@@ -704,6 +836,11 @@ fn merge_in_right_side(join: &LogicalJoin, lookup: &PlanRef, pure: &PureScan) ->
     // The columns of the lookup, computed from the row of the instance.
     let mut columns = referred_columns(&pure.exprs);
     columns.extend(referred_columns(&pure.predicate));
+    for found in &chosen {
+        if let Found::Searched(key_column) = found {
+            columns.insert(*key_column);
+        }
+    }
     let exposed = expose(
         &left,
         &Request {
@@ -733,13 +870,17 @@ fn merge_in_right_side(join: &LogicalJoin, lookup: &PlanRef, pure: &PureScan) ->
     let facts = column_facts(&new_left);
     let mut found: Vec<ExprImpl> = chosen
         .iter()
-        .copied()
+        .map(|found| match found {
+            Found::Bound(column) => *column,
+            Found::Searched(key_column) => exposed.positions[key_column],
+        })
         .collect::<BTreeSet<_>>()
         .into_iter()
         .filter(|&column| !facts.is_non_null(column))
         .map(|column| is_not_null(left_column(column)))
         .collect();
     found.extend(pure.predicate.iter().map(&on_instance));
+    let found = tidy(found);
 
     // The virtual columns over the new left side, then the rest of the right side.
     let rest_layout: Vec<usize> = lifted
@@ -747,12 +888,12 @@ fn merge_in_right_side(join: &LogicalJoin, lookup: &PlanRef, pure: &PureScan) ->
         .as_ref()
         .map(|rest| rest.layout.clone())
         .unwrap_or_default();
-    let to_plan = |expr: &ExprImpl| -> Option<ExprImpl> {
+    let to_plan_with = |expr: &ExprImpl, lookup_values: &[ExprImpl]| -> Option<ExprImpl> {
         let mut ok = true;
         let expr = map_input_refs(expr, |input_ref| {
             let column = input_ref.index();
             if column < lookup_len {
-                on_instance(&pure.exprs[column])
+                lookup_values[column].clone()
             } else if is_left(column) {
                 left_column(column - lookup_len)
             } else if let Some(position) = rest_layout.iter().position(|&other| other == column) {
@@ -764,8 +905,33 @@ fn merge_in_right_side(join: &LogicalJoin, lookup: &PlanRef, pure: &PureScan) ->
         });
         ok.then_some(expr)
     };
+    // The columns of the lookup. When it is the padded side of a left outer join of the right
+    // side, they are those of the row of the instance when the condition of that join holds on
+    // it and the lookup finds it, and `NULL` otherwise; and a row of the right side does not need
+    // the lookup to find anything.
+    let instance_values: Vec<ExprImpl> = pure.exprs.iter().map(&on_instance).collect();
+    let lookup_values: Vec<ExprImpl> = match lookup_ext {
+        Some(ext) => {
+            let mut guard = ext
+                .on
+                .iter()
+                .map(|conjunct| to_plan_with(conjunct, &instance_values))
+                .collect::<Option<Vec<_>>>()?;
+            guard.extend(found.iter().cloned());
+            let guard = tidy(guard);
+            instance_values
+                .iter()
+                .map(|value| when_all(&guard, value.clone()))
+                .collect()
+        }
+        None => instance_values,
+    };
+    let to_plan = |expr: &ExprImpl| to_plan_with(expr, &lookup_values);
     let mut conjunctions = conjuncts.iter().map(&to_plan).collect::<Option<Vec<_>>>()?;
-    conjunctions.extend(found);
+    if lookup_ext.is_none() {
+        conjunctions.extend(found);
+    }
+    let conjunctions = tidy(conjunctions);
 
     if join_type != JoinType::LeftOuter {
         // Whether a row of the right side matches: the left outer joins that were lifted do not
@@ -836,6 +1002,10 @@ fn merge_in_right_side(join: &LogicalJoin, lookup: &PlanRef, pure: &PureScan) ->
     let mut layout_len = base_len;
     let mut ext_positions: BTreeMap<usize, usize> = BTreeMap::new();
     for ext in lifted.exts {
+        if is_lookup_ext(&ext, lookup) {
+            // Its columns are computed from the row of the instance, see `lookup_values`.
+            continue;
+        }
         let ext_layout = ext.right.layout.clone();
         let mut ok = true;
         let mut conjunctions: Vec<ExprImpl> = ext
@@ -861,6 +1031,7 @@ fn merge_in_right_side(join: &LogicalJoin, lookup: &PlanRef, pure: &PureScan) ->
             return None;
         }
         conjunctions.push(gate.clone());
+        let conjunctions = tidy(conjunctions);
         current = LogicalJoin::new(
             current,
             ext.right.plan,

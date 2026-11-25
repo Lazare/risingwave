@@ -744,7 +744,7 @@
       select d2.id, d2.name, e.code from d d2 left join e on d2.grp = e.id where d2.active
     ) r on d.id = r.id;
   optimized_logical_plan_for_stream: |-
-    LogicalProject { exprs: [f.id, Case((((d.id = d.id) AND IsNotNull(d.id)) AND d.active), d.name) as $expr1, e.code] }
+    LogicalProject { exprs: [f.id, Case((IsNotNull(d.id) AND d.active), d.name) as $expr1, e.code] }
     └─LogicalJoin { type: LeftOuter, on: (d.grp = e.id) AND IsNotNull(d.id) AND d.active, output: [f.id, d.id, d.name, d.active, e.code] }
       ├─LogicalJoin { type: LeftOuter, on: (f.dim_id = d.id), output: [f.id, d.id, d.name, d.grp, d.active] }
       │ ├─LogicalScan { table: f, columns: [f.id, f.dim_id] }
@@ -1015,3 +1015,183 @@
     set streaming_simplify_on_unique_key = true;
     select f.id, f.amt from f left join d on f.dim_id = d.id;
   optimized_logical_plan_for_stream: 'LogicalScan { table: f, columns: [f.id, f.amt] }'
+- name: two inner reads of a shared aggregation on its group key
+  before:
+  - setup_flat
+  sql: |
+    with q as (select grp, count(*) as c, max(name) as m from d group by grp)
+    select f.id, q1.c, q2.m from f join q q1 on f.other_id = q1.grp join q q2 on f.other_id = q2.grp;
+  optimized_logical_plan_for_stream: |-
+    LogicalJoin { type: Inner, on: (f.other_id = d.grp), output: [f.id, count, max(d.name)] }
+    ├─LogicalScan { table: f, columns: [f.id, f.other_id] }
+    └─LogicalAgg { group_key: [d.grp], aggs: [count, max(d.name)] }
+      └─LogicalScan { table: d, columns: [d.name, d.grp] }
+- name: two left reads of a shared aggregation on its group key
+  before:
+  - setup_flat
+  sql: |
+    with q as (select grp, count(*) as c, max(name) as m from d group by grp)
+    select f.id, q1.c, q2.m from f left join q q1 on f.other_id = q1.grp left join q q2 on f.other_id = q2.grp;
+  optimized_logical_plan_for_stream: |-
+    LogicalJoin { type: LeftOuter, on: (f.other_id = d.grp), output: [f.id, count, max(d.name)] }
+    ├─LogicalScan { table: f, columns: [f.id, f.other_id] }
+    └─LogicalAgg { group_key: [d.grp], aggs: [count, max(d.name)] }
+      └─LogicalScan { table: d, columns: [d.name, d.grp] }
+  stream_plan: |-
+    StreamMaterialize { columns: [id, c, m, f.other_id(hidden), d.grp(hidden)], stream_key: [id, f.other_id], pk_columns: [id, f.other_id], pk_conflict: NoCheck }
+    └─StreamExchange { dist: HashShard(f.id, f.other_id) }
+      └─StreamHashJoin { type: LeftOuter, predicate: f.other_id = d.grp, output: [f.id, count, max(d.name), f.other_id, d.grp] }
+        ├─StreamExchange { dist: HashShard(f.other_id) }
+        │ └─StreamTableScan { table: f, columns: [f.id, f.other_id], stream_scan_type: SnapshotBackfill, stream_key: [f.id], pk: [id], dist: UpstreamHashShard(f.id) }
+        └─StreamHashAgg { group_key: [d.grp], aggs: [count, max(d.name)] }
+          └─StreamExchange { dist: HashShard(d.grp) }
+            └─StreamTableScan { table: d, columns: [d.name, d.grp, d.id], stream_scan_type: SnapshotBackfill, stream_key: [d.id], pk: [id], dist: UpstreamHashShard(d.id) }
+- name: exists on a shared distinct that the left side already reads
+  before:
+  - setup_flat
+  sql: |
+    with u as (select distinct grp from d)
+    select f.id from f join u on f.other_id = u.grp where exists (select 1 from u u2 where u2.grp = f.other_id);
+  optimized_logical_plan_for_stream: |-
+    LogicalJoin { type: Inner, on: (f.other_id = d.grp), output: [f.id] }
+    ├─LogicalScan { table: f, columns: [f.id, f.other_id] }
+    └─LogicalAgg { group_key: [d.grp], aggs: [] }
+      └─LogicalScan { table: d, columns: [d.grp] }
+- name: left join of a chain that reads a shared aggregation and the table of the left side again
+  before:
+  - setup_flat
+  sql: |
+    with pp as (select id, sum(a) as s from g group by id), m as (select id, sum(x) as s from h group by id)
+    select d.id, pp.s, y.z from d left join pp on d.id = pp.id left join (
+      select m.id, m.s - pp.s + d2.grp as z from m join d d2 on m.id = d2.id join pp on d2.id = pp.id
+    ) y on d.id = y.id;
+  optimized_logical_plan_for_stream: |-
+    LogicalProject { exprs: [d.id, sum(g.a), Case(IsNotNull(h.id), ((sum(h.x) - Case(IsNotNull(h.id), sum(g.a))) + d.grp)) as $expr1] }
+    └─LogicalJoin { type: LeftOuter, on: (d.id = h.id) AND (h.id = d.id) AND (h.id = g.id) AND (d.id = g.id) AND IsNotNull(d.id) AND IsNotNull(g.id), output: [d.id, sum(g.a), d.grp, h.id, sum(h.x)] }
+      ├─LogicalJoin { type: LeftOuter, on: (d.id = g.id), output: [d.id, sum(g.a), d.grp, g.id] }
+      │ ├─LogicalScan { table: d, columns: [d.id, d.grp] }
+      │ └─LogicalAgg { group_key: [g.id], aggs: [sum(g.a)] }
+      │   └─LogicalScan { table: g, columns: [g.id, g.a] }
+      └─LogicalAgg { group_key: [h.id], aggs: [sum(h.x)] }
+        └─LogicalScan { table: h, columns: [h.id, h.x] }
+  stream_plan: |-
+    StreamMaterialize { columns: [id, s, z, g.id(hidden)], stream_key: [id, g.id], pk_columns: [id, g.id], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [d.id, sum(g.a), Case(IsNotNull(h.id), ((sum(h.x) - Case(IsNotNull(h.id), sum(g.a))) + d.grp)) as $expr1, g.id] }
+      └─StreamHashJoin { type: LeftOuter, predicate: d.id = h.id AND d.id = h.id AND g.id = h.id AND (d.id = g.id) AND IsNotNull(d.id) AND IsNotNull(g.id), output: [d.id, sum(g.a), d.grp, h.id, sum(h.x), g.id] }
+        ├─StreamExchange { dist: HashShard(g.id) }
+        │ └─StreamHashJoin { type: LeftOuter, predicate: d.id = g.id, output: [d.id, sum(g.a), d.grp, g.id] }
+        │   ├─StreamExchange { dist: HashShard(d.id) }
+        │   │ └─StreamTableScan { table: d, columns: [d.id, d.grp], stream_scan_type: SnapshotBackfill, stream_key: [d.id], pk: [id], dist: UpstreamHashShard(d.id) }
+        │   └─StreamExchange { dist: HashShard(g.id) }
+        │     └─StreamProject { exprs: [g.id, sum(g.a)] }
+        │       └─StreamHashAgg { group_key: [g.id], aggs: [sum(g.a), count] }
+        │         └─StreamTableScan { table: g, columns: [g.id, g.a], stream_scan_type: SnapshotBackfill, stream_key: [g.id], pk: [id], dist: UpstreamHashShard(g.id) }
+        └─StreamProject { exprs: [h.id, sum(h.x)] }
+          └─StreamHashAgg { group_key: [h.id], aggs: [sum(h.x), count] }
+            └─StreamExchange { dist: HashShard(h.id) }
+              └─StreamTableScan { table: h, columns: [h.id, h.x, h.rid], stream_scan_type: SnapshotBackfill, stream_key: [h.rid], pk: [rid], dist: UpstreamHashShard(h.rid) }
+- name: left join of a chain that reads a shared aggregation on a column that is not a key
+  before:
+  - setup_flat
+  sql: |
+    with pp as (select a, sum(b) as s from g group by a), m as (select id, sum(x) as s from h group by id)
+    select d.id, pp.s, y.z from d left join pp on d.id = pp.a left join (
+      select m.id, m.s - pp.s + d2.grp as z from m join d d2 on m.id = d2.id join pp on d2.id = pp.a
+    ) y on d.id = y.id;
+  optimized_logical_plan_for_stream: |-
+    LogicalProject { exprs: [d.id, sum(g.b), Case(IsNotNull(h.id), ((sum(h.x) - Case(IsNotNull(h.id), sum(g.b))) + d.grp)) as $expr1] }
+    └─LogicalJoin { type: LeftOuter, on: (d.id = h.id) AND (h.id = d.id) AND (h.id = g.a) AND (d.id = g.a) AND IsNotNull(d.id) AND IsNotNull(g.a), output: [d.id, sum(g.b), d.grp, h.id, sum(h.x)] }
+      ├─LogicalJoin { type: LeftOuter, on: (d.id = g.a), output: [d.id, sum(g.b), d.grp, g.a] }
+      │ ├─LogicalScan { table: d, columns: [d.id, d.grp] }
+      │ └─LogicalAgg { group_key: [g.a], aggs: [sum(g.b)] }
+      │   └─LogicalScan { table: g, columns: [g.a, g.b] }
+      └─LogicalAgg { group_key: [h.id], aggs: [sum(h.x)] }
+        └─LogicalScan { table: h, columns: [h.id, h.x] }
+- name: kept - two reads of a shared aggregation on another column than its group key
+  before:
+  - setup_flat
+  sql: |
+    with q as (select grp, count(*) as c, max(name) as m from d group by grp)
+    select f.id, q1.c, q2.m from f join q q1 on f.other_id = q1.grp join q q2 on f.other_id = q2.c;
+  optimized_logical_plan_for_stream: |-
+    LogicalJoin { type: Inner, on: ($expr1 = count), output: [f.id, count, max(d.name)] }
+    ├─LogicalProject { exprs: [f.id, count, f.other_id::Int64 as $expr1] }
+    │ └─LogicalJoin { type: Inner, on: (f.other_id = d.grp), output: [f.id, f.other_id, count] }
+    │   ├─LogicalScan { table: f, columns: [f.id, f.other_id] }
+    │   └─LogicalShare { id: 2 }
+    │     └─LogicalAgg { group_key: [d.grp], aggs: [count, max(d.name)] }
+    │       └─LogicalScan { table: d, columns: [d.name, d.grp] }
+    └─LogicalShare { id: 2 }
+      └─LogicalAgg { group_key: [d.grp], aggs: [count, max(d.name)] }
+        └─LogicalScan { table: d, columns: [d.name, d.grp] }
+- name: kept - two reads of a shared union, which has no unique key
+  before:
+  - setup_flat
+  sql: |
+    with u as (select id, name from d union all select id, code from e)
+    select f.id, u1.name, u2.name as n2 from f join u u1 on f.other_id = u1.id join u u2 on f.other_id = u2.id;
+  optimized_logical_plan_for_stream: |-
+    LogicalJoin { type: Inner, on: (f.other_id = d.id), output: [f.id, d.name, d.name] }
+    ├─LogicalJoin { type: Inner, on: (f.other_id = d.id), output: [f.id, f.other_id, d.name] }
+    │ ├─LogicalScan { table: f, columns: [f.id, f.other_id] }
+    │ └─LogicalShare { id: 2 }
+    │   └─LogicalUnion { all: true }
+    │     ├─LogicalScan { table: d, columns: [d.id, d.name] }
+    │     └─LogicalScan { table: e, columns: [e.id, e.code] }
+    └─LogicalShare { id: 2 }
+      └─LogicalUnion { all: true }
+        ├─LogicalScan { table: d, columns: [d.id, d.name] }
+        └─LogicalScan { table: e, columns: [e.id, e.code] }
+- name: lookup in the padded side of a left join of the right side of a left join
+  before:
+  - setup_flat
+  sql: |
+    select d.id, d.name, r.w from d left join (
+      select q.id, coalesce(q.s, o.grp) as w
+      from (select id, sum(x) as s from h group by id) q left join (select id, grp from d where grp > 0) o on q.id = o.id
+    ) r on d.id = r.id;
+  optimized_logical_plan_for_stream: |-
+    LogicalProject { exprs: [d.id, d.name, Case(IsNotNull(h.id), Coalesce(sum(h.x), Case((((h.id = d.id) AND IsNotNull(d.id)) AND (d.grp > 0:Int32)), d.grp)::Int64)) as $expr1] }
+    └─LogicalJoin { type: LeftOuter, on: (d.id = h.id), output: all }
+      ├─LogicalScan { table: d, columns: [d.id, d.name, d.grp] }
+      └─LogicalAgg { group_key: [h.id], aggs: [sum(h.x)] }
+        └─LogicalScan { table: h, columns: [h.id, h.x] }
+  stream_plan: |-
+    StreamMaterialize { columns: [id, name, w], stream_key: [id], pk_columns: [id], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [d.id, d.name, Case(IsNotNull(h.id), Coalesce(sum(h.x), Case((((h.id = d.id) AND IsNotNull(d.id)) AND (d.grp > 0:Int32)), d.grp)::Int64)) as $expr1] }
+      └─StreamHashJoin { type: LeftOuter, predicate: d.id = h.id, output: all }
+        ├─StreamExchange { dist: HashShard(d.id) }
+        │ └─StreamTableScan { table: d, columns: [d.id, d.name, d.grp], stream_scan_type: SnapshotBackfill, stream_key: [d.id], pk: [id], dist: UpstreamHashShard(d.id) }
+        └─StreamProject { exprs: [h.id, sum(h.x)] }
+          └─StreamHashAgg { group_key: [h.id], aggs: [sum(h.x), count] }
+            └─StreamExchange { dist: HashShard(h.id) }
+              └─StreamTableScan { table: h, columns: [h.id, h.x, h.rid], stream_scan_type: SnapshotBackfill, stream_key: [h.rid], pk: [rid], dist: UpstreamHashShard(h.rid) }
+- name: lookup in the padded side of a left join of a tree of inner joins
+  before:
+  - setup_flat
+  sql: |
+    select f.id, d.name, x.ts, x.g2 from f join d on f.dim_id = d.id
+    join (select s.id, s.ts, d2.grp as g2 from s left join d d2 on s.id = d2.id and d2.active) x on f.dim_id = x.id;
+  optimized_logical_plan_for_stream: |-
+    LogicalProject { exprs: [f.id, d.name, s.ts, Case(d.active, d.grp) as $expr1] }
+    └─LogicalJoin { type: Inner, on: (f.dim_id = s.id), output: [f.id, d.name, s.ts, d.grp, d.active] }
+      ├─LogicalJoin { type: Inner, on: (f.dim_id = d.id), output: [f.id, f.dim_id, d.name, d.grp, d.active] }
+      │ ├─LogicalScan { table: f, columns: [f.id, f.dim_id] }
+      │ └─LogicalScan { table: d, columns: [d.id, d.name, d.grp, d.active] }
+      └─LogicalScan { table: s, columns: [s.id, s.ts] }
+- name: kept - lookup in the padded side of a left join, on a column that is not its key
+  before:
+  - setup_flat
+  sql: |
+    select d.id, d.name, r.w from d left join (
+      select q.id, coalesce(q.s, o.grp) as w
+      from (select id, sum(x) as s from h group by id) q left join d o on q.id = o.grp
+    ) r on d.id = r.id;
+  optimized_logical_plan_for_stream: |-
+    LogicalJoin { type: LeftOuter, on: (d.id = h.id), output: [d.id, d.name, $expr1] }
+    ├─LogicalScan { table: d, columns: [d.id, d.name] }
+    └─LogicalProject { exprs: [h.id, Coalesce(sum(h.x), d.grp::Int64) as $expr1] }
+      └─LogicalJoin { type: LeftOuter, on: (h.id = d.grp), output: all }
+        ├─LogicalAgg { group_key: [h.id], aggs: [sum(h.x)] }
+        │ └─LogicalScan { table: h, columns: [h.id, h.x] }
+        └─LogicalScan { table: d, columns: [d.grp] }

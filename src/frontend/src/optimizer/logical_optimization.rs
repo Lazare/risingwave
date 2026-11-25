@@ -1022,10 +1022,15 @@ impl LogicalOptimizer {
             .streaming_merge_repeated_lookups()
             && !ctx.is_stream_prune_baseline()
         {
-            let applied_before = ctx.total_rule_applied();
-            plan = plan.optimize_by_rules(&STREAM_MERGE_REPEATED_LOOKUPS)?;
-            let applied = ctx.total_rule_applied() - applied_before;
-            if applied > 0 {
+            // A rewritten join is not looked at again in the same pass: a lookup that it still
+            // holds (the second of two in its right side) is merged by the next pass.
+            for _ in 0..3 {
+                let applied_before = ctx.total_rule_applied();
+                plan = plan.optimize_by_rules(&STREAM_MERGE_REPEATED_LOOKUPS)?;
+                let applied = ctx.total_rule_applied() - applied_before;
+                if applied == 0 {
+                    break;
+                }
                 ctx.add_stream_prune_rule_applied(applied);
                 plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
                 plan = Self::column_pruning(plan, explain_trace, &ctx);

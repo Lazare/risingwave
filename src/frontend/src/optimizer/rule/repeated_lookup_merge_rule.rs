@@ -68,7 +68,7 @@ use risingwave_pb::plan_common::JoinType;
 use super::column_facts_simplify_rule::column_facts;
 use super::never_true_predicate_rule::is_simple_type;
 use super::prelude::{PlanRef, *};
-use super::unique_key_simplify_rule::is_unique_on_compared_columns;
+use super::unique_key_simplify_rule::{is_unique_on_compared_columns, unique_keys_of};
 use crate::catalog::table_catalog::TableType;
 use crate::expr::{Expr, ExprImpl, ExprRewriter, ExprType, FunctionCall, InputRef};
 use crate::optimizer::plan_node::generic::{Agg, GenericPlanRef, PlanAggCall};
@@ -95,6 +95,22 @@ pub(super) fn map_input_refs(expr: &ExprImpl, f: impl FnMut(InputRef) -> ExprImp
 
 fn is_not_null(expr: ExprImpl) -> ExprImpl {
     FunctionCall::new_unchecked(ExprType::IsNotNull, vec![expr], DataType::Boolean).into()
+}
+
+/// Removes the repeated conjuncts, and replaces `x = x` with `x IS NOT NULL`: the columns that a
+/// rewrite maps to the same column make such conjuncts.
+pub(super) fn tidy(conjuncts: Vec<ExprImpl>) -> Vec<ExprImpl> {
+    let mut tidied: Vec<ExprImpl> = vec![];
+    for conjunct in conjuncts {
+        let conjunct = match conjunct.as_eq_cond() {
+            Some((first, second)) if first.index() == second.index() => is_not_null(first.into()),
+            _ => conjunct,
+        };
+        if !tidied.contains(&conjunct) {
+            tidied.push(conjunct);
+        }
+    }
+    tidied
 }
 
 /// The conjunction of the expressions, which must not be empty.
@@ -218,6 +234,114 @@ pub(super) fn pure_scan(plan: &PlanRef) -> Option<PureScan> {
     None
 }
 
+/// The relation that an instance or a lookup reads: a table, or a shared sub-plan with a unique
+/// key. Two reads of the same shared sub-plan read the same rows, as two scans of a table do.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Relation {
+    Table(TableId),
+    Share(PlanNodeId),
+}
+
+/// A lookup: a plan made of `Project` and `Filter` nodes over the read of a [`Relation`] (see
+/// [`lookup_of`]). For a table, the read is the scan and the columns are those of the table; for
+/// a shared sub-plan, the read is the `Share` node and the columns are its output columns.
+struct Lookup {
+    relation: Relation,
+    /// The node that reads the relation.
+    read_id: PlanNodeId,
+    /// The columns of the unique key of the relation.
+    key: Vec<usize>,
+    /// The conjuncts that a row of the relation satisfies to be read, over its columns.
+    predicate: Vec<ExprImpl>,
+    /// The output columns of the plan, over the columns of the relation.
+    exprs: Vec<ExprImpl>,
+}
+
+impl Lookup {
+    /// The column of the key that an output column of the plan exposes as it is.
+    fn key_column_at(&self, output: usize) -> Option<usize> {
+        let column = self.exprs[output].as_input_ref()?.index();
+        self.key.contains(&column).then_some(column)
+    }
+}
+
+/// Returns the [`Lookup`] form of a plan: a [`PureScan`], or `Project` and `Filter` nodes over a
+/// shared sub-plan that has a unique key (see [`share_key`]).
+fn lookup_of(plan: &PlanRef) -> Option<Lookup> {
+    if let Some(pure) = pure_scan(plan) {
+        return Some(Lookup {
+            relation: Relation::Table(pure.scan.table().id()),
+            read_id: pure.scan.id(),
+            key: pure.key(),
+            predicate: pure.predicate,
+            exprs: pure.exprs,
+        });
+    }
+    if plan.as_logical_share().is_some() {
+        return Some(Lookup {
+            relation: Relation::Share(plan.id()),
+            read_id: plan.id(),
+            key: share_key(plan)?,
+            predicate: vec![],
+            exprs: plan
+                .schema()
+                .fields()
+                .iter()
+                .enumerate()
+                .map(|(index, field)| InputRef::new(index, field.data_type()).into())
+                .collect(),
+        });
+    }
+    let is_movable = |expr: &ExprImpl| expr.is_pure() && expr.count_nows() == 0;
+    if let Some(project) = plan.as_logical_project() {
+        let mut lookup = lookup_of(&project.input())?;
+        let exprs: Vec<ExprImpl> = project
+            .exprs()
+            .iter()
+            .map(|expr| map_input_refs(expr, |input_ref| lookup.exprs[input_ref.index()].clone()))
+            .collect();
+        if !exprs.iter().all(is_movable) {
+            return None;
+        }
+        lookup.exprs = exprs;
+        return Some(lookup);
+    }
+    if let Some(filter) = plan.as_logical_filter() {
+        let mut lookup = lookup_of(&filter.input())?;
+        for conjunct in &filter.predicate().conjunctions {
+            let conjunct = map_input_refs(conjunct, |input_ref| {
+                lookup.exprs[input_ref.index()].clone()
+            });
+            if !is_movable(&conjunct) {
+                return None;
+            }
+            lookup.predicate.push(conjunct);
+        }
+        return Some(lookup);
+    }
+    None
+}
+
+/// The unique key of a shared sub-plan that is not the read of a table: the group key of an
+/// aggregation, the columns of a `DISTINCT`, the group key of a top-1... (see
+/// [`unique_keys_of`]). The shortest one that is not empty, on columns of the simple types.
+fn share_key(plan: &PlanRef) -> Option<Vec<usize>> {
+    if plan.as_logical_share().is_none() || pure_scan(plan).is_some() {
+        return None;
+    }
+    let fields = plan.schema().fields();
+    unique_keys_of(plan)
+        .into_iter()
+        .filter(|key| {
+            !key.is_empty()
+                && key
+                    .iter()
+                    .all(|&column| is_simple_type(&fields[column].data_type()))
+        })
+        .min_by_key(|key| key.len())
+        .map(|key| key.into_iter().collect())
+}
+
 /// What a left outer join that looks up a row of a table by its whole key tells about the rows
 /// where the lookup found nothing.
 ///
@@ -233,14 +357,17 @@ struct OuterLookup {
     /// For each column of the key of the table, the column of the plan that it is compared with,
     /// if the plan still outputs it.
     keys: BTreeMap<usize, usize>,
+    /// The conjuncts that the rows of the relation satisfy to be found, over its columns.
+    predicate: Vec<ExprImpl>,
 }
 
-/// An instance of a table that the rows of a plan node carry: each row is built from at most
-/// one row of the table, read by the scan `scan_id`.
+/// An instance of a relation (a table, or a shared sub-plan with a unique key) that the rows of a
+/// plan node carry: each row is built from at most one row of the relation, read by the node
+/// `scan_id` (the scan, or the `Share` node).
 #[derive(Clone)]
 struct Carried {
     scan_id: PlanNodeId,
-    table_id: TableId,
+    relation: Relation,
     /// The columns of the key of the table.
     key: Vec<usize>,
     /// For a column of the table, the columns of the plan node that are bound to it: when such
@@ -315,10 +442,16 @@ fn equal_columns(conjuncts: &[ExprImpl]) -> Vec<(usize, usize)> {
 /// equality per column of the key of the table, returns the right side and, for each column of
 /// the key, the column of the left side that it is compared with.
 fn outer_lookup_of(join: &LogicalJoin) -> Option<(PureScan, BTreeMap<usize, usize>)> {
+    let (_, keys) = outer_lookup_keys(join)?;
+    Some((pure_scan(&join.right())?, keys))
+}
+
+/// The same for a [`Lookup`]: a table, or a shared sub-plan with a unique key.
+fn outer_lookup_keys(join: &LogicalJoin) -> Option<(Lookup, BTreeMap<usize, usize>)> {
     if join.join_type() != JoinType::LeftOuter {
         return None;
     }
-    let pure = pure_scan(&join.right())?;
+    let pure = lookup_of(&join.right())?;
     let left_len = join.left().schema().len();
     let mut keys = BTreeMap::new();
     for conjunct in &join.on().conjunctions {
@@ -335,7 +468,7 @@ fn outer_lookup_of(join: &LogicalJoin) -> Option<(PureScan, BTreeMap<usize, usiz
             return None;
         }
     }
-    (keys.len() == pure.key().len()).then_some((pure, keys))
+    (keys.len() == pure.key.len()).then_some((pure, keys))
 }
 
 type Memo = HashMap<PlanNodeId, Vec<Carried>>;
@@ -385,7 +518,7 @@ fn derive_carried(plan: &PlanRef, memo: &mut Memo) -> Vec<Carried> {
         }
         return vec![Carried {
             scan_id: plan.id(),
-            table_id: scan.table().id(),
+            relation: Relation::Table(scan.table().id()),
             key: scan.table().stream_key(),
             bound,
             outer_lookup: None,
@@ -393,7 +526,21 @@ fn derive_carried(plan: &PlanRef, memo: &mut Memo) -> Vec<Carried> {
         }];
     }
     if let Some(share) = plan.as_logical_share() {
-        return carried(&share.input(), memo);
+        let mut instances = carried(&share.input(), memo);
+        // The shared sub-plan itself, when it has a unique key: its output columns are bound.
+        if let Some(key) = share_key(plan) {
+            instances.push(Carried {
+                scan_id: plan.id(),
+                relation: Relation::Share(plan.id()),
+                key,
+                bound: (0..plan.schema().len())
+                    .map(|column| (column, BTreeSet::from([column])))
+                    .collect(),
+                outer_lookup: None,
+                predicate: vec![],
+            });
+        }
+        return instances;
     }
     if is_row_selection(plan) {
         return carried(&plan.inputs()[0], memo);
@@ -509,10 +656,10 @@ fn derive_carried(plan: &PlanRef, memo: &mut Memo) -> Vec<Carried> {
             instance.bind_equal_columns(&equalities);
         }
     }
-    if let Some((pure, keys)) = outer_lookup_of(join)
+    if let Some((pure, keys)) = outer_lookup_keys(join)
         && let Some(instance) = instances
             .iter_mut()
-            .find(|instance| instance.scan_id == pure.scan.id())
+            .find(|instance| instance.scan_id == pure.read_id)
         // The instance is the one of the right side, not one that the left side reads too.
         && instance
             .bound
@@ -523,6 +670,7 @@ fn derive_carried(plan: &PlanRef, memo: &mut Memo) -> Vec<Carried> {
         instance.outer_lookup = Some(OuterLookup {
             join_id: plan.id(),
             keys,
+            predicate: pure.predicate,
         });
     }
     let mut positions: HashMap<usize, Vec<usize>> = HashMap::new();
@@ -989,10 +1137,7 @@ pub(super) fn commute(join: &LogicalJoin) -> LogicalJoin {
 
 /// For each column of the key of the table that the right side of a join reads, the columns of
 /// the left side that the condition compares it with, and the conjunct that does.
-fn compared_key_columns(
-    join: &LogicalJoin,
-    pure: &PureScan,
-) -> BTreeMap<usize, Vec<(usize, usize)>> {
+fn compared_key_columns(join: &LogicalJoin, pure: &Lookup) -> BTreeMap<usize, Vec<(usize, usize)>> {
     let left_len = join.left().schema().len();
     let mut compared: BTreeMap<usize, Vec<(usize, usize)>> = BTreeMap::new();
     for (position, conjunct) in join.on().conjunctions.iter().enumerate() {
@@ -1012,11 +1157,21 @@ fn compared_key_columns(
     compared
 }
 
+/// Whether the left outer join that found an instance (see [`OuterLookup`]) reads the same rows
+/// as a lookup with these conjuncts: then, from the same columns, the lookup finds a row exactly
+/// when the instance is matched, and that row.
+fn searched_same_rows(instance: &Carried, predicate: &[ExprImpl]) -> bool {
+    instance.outer_lookup.as_ref().is_some_and(|lookup| {
+        lookup.predicate.iter().all(|c| predicate.contains(c))
+            && predicate.iter().all(|c| lookup.predicate.contains(c))
+    })
+}
+
 /// Removes the join if its right side is a lookup that its left side makes redundant.
 fn merge_lookup(join: &LogicalJoin) -> Option<PlanRef> {
     let left = join.left();
-    let pure = pure_scan(&join.right())?;
-    let key = pure.key();
+    let pure = lookup_of(&join.right())?;
+    let key = pure.key.clone();
     let compared = compared_key_columns(join, &pure);
     if !key.iter().all(|column| compared.contains_key(column)) {
         return None;
@@ -1024,7 +1179,7 @@ fn merge_lookup(join: &LogicalJoin) -> Option<PlanRef> {
 
     let mut memo = Memo::new();
     for instance in carried(&left, &mut memo) {
-        if instance.table_id != pure.scan.table().id() {
+        if instance.relation != pure.relation {
             continue;
         }
         // For each column of the key: the column of the left side that designates the row of the
@@ -1073,7 +1228,7 @@ fn merge_lookup(join: &LogicalJoin) -> Option<PlanRef> {
 
 fn replace_lookup(
     join: &LogicalJoin,
-    pure: &PureScan,
+    pure: &Lookup,
     instance: &Carried,
     chosen: &[(usize, usize, bool)],
     through_outer_lookup: bool,
@@ -1081,7 +1236,7 @@ fn replace_lookup(
 ) -> Option<PlanRef> {
     let left = join.left();
     let left_len = left.schema().len();
-    let key = pure.key();
+    let key = pure.key.clone();
     let conjuncts = &join.on().conjunctions;
     let rest: Vec<&ExprImpl> = conjuncts
         .iter()
@@ -1115,6 +1270,15 @@ fn replace_lookup(
             scan_id: instance.scan_id,
             columns: &columns,
             outer_lookup: match (&instance.outer_lookup, through_outer_lookup) {
+                // A shared sub-plan can not be widened; with the same conjuncts, the row of the
+                // instance is the one of the lookup, and is matched when its key is not `NULL`.
+                (Some(_), true)
+                    if matches!(instance.relation, Relation::Share(_))
+                        && searched_same_rows(instance, &pure.predicate) =>
+                {
+                    None
+                }
+                (Some(_), true) if matches!(instance.relation, Relation::Share(_)) => return None,
                 (Some(lookup), true) => Some((lookup.join_id, &pure.predicate)),
                 (None, true) => return None,
                 (_, false) => None,
@@ -1164,6 +1328,7 @@ fn replace_lookup(
             }
         })
     }));
+    let found = tidy(found);
     let is_only_matched = is_only_matched && found.len() == 1;
 
     let join_type = join.join_type();
@@ -1241,7 +1406,7 @@ fn witness_lookup(join: &LogicalJoin) -> Option<PlanRef> {
     }
     let left = join.left();
     let left_len = left.schema().len();
-    let pure = pure_scan(&join.right())?;
+    let pure = lookup_of(&join.right())?;
     // The columns of the left side compared with a column of the table, and the conjuncts on the
     // left side only.
     let mut equalities: Vec<(usize, usize)> = vec![];
@@ -1269,7 +1434,7 @@ fn witness_lookup(join: &LogicalJoin) -> Option<PlanRef> {
     }
     let mut memo = Memo::new();
     let has_witness = carried(&left, &mut memo).iter().any(|instance| {
-        instance.table_id == pure.scan.table().id()
+        instance.relation == pure.relation
             && equalities.iter().all(|(left_column, column)| {
                 instance
                     .bound

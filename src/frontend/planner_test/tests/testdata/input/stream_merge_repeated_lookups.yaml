@@ -539,3 +539,89 @@
     select f.id, f.amt from f left join d on f.dim_id = d.id;
   expected_outputs:
   - optimized_logical_plan_for_stream
+
+# Lookups of a shared sub-plan with a unique key (an aggregation, a `DISTINCT`, a top-1 per
+# group), read twice on its key: both reads read the same rows.
+- name: two inner reads of a shared aggregation on its group key
+  before: [setup_flat]
+  sql: |
+    with q as (select grp, count(*) as c, max(name) as m from d group by grp)
+    select f.id, q1.c, q2.m from f join q q1 on f.other_id = q1.grp join q q2 on f.other_id = q2.grp;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: two left reads of a shared aggregation on its group key
+  before: [setup_flat]
+  sql: |
+    with q as (select grp, count(*) as c, max(name) as m from d group by grp)
+    select f.id, q1.c, q2.m from f left join q q1 on f.other_id = q1.grp left join q q2 on f.other_id = q2.grp;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: exists on a shared distinct that the left side already reads
+  before: [setup_flat]
+  sql: |
+    with u as (select distinct grp from d)
+    select f.id from f join u on f.other_id = u.grp where exists (select 1 from u u2 where u2.grp = f.other_id);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: left join of a chain that reads a shared aggregation and the table of the left side again
+  before: [setup_flat]
+  sql: |
+    with pp as (select id, sum(a) as s from g group by id), m as (select id, sum(x) as s from h group by id)
+    select d.id, pp.s, y.z from d left join pp on d.id = pp.id left join (
+      select m.id, m.s - pp.s + d2.grp as z from m join d d2 on m.id = d2.id join pp on d2.id = pp.id
+    ) y on d.id = y.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: left join of a chain that reads a shared aggregation on a column that is not a key
+  before: [setup_flat]
+  sql: |
+    with pp as (select a, sum(b) as s from g group by a), m as (select id, sum(x) as s from h group by id)
+    select d.id, pp.s, y.z from d left join pp on d.id = pp.a left join (
+      select m.id, m.s - pp.s + d2.grp as z from m join d d2 on m.id = d2.id join pp on d2.id = pp.a
+    ) y on d.id = y.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - two reads of a shared aggregation on another column than its group key
+  before: [setup_flat]
+  sql: |
+    with q as (select grp, count(*) as c, max(name) as m from d group by grp)
+    select f.id, q1.c, q2.m from f join q q1 on f.other_id = q1.grp join q q2 on f.other_id = q2.c;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - two reads of a shared union, which has no unique key
+  before: [setup_flat]
+  sql: |
+    with u as (select id, name from d union all select id, code from e)
+    select f.id, u1.name, u2.name as n2 from f join u u1 on f.other_id = u1.id join u u2 on f.other_id = u2.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+
+# A lookup in the padded side of a left join, designated by a row that the other side carries.
+- name: lookup in the padded side of a left join of the right side of a left join
+  before: [setup_flat]
+  sql: |
+    select d.id, d.name, r.w from d left join (
+      select q.id, coalesce(q.s, o.grp) as w
+      from (select id, sum(x) as s from h group by id) q left join (select id, grp from d where grp > 0) o on q.id = o.id
+    ) r on d.id = r.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: lookup in the padded side of a left join of a tree of inner joins
+  before: [setup_flat]
+  sql: |
+    select f.id, d.name, x.ts, x.g2 from f join d on f.dim_id = d.id
+    join (select s.id, s.ts, d2.grp as g2 from s left join d d2 on s.id = d2.id and d2.active) x on f.dim_id = x.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - lookup in the padded side of a left join, on a column that is not its key
+  before: [setup_flat]
+  sql: |
+    select d.id, d.name, r.w from d left join (
+      select q.id, coalesce(q.s, o.grp) as w
+      from (select id, sum(x) as s from h group by id) q left join d o on q.id = o.grp
+    ) r on d.id = r.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
