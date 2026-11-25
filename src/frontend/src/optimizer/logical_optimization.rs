@@ -516,6 +516,15 @@ static STREAM_PRUNE_EMPTY_RELATION: LazyLock<OptimizationStage> = LazyLock::new(
     )
 });
 
+static STREAM_MERGE_REPEATED_LOOKUPS: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Merge Repeated Lookups For Stream",
+        vec![RepeatedLookupMergeRule::create()],
+        // Bottom-up: a lookup merged below is carried by the input of the lookups above.
+        ApplyOrder::BottomUp,
+    )
+});
+
 static STREAM_SIMPLIFY_ON_UNIQUE_KEY: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Simplify On Unique Key For Stream",
@@ -897,6 +906,26 @@ impl LogicalOptimizer {
                 }
                 ctx.add_stream_prune_rule_applied(applied);
                 plan = Self::column_pruning(plan, explain_trace, &ctx);
+            }
+        }
+
+        // Remove the joins that look up a row of a table that their other side already carries.
+        // After the simplifications above, which remove the lookups that are not used at all.
+        // The filters and projections that replace the joins are then pushed down and pruned.
+        if ctx
+            .session_ctx()
+            .config()
+            .streaming_merge_repeated_lookups()
+            && !ctx.is_stream_prune_baseline()
+        {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&STREAM_MERGE_REPEATED_LOOKUPS)?;
+            let applied = ctx.total_rule_applied() - applied_before;
+            if applied > 0 {
+                ctx.add_stream_prune_rule_applied(applied);
+                plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
             }
         }
 

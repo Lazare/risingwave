@@ -374,7 +374,9 @@ pub(crate) fn gen_create_mv_graph(
     // Kept to plan the job again without pruning, see `report_stream_prune_savings`.
     let prune_enabled = {
         let config = handler_args.session.config();
-        config.streaming_prune_empty_relation() || config.streaming_simplify_on_unique_key()
+        config.streaming_prune_empty_relation()
+            || config.streaming_simplify_on_unique_key()
+            || config.streaming_merge_repeated_lookups()
     };
     let baseline_args = prune_enabled.then(|| {
         (

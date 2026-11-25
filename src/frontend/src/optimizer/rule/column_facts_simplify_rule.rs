@@ -58,7 +58,7 @@ impl ColumnFacts {
         self.constants.keys().copied().collect()
     }
 
-    fn is_non_null(&self, index: usize) -> bool {
+    pub(super) fn is_non_null(&self, index: usize) -> bool {
         self.non_null.contains(&index) || self.constants.contains_key(&index)
     }
 

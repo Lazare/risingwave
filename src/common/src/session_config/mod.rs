@@ -287,6 +287,13 @@ pub struct SessionConfig {
     #[parameter(default = false)]
     streaming_simplify_on_unique_key: bool,
 
+    /// Remove from the plan of a new streaming job a join that looks up, by its key, a row of a
+    /// table that the other side of the join already carries: several joins of the same table on
+    /// its key from the same columns become one. The result then relies on the key of the table
+    /// being exact. Defaults to false.
+    #[parameter(default = false)]
+    streaming_merge_repeated_lookups: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,
