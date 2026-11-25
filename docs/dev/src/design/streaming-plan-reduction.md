@@ -27,11 +27,12 @@ own rules.
 | 2 | Elimination of an aggregation, `DISTINCT` or top-n on a key | done (prototype) |
 | 3 | Elimination of a self-join on a key | in progress: repeated lookups of a table done on the branch `proto/streaming-merge-repeated-lookups`, lookups nested in trees of joins and semi or anti joins answered by a carried row done on the branch `proto/plan-reduction-flat-lookups`, aggregations next |
 | 5 | Aggregation pushed below a join onto the unique side | selected, not started |
-| 6 | Merge of two stacked aggregations | selected, not started |
+| 6 | Merge of two stacked aggregations | done (prototype, branch `proto/plan-reduction-shared-aggs`): stacked aggregations and a dedup below a distinct count; a dedup below a top-1 or a semi join not done (see 6) |
 | 7 | Join common to the branches of a `UNION ALL` joined once above the union | done (prototype, branch of idea 3) |
 | 8 | Aggregate of a constant over a group | done (prototype, branch of idea 3) |
 | 9 | Leftovers of subquery decorrelation (domain re-scan, aggregation and null-safe join back) | aggregating subqueries done (prototype, branch `proto/streaming-simplify-subquery-unnesting`); laterals without a table not started |
 | US | Branches of a `UNION ALL` that read the same table read it once (`Expand` per branch) | done (prototype, branch `proto/plan-reduction-union-scans`); dominance under a top-1 not done |
+| 10 | Sharing again, within one query, the sub-plans that became identical | done for stateful sub-plans (prototype, branch `proto/plan-reduction-shared-aggs`); scans that differ by their columns not done |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -393,6 +394,8 @@ c.name` becomes `(SELECT cust_id, sum(amt) FROM f GROUP BY cust_id) LEFT JOIN c 
   and can add state.
 - Yan and Larson, "Eager Aggregation and Lazy Aggregation", VLDB 1995; Materialize
   (`reduction_pushdown`).
+- Status on 2026-11-25: still not started. The branch of 6 left it out: it moves an aggregation
+  rather than removing one, and needs the unique keys of the join sides (idea 4) at the same place.
 
 ### 6. Merge of two stacked aggregations
 
@@ -404,6 +407,90 @@ region` becomes `SELECT region, sum(x) FROM t GROUP BY region`.
   aggregation is shared or filtered on its results.
 - Two levels are sometimes written on purpose against skew: keep it optional.
 - Calcite (`AGGREGATE_MERGE`), CockroachDB (`FoldGroupingOperators`).
+
+**Done on the branch `proto/plan-reduction-shared-aggs`** (added on 2026-11-25): variable
+`streaming_merge_stacked_aggregations`, rule `StackedAggMergeRule`, a bottom-up stage after the
+other stages of the prototype (three levels merge into one).
+
+- Matched: an aggregation over an aggregation, with at most a projection of columns in between,
+  whose group key is made of inner group key columns. The inner group key must not be empty: an
+  outer group then exists exactly when an input row has its key, in both plans. No grouping sets.
+  A `HAVING` of the inner aggregation (a filter in between) or a shared inner aggregation stops
+  the rule.
+- Outer aggregates over an inner aggregate (no `DISTINCT` on the sums and counts, no `FILTER` or
+  `ORDER BY` on the outer one; the inner `FILTER` is kept):
+  - `sum` of `sum` of an integer or a decimal: `sum` of the argument cast to the type of the inner
+    sum, so that type and overflow are those of the stacked sums (`sum(int)` is `bigint`, the sum
+    of it `numeric`). Not floats: the order of the additions would change the rounding;
+  - `sum` of `count`: the count, cast to `numeric`. Not without outer group key: over an empty
+    input the outer sum is `NULL` and the count would be 0;
+  - `min` of `min`, `max` of `max`, `bool_and` of `bool_and`, `bool_or` of `bool_or`: the same
+    aggregate. `NULL`s are ignored at both levels; all-`NULL` gives `NULL` at both levels.
+- Outer aggregates over an inner group key column `v`, i.e. a dedup below the outer aggregation
+  (the "duplicate-insensitive context" below):
+  - `count(DISTINCT v)`, `sum(DISTINCT v)`: the same over the input;
+  - `count(v)`, `sum(v)`: `count(DISTINCT v)`, `sum(DISTINCT v)` when the inner group key is within
+    the outer group key and `v`, so that each inner group is one distinct `v` of its outer group
+    (`SELECT g, count(v) FROM (SELECT DISTINCT g, v FROM t) GROUP BY g`). The deduplication state
+    of the distinct aggregate holds the same rows as the state of the removed aggregation;
+  - not `min`/`max` of `v` (same values, but their state would hold every input row instead of
+    every distinct value), not `count(*)` (it counts inner groups);
+  - no aggregate at all: `DISTINCT` of `DISTINCT`, `GROUP BY` on fewer columns.
+- Kept: `avg`, `count` of `count`, `max` of `min`, `sum(DISTINCT)` of `sum`, an outer group key on an
+  aggregate, `count(v)` over a dedup on more columns than the outer key and `v`.
+- Not done, recorded:
+  - the same through a `UNION ALL` (an aggregation over the union of aggregations of the same
+    key): one aggregation over the union of the inputs. Same algebra, a wider pattern;
+  - a dedup below a top-1 per key (`row_number() = 1` over a `UNION` or a `DISTINCT` whose rows
+    only carry the key and constants): the top-1 picks the same row from the set of distinct
+    rows, but its state holds every input row, where it held every distinct row, and ties between
+    branches are resolved by the stream key, which changes. A trade of state, not a reduction;
+  - a dedup on the build side of a semi or anti join: same trade, the join state then holds
+    every row;
+  - several aggregations of the same input and group key with different filters, joined on the key
+    (one aggregation with a `FILTER` per call and a `count(*) FILTER` per former aggregation to
+    tell whether its group existed): see the "next for the aggregations" of idea 3, it needs the
+    join matching of that rule;
+  - a scalar aggregation over an input of at most one row (a filter on the whole key of a table)
+    keeps its two phases: a different rule (cardinality, not stacking).
+- In streaming the merged aggregation is an ordinary aggregation of the input; retractions and rows
+  moving between groups need nothing special. The known `sum` quirk (0 instead of `NULL` once the
+  non-`NULL` values of a group are retracted) can differ in place between the two plans: the
+  differential test wraps such sums in `coalesce`.
+- Found on the way, not changed (without the variable): `SELECT sum(c) FROM (SELECT g, count(*) AS
+  c FROM t GROUP BY g)` returns 0 in streaming once `t` is emptied, `NULL` in batch (the two-phase
+  plan sums the counts with a sum that does not return to `NULL`).
+
+### 10. Sharing again the sub-plans that became identical (added on 2026-11-25, done on the branch)
+
+The common sub-plan sharing runs at the beginning of the streaming optimizer, before predicate
+pushdown, subquery unnesting and column pruning. Sub-plans that only become identical after them
+are computed twice: a join written in a view and filtered above it in one place, and written with
+the filter in another; an aggregation of a view whose other aggregates are pruned, and the same
+aggregation written in the query; the domains of two subqueries correlated on the same column.
+
+Variable `streaming_share_identical_subplans`, function `share_identical_subplans`, run last in
+the streaming optimizer (after the stacked aggregations): the rules above need one plan per
+consumer and do not rewrite a shared sub-plan.
+
+- Same structural equality as the early sharing (column names ignored). Deterministic: the first
+  copy in a depth-first traversal becomes the shared one.
+- A share is a fragment boundary (a no-shuffle exchange to each consumer). Only sub-plans with a
+  stateful operator (join, aggregation, top-n, dedup, over window) that read a table or a source
+  are shared: removing a copy removes its state, actors and backfills. A chain of scan, filter and
+  projection holds no state; sharing it trades one backfill for one more fragment and hop between
+  the scan and every consumer, so it is left duplicated, as the early sharing leaves a bare scan.
+- The shares that existed before are kept as they are, and a plan without a new duplicate is
+  returned unchanged.
+- Found on the way, not changed (with and without the variable): `SELECT a.id, (SELECT max(v)
+  FROM h WHERE h.sid = a.k), (SELECT count(*) FROM h WHERE h.sid = a.k AND ...) FROM a` gives
+  `NULL` instead of 0 for the count of a row whose `a.k` is `NULL` in streaming: the two domains
+  are full-outer-joined, filtered on `a.k IS NOT NULL`, then joined back with `IS NOT DISTINCT
+  FROM`, so the row finds no match. Batch returns 0.
+- Not done: reads of the same table that differ by their columns or by a filter (one scan of the
+  union of the columns, each consumer projecting and filtering its part), and joins that differ
+  by a filter that commutes with them. Both need a widening of the shared sub-plan, and for scans
+  the trade above makes the gain doubtful.
 
 ## Not for now: sharing between materialized views
 
@@ -427,7 +514,7 @@ Decision of 2026-11-25: too large for now.
   its scans would let A and E fire across materialized layers. Needs storing or re-deriving the
   facts, and invalidation if the definition of a view can change.
 - **Duplicate-insensitive context.** A `DISTINCT` under another `DISTINCT`, with only filters,
-  projections, `UNION ALL` or inner joins in between, is useless. Not always a gain: a `DISTINCT`
+  projections, `UNION ALL` or inner joins in between, is useless. Directly stacked: done with 6. Not always a gain: a `DISTINCT`
   below a join shrinks the state of that join. Never for a `row_number() = 1`, which selects a row.
 - **`UNION` rewrites.** `UNION` to `UNION ALL` when the branches hold no duplicate and are
   disjoint (needs 4c). Fusion of a `UNION ALL` of two filters over the same input into one pass:
@@ -438,7 +525,7 @@ Decision of 2026-11-25: too large for now.
   to an inner join (`simplify_outer`) with an evaluation of the predicate with `NULL` for the
   optional side.
 - **Sharing sub-plans again after normalization**, within one query. Must run after 1 and 2,
-  which need per-consumer plans.
+  which need per-consumer plans. Done for stateful sub-plans: see 10.
 - **Semi join simplifications.** `(A semi B) semi B`; `k IN (SELECT k FROM A)` on `A` itself.
 - **Multi-way join on a common key**, as a new operator without intermediate state (experimental
   in Flink). Large.

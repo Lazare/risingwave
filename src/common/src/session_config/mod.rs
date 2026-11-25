@@ -314,6 +314,19 @@ pub struct SessionConfig {
     #[parameter(default = false)]
     streaming_merge_union_scans: bool,
 
+    /// In the plan of a new streaming job, merge an aggregation over another aggregation into one
+    /// aggregation of the input of the inner one, when the outer one groups by inner group key
+    /// columns and its aggregates can be computed from the input (`sum` of `sum`, `sum` of
+    /// `count`, `min` of `min`, a dedup below a distinct count...). Defaults to false.
+    #[parameter(default = false)]
+    streaming_merge_stacked_aggregations: bool,
+
+    /// In the plan of a new streaming job, share again, at the end of the optimization, the
+    /// stateful sub-plans that became identical only after predicate pushdown, subquery unnesting
+    /// and column pruning: they are computed once instead of once per copy. Defaults to false.
+    #[parameter(default = false)]
+    streaming_share_identical_subplans: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,

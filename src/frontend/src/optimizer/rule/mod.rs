@@ -222,6 +222,11 @@ pub use apply_one_row_join_split_rule::*;
 // Rule `UnionScanMergeRule` (`streaming_merge_union_scans`).
 mod union_scan_merge_rule;
 pub use union_scan_merge_rule::*;
+// Merge of stacked aggregations and late sharing of identical sub-plans (streaming only).
+mod stacked_agg_merge_rule;
+pub use stacked_agg_merge_rule::*;
+mod identical_subplan_share;
+pub use identical_subplan_share::*;
 mod repeated_lookup_merge_rule;
 pub use repeated_lookup_merge_rule::*;
 mod unique_key_simplify_rule;
@@ -376,6 +381,7 @@ macro_rules! for_all_rules {
             , { CommonJoinOverUnionRule }
             , { ApplyOneRowJoinSplitRule }
             , { UnionScanMergeRule }
+            , { StackedAggMergeRule }
             , { BushyTreeJoinOrderingRule }
             , { StreamProjectMergeRule }
             , { StreamProjectSplitRule }
