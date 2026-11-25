@@ -142,8 +142,6 @@ CASES = [
      f"select f.id as fid, f.amt as amt from {F} f left join {D} d on f.dim_id = d.id and d.grp > 1 and f.amt > 0"),
     ('uoj_right', 'unused right join',
      f"select f.id as fid, f.amt as amt from {D} d right join {F} f on f.dim_id = d.id"),
-    ('uoj_const', 'unused left join whose right key is bound by a constant',
-     f"select f.id as fid, f.amt as amt from {F} f left join {D} d on d.id = 2 and f.amt > d.grp"),
     ('uoj_two', 'two left joins, only the unused one is removed',
      f"select f.id as fid, e.code as code from {F} f left join {D} d on f.dim_id = d.id left join {E} e on f.amt = e.id"),
     ('uoj_dedup', 'unused left join on a deduplicated right side',
@@ -194,6 +192,8 @@ CASES = [
 # Queries that streaming only accepts with the pruning (a join without equality): the
 # materialized view is compared with the batch execution of its query.
 ON_ONLY = [
+    ('uoj_const', 'unused left join whose right key is bound by a constant',
+     f"select f.id as fid, f.amt as amt from {F} f left join {D} d on d.id = 2 and f.amt > d.grp"),
     ('row_cross', 'cross join with a constant row',
      f"select t.v1 as tv, c.x as cx, c.y as cy from {T} t cross join (values (1, 'a')) as c(x, y)"),
     ('row_left_side', 'constant row on the left side',
@@ -210,7 +210,7 @@ DOWNSTREAM = [
     ('down_padded', 'on top of a left join replaced with a projection',
      "select tv, count(sw) as cnt, count(*) as total from per_left_right_empty{sfx} group by tv"),
     ('down_const_row', 'on top of an aggregation replaced with its constant row',
-     f"select t.v1 as tv, a.c1 as c1, a.s1 as s1 from {T} t join per_agg_simple{{sfx}} a on a.c1 = 0"),
+     f"select t.v1 as tv, a.c1 as c1, a.s1 as s1 from {T} t join per_agg_simple{{sfx}} a on t.v2 = a.c1 + 3"),
 ]
 
 out = []
@@ -306,7 +306,7 @@ query('II', "select c, m from per_agg_join_on", ["0 NULL"])
 query('TI', "select kind, v from per_union_one_on order by v", ["b 1", "b 2", "b 2", "b 7", "b NULL"])
 query('I', "select count(*) from per_eq_eq_on", ["0"])
 query('I', "select count(*) from per_limit0_on", ["0"])
-query('III', "select tv, c1, s1 from per_down_const_row_on order by tv", ["1 0 NULL", "2 0 NULL", "2 0 NULL", "6 0 NULL", "NULL 0 NULL"])
+query('III', "select tv, c1, s1 from per_down_const_row_on order by tv", ["1 0 NULL", "NULL 0 NULL"])
 
 out.append("# First round of changes: new rows, some of which satisfy one conjunct of a pruned predicate.\n")
 stmt(f"insert into {T} values (1, 4, 'b', false, '2026-02-01 00:00:00'), (2, 3, 'a', true, null), "

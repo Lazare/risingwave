@@ -418,11 +418,6 @@ create materialized view per_uoj_extra_off as select f.id as fid, f.amt as amt f
 statement ok
 create materialized view per_uoj_right_off as select f.id as fid, f.amt as amt from per_d d right join per_f f on f.dim_id = d.id;
 
-# unused left join whose right key is bound by a constant
-
-statement ok
-create materialized view per_uoj_const_off as select f.id as fid, f.amt as amt from per_f f left join per_d d on d.id = 2 and f.amt > d.grp;
-
 # two left joins, only the unused one is removed
 
 statement ok
@@ -546,7 +541,7 @@ create materialized view per_down_padded_off as select tv, count(sw) as cnt, cou
 # on top of an aggregation replaced with its constant row
 
 statement ok
-create materialized view per_down_const_row_off as select t.v1 as tv, a.c1 as c1, a.s1 as s1 from per_t t join per_agg_simple_off a on a.c1 = 0;
+create materialized view per_down_const_row_off as select t.v1 as tv, a.c1 as c1, a.s1 as s1 from per_t t join per_agg_simple_off a on t.v2 = a.c1 + 3;
 
 statement ok
 set streaming_prune_empty_relation = true;
@@ -909,11 +904,6 @@ create materialized view per_uoj_extra_on as select f.id as fid, f.amt as amt fr
 statement ok
 create materialized view per_uoj_right_on as select f.id as fid, f.amt as amt from per_d d right join per_f f on f.dim_id = d.id;
 
-# unused left join whose right key is bound by a constant
-
-statement ok
-create materialized view per_uoj_const_on as select f.id as fid, f.amt as amt from per_f f left join per_d d on d.id = 2 and f.amt > d.grp;
-
 # two left joins, only the unused one is removed
 
 statement ok
@@ -1037,7 +1027,12 @@ create materialized view per_down_padded_on as select tv, count(sw) as cnt, coun
 # on top of an aggregation replaced with its constant row
 
 statement ok
-create materialized view per_down_const_row_on as select t.v1 as tv, a.c1 as c1, a.s1 as s1 from per_t t join per_agg_simple_on a on a.c1 = 0;
+create materialized view per_down_const_row_on as select t.v1 as tv, a.c1 as c1, a.s1 as s1 from per_t t join per_agg_simple_on a on t.v2 = a.c1 + 3;
+
+# unused left join whose right key is bound by a constant
+
+statement ok
+create materialized view per_uoj_const_on as select f.id as fid, f.amt as amt from per_f f left join per_d d on d.id = 2 and f.amt > d.grp;
 
 # cross join with a constant row
 
@@ -1646,14 +1641,6 @@ select
 
 query III
 select
-  (select count(*) from (select * from per_uoj_const_on except select * from per_uoj_const_off) x),
-  (select count(*) from (select * from per_uoj_const_off except select * from per_uoj_const_on) y),
-  (select count(*) from per_uoj_const_on) - (select count(*) from per_uoj_const_off);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select * from per_uoj_two_on except select * from per_uoj_two_off) x),
   (select count(*) from (select * from per_uoj_two_off except select * from per_uoj_two_on) y),
   (select count(*) from per_uoj_two_on) - (select count(*) from per_uoj_two_off);
@@ -1856,6 +1843,14 @@ select
 
 query III
 select
+  (select count(*) from (select * from per_uoj_const_on except select * from (select f.id as fid, f.amt as amt from per_f f left join per_d d on d.id = 2 and f.amt > d.grp) q) x),
+  (select count(*) from (select * from (select f.id as fid, f.amt as amt from per_f f left join per_d d on d.id = 2 and f.amt > d.grp) q except select * from per_uoj_const_on) y),
+  (select count(*) from per_uoj_const_on) - (select count(*) from (select f.id as fid, f.amt as amt from per_f f left join per_d d on d.id = 2 and f.amt > d.grp) q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from per_row_cross_on except select * from (select t.v1 as tv, c.x as cx, c.y as cy from per_t t cross join (values (1, 'a')) as c(x, y)) q) x),
   (select count(*) from (select * from (select t.v1 as tv, c.x as cx, c.y as cy from per_t t cross join (values (1, 'a')) as c(x, y)) q except select * from per_row_cross_on) y),
   (select count(*) from per_row_cross_on) - (select count(*) from (select t.v1 as tv, c.x as cx, c.y as cy from per_t t cross join (values (1, 'a')) as c(x, y)) q);
@@ -1927,9 +1922,6 @@ query III
 select tv, c1, s1 from per_down_const_row_on order by tv;
 ----
 1 0 NULL
-2 0 NULL
-2 0 NULL
-6 0 NULL
 NULL 0 NULL
 
 # First round of changes: new rows, some of which satisfy one conjunct of a pruned predicate.
@@ -2538,14 +2530,6 @@ select
 
 query III
 select
-  (select count(*) from (select * from per_uoj_const_on except select * from per_uoj_const_off) x),
-  (select count(*) from (select * from per_uoj_const_off except select * from per_uoj_const_on) y),
-  (select count(*) from per_uoj_const_on) - (select count(*) from per_uoj_const_off);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select * from per_uoj_two_on except select * from per_uoj_two_off) x),
   (select count(*) from (select * from per_uoj_two_off except select * from per_uoj_two_on) y),
   (select count(*) from per_uoj_two_on) - (select count(*) from per_uoj_two_off);
@@ -2745,6 +2729,14 @@ select
 0 0 0
 
 # After the inserts: the materialized views that need the pruning hold the rows of their query.
+
+query III
+select
+  (select count(*) from (select * from per_uoj_const_on except select * from (select f.id as fid, f.amt as amt from per_f f left join per_d d on d.id = 2 and f.amt > d.grp) q) x),
+  (select count(*) from (select * from (select f.id as fid, f.amt as amt from per_f f left join per_d d on d.id = 2 and f.amt > d.grp) q except select * from per_uoj_const_on) y),
+  (select count(*) from per_uoj_const_on) - (select count(*) from (select f.id as fid, f.amt as amt from per_f f left join per_d d on d.id = 2 and f.amt > d.grp) q);
+----
+0 0 0
 
 query III
 select
@@ -3398,14 +3390,6 @@ select
 
 query III
 select
-  (select count(*) from (select * from per_uoj_const_on except select * from per_uoj_const_off) x),
-  (select count(*) from (select * from per_uoj_const_off except select * from per_uoj_const_on) y),
-  (select count(*) from per_uoj_const_on) - (select count(*) from per_uoj_const_off);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select * from per_uoj_two_on except select * from per_uoj_two_off) x),
   (select count(*) from (select * from per_uoj_two_off except select * from per_uoj_two_on) y),
   (select count(*) from per_uoj_two_on) - (select count(*) from per_uoj_two_off);
@@ -3608,6 +3592,14 @@ select
 
 query III
 select
+  (select count(*) from (select * from per_uoj_const_on except select * from (select f.id as fid, f.amt as amt from per_f f left join per_d d on d.id = 2 and f.amt > d.grp) q) x),
+  (select count(*) from (select * from (select f.id as fid, f.amt as amt from per_f f left join per_d d on d.id = 2 and f.amt > d.grp) q except select * from per_uoj_const_on) y),
+  (select count(*) from per_uoj_const_on) - (select count(*) from (select f.id as fid, f.amt as amt from per_f f left join per_d d on d.id = 2 and f.amt > d.grp) q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from per_row_cross_on except select * from (select t.v1 as tv, c.x as cx, c.y as cy from per_t t cross join (values (1, 'a')) as c(x, y)) q) x),
   (select count(*) from (select * from (select t.v1 as tv, c.x as cx, c.y as cy from per_t t cross join (values (1, 'a')) as c(x, y)) q except select * from per_row_cross_on) y),
   (select count(*) from per_row_cross_on) - (select count(*) from (select t.v1 as tv, c.x as cx, c.y as cy from per_t t cross join (values (1, 'a')) as c(x, y)) q);
@@ -3780,9 +3772,6 @@ drop materialized view per_uoj_dedup_on;
 
 statement ok
 drop materialized view per_uoj_two_on;
-
-statement ok
-drop materialized view per_uoj_const_on;
 
 statement ok
 drop materialized view per_uoj_right_on;
@@ -4073,9 +4062,6 @@ statement ok
 drop materialized view per_uoj_two_off;
 
 statement ok
-drop materialized view per_uoj_const_off;
-
-statement ok
 drop materialized view per_uoj_right_off;
 
 statement ok
@@ -4305,6 +4291,9 @@ drop materialized view per_row_left_side_on;
 
 statement ok
 drop materialized view per_row_cross_on;
+
+statement ok
+drop materialized view per_uoj_const_on;
 
 statement ok
 drop table per_e;

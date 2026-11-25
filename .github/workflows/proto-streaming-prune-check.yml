@@ -252,6 +252,8 @@ jobs:
       - name: Differential test of the pruning
         id: differential
         run: |
+          # Without `pipefail` the step would succeed whenever `tee` does.
+          set -o pipefail
           export PATH="$PWD/e2e_test/commands:$PATH"
           sqllogictest -p 4566 -d dev './e2e_test/streaming/prune_empty_relation.slt' \
             2>&1 | tee "$RUNNER_TEMP/e2e/differential.log"
