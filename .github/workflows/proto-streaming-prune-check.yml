@@ -22,6 +22,7 @@ on:
       - 'proto/streaming-prune-empty-relation'
       - 'proto/streaming-merge-repeated-lookups'
       - 'proto/streaming-simplify-subquery-unnesting'
+      - 'proto/streaming-simplify-subquery-unnesting-*'
 
 concurrency:
   group: proto-streaming-prune-check-${{ github.ref }}

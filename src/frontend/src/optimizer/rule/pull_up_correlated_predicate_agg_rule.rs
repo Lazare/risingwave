@@ -117,6 +117,13 @@ impl Rule<Logical> for PullUpCorrelatedPredicateAggRule {
         } else {
             vec![]
         };
+        // Subqueries with the same correlated filter share it: the variant for streaming looks
+        // through the share, the general way would remove it too.
+        let input = if self.for_stream {
+            skip_share(input)
+        } else {
+            input
+        };
         let bottom_project = if let Some(project) = input.as_logical_project() {
             project.clone()
         } else {
@@ -126,7 +133,11 @@ impl Rule<Logical> for PullUpCorrelatedPredicateAggRule {
             )
         };
         let (mut bottom_proj_exprs, _) = bottom_project.clone().decompose();
-        let bottom_project_input = bottom_project.input();
+        let bottom_project_input = if self.for_stream {
+            skip_share(bottom_project.input())
+        } else {
+            bottom_project.input()
+        };
         let bottom_filter: &LogicalFilter = bottom_project_input.as_logical_filter()?;
 
         // Split predicates in LogicalFilter into correlated expressions and uncorrelated
@@ -399,6 +410,13 @@ struct EmptyInputRewriter<'a> {
 impl ExprRewriter for EmptyInputRewriter<'_> {
     fn rewrite_input_ref(&mut self, input_ref: InputRef) -> ExprImpl {
         self.values[input_ref.index()].clone()
+    }
+}
+
+fn skip_share(plan: PlanRef) -> PlanRef {
+    match plan.as_logical_share() {
+        Some(share) => share.input(),
+        None => plan,
     }
 }
 
