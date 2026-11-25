@@ -48,6 +48,15 @@
 //!   from a row of `T`, and not from the `NULL`s of an outer join. The instance is followed up
 //!   the plan through projections, filters, joins, top-n and dedup, shared sub-plans, and the
 //!   aggregations whose group key designates its row.
+//!
+//! # Beyond a side of the join
+//!
+//! - The lookup may also be a leaf of a tree of inner joins, or of the preserved side of a left
+//!   outer join of the tree, and the equality that designates its row may come from any inner
+//!   join of the tree: see the module `flat`.
+//! - A left semi or anti join only asks whether a row matches: the row of the instance answers
+//!   when the condition compares columns bound to it, even if they are not the key (see
+//!   [`witness_lookup`]).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -64,10 +73,12 @@ use crate::catalog::table_catalog::TableType;
 use crate::expr::{Expr, ExprImpl, ExprRewriter, ExprType, FunctionCall, InputRef};
 use crate::optimizer::plan_node::generic::{Agg, GenericPlanRef, PlanAggCall};
 use crate::optimizer::plan_node::{
-    LogicalFilter, LogicalJoin, LogicalProject, LogicalScan, PlanNodeId, PlanTreeNodeBinary,
-    PlanTreeNodeUnary,
+    LogicalFilter, LogicalJoin, LogicalProject, LogicalProjectSet, LogicalScan, PlanNodeId,
+    PlanTreeNodeBinary, PlanTreeNodeUnary,
 };
 use crate::utils::Condition;
+
+mod flat;
 
 /// Rewrites every column reference of an expression.
 struct MapInputRef<F: FnMut(InputRef) -> ExprImpl>(F);
@@ -240,6 +251,9 @@ struct Carried {
     /// or an inner join compares them with.
     bound: BTreeMap<usize, BTreeSet<usize>>,
     outer_lookup: Option<OuterLookup>,
+    /// The conjuncts that the row of the table satisfies, over the columns of the table: the
+    /// predicate of the scan.
+    predicate: Vec<ExprImpl>,
 }
 
 impl Carried {
@@ -339,6 +353,7 @@ fn is_row_selection(plan: &PlanRef) -> bool {
 /// - `Scan`: itself, bound to the columns that it reads.
 /// - `Share`, `Project`, `Filter`: those of the input. A filter binds the columns that it
 ///   compares with a bound column.
+/// - `ProjectSet`: those of the input, as each row comes from one row of the input.
 /// - `TopN`, `Limit`, `Dedup`: those of the input, whose rows they only select.
 /// - `Agg` without grouping sets: those of the input that the group key designates. When the
 ///   group key holds, for every column of the key of the table, a column that is bound to it or
@@ -374,6 +389,7 @@ fn derive_carried(plan: &PlanRef, memo: &mut Memo) -> Vec<Carried> {
             key: scan.table().stream_key(),
             bound,
             outer_lookup: None,
+            predicate: scan.predicate().conjunctions.clone(),
         }];
     }
     if let Some(share) = plan.as_logical_share() {
@@ -425,6 +441,23 @@ fn derive_carried(plan: &PlanRef, memo: &mut Memo) -> Vec<Carried> {
             .map(|instance| instance.map(&positions))
             .collect();
     }
+    if let Some(project_set) = plan.as_logical_project_set() {
+        // Every row comes from one row of the input. The first column is the projected row id,
+        // then come the expressions of the select list.
+        let mut positions: HashMap<usize, Vec<usize>> = HashMap::new();
+        for (index, expr) in project_set.select_list().iter().enumerate() {
+            if let Some(input_ref) = expr.as_input_ref() {
+                positions
+                    .entry(input_ref.index())
+                    .or_default()
+                    .push(index + 1);
+            }
+        }
+        return carried(&project_set.input(), memo)
+            .into_iter()
+            .map(|instance| instance.map(&positions))
+            .collect();
+    }
     if let Some(filter) = plan.as_logical_filter() {
         let equalities = equal_columns(&filter.predicate().conjunctions);
         let mut instances = carried(&filter.input(), memo);
@@ -459,7 +492,19 @@ fn derive_carried(plan: &PlanRef, memo: &mut Memo) -> Vec<Carried> {
         _ => return vec![],
     }
     if join_type == JoinType::Inner {
-        let equalities = equal_columns(&join.on().conjunctions);
+        let mut equalities = equal_columns(&join.on().conjunctions);
+        // The columns bound to the same column of an instance hold the same value, or are all
+        // `NULL`: one of them that is not `NULL` makes the others not `NULL` and equal to it. An
+        // instance of the other side that is bound to one of them is bound to the others too,
+        // which the joins below this one made equal.
+        for instance in &instances {
+            for columns in instance.bound.values() {
+                let mut columns = columns.iter().copied();
+                if let Some(first) = columns.next() {
+                    equalities.extend(columns.map(|other| (first, other)));
+                }
+            }
+        }
         for instance in &mut instances {
             instance.bind_equal_columns(&equalities);
         }
@@ -660,6 +705,22 @@ fn expose(plan: &PlanRef, request: &Request<'_>, memo: &mut Memo) -> Option<Expo
         }
         return Some(Exposed {
             plan: LogicalProject::new(input.plan, exprs).into(),
+            positions,
+            predicate: input.predicate,
+        });
+    }
+    if let Some(project_set) = plan.as_logical_project_set() {
+        let input = expose(&project_set.input(), request, memo)?;
+        let mut select_list = project_set.select_list().clone();
+        let mut positions = BTreeMap::new();
+        for (&column, &position) in &input.positions {
+            // After the projected row id and the former select list.
+            positions.insert(column, select_list.len() + 1);
+            let data_type = input.plan.schema().fields()[position].data_type();
+            select_list.push(InputRef::new(position, data_type).into());
+        }
+        return Some(Exposed {
+            plan: LogicalProjectSet::new(input.plan, select_list).into(),
             positions,
             predicate: input.predicate,
         });
@@ -871,16 +932,25 @@ fn widen_outer_lookup(
 /// lookup and the rest of the join condition holds: the rows of an inner or semi join are
 /// filtered on that, those of an anti join on the opposite, and the columns of a left outer join
 /// are `NULL` otherwise.
+///
+/// Otherwise, a semi or anti join may be answered by the row of an instance (see
+/// [`witness_lookup`]), and a lookup nested deeper in a tree of joins is looked for (see the
+/// module `flat`).
 pub struct RepeatedLookupMergeRule;
 
 impl Rule<Logical> for RepeatedLookupMergeRule {
     fn apply(&self, plan: PlanRef) -> Option<PlanRef> {
         let join = plan.as_logical_join()?;
-        match join.join_type() {
-            JoinType::LeftOuter | JoinType::LeftSemi | JoinType::LeftAnti => merge_lookup(join),
+        let merged = match join.join_type() {
+            JoinType::LeftOuter => merge_lookup(join),
+            JoinType::LeftSemi | JoinType::LeftAnti => {
+                merge_lookup(join).or_else(|| witness_lookup(join))
+            }
             JoinType::Inner => merge_lookup(join).or_else(|| merge_lookup(&commute(join))),
             _ => None,
-        }
+        };
+        // The lookups nested in a tree of joins, see `flat`.
+        merged.or_else(|| flat::merge_nested_lookup(&plan, join))
     }
 }
 
@@ -1144,6 +1214,121 @@ fn replace_lookup(
         LogicalFilter::new(new_left, Condition { conjunctions }).into()
     };
     Some(LogicalProject::new(input, exprs).into())
+}
+
+/// Replaces a left semi or anti join whose right side reads a table that its left side already
+/// carries, compared on any columns of the table, not only on its key.
+///
+/// A semi join only asks whether a row of the table matches. When every column of the table that
+/// the condition compares is compared with a column of the left side that is bound to the same
+/// column of one instance (see [`Carried::bound`]), the row of the instance matches whenever
+/// these columns are not `NULL`: it is a row of the table, and it satisfies the predicate of the
+/// right side when the scan of the instance has the same conjuncts. Without them, no row matches,
+/// as `=` never holds on `NULL`. The other conjuncts of the condition must refer to the left side
+/// only: they hold or not whatever the row of the table.
+///
+/// ```text
+/// Join(LeftAnti, on: f.dim_id = d2.grp)       Filter(NOT coalesce(f.dim_id IS NOT NULL, false))
+/// ├─Join(Inner, on: f.dim_id = d.grp)     =>  └─Join(Inner, on: f.dim_id = d.grp)
+/// │ ├─Scan(f)                                   ├─Scan(f)
+/// │ └─Scan(d, [grp])                            └─Scan(d, [grp])
+/// └─Scan(d2, [grp])
+/// ```
+fn witness_lookup(join: &LogicalJoin) -> Option<PlanRef> {
+    let join_type = join.join_type();
+    if !matches!(join_type, JoinType::LeftSemi | JoinType::LeftAnti) {
+        return None;
+    }
+    let left = join.left();
+    let left_len = left.schema().len();
+    let pure = pure_scan(&join.right())?;
+    // The columns of the left side compared with a column of the table, and the conjuncts on the
+    // left side only.
+    let mut equalities: Vec<(usize, usize)> = vec![];
+    let mut left_only: Vec<ExprImpl> = vec![];
+    for conjunct in &join.on().conjunctions {
+        if let Some((first, second)) = conjunct.as_eq_cond()
+            && first.index() < left_len
+            && second.index() >= left_len
+            && first.return_type() == second.return_type()
+            && is_simple_type(&first.return_type())
+            && let Some(column) = pure.exprs[second.index() - left_len].as_input_ref()
+        {
+            equalities.push((first.index(), column.index()));
+        } else if referred_columns([conjunct])
+            .iter()
+            .all(|&index| index < left_len)
+        {
+            left_only.push(conjunct.clone());
+        } else {
+            return None;
+        }
+    }
+    if equalities.is_empty() {
+        return None;
+    }
+    let mut memo = Memo::new();
+    let has_witness = carried(&left, &mut memo).iter().any(|instance| {
+        instance.table_id == pure.scan.table().id()
+            && equalities.iter().all(|(left_column, column)| {
+                instance
+                    .bound
+                    .get(column)
+                    .is_some_and(|columns| columns.contains(left_column))
+            })
+            && pure
+                .predicate
+                .iter()
+                .all(|conjunct| instance.predicate.contains(conjunct))
+    });
+    if !has_witness {
+        return None;
+    }
+    let facts = column_facts(&left);
+    let mut found: Vec<ExprImpl> = equalities
+        .iter()
+        .map(|&(left_column, _)| left_column)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|&left_column| !facts.is_non_null(left_column))
+        .map(|left_column| {
+            is_not_null(
+                InputRef::new(left_column, left.schema().fields()[left_column].data_type()).into(),
+            )
+        })
+        .collect();
+    found.extend(left_only);
+    let conjunctions = match join_type {
+        JoinType::LeftSemi => found,
+        _ if found.is_empty() => vec![ExprImpl::literal_bool(false)],
+        _ => vec![not_true(and_all(found))],
+    };
+    let input = if conjunctions.is_empty() {
+        left.clone()
+    } else {
+        LogicalFilter::new(left.clone(), Condition { conjunctions }).into()
+    };
+    let exprs = join
+        .output_indices()
+        .iter()
+        .map(|&index| InputRef::new(index, left.schema().fields()[index].data_type()).into())
+        .collect();
+    Some(LogicalProject::new(input, exprs).into())
+}
+
+/// `NOT coalesce(<condition>, false)`: true when the condition is false or `NULL`.
+fn not_true(condition: ExprImpl) -> ExprImpl {
+    let condition_or_false = FunctionCall::new_unchecked(
+        ExprType::Coalesce,
+        vec![condition, ExprImpl::literal_bool(false)],
+        DataType::Boolean,
+    );
+    FunctionCall::new_unchecked(
+        ExprType::Not,
+        vec![condition_or_false.into()],
+        DataType::Boolean,
+    )
+    .into()
 }
 
 /// Prints, for every join of a plan whose two sides read the same relation (a table, or a shared

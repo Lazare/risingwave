@@ -23,6 +23,15 @@ create table fuj_g (id int primary key, a int, b int);
 statement ok
 create view fuj_da as select * from fuj_d where active;
 
+statement ok
+create view fuj_dj as select d.id, d.name, d.grp, g.a from fuj_d d join fuj_g g on d.grp = g.b;
+
+statement ok
+create view fuj_dagg as select grp, count(*) as cnt, max(name) as mx from fuj_d group by grp;
+
+statement ok
+create view fuj_dl as select d.id, d.name, g.a from fuj_d d left join fuj_g g on d.grp = g.b;
+
 # Rows present before the materialized views are created: they go through the backfill.
 
 statement ok
@@ -155,6 +164,66 @@ create materialized view fuj_agg_above_off as select dn, count(*) as cnt, sum(am
 statement ok
 create materialized view fuj_union_distinct_off as select d.name as dn, d.grp as dg from fuj_f f join fuj_d d on f.dim_id = d.id union select d.name, d.grp from fuj_e e join fuj_d d on e.ref_id = d.id;
 
+# a view with a join, inner joins
+
+statement ok
+create materialized view fuj_dv_inner_off as select f.id as id, v.name as dn, v.a as va from fuj_f f join fuj_dj v on f.dim_id = v.id union all select e.id, v.name, v.a from fuj_e e join fuj_dj v on e.ref_id = v.id;
+
+# an aggregating view, left joins
+
+statement ok
+create materialized view fuj_dv_agg_left_off as select f.id as id, v.cnt as cnt, v.mx as mx from fuj_f f left join fuj_dagg v on f.amt = v.grp union all select e.id, v.cnt, e.code from fuj_e e left join fuj_dagg v on e.ref_id = v.grp;
+
+# anti joins with a view with a join
+
+statement ok
+create materialized view fuj_dv_anti_off as select f.id as id, f.label as txt from fuj_f f where not exists (select 1 from fuj_dj v where v.id = f.dim_id) union all select e.id, e.code from fuj_e e where not exists (select 1 from fuj_dj v where v.id = e.ref_id);
+
+# semi joins with a different filter of the aggregating view
+
+statement ok
+create materialized view fuj_dv_semi_filters_off as select f.id as id, f.label as txt from fuj_f f where exists (select 1 from fuj_dagg v where v.grp = f.amt and v.cnt > 1) union all select e.id, e.code from fuj_e e where exists (select 1 from fuj_dagg v where v.grp = e.ref_id and v.mx is not null);
+
+# inner joins with a different filter of the aggregating view
+
+statement ok
+create materialized view fuj_dv_filters_off as select f.id as id, v.cnt as cnt from fuj_f f join fuj_dagg v on f.amt = v.grp where v.cnt > 1 union all select e.id, v.cnt from fuj_e e join fuj_dagg v on e.ref_id = v.grp where v.mx is not null;
+
+# an extra condition on the view in one branch
+
+statement ok
+create materialized view fuj_dv_condition_off as select f.id as id, v.name as dn from fuj_f f left join fuj_dj v on f.dim_id = v.id and v.a > f.amt union all select e.id, v.name from fuj_e e left join fuj_dj v on e.ref_id = v.id;
+
+# a view with a left join, left joins
+
+statement ok
+create materialized view fuj_dv_left_view_off as select f.id as id, v.name as dn, v.a as va from fuj_f f left join fuj_dl v on f.dim_id = v.id union all select e.id, v.name, v.a from fuj_e e left join fuj_dl v on e.ref_id = v.id;
+
+# the same aggregating subquery written in each branch
+
+statement ok
+create materialized view fuj_dv_inline_off as select f.id as id, v.cnt as cnt from fuj_f f join (select grp, count(*) as cnt from fuj_d group by grp) v on f.amt = v.grp union all select e.id, v.cnt from fuj_e e join (select grp, count(*) as cnt from fuj_d group by grp) v on e.ref_id = v.grp;
+
+# two joins common to the branches
+
+statement ok
+create materialized view fuj_chain_off as select f.id as id, g.a as ga, d.name as dn from fuj_f f join fuj_d d on f.dim_id = d.id join fuj_g g on d.grp = g.b union all select e.id, g.a, d.name from fuj_e e join fuj_d d on e.ref_id = d.id join fuj_g g on d.grp = g.b;
+
+# two anti joins in each branch
+
+statement ok
+create materialized view fuj_two_anti_off as select f.id as id, f.label as txt from fuj_f f where not exists (select 1 from fuj_g g where g.a = f.other_id and g.b > 1) and not exists (select 1 from fuj_d d where d.id = f.other_id) union all select e.id, e.code from fuj_e e where not exists (select 1 from fuj_g g where g.a = e.ref_id and g.b > 1) and not exists (select 1 from fuj_d d where d.id = e.ref_id);
+
+# anti join on the other input above a left join in one branch
+
+statement ok
+create materialized view fuj_anti_above_left_off as select f.id as id, d.name as dn from fuj_f f left join fuj_d d on f.dim_id = d.id where not exists (select 1 from fuj_g g where g.a = f.other_id) union all select e.id, d.name from fuj_e e left join fuj_d d on e.ref_id = d.id;
+
+# semi join on the joined table above inner joins
+
+statement ok
+create materialized view fuj_semi_above_inner_off as select f.id as id, d.name as dn from fuj_f f join fuj_d d on f.dim_id = d.id where exists (select 1 from fuj_g g where g.b = d.grp) union all select e.id, d.name from fuj_e e join fuj_d d on e.ref_id = d.id where exists (select 1 from fuj_g g where g.b = d.grp);
+
 # kept: an inner join and a left join
 
 statement ok
@@ -164,6 +233,11 @@ create materialized view fuj_kept_types_off as select f.id as id, d.name as dn f
 
 statement ok
 create materialized view fuj_kept_columns_off as select f.id as id, d.name as dn from fuj_f f join fuj_d d on f.dim_id = d.id union all select e.id, d.name from fuj_e e join fuj_d d on e.ref_id = d.grp;
+
+# kept: anti join on the padded side of a left join
+
+statement ok
+create materialized view fuj_kept_anti_padded_off as select f.id as id, d.name as dn from fuj_f f left join fuj_d d on f.dim_id = d.id where not exists (select 1 from fuj_g g where g.a = d.grp) union all select e.id, d.name from fuj_e e left join fuj_d d on e.ref_id = d.id;
 
 statement ok
 set streaming_factor_union_join = true;
@@ -283,6 +357,66 @@ create materialized view fuj_agg_above_on as select dn, count(*) as cnt, sum(amt
 statement ok
 create materialized view fuj_union_distinct_on as select d.name as dn, d.grp as dg from fuj_f f join fuj_d d on f.dim_id = d.id union select d.name, d.grp from fuj_e e join fuj_d d on e.ref_id = d.id;
 
+# a view with a join, inner joins
+
+statement ok
+create materialized view fuj_dv_inner_on as select f.id as id, v.name as dn, v.a as va from fuj_f f join fuj_dj v on f.dim_id = v.id union all select e.id, v.name, v.a from fuj_e e join fuj_dj v on e.ref_id = v.id;
+
+# an aggregating view, left joins
+
+statement ok
+create materialized view fuj_dv_agg_left_on as select f.id as id, v.cnt as cnt, v.mx as mx from fuj_f f left join fuj_dagg v on f.amt = v.grp union all select e.id, v.cnt, e.code from fuj_e e left join fuj_dagg v on e.ref_id = v.grp;
+
+# anti joins with a view with a join
+
+statement ok
+create materialized view fuj_dv_anti_on as select f.id as id, f.label as txt from fuj_f f where not exists (select 1 from fuj_dj v where v.id = f.dim_id) union all select e.id, e.code from fuj_e e where not exists (select 1 from fuj_dj v where v.id = e.ref_id);
+
+# semi joins with a different filter of the aggregating view
+
+statement ok
+create materialized view fuj_dv_semi_filters_on as select f.id as id, f.label as txt from fuj_f f where exists (select 1 from fuj_dagg v where v.grp = f.amt and v.cnt > 1) union all select e.id, e.code from fuj_e e where exists (select 1 from fuj_dagg v where v.grp = e.ref_id and v.mx is not null);
+
+# inner joins with a different filter of the aggregating view
+
+statement ok
+create materialized view fuj_dv_filters_on as select f.id as id, v.cnt as cnt from fuj_f f join fuj_dagg v on f.amt = v.grp where v.cnt > 1 union all select e.id, v.cnt from fuj_e e join fuj_dagg v on e.ref_id = v.grp where v.mx is not null;
+
+# an extra condition on the view in one branch
+
+statement ok
+create materialized view fuj_dv_condition_on as select f.id as id, v.name as dn from fuj_f f left join fuj_dj v on f.dim_id = v.id and v.a > f.amt union all select e.id, v.name from fuj_e e left join fuj_dj v on e.ref_id = v.id;
+
+# a view with a left join, left joins
+
+statement ok
+create materialized view fuj_dv_left_view_on as select f.id as id, v.name as dn, v.a as va from fuj_f f left join fuj_dl v on f.dim_id = v.id union all select e.id, v.name, v.a from fuj_e e left join fuj_dl v on e.ref_id = v.id;
+
+# the same aggregating subquery written in each branch
+
+statement ok
+create materialized view fuj_dv_inline_on as select f.id as id, v.cnt as cnt from fuj_f f join (select grp, count(*) as cnt from fuj_d group by grp) v on f.amt = v.grp union all select e.id, v.cnt from fuj_e e join (select grp, count(*) as cnt from fuj_d group by grp) v on e.ref_id = v.grp;
+
+# two joins common to the branches
+
+statement ok
+create materialized view fuj_chain_on as select f.id as id, g.a as ga, d.name as dn from fuj_f f join fuj_d d on f.dim_id = d.id join fuj_g g on d.grp = g.b union all select e.id, g.a, d.name from fuj_e e join fuj_d d on e.ref_id = d.id join fuj_g g on d.grp = g.b;
+
+# two anti joins in each branch
+
+statement ok
+create materialized view fuj_two_anti_on as select f.id as id, f.label as txt from fuj_f f where not exists (select 1 from fuj_g g where g.a = f.other_id and g.b > 1) and not exists (select 1 from fuj_d d where d.id = f.other_id) union all select e.id, e.code from fuj_e e where not exists (select 1 from fuj_g g where g.a = e.ref_id and g.b > 1) and not exists (select 1 from fuj_d d where d.id = e.ref_id);
+
+# anti join on the other input above a left join in one branch
+
+statement ok
+create materialized view fuj_anti_above_left_on as select f.id as id, d.name as dn from fuj_f f left join fuj_d d on f.dim_id = d.id where not exists (select 1 from fuj_g g where g.a = f.other_id) union all select e.id, d.name from fuj_e e left join fuj_d d on e.ref_id = d.id;
+
+# semi join on the joined table above inner joins
+
+statement ok
+create materialized view fuj_semi_above_inner_on as select f.id as id, d.name as dn from fuj_f f join fuj_d d on f.dim_id = d.id where exists (select 1 from fuj_g g where g.b = d.grp) union all select e.id, d.name from fuj_e e join fuj_d d on e.ref_id = d.id where exists (select 1 from fuj_g g where g.b = d.grp);
+
 # kept: an inner join and a left join
 
 statement ok
@@ -292,6 +426,11 @@ create materialized view fuj_kept_types_on as select f.id as id, d.name as dn fr
 
 statement ok
 create materialized view fuj_kept_columns_on as select f.id as id, d.name as dn from fuj_f f join fuj_d d on f.dim_id = d.id union all select e.id, d.name from fuj_e e join fuj_d d on e.ref_id = d.grp;
+
+# kept: anti join on the padded side of a left join
+
+statement ok
+create materialized view fuj_kept_anti_padded_on as select f.id as id, d.name as dn from fuj_f f left join fuj_d d on f.dim_id = d.id where not exists (select 1 from fuj_g g where g.a = d.grp) union all select e.id, d.name from fuj_e e left join fuj_d d on e.ref_id = d.id;
 
 # After the backfill: with and without the single join, every materialized view holds the same rows.
 
@@ -481,6 +620,102 @@ select
 
 query III
 select
+  (select count(*) from (select * from fuj_dv_inner_on except select * from fuj_dv_inner_off) x),
+  (select count(*) from (select * from fuj_dv_inner_off except select * from fuj_dv_inner_on) y),
+  (select count(*) from fuj_dv_inner_on) - (select count(*) from fuj_dv_inner_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_agg_left_on except select * from fuj_dv_agg_left_off) x),
+  (select count(*) from (select * from fuj_dv_agg_left_off except select * from fuj_dv_agg_left_on) y),
+  (select count(*) from fuj_dv_agg_left_on) - (select count(*) from fuj_dv_agg_left_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_anti_on except select * from fuj_dv_anti_off) x),
+  (select count(*) from (select * from fuj_dv_anti_off except select * from fuj_dv_anti_on) y),
+  (select count(*) from fuj_dv_anti_on) - (select count(*) from fuj_dv_anti_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_semi_filters_on except select * from fuj_dv_semi_filters_off) x),
+  (select count(*) from (select * from fuj_dv_semi_filters_off except select * from fuj_dv_semi_filters_on) y),
+  (select count(*) from fuj_dv_semi_filters_on) - (select count(*) from fuj_dv_semi_filters_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_filters_on except select * from fuj_dv_filters_off) x),
+  (select count(*) from (select * from fuj_dv_filters_off except select * from fuj_dv_filters_on) y),
+  (select count(*) from fuj_dv_filters_on) - (select count(*) from fuj_dv_filters_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_condition_on except select * from fuj_dv_condition_off) x),
+  (select count(*) from (select * from fuj_dv_condition_off except select * from fuj_dv_condition_on) y),
+  (select count(*) from fuj_dv_condition_on) - (select count(*) from fuj_dv_condition_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_left_view_on except select * from fuj_dv_left_view_off) x),
+  (select count(*) from (select * from fuj_dv_left_view_off except select * from fuj_dv_left_view_on) y),
+  (select count(*) from fuj_dv_left_view_on) - (select count(*) from fuj_dv_left_view_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_inline_on except select * from fuj_dv_inline_off) x),
+  (select count(*) from (select * from fuj_dv_inline_off except select * from fuj_dv_inline_on) y),
+  (select count(*) from fuj_dv_inline_on) - (select count(*) from fuj_dv_inline_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_chain_on except select * from fuj_chain_off) x),
+  (select count(*) from (select * from fuj_chain_off except select * from fuj_chain_on) y),
+  (select count(*) from fuj_chain_on) - (select count(*) from fuj_chain_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_two_anti_on except select * from fuj_two_anti_off) x),
+  (select count(*) from (select * from fuj_two_anti_off except select * from fuj_two_anti_on) y),
+  (select count(*) from fuj_two_anti_on) - (select count(*) from fuj_two_anti_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_anti_above_left_on except select * from fuj_anti_above_left_off) x),
+  (select count(*) from (select * from fuj_anti_above_left_off except select * from fuj_anti_above_left_on) y),
+  (select count(*) from fuj_anti_above_left_on) - (select count(*) from fuj_anti_above_left_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_semi_above_inner_on except select * from fuj_semi_above_inner_off) x),
+  (select count(*) from (select * from fuj_semi_above_inner_off except select * from fuj_semi_above_inner_on) y),
+  (select count(*) from fuj_semi_above_inner_on) - (select count(*) from fuj_semi_above_inner_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from fuj_kept_types_on except select * from fuj_kept_types_off) x),
   (select count(*) from (select * from fuj_kept_types_off except select * from fuj_kept_types_on) y),
   (select count(*) from fuj_kept_types_on) - (select count(*) from fuj_kept_types_off);
@@ -492,6 +727,14 @@ select
   (select count(*) from (select * from fuj_kept_columns_on except select * from fuj_kept_columns_off) x),
   (select count(*) from (select * from fuj_kept_columns_off except select * from fuj_kept_columns_on) y),
   (select count(*) from fuj_kept_columns_on) - (select count(*) from fuj_kept_columns_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_kept_anti_padded_on except select * from fuj_kept_anti_padded_off) x),
+  (select count(*) from (select * from fuj_kept_anti_padded_off except select * from fuj_kept_anti_padded_on) y),
+  (select count(*) from fuj_kept_anti_padded_on) - (select count(*) from fuj_kept_anti_padded_off);
 ----
 0 0 0
 
@@ -758,6 +1001,102 @@ select
 
 query III
 select
+  (select count(*) from (select * from fuj_dv_inner_on except select * from fuj_dv_inner_off) x),
+  (select count(*) from (select * from fuj_dv_inner_off except select * from fuj_dv_inner_on) y),
+  (select count(*) from fuj_dv_inner_on) - (select count(*) from fuj_dv_inner_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_agg_left_on except select * from fuj_dv_agg_left_off) x),
+  (select count(*) from (select * from fuj_dv_agg_left_off except select * from fuj_dv_agg_left_on) y),
+  (select count(*) from fuj_dv_agg_left_on) - (select count(*) from fuj_dv_agg_left_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_anti_on except select * from fuj_dv_anti_off) x),
+  (select count(*) from (select * from fuj_dv_anti_off except select * from fuj_dv_anti_on) y),
+  (select count(*) from fuj_dv_anti_on) - (select count(*) from fuj_dv_anti_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_semi_filters_on except select * from fuj_dv_semi_filters_off) x),
+  (select count(*) from (select * from fuj_dv_semi_filters_off except select * from fuj_dv_semi_filters_on) y),
+  (select count(*) from fuj_dv_semi_filters_on) - (select count(*) from fuj_dv_semi_filters_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_filters_on except select * from fuj_dv_filters_off) x),
+  (select count(*) from (select * from fuj_dv_filters_off except select * from fuj_dv_filters_on) y),
+  (select count(*) from fuj_dv_filters_on) - (select count(*) from fuj_dv_filters_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_condition_on except select * from fuj_dv_condition_off) x),
+  (select count(*) from (select * from fuj_dv_condition_off except select * from fuj_dv_condition_on) y),
+  (select count(*) from fuj_dv_condition_on) - (select count(*) from fuj_dv_condition_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_left_view_on except select * from fuj_dv_left_view_off) x),
+  (select count(*) from (select * from fuj_dv_left_view_off except select * from fuj_dv_left_view_on) y),
+  (select count(*) from fuj_dv_left_view_on) - (select count(*) from fuj_dv_left_view_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_inline_on except select * from fuj_dv_inline_off) x),
+  (select count(*) from (select * from fuj_dv_inline_off except select * from fuj_dv_inline_on) y),
+  (select count(*) from fuj_dv_inline_on) - (select count(*) from fuj_dv_inline_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_chain_on except select * from fuj_chain_off) x),
+  (select count(*) from (select * from fuj_chain_off except select * from fuj_chain_on) y),
+  (select count(*) from fuj_chain_on) - (select count(*) from fuj_chain_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_two_anti_on except select * from fuj_two_anti_off) x),
+  (select count(*) from (select * from fuj_two_anti_off except select * from fuj_two_anti_on) y),
+  (select count(*) from fuj_two_anti_on) - (select count(*) from fuj_two_anti_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_anti_above_left_on except select * from fuj_anti_above_left_off) x),
+  (select count(*) from (select * from fuj_anti_above_left_off except select * from fuj_anti_above_left_on) y),
+  (select count(*) from fuj_anti_above_left_on) - (select count(*) from fuj_anti_above_left_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_semi_above_inner_on except select * from fuj_semi_above_inner_off) x),
+  (select count(*) from (select * from fuj_semi_above_inner_off except select * from fuj_semi_above_inner_on) y),
+  (select count(*) from fuj_semi_above_inner_on) - (select count(*) from fuj_semi_above_inner_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from fuj_kept_types_on except select * from fuj_kept_types_off) x),
   (select count(*) from (select * from fuj_kept_types_off except select * from fuj_kept_types_on) y),
   (select count(*) from fuj_kept_types_on) - (select count(*) from fuj_kept_types_off);
@@ -769,6 +1108,14 @@ select
   (select count(*) from (select * from fuj_kept_columns_on except select * from fuj_kept_columns_off) x),
   (select count(*) from (select * from fuj_kept_columns_off except select * from fuj_kept_columns_on) y),
   (select count(*) from fuj_kept_columns_on) - (select count(*) from fuj_kept_columns_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_kept_anti_padded_on except select * from fuj_kept_anti_padded_off) x),
+  (select count(*) from (select * from fuj_kept_anti_padded_off except select * from fuj_kept_anti_padded_on) y),
+  (select count(*) from fuj_kept_anti_padded_on) - (select count(*) from fuj_kept_anti_padded_off);
 ----
 0 0 0
 
@@ -830,6 +1177,26 @@ update fuj_g set a = 3 where id = 205;
 
 statement ok
 delete from fuj_g where id = 204;
+
+# Rows of the derived relations move: duplicates appear and go, groups change.
+
+statement ok
+insert into fuj_g values (211, 4, 1), (212, null, 2), (213, 2, null);
+
+statement ok
+update fuj_g set b = 3 where id = 202;
+
+statement ok
+update fuj_d set grp = null where id = 7;
+
+statement ok
+update fuj_f set amt = null where id = 17;
+
+statement ok
+update fuj_f set amt = 2, other_id = 4 where id = 19;
+
+statement ok
+update fuj_e set ref_id = 1 where id = 110;
 
 # After the updates and deletes: with and without the single join, every materialized view holds the same rows.
 
@@ -1019,6 +1386,102 @@ select
 
 query III
 select
+  (select count(*) from (select * from fuj_dv_inner_on except select * from fuj_dv_inner_off) x),
+  (select count(*) from (select * from fuj_dv_inner_off except select * from fuj_dv_inner_on) y),
+  (select count(*) from fuj_dv_inner_on) - (select count(*) from fuj_dv_inner_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_agg_left_on except select * from fuj_dv_agg_left_off) x),
+  (select count(*) from (select * from fuj_dv_agg_left_off except select * from fuj_dv_agg_left_on) y),
+  (select count(*) from fuj_dv_agg_left_on) - (select count(*) from fuj_dv_agg_left_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_anti_on except select * from fuj_dv_anti_off) x),
+  (select count(*) from (select * from fuj_dv_anti_off except select * from fuj_dv_anti_on) y),
+  (select count(*) from fuj_dv_anti_on) - (select count(*) from fuj_dv_anti_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_semi_filters_on except select * from fuj_dv_semi_filters_off) x),
+  (select count(*) from (select * from fuj_dv_semi_filters_off except select * from fuj_dv_semi_filters_on) y),
+  (select count(*) from fuj_dv_semi_filters_on) - (select count(*) from fuj_dv_semi_filters_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_filters_on except select * from fuj_dv_filters_off) x),
+  (select count(*) from (select * from fuj_dv_filters_off except select * from fuj_dv_filters_on) y),
+  (select count(*) from fuj_dv_filters_on) - (select count(*) from fuj_dv_filters_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_condition_on except select * from fuj_dv_condition_off) x),
+  (select count(*) from (select * from fuj_dv_condition_off except select * from fuj_dv_condition_on) y),
+  (select count(*) from fuj_dv_condition_on) - (select count(*) from fuj_dv_condition_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_left_view_on except select * from fuj_dv_left_view_off) x),
+  (select count(*) from (select * from fuj_dv_left_view_off except select * from fuj_dv_left_view_on) y),
+  (select count(*) from fuj_dv_left_view_on) - (select count(*) from fuj_dv_left_view_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_inline_on except select * from fuj_dv_inline_off) x),
+  (select count(*) from (select * from fuj_dv_inline_off except select * from fuj_dv_inline_on) y),
+  (select count(*) from fuj_dv_inline_on) - (select count(*) from fuj_dv_inline_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_chain_on except select * from fuj_chain_off) x),
+  (select count(*) from (select * from fuj_chain_off except select * from fuj_chain_on) y),
+  (select count(*) from fuj_chain_on) - (select count(*) from fuj_chain_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_two_anti_on except select * from fuj_two_anti_off) x),
+  (select count(*) from (select * from fuj_two_anti_off except select * from fuj_two_anti_on) y),
+  (select count(*) from fuj_two_anti_on) - (select count(*) from fuj_two_anti_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_anti_above_left_on except select * from fuj_anti_above_left_off) x),
+  (select count(*) from (select * from fuj_anti_above_left_off except select * from fuj_anti_above_left_on) y),
+  (select count(*) from fuj_anti_above_left_on) - (select count(*) from fuj_anti_above_left_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_semi_above_inner_on except select * from fuj_semi_above_inner_off) x),
+  (select count(*) from (select * from fuj_semi_above_inner_off except select * from fuj_semi_above_inner_on) y),
+  (select count(*) from fuj_semi_above_inner_on) - (select count(*) from fuj_semi_above_inner_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from fuj_kept_types_on except select * from fuj_kept_types_off) x),
   (select count(*) from (select * from fuj_kept_types_off except select * from fuj_kept_types_on) y),
   (select count(*) from fuj_kept_types_on) - (select count(*) from fuj_kept_types_off);
@@ -1030,6 +1493,14 @@ select
   (select count(*) from (select * from fuj_kept_columns_on except select * from fuj_kept_columns_off) x),
   (select count(*) from (select * from fuj_kept_columns_off except select * from fuj_kept_columns_on) y),
   (select count(*) from fuj_kept_columns_on) - (select count(*) from fuj_kept_columns_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_kept_anti_padded_on except select * from fuj_kept_anti_padded_off) x),
+  (select count(*) from (select * from fuj_kept_anti_padded_off except select * from fuj_kept_anti_padded_on) y),
+  (select count(*) from fuj_kept_anti_padded_on) - (select count(*) from fuj_kept_anti_padded_off);
 ----
 0 0 0
 
@@ -1226,6 +1697,102 @@ select
 
 query III
 select
+  (select count(*) from (select * from fuj_dv_inner_on except select * from fuj_dv_inner_off) x),
+  (select count(*) from (select * from fuj_dv_inner_off except select * from fuj_dv_inner_on) y),
+  (select count(*) from fuj_dv_inner_on) - (select count(*) from fuj_dv_inner_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_agg_left_on except select * from fuj_dv_agg_left_off) x),
+  (select count(*) from (select * from fuj_dv_agg_left_off except select * from fuj_dv_agg_left_on) y),
+  (select count(*) from fuj_dv_agg_left_on) - (select count(*) from fuj_dv_agg_left_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_anti_on except select * from fuj_dv_anti_off) x),
+  (select count(*) from (select * from fuj_dv_anti_off except select * from fuj_dv_anti_on) y),
+  (select count(*) from fuj_dv_anti_on) - (select count(*) from fuj_dv_anti_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_semi_filters_on except select * from fuj_dv_semi_filters_off) x),
+  (select count(*) from (select * from fuj_dv_semi_filters_off except select * from fuj_dv_semi_filters_on) y),
+  (select count(*) from fuj_dv_semi_filters_on) - (select count(*) from fuj_dv_semi_filters_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_filters_on except select * from fuj_dv_filters_off) x),
+  (select count(*) from (select * from fuj_dv_filters_off except select * from fuj_dv_filters_on) y),
+  (select count(*) from fuj_dv_filters_on) - (select count(*) from fuj_dv_filters_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_condition_on except select * from fuj_dv_condition_off) x),
+  (select count(*) from (select * from fuj_dv_condition_off except select * from fuj_dv_condition_on) y),
+  (select count(*) from fuj_dv_condition_on) - (select count(*) from fuj_dv_condition_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_left_view_on except select * from fuj_dv_left_view_off) x),
+  (select count(*) from (select * from fuj_dv_left_view_off except select * from fuj_dv_left_view_on) y),
+  (select count(*) from fuj_dv_left_view_on) - (select count(*) from fuj_dv_left_view_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_inline_on except select * from fuj_dv_inline_off) x),
+  (select count(*) from (select * from fuj_dv_inline_off except select * from fuj_dv_inline_on) y),
+  (select count(*) from fuj_dv_inline_on) - (select count(*) from fuj_dv_inline_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_chain_on except select * from fuj_chain_off) x),
+  (select count(*) from (select * from fuj_chain_off except select * from fuj_chain_on) y),
+  (select count(*) from fuj_chain_on) - (select count(*) from fuj_chain_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_two_anti_on except select * from fuj_two_anti_off) x),
+  (select count(*) from (select * from fuj_two_anti_off except select * from fuj_two_anti_on) y),
+  (select count(*) from fuj_two_anti_on) - (select count(*) from fuj_two_anti_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_anti_above_left_on except select * from fuj_anti_above_left_off) x),
+  (select count(*) from (select * from fuj_anti_above_left_off except select * from fuj_anti_above_left_on) y),
+  (select count(*) from fuj_anti_above_left_on) - (select count(*) from fuj_anti_above_left_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_semi_above_inner_on except select * from fuj_semi_above_inner_off) x),
+  (select count(*) from (select * from fuj_semi_above_inner_off except select * from fuj_semi_above_inner_on) y),
+  (select count(*) from fuj_semi_above_inner_on) - (select count(*) from fuj_semi_above_inner_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from fuj_kept_types_on except select * from fuj_kept_types_off) x),
   (select count(*) from (select * from fuj_kept_types_off except select * from fuj_kept_types_on) y),
   (select count(*) from fuj_kept_types_on) - (select count(*) from fuj_kept_types_off);
@@ -1237,6 +1804,14 @@ select
   (select count(*) from (select * from fuj_kept_columns_on except select * from fuj_kept_columns_off) x),
   (select count(*) from (select * from fuj_kept_columns_off except select * from fuj_kept_columns_on) y),
   (select count(*) from fuj_kept_columns_on) - (select count(*) from fuj_kept_columns_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_kept_anti_padded_on except select * from fuj_kept_anti_padded_off) x),
+  (select count(*) from (select * from fuj_kept_anti_padded_off except select * from fuj_kept_anti_padded_on) y),
+  (select count(*) from fuj_kept_anti_padded_on) - (select count(*) from fuj_kept_anti_padded_off);
 ----
 0 0 0
 
@@ -1434,6 +2009,102 @@ select
 
 query III
 select
+  (select count(*) from (select * from fuj_dv_inner_on except select * from fuj_dv_inner_off) x),
+  (select count(*) from (select * from fuj_dv_inner_off except select * from fuj_dv_inner_on) y),
+  (select count(*) from fuj_dv_inner_on) - (select count(*) from fuj_dv_inner_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_agg_left_on except select * from fuj_dv_agg_left_off) x),
+  (select count(*) from (select * from fuj_dv_agg_left_off except select * from fuj_dv_agg_left_on) y),
+  (select count(*) from fuj_dv_agg_left_on) - (select count(*) from fuj_dv_agg_left_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_anti_on except select * from fuj_dv_anti_off) x),
+  (select count(*) from (select * from fuj_dv_anti_off except select * from fuj_dv_anti_on) y),
+  (select count(*) from fuj_dv_anti_on) - (select count(*) from fuj_dv_anti_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_semi_filters_on except select * from fuj_dv_semi_filters_off) x),
+  (select count(*) from (select * from fuj_dv_semi_filters_off except select * from fuj_dv_semi_filters_on) y),
+  (select count(*) from fuj_dv_semi_filters_on) - (select count(*) from fuj_dv_semi_filters_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_filters_on except select * from fuj_dv_filters_off) x),
+  (select count(*) from (select * from fuj_dv_filters_off except select * from fuj_dv_filters_on) y),
+  (select count(*) from fuj_dv_filters_on) - (select count(*) from fuj_dv_filters_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_condition_on except select * from fuj_dv_condition_off) x),
+  (select count(*) from (select * from fuj_dv_condition_off except select * from fuj_dv_condition_on) y),
+  (select count(*) from fuj_dv_condition_on) - (select count(*) from fuj_dv_condition_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_left_view_on except select * from fuj_dv_left_view_off) x),
+  (select count(*) from (select * from fuj_dv_left_view_off except select * from fuj_dv_left_view_on) y),
+  (select count(*) from fuj_dv_left_view_on) - (select count(*) from fuj_dv_left_view_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_dv_inline_on except select * from fuj_dv_inline_off) x),
+  (select count(*) from (select * from fuj_dv_inline_off except select * from fuj_dv_inline_on) y),
+  (select count(*) from fuj_dv_inline_on) - (select count(*) from fuj_dv_inline_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_chain_on except select * from fuj_chain_off) x),
+  (select count(*) from (select * from fuj_chain_off except select * from fuj_chain_on) y),
+  (select count(*) from fuj_chain_on) - (select count(*) from fuj_chain_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_two_anti_on except select * from fuj_two_anti_off) x),
+  (select count(*) from (select * from fuj_two_anti_off except select * from fuj_two_anti_on) y),
+  (select count(*) from fuj_two_anti_on) - (select count(*) from fuj_two_anti_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_anti_above_left_on except select * from fuj_anti_above_left_off) x),
+  (select count(*) from (select * from fuj_anti_above_left_off except select * from fuj_anti_above_left_on) y),
+  (select count(*) from fuj_anti_above_left_on) - (select count(*) from fuj_anti_above_left_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from fuj_semi_above_inner_on except select * from fuj_semi_above_inner_off) x),
+  (select count(*) from (select * from fuj_semi_above_inner_off except select * from fuj_semi_above_inner_on) y),
+  (select count(*) from fuj_semi_above_inner_on) - (select count(*) from fuj_semi_above_inner_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from fuj_kept_types_on except select * from fuj_kept_types_off) x),
   (select count(*) from (select * from fuj_kept_types_off except select * from fuj_kept_types_on) y),
   (select count(*) from fuj_kept_types_on) - (select count(*) from fuj_kept_types_off);
@@ -1448,13 +2119,60 @@ select
 ----
 0 0 0
 
+query III
+select
+  (select count(*) from (select * from fuj_kept_anti_padded_on except select * from fuj_kept_anti_padded_off) x),
+  (select count(*) from (select * from fuj_kept_anti_padded_off except select * from fuj_kept_anti_padded_on) y),
+  (select count(*) from fuj_kept_anti_padded_on) - (select count(*) from fuj_kept_anti_padded_off);
+----
+0 0 0
+
 # Cleanup.
+
+statement ok
+drop materialized view fuj_kept_anti_padded_on;
 
 statement ok
 drop materialized view fuj_kept_columns_on;
 
 statement ok
 drop materialized view fuj_kept_types_on;
+
+statement ok
+drop materialized view fuj_semi_above_inner_on;
+
+statement ok
+drop materialized view fuj_anti_above_left_on;
+
+statement ok
+drop materialized view fuj_two_anti_on;
+
+statement ok
+drop materialized view fuj_chain_on;
+
+statement ok
+drop materialized view fuj_dv_inline_on;
+
+statement ok
+drop materialized view fuj_dv_left_view_on;
+
+statement ok
+drop materialized view fuj_dv_condition_on;
+
+statement ok
+drop materialized view fuj_dv_filters_on;
+
+statement ok
+drop materialized view fuj_dv_semi_filters_on;
+
+statement ok
+drop materialized view fuj_dv_anti_on;
+
+statement ok
+drop materialized view fuj_dv_agg_left_on;
+
+statement ok
+drop materialized view fuj_dv_inner_on;
 
 statement ok
 drop materialized view fuj_union_distinct_on;
@@ -1526,10 +2244,49 @@ statement ok
 drop materialized view fuj_inner_on;
 
 statement ok
+drop materialized view fuj_kept_anti_padded_off;
+
+statement ok
 drop materialized view fuj_kept_columns_off;
 
 statement ok
 drop materialized view fuj_kept_types_off;
+
+statement ok
+drop materialized view fuj_semi_above_inner_off;
+
+statement ok
+drop materialized view fuj_anti_above_left_off;
+
+statement ok
+drop materialized view fuj_two_anti_off;
+
+statement ok
+drop materialized view fuj_chain_off;
+
+statement ok
+drop materialized view fuj_dv_inline_off;
+
+statement ok
+drop materialized view fuj_dv_left_view_off;
+
+statement ok
+drop materialized view fuj_dv_condition_off;
+
+statement ok
+drop materialized view fuj_dv_filters_off;
+
+statement ok
+drop materialized view fuj_dv_semi_filters_off;
+
+statement ok
+drop materialized view fuj_dv_anti_off;
+
+statement ok
+drop materialized view fuj_dv_agg_left_off;
+
+statement ok
+drop materialized view fuj_dv_inner_off;
 
 statement ok
 drop materialized view fuj_union_distinct_off;
@@ -1599,6 +2356,15 @@ drop materialized view fuj_left_proj_off;
 
 statement ok
 drop materialized view fuj_inner_off;
+
+statement ok
+drop view fuj_dl;
+
+statement ok
+drop view fuj_dagg;
+
+statement ok
+drop view fuj_dj;
 
 statement ok
 drop view fuj_da;

@@ -25,12 +25,15 @@ own rules.
 | 4 | Stronger derivation of unique keys | done (prototype) |
 | 1 | Elimination of an unused outer join on a unique key | done (prototype) |
 | 2 | Elimination of an aggregation, `DISTINCT` or top-n on a key | done (prototype) |
-| 3 | Elimination of a self-join on a key | in progress: repeated lookups of a table done on the branch `proto/streaming-merge-repeated-lookups`, aggregations next |
+| 3 | Elimination of a self-join on a key | in progress: repeated lookups of a table done on the branch `proto/streaming-merge-repeated-lookups`, lookups nested in trees of joins and semi or anti joins answered by a carried row done on the branch `proto/plan-reduction-flat-lookups`, aggregations next |
 | 5 | Aggregation pushed below a join onto the unique side | selected, not started |
-| 6 | Merge of two stacked aggregations | selected, not started |
-| 7 | Join common to the branches of a `UNION ALL` joined once above the union | done (prototype, branch of idea 3) |
+| 6 | Merge of two stacked aggregations | done (prototype, branch `proto/plan-reduction-shared-aggs`): stacked aggregations and a dedup below a distinct count; a dedup below a top-1 or a semi join not done (see 6) |
+| 7 | Join common to the branches of a `UNION ALL` joined once above the union | done (prototype, branch of idea 3); derived joined side, several joins and semi or anti joins above the join on the branch `proto/plan-reduction-union-derived` |
 | 8 | Aggregate of a constant over a group | done (prototype, branch of idea 3) |
 | 9 | Leftovers of subquery decorrelation (domain re-scan, aggregation and null-safe join back) | aggregating subqueries done (prototype, branch `proto/streaming-simplify-subquery-unnesting`); laterals without a table not started |
+| US | Branches of a `UNION ALL` that read the same table read it once (`Expand` per branch) | done (prototype, branch `proto/plan-reduction-union-scans`); dominance under a top-1 not done |
+| 10 | Sharing again, within one query, the sub-plans that became identical | done for stateful sub-plans (prototype, branch `proto/plan-reduction-shared-aggs`); scans that differ by their columns not done |
+| 9 | Leftovers of subquery decorrelation (domain re-scan, aggregation and null-safe join back) | aggregating subqueries done (prototype, branch `proto/streaming-simplify-subquery-unnesting`); laterals without a table done (prototype, branch `proto/plan-reduction-lateral`, see 9b) |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -195,6 +198,60 @@ input joined on their group key: one aggregation with a `FILTER` per call.
   - Still out of reach: a lookup whose removed side is itself a chain of joins that ends with
     the scan, and a key equality that an ancestor join establishes. Both need the inner joins
     to be looked at as one flat join with classes of equal columns.
+- **Lookups nested in a tree of joins, done on the branch `proto/plan-reduction-flat-lookups`**
+  (same variable and rule, module `flat` of the rule):
+  - A tree of inner joins, filters and projections is one flat join: the cross product of its
+    leaves, filtered by all its conjuncts. A left outer join of the tree keeps every row of its
+    preserved side and can be applied last: `(X LEFT JOIN Y) JOIN L` is
+    `(X JOIN L) LEFT JOIN Y` when the condition with `L` does not refer to `Y`, and a conjunct
+    can move above the left joins of the columns it does not refer to. The equalities of the
+    conjuncts make *classes* of equal columns: `a.x = b.y AND b.y = c.z` puts `a.x`, `b.y` and
+    `c.z` in one class, and in every row they hold the same value, which is not `NULL`.
+  - The lookup is now any leaf of the tree reached through inner joins, filters, projections
+    and the preserved side of left outer joins. It is taken out of the tree: the joins and
+    filters that do not need its columns stay in place, the conjuncts that do are lifted, and
+    so are the left outer joins whose condition reads it. The lookup is then joined with the
+    rest of the tree and that join goes through the rule as before; the lifted left joins and
+    conjuncts follow. `f JOIN d ON f.dim_id = d.id JOIN (s JOIN d d2 ON s.id = d2.id) x
+    ON d.id = x.id` keeps one read of `d`, and `(d LEFT JOIN a ...) JOIN (d d2 LEFT JOIN b ...)
+    ON d.id = d2.id` becomes `d LEFT JOIN b ... LEFT JOIN a ...`.
+  - A join of the tree that loses all its equalities to the lifted conjuncts is given the
+    equalities that the classes imply between its sides (`g.id = d2.id AND d2.id = s.id` leaves
+    `g.id = s.id` when `d2` goes): a streaming join needs one.
+  - The lookup may also be nested in the right side of a left outer, semi or anti join whose left
+    side carries the row: each column of its key is in a class (of the right side and of the
+    condition of the join) with a column of the left side bound to the same column of the
+    instance. In a pair of rows that the join matches, the lookup then reads the row of the
+    instance. The rest of the right side is joined instead, with the same conditions over the
+    row of the instance, its filter and the non-`NULL` compared columns. For a left join, the
+    columns of the right side that are computed (and not plain columns of the rest, which the
+    join pads) are guarded by "the rest matched" (a column of the rest compared with `=` is not
+    `NULL`), and the left joins lifted from the right side are applied with that guard. A
+    conjunct on the columns of such a left join refuses the rewrite: it removes rows of the right
+    side, not pairs. For a semi or anti join, the lifted left joins are dropped (they never
+    remove a row).
+  - A semi or anti join is also answered by the *row of the instance itself* when its condition
+    compares columns of the table, key or not, with columns of the left side bound to the same
+    columns of one instance, the other conjuncts refer to the left side only, and the scan of
+    the instance has the filter of the right side: the carried row matches whenever these
+    columns are not `NULL`, and nothing matches otherwise. `EXISTS` becomes a filter on that,
+    `NOT EXISTS` its opposite. No uniqueness is needed: one matching row is enough. With a
+    filter that the carried row may fail, another row could match: kept.
+  - The columns bound to the same column of an instance hold the same value or are all `NULL`,
+    so an inner join binds an instance of one side through the bound columns of the other side
+    too: the equalities of the joins below are not lost when the instance is met higher.
+  - The instance is also followed through a table function in the select list (`ProjectSet`):
+    each of its rows comes from one row of its input.
+  - A semi or anti join whose right side is a shared sub-plan (a view used twice) is looked into
+    too, but only rewritten when nothing of the sub-plan is left in it: the rest would otherwise
+    be computed a second time next to the shared one.
+  - Not handled, deliberately: a lookup in the padded side of a left join of the tree (it is
+    not pulled above the outer join), a lookup of a derived relation (aggregation, distinct or
+    top-1 of a shared sub-plan), a lookup whose row is designated through a lifted left join,
+    a key compared on a computed expression. An unused inner join on the key is never removed:
+    the row may be missing, which the join filters (an unused left join on a unique key is
+    removed by idea 1). Redundancies that hold only because a consumer is insensitive to
+    duplicates (a top-1 or a `min` above) are not used either.
 - **Next for the aggregations**: `Agg(group k)` over the same input with different filters,
   joined on `k` from the same column, becomes one aggregation with a `FILTER` per call and a
   `count(*) FILTER` per former aggregation to tell whether its group existed.
@@ -210,19 +267,47 @@ input joined on their group key: one aggregation with a `FILTER` per call.
 
 `(A ⋈ C) UNION ALL (B ⋈ C)` is `(A UNION ALL B) ⋈ C` for the inner, left outer, left semi and
 left anti joins: variable `streaming_factor_union_join`, rule `CommonJoinOverUnionRule`. No key is
-needed. `C` is scanned once and its join state kept once.
+needed. `C` is computed once and its join state kept once.
 
-- The branches that are merged join the same table, with the same join type, on the same
-  expressions of the table; their other inputs are unioned with the number of their branch.
+- The branches that are merged join the same relation, with the same join type, on the same
+  expressions of the relation; their other inputs are unioned with the number of their branch.
+- The joined relation is the scan of a table (with its filters and projections, also through a
+  shared sub-plan), or a *derived* relation: filters and projections over a sub-plan that is the
+  same plan in every merged branch (typically the shared sub-plan of a view or of a subquery
+  written twice: joins, aggregations, unions). A shared sub-plan is kept as it is, since it may
+  have other consumers; the filters and projections above it may differ between branches.
+- The derived relation must give the same rows wherever it is computed: tables read in the
+  present (no `FOR SYSTEM_TIME AS OF`, no source), projections, filters, joins (not as-of),
+  unions, values, project sets, and aggregations whose calls do not depend on the order of the
+  rows (`count`, `sum`, `min`, `max`, `avg`, bit and bool aggregates); every expression pure and
+  without `now()`. Kept: temporal filters, user-defined functions, `string_agg`, `array_agg`,
+  `first_value`..., top-n and window functions (ties may be broken differently).
 - What differs between branches moves around the single join: the rest of a join condition and
-  the filter of a scan are checked in the join condition for the rows of the branch (an outer or
-  anti join stays exact); the filter and projection above a join are applied per branch above.
-- An expression of the joined table that a branch computed below an outer join is still
+  the filter of the joined relation are checked in the join condition for the rows of the
+  branch (an outer or anti join stays exact); the filter and projection above a join are applied
+  per branch above. `NULL` keys and duplicates of the joined relation behave as in each branch:
+  every row of the union meets the same rows of the relation as before, under the same
+  condition.
+- An expression of the joined relation that a branch computed below an outer join is still
   computed below the single join, so that it is `NULL` without a match.
+- Several joins: the union of the other inputs of the single join, and the union of the merged
+  branches with the others, are looked at again. `(A ⋈ C ⋈ H) ∪ (B ⋈ C ⋈ H)` becomes
+  `((A ∪ B) ⋈ C) ⋈ H`, and two stacked anti joins common to the branches are both factored.
+- A semi or anti join above the join of a branch, whose condition only uses the columns of one
+  input `L` of that join, is first moved into `L`: `(L ⋈ X) ⋉ R = (L ⋉ R) ⋈ X`, as every row of
+  the join carries the columns of one row of `L` unchanged. Allowed for `L` the left input of an
+  inner, left outer, left semi or left anti join, or either input of an inner join; not for the
+  side of a left join that is padded with `NULL`. The join below can then be the shared one,
+  as in `(A ⟕ C WHERE NOT EXISTS (.. A ..)) ∪ (B ⟕ C)`. A branch read as written is preferred.
 - Cost to keep in mind: one join state holds the rows of every branch, and the rows of the union
-  are as wide as the widest branch.
-- Not done: a common side that is more than the scan of a table, an inner join in one branch
-  and an anti join on the same key in another (one left join split on `IS NULL`).
+  are as wide as the widest branch. A semi or anti join moved down keeps the rows of `L` in its
+  state instead of the rows of the join.
+- Not done: an inner join in one branch and an anti join on the same key in another (one left
+  join split on `IS NULL`); branches whose filters on the joined relation are disjoint and whose
+  join keys differ (one join on a `CASE` key); a join made redundant by the same join above the
+  union; joins that are common only after reordering the joins of a branch; a non deterministic
+  relation shared by one sub-plan (both branches already read the same rows there, but it is
+  kept on purpose).
 
 ### 8. Aggregate of a constant (added on 2026-11-25, done on the branch)
 
@@ -272,6 +357,129 @@ drops the rows of `t` without a match where the query keeps every row, the anti 
 where the query returns none (seen in streaming plans, batch not checked). The rule checks the null-rejection of a filter above the apply but not the join
 type of the apply.
 
+### US. Branches of a `UNION ALL` that read the same table (added on 2026-11-25, done on the branch)
+
+Variable `streaming_merge_union_scans`, rule `UnionScanMergeRule`. Views often split one table into
+several branches of a `UNION ALL`, each with its own filter and projection (one branch per status,
+per role, per kind of row). Each branch scans and backfills the table again. The rule
+reads it once:
+
+```text
+select a, x from t where p0            Project(CASE WHEN flag = 0 THEN a ELSE b END, ..)
+union all                         =>   └─Filter(CASE WHEN flag = 0 THEN p0 WHEN flag = 1 THEN p1 END)
+select b, y from t where p1              └─Expand(two copies of each row, flag = 0 and 1)
+                                           └─Scan(t, predicate: p0 OR p1)
+```
+
+- Exact bag semantics, no assumption on the filters: a row gives one copy per branch, the copy
+  of a branch is kept when the filter of the branch is true (`NULL` drops it, as a filter does),
+  so a row that passes two filters gives two rows and a duplicate row gives duplicate rows. The
+  filters need not be exclusive; with exclusive filters a single `CASE` without copies would
+  do, but proving exclusivity is not needed for the gain, which is the scan.
+- `LogicalExpand` (used for grouping sets and distinct aggregates, stateless) makes the copies,
+  every subset keeping every column, so no `NULL` column is built. Its stream key is the key of
+  the input and the flag, as the key of the union was the key of the branch and its number: the
+  materialized view keeps the same number of hidden columns. Its output distribution is
+  `SomeShard`, so an exchange follows where the union had one per branch.
+- `CASE` evaluates the condition and the expressions of a branch on the copies of that branch
+  only, so an expression that fails on rows its branch never sees is not evaluated on them. The
+  conjuncts common to every branch and the `OR` of the others go into the single scan.
+- Merged: branches of the form `(Project | Filter)*` over a scan of the same table, or over the
+  same shared sub-plan (`Share`) of a scan, which then stays shared with its other consumers.
+  Several groups of one union are merged separately; the other branches stay in the union.
+- Kept: a branch with a join, an aggregation or a table function above the scan, an impure
+  expression or `now()` (a temporal filter is a join with `Now` at this stage), a scan `AS OF`,
+  a table with a watermark (a column taken from different columns per branch would lose the
+  watermark that the union derived), a shared sub-plan that is not a scan.
+- Rows per branch: the `Expand` emits one copy per branch before the filter, a transient cost
+  in the same fragment; nothing is kept in state.
+
+Not done, the "status ladder" under a top-1 per key (`row_number() OVER (PARTITION BY k ORDER BY
+priority DESC) = 1` above a union of constant-priority branches):
+
+- *Dominated branches.* Under the top-1 only the highest priority per key matters, so two
+  branches over the same row could emit one row with a `CASE` on the priority, and an anti join
+  `NOT EXISTS (r)` in a lower branch is useless when a higher branch emits every key of `r`.
+  Correct only when the top-1 keeps nothing but the priority-determined columns, when ties
+  cannot change the result, and when no other consumer sees the union; the rule would have to
+  match the window, its partition, its order and the branches together. The merge above
+  already removes the extra scans of such branches; what remains is rows and an anti join.
+- *Default branch.* A lowest-priority branch `select k, 'init' from t` under a top-1 that is
+  joined back to `t` on `k` could become a `LEFT JOIN` with `coalesce(status, 'init')`. This
+  rewrites a join above the top-1 from a fact about a branch below it, and only holds when the
+  joined relation is exactly the scan of that branch (same filters, `k` not `NULL`). Both are
+  left for a dedicated rule after the prototype.
+### 9b. Subqueries over set-returning functions of the outer row (added on 2026-11-25, done)
+
+Variable `streaming_unnest_lateral_functions`, rules `LateralTableFunctionRule` and
+`UnnestArrayOfTableFunctionRule`. A correlated subquery that reads no table, only columns of the
+outer row through set-returning functions, went the general way: the outer side read again, the
+distinct values of the correlated columns aggregated into a domain, the functions applied to the
+domain, a left join of the domain with them (an aggregation for a scalar subquery), and an
+`IS NOT DISTINCT FROM` join back. With the variable the subquery is evaluated on each outer row:
+
+- `LEFT JOIN LATERAL (SELECT f(srf(t.a)) ...) ON true`, `t LEFT JOIN srf(t.a) ON true`: a
+  `ProjectSet` over `t`. RisingWave has no outer `ProjectSet` (one that keeps the row, padded with
+  NULLs, when the functions return no row) and none is added: the functions of a `ProjectSet` are
+  zipped and the shorter ones padded with NULLs, so `generate_series(1, 1)` zipped with them gives
+  exactly the padded row when they return none. A function that fails on a row returns no row in
+  both forms, and the row is padded. A projected expression that is not NULL on the padded row
+  (a constant, `WITH ORDINALITY`) becomes `CASE WHEN <not padded> THEN .. END`.
+- `ARRAY(SELECT srf(t.a))`, `(SELECT max(x) FROM srf(t.a) x)`, `EXISTS`, `count`, `sum`,
+  `string_agg`, ...: the same `ProjectSet`, then the aggregation grouped by the stream key of `t`
+  (one group per row of `t`, its other columns carried with `internal_last_seen_value`; grouping
+  by all its columns would keep hidden columns such as `_rw_timestamp`), each call filtered on the
+  rows that are not padded, so that a row whose functions return nothing gets the value over an empty input. A
+  row is known to be padded when every function never returns NULL (`jsonb_array_elements`,
+  `regexp_matches`, `generate_series`, `jsonb_object_keys`, ...) or has a twin zipped with it
+  that returns as many rows and never NULL: `generate_subscripts(a, 1)` for `unnest(a)` of a
+  one-dimensional array, `jsonb_array_elements(j)` for `jsonb_array_elements_text(j)` (whose text
+  of a JSON null is `''` today but NULL in PostgreSQL: a kept plan does not rely on it). `sum(x)`
+  becomes `CASE WHEN count(x) > 0 THEN sum(x) END`: an update of the array retracts the old values
+  of the group while the new ones come in, and a streaming `sum` whose non-NULL values were all
+  retracted returns 0 instead of NULL.
+- `unnest(ARRAY(SELECT srf(t.a)))` (or of `COALESCE(.., '{}')`) used only as a source of rows:
+  `srf(t.a)`, no aggregation at all. A bag: the order of the array does not matter. Not when the
+  array is also selected, when the function returns arrays (`unnest` flattens them), or when the
+  row number of the `unnest` is read.
+- `CROSS JOIN LATERAL (SELECT v, sum(v) OVER (ORDER BY o) FROM unnest(t.a) WITH ORDINALITY ...)`:
+  an inner `ProjectSet` and the window partitioned by the stream key of `t`.
+
+Example: `SELECT t.id, a.x FROM t LEFT JOIN LATERAL (SELECT (regexp_matches(t.s, 'A([0-9]+)'))[1]
+AS x) a ON true` was a scan of `t`, a second scan of `t`, an aggregation (the domain), a
+`ProjectSet` and a hash join; it is one scan and one stateless `ProjectSet`. An `ARRAY(..)` per row
+was two scans, two aggregations for the domains, a `ProjectSet`, two joins and an aggregation; it
+is one scan, a `ProjectSet` and one aggregation.
+
+Kept in the general way: a condition in the subquery (`WHERE` over the function, or `ON` other
+than true), a subquery that reads a table, `LIMIT` or `ORDER BY .. LIMIT`, `DISTINCT` aggregates,
+aggregates other than `count`, `sum`, `min`, `max`, `array_agg`, `string_agg`, `jsonb_agg`,
+`jsonb_object_agg`, a window in a left join, `unnest` of a nested array where the padded row
+must be known, an aggregation or a window over an outer side without a stream key, user-defined
+or other table functions. The functions are zipped with a twin only when the padded row must be
+known (an aggregation, or a projected expression that is not NULL on it). Batch plans do not change.
+
+Not done:
+
+- **`(regexp_matches(s, p))[1]` without the `g` flag as the scalar `(regexp_match(s, p))[1]`.**
+  Equivalent in PostgreSQL, where `regexp_matches` without `g` returns at most one row, but not in
+  RisingWave: its `regexp_matches` returns every match whatever the flags (a known difference with
+  PostgreSQL). The outer `ProjectSet` above keeps every match, as the original plan does.
+- The functions are evaluated on each row rather than once per distinct value: equal for
+  deterministic functions; for a `jsonb` that is equal to another but written differently
+  (`1.0` and `1`), the general way could give one row the text of the other one, the per-row
+  evaluation gives each row its own, as the batch query does.
+- Found on the way, not changed: without the variable, the subqueries of one select list over a
+  correlated value (`SELECT (SELECT count(*) FROM unnest(t.a)), EXISTS (SELECT 1 FROM unnest(t.a))
+  FROM t`) are planned under a `FULL OUTER JOIN` of their results on the domain, followed by a
+  filter `a IS NOT NULL OR a IS NOT NULL` that drops the NULL value of the domain: a row of `t`
+  whose `a` is NULL gets NULL instead of 0, false or an empty array (seen in streaming plans,
+  batch not checked). Each subquery alone is right. The per-row evaluation gives 0, false and
+  the empty array.
+- A relation joined with an aggregate of a set-returning function of itself on its key
+  (`t LEFT JOIN (SELECT t.id, max(x) FROM t, srf(t.a) x GROUP BY t.id) ON ..`): the same per-row
+  aggregation once it is recognised, which needs the key of `t` and is the self-join of idea 3.
+
 ### 5. Aggregation pushed below a join onto the unique side
 
 `SELECT f.cust_id, c.name, sum(f.amt) FROM f LEFT JOIN c ON f.cust_id = c.id GROUP BY f.cust_id,
@@ -285,6 +493,8 @@ c.name` becomes `(SELECT cust_id, sum(amt) FROM f GROUP BY cust_id) LEFT JOIN c 
   and can add state.
 - Yan and Larson, "Eager Aggregation and Lazy Aggregation", VLDB 1995; Materialize
   (`reduction_pushdown`).
+- Status on 2026-11-25: still not started. The branch of 6 left it out: it moves an aggregation
+  rather than removing one, and needs the unique keys of the join sides (idea 4) at the same place.
 
 ### 6. Merge of two stacked aggregations
 
@@ -296,6 +506,90 @@ region` becomes `SELECT region, sum(x) FROM t GROUP BY region`.
   aggregation is shared or filtered on its results.
 - Two levels are sometimes written on purpose against skew: keep it optional.
 - Calcite (`AGGREGATE_MERGE`), CockroachDB (`FoldGroupingOperators`).
+
+**Done on the branch `proto/plan-reduction-shared-aggs`** (added on 2026-11-25): variable
+`streaming_merge_stacked_aggregations`, rule `StackedAggMergeRule`, a bottom-up stage after the
+other stages of the prototype (three levels merge into one).
+
+- Matched: an aggregation over an aggregation, with at most a projection of columns in between,
+  whose group key is made of inner group key columns. The inner group key must not be empty: an
+  outer group then exists exactly when an input row has its key, in both plans. No grouping sets.
+  A `HAVING` of the inner aggregation (a filter in between) or a shared inner aggregation stops
+  the rule.
+- Outer aggregates over an inner aggregate (no `DISTINCT` on the sums and counts, no `FILTER` or
+  `ORDER BY` on the outer one; the inner `FILTER` is kept):
+  - `sum` of `sum` of an integer or a decimal: `sum` of the argument cast to the type of the inner
+    sum, so that type and overflow are those of the stacked sums (`sum(int)` is `bigint`, the sum
+    of it `numeric`). Not floats: the order of the additions would change the rounding;
+  - `sum` of `count`: the count, cast to `numeric`. Not without outer group key: over an empty
+    input the outer sum is `NULL` and the count would be 0;
+  - `min` of `min`, `max` of `max`, `bool_and` of `bool_and`, `bool_or` of `bool_or`: the same
+    aggregate. `NULL`s are ignored at both levels; all-`NULL` gives `NULL` at both levels.
+- Outer aggregates over an inner group key column `v`, i.e. a dedup below the outer aggregation
+  (the "duplicate-insensitive context" below):
+  - `count(DISTINCT v)`, `sum(DISTINCT v)`: the same over the input;
+  - `count(v)`, `sum(v)`: `count(DISTINCT v)`, `sum(DISTINCT v)` when the inner group key is within
+    the outer group key and `v`, so that each inner group is one distinct `v` of its outer group
+    (`SELECT g, count(v) FROM (SELECT DISTINCT g, v FROM t) GROUP BY g`). The deduplication state
+    of the distinct aggregate holds the same rows as the state of the removed aggregation;
+  - not `min`/`max` of `v` (same values, but their state would hold every input row instead of
+    every distinct value), not `count(*)` (it counts inner groups);
+  - no aggregate at all: `DISTINCT` of `DISTINCT`, `GROUP BY` on fewer columns.
+- Kept: `avg`, `count` of `count`, `max` of `min`, `sum(DISTINCT)` of `sum`, an outer group key on an
+  aggregate, `count(v)` over a dedup on more columns than the outer key and `v`.
+- Not done, recorded:
+  - the same through a `UNION ALL` (an aggregation over the union of aggregations of the same
+    key): one aggregation over the union of the inputs. Same algebra, a wider pattern;
+  - a dedup below a top-1 per key (`row_number() = 1` over a `UNION` or a `DISTINCT` whose rows
+    only carry the key and constants): the top-1 picks the same row from the set of distinct
+    rows, but its state holds every input row, where it held every distinct row, and ties between
+    branches are resolved by the stream key, which changes. A trade of state, not a reduction;
+  - a dedup on the build side of a semi or anti join: same trade, the join state then holds
+    every row;
+  - several aggregations of the same input and group key with different filters, joined on the key
+    (one aggregation with a `FILTER` per call and a `count(*) FILTER` per former aggregation to
+    tell whether its group existed): see the "next for the aggregations" of idea 3, it needs the
+    join matching of that rule;
+  - a scalar aggregation over an input of at most one row (a filter on the whole key of a table)
+    keeps its two phases: a different rule (cardinality, not stacking).
+- In streaming the merged aggregation is an ordinary aggregation of the input; retractions and rows
+  moving between groups need nothing special. The known `sum` quirk (0 instead of `NULL` once the
+  non-`NULL` values of a group are retracted) can differ in place between the two plans: the
+  differential test wraps such sums in `coalesce`.
+- Found on the way, not changed (without the variable): `SELECT sum(c) FROM (SELECT g, count(*) AS
+  c FROM t GROUP BY g)` returns 0 in streaming once `t` is emptied, `NULL` in batch (the two-phase
+  plan sums the counts with a sum that does not return to `NULL`).
+
+### 10. Sharing again the sub-plans that became identical (added on 2026-11-25, done on the branch)
+
+The common sub-plan sharing runs at the beginning of the streaming optimizer, before predicate
+pushdown, subquery unnesting and column pruning. Sub-plans that only become identical after them
+are computed twice: a join written in a view and filtered above it in one place, and written with
+the filter in another; an aggregation of a view whose other aggregates are pruned, and the same
+aggregation written in the query; the domains of two subqueries correlated on the same column.
+
+Variable `streaming_share_identical_subplans`, function `share_identical_subplans`, run last in
+the streaming optimizer (after the stacked aggregations): the rules above need one plan per
+consumer and do not rewrite a shared sub-plan.
+
+- Same structural equality as the early sharing (column names ignored). Deterministic: the first
+  copy in a depth-first traversal becomes the shared one.
+- A share is a fragment boundary (a no-shuffle exchange to each consumer). Only sub-plans with a
+  stateful operator (join, aggregation, top-n, dedup, over window) that read a table or a source
+  are shared: removing a copy removes its state, actors and backfills. A chain of scan, filter and
+  projection holds no state; sharing it trades one backfill for one more fragment and hop between
+  the scan and every consumer, so it is left duplicated, as the early sharing leaves a bare scan.
+- The shares that existed before are kept as they are, and a plan without a new duplicate is
+  returned unchanged.
+- Found on the way, not changed (with and without the variable): `SELECT a.id, (SELECT max(v)
+  FROM h WHERE h.sid = a.k), (SELECT count(*) FROM h WHERE h.sid = a.k AND ...) FROM a` gives
+  `NULL` instead of 0 for the count of a row whose `a.k` is `NULL` in streaming: the two domains
+  are full-outer-joined, filtered on `a.k IS NOT NULL`, then joined back with `IS NOT DISTINCT
+  FROM`, so the row finds no match. Batch returns 0.
+- Not done: reads of the same table that differ by their columns or by a filter (one scan of the
+  union of the columns, each consumer projecting and filtering its part), and joins that differ
+  by a filter that commutes with them. Both need a widening of the shared sub-plan, and for scans
+  the trade above makes the gain doubtful.
 
 ## Not for now: sharing between materialized views
 
@@ -319,7 +613,7 @@ Decision of 2026-11-25: too large for now.
   its scans would let A and E fire across materialized layers. Needs storing or re-deriving the
   facts, and invalidation if the definition of a view can change.
 - **Duplicate-insensitive context.** A `DISTINCT` under another `DISTINCT`, with only filters,
-  projections, `UNION ALL` or inner joins in between, is useless. Not always a gain: a `DISTINCT`
+  projections, `UNION ALL` or inner joins in between, is useless. Directly stacked: done with 6. Not always a gain: a `DISTINCT`
   below a join shrinks the state of that join. Never for a `row_number() = 1`, which selects a row.
 - **`UNION` rewrites.** `UNION` to `UNION ALL` when the branches hold no duplicate and are
   disjoint (needs 4c). Fusion of a `UNION ALL` of two filters over the same input into one pass:
@@ -330,7 +624,7 @@ Decision of 2026-11-25: too large for now.
   to an inner join (`simplify_outer`) with an evaluation of the predicate with `NULL` for the
   optional side.
 - **Sharing sub-plans again after normalization**, within one query. Must run after 1 and 2,
-  which need per-consumer plans.
+  which need per-consumer plans. Done for stateful sub-plans: see 10.
 - **Semi join simplifications.** `(A semi B) semi B`; `k IN (SELECT k FROM A)` on `A` itself.
 - **Multi-way join on a common key**, as a new operator without intermediate state (experimental
   in Flink). Large.

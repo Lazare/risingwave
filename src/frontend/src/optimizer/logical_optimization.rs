@@ -249,6 +249,48 @@ static STREAM_SIMPLE_UNNESTING_AGG: LazyLock<OptimizationStage> = LazyLock::new(
     )
 });
 
+// Rule `UnionScanMergeRule` (`streaming_merge_union_scans`).
+static STREAM_MERGE_UNION_SCANS: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Merge Union Scans For Stream",
+        vec![UnionScanMergeRule::create()],
+        // Bottom-up: the branches of a union are reduced before the union is looked at.
+        ApplyOrder::BottomUp,
+    )
+});
+
+// Merge of stacked aggregations, see `StackedAggMergeRule`.
+static STREAM_MERGE_STACKED_AGGS: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Merge Stacked Aggregations For Stream",
+        vec![StackedAggMergeRule::create()],
+        // Bottom-up: an aggregation merged below can be merged again with the one above.
+        ApplyOrder::BottomUp,
+    )
+});
+
+// Per-row evaluation of lateral set-returning functions (`streaming_unnest_lateral_functions`):
+// `unnest(ARRAY(SELECT srf(..)))` first, from the top, before the apply of the `ARRAY(..)` is
+// evaluated per row on its own.
+static STREAM_UNNEST_ARRAY_OF_FUNCTION: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Stream Unnest Array Of Lateral Function",
+        vec![UnnestArrayOfTableFunctionRule::create()],
+        ApplyOrder::TopDown,
+    )
+});
+
+static STREAM_UNNEST_LATERAL_FUNCTIONS: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Stream Unnest Lateral Functions",
+        vec![
+            ApplyOneRowJoinSplitRule::create(),
+            LateralTableFunctionRule::create(),
+        ],
+        ApplyOrder::BottomUp,
+    )
+});
+
 static SET_OPERATION_MERGE: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Set Operation Merge",
@@ -716,6 +758,18 @@ impl LogicalOptimizer {
             // values of the outer columns, read again from the outer side) of the general way.
             plan = plan.optimize_by_rules_until_fix_point(&STREAM_SIMPLE_UNNESTING_AGG)?;
         }
+        if for_stream
+            && ctx
+                .session_ctx()
+                .config()
+                .streaming_unnest_lateral_functions()
+            && !ctx.is_stream_prune_baseline()
+        {
+            // A subquery that reads no table, only columns of the outer row through set-returning
+            // functions, is evaluated on each outer row, without the domain of the general way.
+            plan = plan.optimize_by_rules(&STREAM_UNNEST_ARRAY_OF_FUNCTION)?;
+            plan = plan.optimize_by_rules_until_fix_point(&STREAM_UNNEST_LATERAL_FUNCTIONS)?;
+        }
         debug_assert!(!HasMaxOneRowApply().visit(plan.clone()));
         // Predicate push down before translate apply, because we need to calculate the domain
         // and predicate push down can reduce the size of domain.
@@ -982,6 +1036,60 @@ impl LogicalOptimizer {
                 plan = plan.optimize_by_rules(&STREAM_PRUNE_EMPTY_RELATION)?;
                 plan = Self::column_pruning(plan, explain_trace, &ctx);
                 plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
+            }
+        }
+
+        // Rule `UnionScanMergeRule`: read once the table that several branches of a union read,
+        // each with its own filter and projection. The filter that the single scan needs is then
+        // pushed into it, and the columns that no branch uses are pruned.
+        if ctx.session_ctx().config().streaming_merge_union_scans()
+            && !ctx.is_stream_prune_baseline()
+        {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&STREAM_MERGE_UNION_SCANS)?;
+            let applied = ctx.total_rule_applied() - applied_before;
+            if applied > 0 {
+                ctx.add_stream_prune_rule_applied(applied);
+                plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
+            }
+        }
+        // Merge an aggregation over another one into a single aggregation of the input of the inner
+        // one (`StackedAggMergeRule`), then share the stateful sub-plans that the simplifications
+        // above made identical (`share_identical_subplans`): the common sub-plan sharing at the
+        // beginning only saw them before predicate pushdown, unnesting and column pruning. Last,
+        // because the rules above need a plan per consumer.
+        if ctx
+            .session_ctx()
+            .config()
+            .streaming_merge_stacked_aggregations()
+            && !ctx.is_stream_prune_baseline()
+        {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&STREAM_MERGE_STACKED_AGGS)?;
+            let applied = ctx.total_rule_applied() - applied_before;
+            if applied > 0 {
+                ctx.add_stream_prune_rule_applied(applied);
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
+            }
+        }
+        if enable_share_plan
+            && ctx
+                .session_ctx()
+                .config()
+                .streaming_share_identical_subplans()
+            && !ctx.is_stream_prune_baseline()
+        {
+            let (shared, new_shares) = share_identical_subplans(plan);
+            plan = shared;
+            if new_shares > 0 {
+                ctx.add_stream_prune_rule_applied(new_shares);
+                if explain_trace {
+                    ctx.trace("Share Identical Sub-plans:");
+                    ctx.trace(plan.explain_to_string());
+                }
             }
         }
         crate::optimizer::rule::diagnose_repeated_reads(&plan);
