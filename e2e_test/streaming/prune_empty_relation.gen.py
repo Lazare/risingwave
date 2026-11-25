@@ -6,7 +6,7 @@ Usage: python3 e2e_test/streaming/prune_empty_relation.gen.py e2e_test/streaming
 """
 import sys
 
-T, SS, R = 'per_t', 'per_s', 'per_r'
+T, SS, R, N = 'per_t', 'per_s', 'per_r', 'per_n'
 EMPTY_T = f"(select * from {T} where v1 = 1 and v1 = 2)"
 EMPTY_S = f"(select * from {SS} where w = 1 and w = 2)"
 
@@ -124,6 +124,16 @@ CASES = [
      f"select t.v1 as tv, c.x as cx from {T} t join (values (1), (2)) as c(x) on t.v1 = c.x"),
     ('kept_row_left', 'kept: left join with a constant row',
      f"select t.v1 as tv, c.x as cx from {T} t left join (values (1)) as c(x) on t.v1 = c.x"),
+    # NOT NULL constraints of a table.
+    ('nn_is_null', 'is null on a not null column', f"select a, b from {N} where a is null"),
+    ('nn_proj', 'is null on not null columns in a projection',
+     f"select a, a is null as m1, coalesce(a, 0) is null as m2, c is null as m3, b is null as m4 from {N}"),
+    ('nn_not_null', 'is not null on a not null column', f"select a, b from {N} where a is not null and b > 1"),
+    ('nn_default', 'is null on a not null column with a default', f"select a, c from {N} where c is null or a = 1"),
+    ('nn_inner', 'is null on a not null column through an inner join',
+     f"select t.v1 as tv, n.a as na from {T} t join {N} n on t.v1 = n.b where n.a is null or n.c is null"),
+    ('kept_nn_left', 'kept: is null on a not null column of the optional side of a left join',
+     f"select t.v1 as tv, n.a as na from {T} t left join {N} n on t.v1 = n.b where n.a is null"),
 ]
 # Queries that streaming only accepts with the pruning (a join without equality): the
 # materialized view is compared with the batch execution of its query.
@@ -188,11 +198,15 @@ stmt("SET RW_IMPLICIT_FLUSH TO true")
 stmt(f"create table {T} (v1 int, v2 int, v3 varchar, b boolean, ts timestamp)")
 stmt(f"create table {SS} (k int, w int)")
 stmt(f"create table {R} (k int, x int)")
+stmt(f"create table {N} (a int not null, b int, c int not null default 5)")
 out.append("# Rows present before the materialized views are created: they go through the backfill.\n")
 stmt(f"insert into {T} values (1, 3, 'a', true, '2026-01-01 00:00:00'), (2, 4, 'b', false, '2026-01-02 00:00:00'), "
      f"(2, 7, null, null, null), (null, 3, 'c', true, '2026-01-03 00:00:00'), (6, null, 'a', false, '2026-01-04 00:00:00')")
 stmt(f"insert into {SS} values (1, 1), (2, 2), (2, null), (null, 5), (7, 1)")
 stmt(f"insert into {R} values (1, 10), (2, null), (5, 0)")
+stmt(f"insert into {N} (a, b) values (1, 1), (2, null), (3, 2)")
+out.append("# A table rejects the rows that violate its `NOT NULL` constraints.\n")
+out.append(f"statement error null value in column\ninsert into {N} (a, b) values (null, 1);\n")
 
 for sfx in ('off', 'on'):
     stmt(f"set streaming_prune_empty_relation = {'true' if sfx == 'on' else 'false'}")
@@ -231,6 +245,8 @@ stmt(f"insert into {T} values (1, 4, 'b', false, '2026-02-01 00:00:00'), (2, 3, 
      f"(3, 7, 'z', null, '2026-02-02 00:00:00'), (null, null, null, null, null), (5, 3, 'c', true, '2026-02-03 00:00:00')")
 stmt(f"insert into {SS} values (1, 2), (3, 1), (5, null), (6, 2)")
 stmt(f"insert into {R} values (3, 1), (6, null), (1, -1)")
+stmt(f"insert into {N} values (4, 2, 6), (5, 6, 7), (6, null, 8)")
+stmt(f"insert into {N} (a, b) select v1, v2 from {T} where v1 is not null and v2 is not null")
 compare_all("After the inserts")
 
 out.append("# Second round of changes: updates and deletes, which retract rows.\n")
@@ -242,11 +258,27 @@ stmt(f"update {SS} set w = 2 where w = 1")
 stmt(f"delete from {SS} where k = 2")
 stmt(f"update {R} set x = 5 where x is null")
 stmt(f"delete from {R} where k = 1")
+stmt(f"update {N} set b = b + 1, c = c + 1 where a = 1")
+stmt(f"delete from {N} where a = 2")
 compare_all("After the updates and deletes")
 
 query('I', "select count(*) from per_eq_eq_on", ["0"])
 query('I', "select count(*) from per_limit0_on", ["0"])
 query('II', "select c, m from per_agg_join_on", ["0 NULL"])
+query('I', "select count(*) from per_nn_is_null_on", ["0"])
+
+out.append("# A `NOT NULL` column added later: the rows written before read its default value.\n")
+stmt(f"alter table {N} add column e int not null default 9")
+ADDED = f"select a, e, e is null as missing from {N} where e is null or a = 1"
+stmt("set streaming_prune_empty_relation = false")
+stmt(f"create materialized view per_nn_added_off as {ADDED}")
+stmt("set streaming_prune_empty_relation = true")
+stmt(f"create materialized view per_nn_added_on as {ADDED}")
+compare('nn_added')
+stmt(f"insert into {N} (a, b, e) values (1, 1, 4), (7, 7, 7)")
+stmt(f"insert into {N} (a, b) values (1, 5)")
+compare('nn_added')
+query('IIT', "select a, e, missing from per_nn_added_on order by e", ["1 4 f", "1 9 f", "1 9 f", "1 9 f", "1 9 f"])
 
 out.append("# Cleanup.\n")
 for sfx in ('on', 'off'):
@@ -254,9 +286,12 @@ for sfx in ('on', 'off'):
         stmt(f"drop materialized view per_{name}_{sfx}")
     for name, _, _ in reversed(CASES):
         stmt(f"drop materialized view per_{name}_{sfx}")
+stmt("drop materialized view per_nn_added_on")
+stmt("drop materialized view per_nn_added_off")
 stmt("drop materialized view per_limit0_on")
 for name, _, _ in reversed(ON_ONLY):
     stmt(f"drop materialized view per_{name}_on")
+stmt(f"drop table {N}")
 stmt(f"drop table {R}")
 stmt(f"drop table {SS}")
 stmt(f"drop table {T}")

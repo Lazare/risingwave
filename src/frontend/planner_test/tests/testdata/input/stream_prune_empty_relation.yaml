@@ -7,6 +7,8 @@
     create table t (v1 int, v2 int, v3 varchar, b boolean, f double, ts timestamp);
     create table s (k int, w int);
     create table r (k int, x int);
+    create table nn (a int not null, b int, c int not null default 5, d int default 7);
+    create table gen (a int not null, b int, g int as a + 1);
   expected_outputs: []
 - id: setup_off
   sql: |
@@ -650,12 +652,70 @@
     select v1, v2 is null as missing from t where v1 is null;
   expected_outputs:
   - stream_plan
-- name: kept - not null constraint of a table is not used
+
+# NOT NULL constraints of tables: a table drops the rows that violate them.
+- name: is null on a not null column
   before:
   - setup
   sql: |
-    create table nn (a int not null, b int);
     select a, b from nn where a is null;
+  expected_outputs:
+  - stream_plan
+- name: is not null on a not null column
+  before:
+  - setup
+  sql: |
+    select a, b from nn where a is not null and b > 0;
+  expected_outputs:
+  - stream_plan
+- name: is null on not null columns in a projection
+  before:
+  - setup
+  sql: |
+    select a, a is null as m1, coalesce(a, 0) is null as m2, c is null as m3, b is null as m4 from nn;
+  expected_outputs:
+  - stream_plan
+- name: is null on a not null column with a default
+  before:
+  - setup
+  sql: |
+    select a, c from nn where c is null;
+  expected_outputs:
+  - stream_plan
+- name: is null on a not null column through an inner join
+  before:
+  - setup
+  sql: |
+    select t.v1, nn.a from t join nn on t.v1 = nn.b where nn.a is null;
+  expected_outputs:
+  - stream_plan
+- name: kept - is null on nullable columns of a table with not null columns
+  before:
+  - setup
+  sql: |
+    select a, b, d from nn where b is null or d is null;
+  expected_outputs:
+  - stream_plan
+- name: kept - is null on a not null column of the optional side of a left join
+  before:
+  - setup
+  sql: |
+    select t.v1, nn.a from t left join nn on t.v1 = nn.b where nn.a is null;
+  expected_outputs:
+  - stream_plan
+- name: kept - not null column of a table with a generated column
+  before:
+  - setup
+  sql: |
+    select a, b from gen where a is null;
+  expected_outputs:
+  - stream_plan
+- name: kept - column of a materialized view over a not null column
+  before:
+  - setup
+  sql: |
+    create materialized view mv_nn as select a, b from nn;
+    select a, b from mv_nn where a is null;
   expected_outputs:
   - stream_plan
 

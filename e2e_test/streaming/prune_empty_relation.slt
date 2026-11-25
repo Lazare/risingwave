@@ -17,6 +17,9 @@ create table per_s (k int, w int);
 statement ok
 create table per_r (k int, x int);
 
+statement ok
+create table per_n (a int not null, b int, c int not null default 5);
+
 # Rows present before the materialized views are created: they go through the backfill.
 
 statement ok
@@ -27,6 +30,14 @@ insert into per_s values (1, 1), (2, 2), (2, null), (null, 5), (7, 1);
 
 statement ok
 insert into per_r values (1, 10), (2, null), (5, 0);
+
+statement ok
+insert into per_n (a, b) values (1, 1), (2, null), (3, 2);
+
+# A table rejects the rows that violate its `NOT NULL` constraints.
+
+statement error null value in column
+insert into per_n (a, b) values (null, 1);
 
 statement ok
 set streaming_prune_empty_relation = false;
@@ -340,6 +351,36 @@ create materialized view per_kept_row_two_off as select t.v1 as tv, c.x as cx fr
 
 statement ok
 create materialized view per_kept_row_left_off as select t.v1 as tv, c.x as cx from per_t t left join (values (1)) as c(x) on t.v1 = c.x;
+
+# is null on a not null column
+
+statement ok
+create materialized view per_nn_is_null_off as select a, b from per_n where a is null;
+
+# is null on not null columns in a projection
+
+statement ok
+create materialized view per_nn_proj_off as select a, a is null as m1, coalesce(a, 0) is null as m2, c is null as m3, b is null as m4 from per_n;
+
+# is not null on a not null column
+
+statement ok
+create materialized view per_nn_not_null_off as select a, b from per_n where a is not null and b > 1;
+
+# is null on a not null column with a default
+
+statement ok
+create materialized view per_nn_default_off as select a, c from per_n where c is null or a = 1;
+
+# is null on a not null column through an inner join
+
+statement ok
+create materialized view per_nn_inner_off as select t.v1 as tv, n.a as na from per_t t join per_n n on t.v1 = n.b where n.a is null or n.c is null;
+
+# kept: is null on a not null column of the optional side of a left join
+
+statement ok
+create materialized view per_kept_nn_left_off as select t.v1 as tv, n.a as na from per_t t left join per_n n on t.v1 = n.b where n.a is null;
 
 # on top of an empty materialized view
 
@@ -673,6 +714,36 @@ create materialized view per_kept_row_two_on as select t.v1 as tv, c.x as cx fro
 
 statement ok
 create materialized view per_kept_row_left_on as select t.v1 as tv, c.x as cx from per_t t left join (values (1)) as c(x) on t.v1 = c.x;
+
+# is null on a not null column
+
+statement ok
+create materialized view per_nn_is_null_on as select a, b from per_n where a is null;
+
+# is null on not null columns in a projection
+
+statement ok
+create materialized view per_nn_proj_on as select a, a is null as m1, coalesce(a, 0) is null as m2, c is null as m3, b is null as m4 from per_n;
+
+# is not null on a not null column
+
+statement ok
+create materialized view per_nn_not_null_on as select a, b from per_n where a is not null and b > 1;
+
+# is null on a not null column with a default
+
+statement ok
+create materialized view per_nn_default_on as select a, c from per_n where c is null or a = 1;
+
+# is null on a not null column through an inner join
+
+statement ok
+create materialized view per_nn_inner_on as select t.v1 as tv, n.a as na from per_t t join per_n n on t.v1 = n.b where n.a is null or n.c is null;
+
+# kept: is null on a not null column of the optional side of a left join
+
+statement ok
+create materialized view per_kept_nn_left_on as select t.v1 as tv, n.a as na from per_t t left join per_n n on t.v1 = n.b where n.a is null;
 
 # on top of an empty materialized view
 
@@ -1223,6 +1294,54 @@ select
 
 query III
 select
+  (select count(*) from (select * from per_nn_is_null_on except select * from per_nn_is_null_off) x),
+  (select count(*) from (select * from per_nn_is_null_off except select * from per_nn_is_null_on) y),
+  (select count(*) from per_nn_is_null_on) - (select count(*) from per_nn_is_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_nn_proj_on except select * from per_nn_proj_off) x),
+  (select count(*) from (select * from per_nn_proj_off except select * from per_nn_proj_on) y),
+  (select count(*) from per_nn_proj_on) - (select count(*) from per_nn_proj_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_nn_not_null_on except select * from per_nn_not_null_off) x),
+  (select count(*) from (select * from per_nn_not_null_off except select * from per_nn_not_null_on) y),
+  (select count(*) from per_nn_not_null_on) - (select count(*) from per_nn_not_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_nn_default_on except select * from per_nn_default_off) x),
+  (select count(*) from (select * from per_nn_default_off except select * from per_nn_default_on) y),
+  (select count(*) from per_nn_default_on) - (select count(*) from per_nn_default_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_nn_inner_on except select * from per_nn_inner_off) x),
+  (select count(*) from (select * from per_nn_inner_off except select * from per_nn_inner_on) y),
+  (select count(*) from per_nn_inner_on) - (select count(*) from per_nn_inner_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_kept_nn_left_on except select * from per_kept_nn_left_off) x),
+  (select count(*) from (select * from per_kept_nn_left_off except select * from per_kept_nn_left_on) y),
+  (select count(*) from per_kept_nn_left_on) - (select count(*) from per_kept_nn_left_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from per_down_empty_agg_on except select * from per_down_empty_agg_off) x),
   (select count(*) from (select * from per_down_empty_agg_off except select * from per_down_empty_agg_on) y),
   (select count(*) from per_down_empty_agg_on) - (select count(*) from per_down_empty_agg_off);
@@ -1343,6 +1462,12 @@ insert into per_s values (1, 2), (3, 1), (5, null), (6, 2);
 
 statement ok
 insert into per_r values (3, 1), (6, null), (1, -1);
+
+statement ok
+insert into per_n values (4, 2, 6), (5, 6, 7), (6, null, 8);
+
+statement ok
+insert into per_n (a, b) select v1, v2 from per_t where v1 is not null and v2 is not null;
 
 # After the inserts: with and without pruning, every materialized view holds the same rows.
 
@@ -1844,6 +1969,54 @@ select
 
 query III
 select
+  (select count(*) from (select * from per_nn_is_null_on except select * from per_nn_is_null_off) x),
+  (select count(*) from (select * from per_nn_is_null_off except select * from per_nn_is_null_on) y),
+  (select count(*) from per_nn_is_null_on) - (select count(*) from per_nn_is_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_nn_proj_on except select * from per_nn_proj_off) x),
+  (select count(*) from (select * from per_nn_proj_off except select * from per_nn_proj_on) y),
+  (select count(*) from per_nn_proj_on) - (select count(*) from per_nn_proj_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_nn_not_null_on except select * from per_nn_not_null_off) x),
+  (select count(*) from (select * from per_nn_not_null_off except select * from per_nn_not_null_on) y),
+  (select count(*) from per_nn_not_null_on) - (select count(*) from per_nn_not_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_nn_default_on except select * from per_nn_default_off) x),
+  (select count(*) from (select * from per_nn_default_off except select * from per_nn_default_on) y),
+  (select count(*) from per_nn_default_on) - (select count(*) from per_nn_default_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_nn_inner_on except select * from per_nn_inner_off) x),
+  (select count(*) from (select * from per_nn_inner_off except select * from per_nn_inner_on) y),
+  (select count(*) from per_nn_inner_on) - (select count(*) from per_nn_inner_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_kept_nn_left_on except select * from per_kept_nn_left_off) x),
+  (select count(*) from (select * from per_kept_nn_left_off except select * from per_kept_nn_left_on) y),
+  (select count(*) from per_kept_nn_left_on) - (select count(*) from per_kept_nn_left_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from per_down_empty_agg_on except select * from per_down_empty_agg_off) x),
   (select count(*) from (select * from per_down_empty_agg_off except select * from per_down_empty_agg_on) y),
   (select count(*) from per_down_empty_agg_on) - (select count(*) from per_down_empty_agg_off);
@@ -1925,6 +2098,12 @@ update per_r set x = 5 where x is null;
 
 statement ok
 delete from per_r where k = 1;
+
+statement ok
+update per_n set b = b + 1, c = c + 1 where a = 1;
+
+statement ok
+delete from per_n where a = 2;
 
 # After the updates and deletes: with and without pruning, every materialized view holds the same rows.
 
@@ -2426,6 +2605,54 @@ select
 
 query III
 select
+  (select count(*) from (select * from per_nn_is_null_on except select * from per_nn_is_null_off) x),
+  (select count(*) from (select * from per_nn_is_null_off except select * from per_nn_is_null_on) y),
+  (select count(*) from per_nn_is_null_on) - (select count(*) from per_nn_is_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_nn_proj_on except select * from per_nn_proj_off) x),
+  (select count(*) from (select * from per_nn_proj_off except select * from per_nn_proj_on) y),
+  (select count(*) from per_nn_proj_on) - (select count(*) from per_nn_proj_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_nn_not_null_on except select * from per_nn_not_null_off) x),
+  (select count(*) from (select * from per_nn_not_null_off except select * from per_nn_not_null_on) y),
+  (select count(*) from per_nn_not_null_on) - (select count(*) from per_nn_not_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_nn_default_on except select * from per_nn_default_off) x),
+  (select count(*) from (select * from per_nn_default_off except select * from per_nn_default_on) y),
+  (select count(*) from per_nn_default_on) - (select count(*) from per_nn_default_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_nn_inner_on except select * from per_nn_inner_off) x),
+  (select count(*) from (select * from per_nn_inner_off except select * from per_nn_inner_on) y),
+  (select count(*) from per_nn_inner_on) - (select count(*) from per_nn_inner_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from per_kept_nn_left_on except select * from per_kept_nn_left_off) x),
+  (select count(*) from (select * from per_kept_nn_left_off except select * from per_kept_nn_left_on) y),
+  (select count(*) from per_kept_nn_left_on) - (select count(*) from per_kept_nn_left_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from per_down_empty_agg_on except select * from per_down_empty_agg_off) x),
   (select count(*) from (select * from per_down_empty_agg_off except select * from per_down_empty_agg_on) y),
   (select count(*) from per_down_empty_agg_on) - (select count(*) from per_down_empty_agg_off);
@@ -2497,6 +2724,59 @@ select c, m from per_agg_join_on;
 ----
 0 NULL
 
+query I
+select count(*) from per_nn_is_null_on;
+----
+0
+
+# A `NOT NULL` column added later: the rows written before read its default value.
+
+statement ok
+alter table per_n add column e int not null default 9;
+
+statement ok
+set streaming_prune_empty_relation = false;
+
+statement ok
+create materialized view per_nn_added_off as select a, e, e is null as missing from per_n where e is null or a = 1;
+
+statement ok
+set streaming_prune_empty_relation = true;
+
+statement ok
+create materialized view per_nn_added_on as select a, e, e is null as missing from per_n where e is null or a = 1;
+
+query III
+select
+  (select count(*) from (select * from per_nn_added_on except select * from per_nn_added_off) x),
+  (select count(*) from (select * from per_nn_added_off except select * from per_nn_added_on) y),
+  (select count(*) from per_nn_added_on) - (select count(*) from per_nn_added_off);
+----
+0 0 0
+
+statement ok
+insert into per_n (a, b, e) values (1, 1, 4), (7, 7, 7);
+
+statement ok
+insert into per_n (a, b) values (1, 5);
+
+query III
+select
+  (select count(*) from (select * from per_nn_added_on except select * from per_nn_added_off) x),
+  (select count(*) from (select * from per_nn_added_off except select * from per_nn_added_on) y),
+  (select count(*) from per_nn_added_on) - (select count(*) from per_nn_added_off);
+----
+0 0 0
+
+query IIT
+select a, e, missing from per_nn_added_on order by e;
+----
+1 4 f
+1 9 f
+1 9 f
+1 9 f
+1 9 f
+
 # Cleanup.
 
 statement ok
@@ -2510,6 +2790,24 @@ drop materialized view per_down_empty_join_on;
 
 statement ok
 drop materialized view per_down_empty_agg_on;
+
+statement ok
+drop materialized view per_kept_nn_left_on;
+
+statement ok
+drop materialized view per_nn_inner_on;
+
+statement ok
+drop materialized view per_nn_default_on;
+
+statement ok
+drop materialized view per_nn_not_null_on;
+
+statement ok
+drop materialized view per_nn_proj_on;
+
+statement ok
+drop materialized view per_nn_is_null_on;
 
 statement ok
 drop materialized view per_kept_row_left_on;
@@ -2710,6 +3008,24 @@ statement ok
 drop materialized view per_down_empty_agg_off;
 
 statement ok
+drop materialized view per_kept_nn_left_off;
+
+statement ok
+drop materialized view per_nn_inner_off;
+
+statement ok
+drop materialized view per_nn_default_off;
+
+statement ok
+drop materialized view per_nn_not_null_off;
+
+statement ok
+drop materialized view per_nn_proj_off;
+
+statement ok
+drop materialized view per_nn_is_null_off;
+
+statement ok
 drop materialized view per_kept_row_left_off;
 
 statement ok
@@ -2896,6 +3212,12 @@ statement ok
 drop materialized view per_eq_eq_off;
 
 statement ok
+drop materialized view per_nn_added_on;
+
+statement ok
+drop materialized view per_nn_added_off;
+
+statement ok
 drop materialized view per_limit0_on;
 
 statement ok
@@ -2906,6 +3228,9 @@ drop materialized view per_row_left_side_on;
 
 statement ok
 drop materialized view per_row_cross_on;
+
+statement ok
+drop table per_n;
 
 statement ok
 drop table per_r;

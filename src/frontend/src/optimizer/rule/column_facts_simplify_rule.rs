@@ -14,9 +14,12 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use risingwave_common::types::{DataType, DefaultOrd, ScalarImpl};
+use risingwave_common::catalog::ColumnDesc;
+use risingwave_common::types::{DataType, Datum, DefaultOrd, ScalarImpl};
+use risingwave_common::util::value_encoding::DatumFromProtoExt;
 use risingwave_expr::aggregate::{AggType, PbAggKind};
 use risingwave_pb::plan_common::JoinType;
+use risingwave_pb::plan_common::column_desc::GeneratedOrDefaultColumn;
 
 use super::contradictory_null_filter_rule::null_rejected_columns;
 use super::never_true_predicate_rule::{
@@ -31,7 +34,8 @@ use crate::expr::{
 use crate::optimizer::PlanTreeNode;
 use crate::optimizer::plan_node::generic::GenericPlanRef;
 use crate::optimizer::plan_node::{
-    LogicalFilter, LogicalJoin, LogicalProject, PlanNodeId, PlanTreeNodeBinary, PlanTreeNodeUnary,
+    LogicalFilter, LogicalJoin, LogicalProject, LogicalScan, PlanNodeId, PlanTreeNodeBinary,
+    PlanTreeNodeUnary,
 };
 use crate::utils::Condition;
 
@@ -199,12 +203,50 @@ fn agg_is_non_null(agg_type: &AggType) -> bool {
     )
 }
 
+/// Returns whether a column of a table declared `NOT NULL` never holds a `NULL`.
+///
+/// A table drops the rows that violate its `NOT NULL` constraints, whatever writes them (DML, its
+/// connector, a sink into the table), so every stored row satisfies them. A column with a
+/// `DEFAULT` needs more care: the rows written before the column was added read the default
+/// value evaluated when it was added, which must not be `NULL` either.
+fn is_not_null_column(column: &ColumnDesc) -> bool {
+    if column.nullable {
+        return false;
+    }
+    match &column.generated_or_default_column {
+        None => true,
+        Some(GeneratedOrDefaultColumn::DefaultColumn(default_column)) => {
+            default_column.snapshot_value.as_ref().is_some_and(|value| {
+                matches!(Datum::from_protobuf(value, &column.data_type), Ok(Some(_)))
+            })
+        }
+        Some(GeneratedOrDefaultColumn::GeneratedColumn(_)) => false,
+    }
+}
+
+/// The facts about the columns of a scanned table that come from its constraints, indexed by the
+/// columns of the table.
+fn table_constraint_facts(scan: &LogicalScan) -> ColumnFacts {
+    let mut facts = ColumnFacts::default();
+    let table = scan.table();
+    if table.is_user_table() && !table.has_generated_column() {
+        for (index, column) in table.columns().iter().enumerate() {
+            if is_not_null_column(&column.column_desc) {
+                facts.non_null.insert(index);
+            }
+        }
+    }
+    facts
+}
+
 /// Derives the [`ColumnFacts`] of a plan node from those of its inputs. A node that is not
 /// listed here has no known facts, which is always safe.
 ///
 /// - `Values`: a column with the same constant in every row.
 /// - `Scan`, `Filter`: the facts of the predicate (see [`predicate_facts`]), added to those of
-///   the input for a filter. The `NOT NULL` constraints of a table are *not* used.
+///   the input for a filter. For the scan of a table, the columns declared `NOT NULL` are never
+///   `NULL` (see [`is_not_null_column`]); not for a table with a generated column, whose
+///   constraints are checked on the columns that accept DML only.
 /// - `Project`: see [`expr_facts`].
 /// - `Join`: the facts of a side hold for its columns in the output, unless the join pads the
 ///   side with `NULL` (the right side of a left outer join, the left side of a right outer join,
@@ -252,8 +294,9 @@ fn derive_column_facts(plan: &PlanRef, memo: &mut HashMap<PlanNodeId, ColumnFact
     }
     if let Some(scan) = plan.as_logical_scan() {
         // The predicate refers to the columns of the table.
-        return predicate_facts(&scan.predicate().conjunctions)
-            .select(scan.output_col_idx().iter().copied());
+        let mut facts = table_constraint_facts(scan);
+        facts.merge(predicate_facts(&scan.predicate().conjunctions));
+        return facts.select(scan.output_col_idx().iter().copied());
     }
     if let Some(filter) = plan.as_logical_filter() {
         let mut facts = column_facts_inner(&filter.input(), memo);
@@ -603,9 +646,10 @@ impl Rule<Logical> for ColumnFactsSimplifyRule {
             return Some(LogicalFilter::create(input, to_condition(conjuncts)));
         }
         if let Some(scan) = plan.as_logical_scan() {
+            // The predicate refers to the columns of the table, as the facts of its constraints.
             let conjuncts = simplify_conjuncts(
                 &scan.predicate().conjunctions,
-                &ColumnFacts::default(),
+                &table_constraint_facts(scan),
                 false,
             )?;
             return Some(scan.clone_with_predicate(to_condition(conjuncts)).into());
