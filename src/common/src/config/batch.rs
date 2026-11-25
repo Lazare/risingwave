@@ -64,6 +64,35 @@ pub struct BatchConfig {
     /// Enable the spill out to disk feature for batch queries.
     #[serde(default = "default::batch::enable_spill")]
     pub enable_spill: bool,
+
+    /// The share of the batch memory limit of a node that batch queries may really use. The rest
+    /// is a safety margin: the accounted memory is lower than the allocated one, and the batch
+    /// shares the process with other components.
+    #[serde(default = "default::batch::memory_usable_ratio")]
+    pub memory_usable_ratio: f64,
+
+    /// The share of the usable batch memory of a node that a single query may use on that node.
+    /// The spillable operators of a query that reaches it spill to disk.
+    #[serde(default = "default::batch::query_memory_ratio")]
+    pub query_memory_ratio: f64,
+
+    /// The share of the usable batch memory of a node that a single query may use when it cannot
+    /// run within `query_memory_ratio` even without parallelism. A query that needs more is
+    /// rejected.
+    #[serde(default = "default::batch::query_memory_max_ratio")]
+    pub query_memory_max_ratio: f64,
+
+    /// The memory, in MB, reserved for each spillable operator (hash agg, hash join, sort) of a
+    /// query. The parallelism of a query is lowered until the reserved memory of its operators
+    /// fits in the memory of the query, and the query is rejected when it never does.
+    #[serde(default = "default::batch::spillable_operator_min_memory_mb")]
+    pub spillable_operator_min_memory_mb: usize,
+
+    /// The memory, in MB, that each spillable operator adds to the pool shared by the spillable
+    /// operators of its query, within the memory of the query. An operator may use more than its
+    /// reserved memory as long as the pool has room, and spills otherwise.
+    #[serde(default = "default::batch::spillable_operator_avg_memory_mb")]
+    pub spillable_operator_avg_memory_mb: usize,
 }
 
 /// The subsections `[batch.developer]`.
@@ -117,6 +146,26 @@ pub mod default {
 
         pub fn enable_spill() -> bool {
             true
+        }
+
+        pub fn memory_usable_ratio() -> f64 {
+            0.9
+        }
+
+        pub fn query_memory_ratio() -> f64 {
+            0.3
+        }
+
+        pub fn query_memory_max_ratio() -> f64 {
+            0.7
+        }
+
+        pub fn spillable_operator_min_memory_mb() -> usize {
+            8
+        }
+
+        pub fn spillable_operator_avg_memory_mb() -> usize {
+            64
         }
 
         pub fn statement_timeout_in_sec() -> u32 {

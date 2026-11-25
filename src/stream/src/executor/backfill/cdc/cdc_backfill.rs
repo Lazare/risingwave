@@ -53,7 +53,7 @@ use crate::executor::backfill::utils::{
 use crate::executor::monitor::CdcBackfillMetrics;
 use crate::executor::prelude::*;
 use crate::executor::source::get_infinite_backoff_strategy;
-use crate::task::CreateMviewProgressReporter;
+use crate::task::{CreateMviewProgressReporter, LocalBarrierManager};
 
 /// `split_id`, `is_finished`, `row_count`, `cdc_offset` all occupy 1 column each.
 const METADATA_STATE_LEN: usize = 4;
@@ -146,6 +146,9 @@ pub struct CdcBackfillExecutor<S: StateStore> {
     options: CdcScanOptions,
 
     properties: BTreeMap<String, String>,
+
+    /// Used to ring meta while the snapshot is being read and selective barriers are enabled.
+    pending_input_reporter: Option<LocalBarrierManager>,
 }
 
 impl<S: StateStore> CdcBackfillExecutor<S> {
@@ -184,7 +187,20 @@ impl<S: StateStore> CdcBackfillExecutor<S> {
             rate_limit_rps,
             options,
             properties,
+            pending_input_reporter: None,
         }
+    }
+
+    /// Enable the snapshot gate required by selective barriers, ringing meta through the given
+    /// barrier manager. See `docs/dev/src/design/selective-barriers.md`.
+    ///
+    /// Meta does not know that a CDC table is being backfilled: the table is created as soon as
+    /// its job starts. Snapshot rows are therefore only read in an epoch opened by a barrier that
+    /// releases this fragment, and the executor rings at every barrier until the backfill ends,
+    /// so that the fragment and its descendants stay awake.
+    pub fn with_pending_input_reporter(mut self, barrier_manager: LocalBarrierManager) -> Self {
+        self.pending_input_reporter = Some(barrier_manager);
+        self
     }
 
     fn report_metrics(
@@ -561,6 +577,23 @@ impl<S: StateStore> CdcBackfillExecutor<S> {
             // otherwise the upstream changelog may be blocked by the snapshot read stream
             let _ = Pin::new(&mut upstream).peek().await;
 
+            // Selective barriers: whether the snapshot must not be read in the epoch opened by the
+            // given barrier, because this barrier does not release the fragment. Rings meta so
+            // that a next barrier releases it.
+            let fragment_id = self.actor_ctx.fragment_id;
+            let pending_input_reporter = self.pending_input_reporter.clone();
+            let hold_snapshot = |barrier: &Barrier| -> bool {
+                let Some(reporter) = &pending_input_reporter else {
+                    return false;
+                };
+                if barrier.selective.is_none() {
+                    return false;
+                }
+                reporter.report_pending_input(fragment_id);
+                !barrier.is_fragment_released(fragment_id)
+            };
+            let mut selective_hold = false;
+
             // wait for a barrier to make sure the backfill starts after upstream source
             #[for_await]
             for msg in upstream.by_ref() {
@@ -587,6 +620,7 @@ impl<S: StateStore> CdcBackfillExecutor<S> {
                                 // ignore other mutations
                             }
                         }
+                        selective_hold = hold_snapshot(&barrier);
                         // Commit after all preceding recovery chunks have been emitted.
                         state_impl.commit_state(barrier.epoch).await?;
                         yield Message::Barrier(barrier);
@@ -658,9 +692,11 @@ impl<S: StateStore> CdcBackfillExecutor<S> {
                         .map(Either::Right)
                 );
                 let (right_snapshot, snapshot_valve) = pausable(right_snapshot);
-                if is_snapshot_paused {
+                if is_snapshot_paused || selective_hold {
                     snapshot_valve.pause();
                 }
+                // Applies to the epoch opened by the barrier being processed, once it is yielded.
+                let mut next_selective_hold = selective_hold;
 
                 // Prefer to select upstream, so we can stop snapshot stream when barrier comes.
                 let mut backfill_stream =
@@ -727,6 +763,8 @@ impl<S: StateStore> CdcBackfillExecutor<S> {
                                         }
                                     }
 
+                                    next_selective_hold = hold_snapshot(&barrier);
+
                                     // when processing a barrier, check whether can start a new snapshot
                                     // if the number of barriers reaches the snapshot interval
                                     if can_start_new_snapshot || needs_rebuild_snapshot {
@@ -741,6 +779,15 @@ impl<S: StateStore> CdcBackfillExecutor<S> {
                                         // Break the loop for consuming snapshot and prepare to start a new snapshot
                                         break;
                                     } else {
+                                        // No snapshot row is read between this point and the
+                                        // barrier yielded below.
+                                        selective_hold = next_selective_hold;
+                                        if is_snapshot_paused || selective_hold {
+                                            snapshot_valve.pause();
+                                        } else {
+                                            snapshot_valve.resume();
+                                        }
+
                                         // Drain the in-memory buffer to ensure no data is lost during the recovery process.
                                         let (
                                             emitted_upstream_chunks,
@@ -886,7 +933,7 @@ impl<S: StateStore> CdcBackfillExecutor<S> {
                 // It maybe a cancellation bug of the mysql driver.
                 let (_, mut snapshot_stream) = backfill_stream.into_inner();
                 // Resume the snapshot stream so that the snapshot stream patch won't block.
-                if !should_bypass_snapshot_stream_patch && is_snapshot_paused {
+                if !should_bypass_snapshot_stream_patch && (is_snapshot_paused || selective_hold) {
                     snapshot_valve.resume();
                 }
                 if !should_bypass_snapshot_stream_patch
@@ -928,7 +975,7 @@ impl<S: StateStore> CdcBackfillExecutor<S> {
                             // end of backfill loop, since backfill has finished
                             break 'backfill_loop;
                         }
-                        Some(_) if is_snapshot_paused => {
+                        Some(_) if is_snapshot_paused || selective_hold => {
                             // Since the snapshot stream is paused, drop the chunk.
                         }
                         Some(chunk) => {
@@ -1004,6 +1051,7 @@ impl<S: StateStore> CdcBackfillExecutor<S> {
 
                 state_impl.commit_state(pending_barrier.epoch).await?;
                 yield Message::Barrier(pending_barrier);
+                selective_hold = next_selective_hold;
             }
             upstream_table_reader.disconnect().await?;
         } else if self.options.disable_backfill {

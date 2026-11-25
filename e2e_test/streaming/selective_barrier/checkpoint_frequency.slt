@@ -1,0 +1,132 @@
+# Selective barriers with `checkpoint_frequency > 1`. Between two checkpoints, compute nodes do
+# not sync tables: a table may wake up at any barrier but falls asleep only right after a
+# checkpoint. This test checks that data written to idle tables becomes visible without FLUSH
+# and that views stay consistent, while the checkpoint frequency of the database changes.
+#
+# Must be run in the database `dev`.
+
+statement ok
+alter database dev set checkpoint_frequency = 5;
+
+statement ok
+create table sbk_x (k int primary key, v int);
+
+statement ok
+create table sbk_y (k int primary key, v int);
+
+statement ok
+create materialized view sbk_xm as select count(*) as c, sum(v) as s from sbk_x;
+
+statement ok
+create materialized view sbk_ym as select count(*) as c, sum(v) as s from sbk_y;
+
+statement ok
+create materialized view sbk_xy as select x.k, x.v as vx, y.v as vy from sbk_x x join sbk_y y on x.k = y.k;
+
+# Let both tables fall asleep, which takes at least one checkpoint.
+sleep 12s
+
+# The table wakes up between two checkpoints.
+statement ok
+insert into sbk_x values (1, 10), (2, 20);
+
+sleep 12s
+
+query II
+select c, s from sbk_xm;
+----
+2 30
+
+query I
+select c from sbk_ym;
+----
+0
+
+# The frequency changes while tables sleep.
+statement ok
+alter database dev set checkpoint_frequency = 3;
+
+statement ok
+insert into sbk_y values (1, 1), (3, 3);
+
+sleep 8s
+
+query II
+select c, s from sbk_ym;
+----
+2 4
+
+query III
+select k, vx, vy from sbk_xy;
+----
+1 10 1
+
+# Several writes spread over the barriers of a checkpoint window, on tables that wake up at
+# different barriers.
+statement ok
+insert into sbk_x values (3, 30);
+
+sleep 1s
+
+statement ok
+update sbk_y set v = v + 100;
+
+sleep 1s
+
+statement ok
+delete from sbk_x where k = 2;
+
+statement ok
+flush;
+
+query II
+select c, s from sbk_xm;
+----
+2 40
+
+query II
+select c, s from sbk_ym;
+----
+2 204
+
+query III rowsort
+select k, vx, vy from sbk_xy;
+----
+1 10 101
+3 30 103
+
+# Back to the frequency of the cluster.
+statement ok
+alter database dev set checkpoint_frequency = default;
+
+sleep 5s
+
+statement ok
+insert into sbk_y values (2, 2);
+
+statement ok
+insert into sbk_x values (2, 22);
+
+sleep 8s
+
+query III rowsort
+select k, vx, vy from sbk_xy;
+----
+1 10 101
+2 22 2
+3 30 103
+
+statement ok
+drop materialized view sbk_xy;
+
+statement ok
+drop materialized view sbk_xm;
+
+statement ok
+drop materialized view sbk_ym;
+
+statement ok
+drop table sbk_x;
+
+statement ok
+drop table sbk_y;

@@ -59,5 +59,6 @@ pub fn compactor(opts: CompactorOpts) -> ! {
 
 pub fn ctl(opts: CtlOpts) -> ! {
     init_risingwave_logger(LoggerSettings::new("ctl").stderr(true));
+    risingwave_rt::disable_resource_journal();
     main_okk(|shutdown| risingwave_ctl::start(opts, shutdown));
 }

@@ -946,7 +946,12 @@ impl StageRunner {
         let t_id = task_id.task_id;
 
         let stream_status: Fuse<Streaming<TaskInfoResponse>> = compute_client
-            .create_task(task_id, plan_fragment, expr_context)
+            .create_task(
+                task_id,
+                plan_fragment,
+                expr_context,
+                self.query.spillable_operator_instances(),
+            )
             .await
             .inspect_err(|_| self.mask_failed_serving_worker(&worker))
             .map_err(|e| anyhow!(e))?

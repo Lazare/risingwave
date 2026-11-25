@@ -1,0 +1,49 @@
+# Temporal filter on a rounded now(). With selective barriers, the `Now` fragment only advances
+# when the rounded value changes (here every minute), and its descendants sleep in between. The
+# view must still follow the rounded time.
+
+statement ok
+create table sbn_ev (k int primary key, ts timestamptz);
+
+statement ok
+create materialized view sbn_past as select k from sbn_ev where ts < date_trunc('minute', now());
+
+# Far in the past, far in the future, and the start of the current minute, which becomes visible
+# once the next minute starts.
+statement ok
+insert into sbn_ev values
+  (1, now() - interval '1 day'),
+  (2, now() + interval '1 day'),
+  (3, date_trunc('minute', now()));
+
+statement ok
+flush;
+
+query I
+select k from sbn_past where k <> 3 order by k;
+----
+1
+
+sleep 65s
+
+query I
+select k from sbn_past order by k;
+----
+1
+3
+
+# The view matches its batch recomputation for rows far from the minute boundary.
+query I
+select count(*) from (
+  (select k from sbn_past except select k from sbn_ev where ts < date_trunc('minute', now()))
+  union all
+  (select k from sbn_ev where ts < date_trunc('minute', now()) except select k from sbn_past)
+) d;
+----
+0
+
+statement ok
+drop materialized view sbn_past;
+
+statement ok
+drop table sbn_ev;

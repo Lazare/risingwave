@@ -128,8 +128,13 @@ impl<S: StateStore> CdcBackfillState<S> {
 
         match self.state_table.get_row(row::once(split_id)).await? {
             Some(prev_row) => {
-                self.state_table
-                    .update(prev_row, self.cached_state.as_slice());
+                // Do not write an unchanged state. With selective barriers, the fragment may
+                // have slept since the last commit: its state table can only jump to the epoch
+                // of the barrier that wakes it up if nothing was written meanwhile.
+                if prev_row.as_inner() != self.cached_state.as_slice() {
+                    self.state_table
+                        .update(prev_row, self.cached_state.as_slice());
+                }
             }
             None => {
                 self.state_table.insert(self.cached_state.as_slice());

@@ -469,10 +469,14 @@ impl<S: StateStore> SnapshotBackfillExecutor<S> {
                     .latest_progress()
                     .for_each(|(vnode, progress)| {
                         let progress = progress.expect("should not be empty");
-                        assert_eq!(
-                            progress.epoch, first_upstream_barrier.epoch.prev,
-                            "vnode: {:?}",
-                            vnode
+                        // The progress is no longer persisted on every barrier once the job runs
+                        // in the main graph (see `progress_frozen` below), so it may lag behind.
+                        assert!(
+                            progress.epoch <= first_upstream_barrier.epoch.prev,
+                            "vnode: {:?}, progress epoch: {}, upstream prev epoch: {}",
+                            vnode,
+                            progress.epoch,
+                            first_upstream_barrier.epoch.prev
                         );
                         assert_eq!(
                             progress.progress,
@@ -500,6 +504,13 @@ impl<S: StateStore> SnapshotBackfillExecutor<S> {
             &upstream.info.stream_key,
             current_stream_key_indices,
         );
+        // When the executor starts in the main graph (the snapshot backfill was finished and merged
+        // before), the progress only serves as a sanity check on recovery. Rewriting one row per
+        // vnode on every barrier would then produce a constant write amplification even when no
+        // data flows, so the progress is frozen at its last persisted value.
+        // Note that a newly created job also takes this path once it is merged into the main
+        // graph, because its actors are rebuilt at that point.
+        let progress_frozen = should_snapshot_backfill.is_none();
         let mut upstream = upstream.into_executor(self.barrier_rx).execute();
         let mut epoch_row_count = 0;
         // Phase 3: consume upstream
@@ -509,15 +520,31 @@ impl<S: StateStore> SnapshotBackfillExecutor<S> {
             };
             match msg {
                 Message::Barrier(barrier) => {
-                    assert_eq!(barrier.epoch.prev, barrier_epoch.curr);
-                    self.upstream_table
-                        .vnodes()
-                        .iter_vnodes()
-                        .for_each(|vnode| {
-                            // Note: the `epoch_row_count` is the accumulated row count of all vnodes of the current
-                            // executor.
-                            backfill_state.finish_epoch(vnode, barrier.epoch.prev, epoch_row_count);
-                        });
+                    if barrier.is_fragment_waking(self.actor_ctx.fragment_id) {
+                        // Selective barriers: the fragment slept during the previous epochs.
+                        assert!(
+                            progress_frozen && barrier.epoch.prev >= barrier_epoch.curr,
+                            "unexpected wake-up barrier {:?} after {:?}",
+                            barrier.epoch,
+                            barrier_epoch
+                        );
+                    } else if !barrier.is_with_stop_mutation() {
+                        assert_eq!(barrier.epoch.prev, barrier_epoch.curr);
+                    }
+                    if !progress_frozen {
+                        self.upstream_table
+                            .vnodes()
+                            .iter_vnodes()
+                            .for_each(|vnode| {
+                                // Note: the `epoch_row_count` is the accumulated row count of all vnodes of the current
+                                // executor.
+                                backfill_state.finish_epoch(
+                                    vnode,
+                                    barrier.epoch.prev,
+                                    epoch_row_count,
+                                );
+                            });
+                    }
                     epoch_row_count = 0;
                     let update_vnode_bitmap = barrier.as_update_vnode_bitmap(self.actor_ctx.id);
                     barrier_epoch = barrier.epoch;
@@ -536,11 +563,19 @@ impl<S: StateStore> SnapshotBackfillExecutor<S> {
                             .latest_progress()
                             .for_each(|(vnode, progress)| {
                                 let progress = progress.expect("should not be empty");
-                                assert_eq!(
-                                    progress.epoch, barrier_epoch.prev,
-                                    "vnode {:?} has unexpected progress epoch",
-                                    vnode
-                                );
+                                if progress_frozen {
+                                    assert!(
+                                        progress.epoch <= barrier_epoch.prev,
+                                        "vnode {:?} has unexpected progress epoch",
+                                        vnode
+                                    );
+                                } else {
+                                    assert_eq!(
+                                        progress.epoch, barrier_epoch.prev,
+                                        "vnode {:?} has unexpected progress epoch",
+                                        vnode
+                                    );
+                                }
                                 assert_eq!(
                                     progress.progress,
                                     EpochBackfillProgress::Consumed,
@@ -618,11 +653,23 @@ impl PendingBarriers {
         self.checkpoint_barrier_groups.pop_back()
     }
 
+    /// Whether no barrier received from upstream is pending.
+    fn is_empty(&self) -> bool {
+        self.checkpoint_barrier_groups.is_empty() && self.pending_non_checkpoint_barriers.is_empty()
+    }
+
     fn consume_epoch(&mut self, epoch: EpochPair) {
-        let barriers = self
-            .checkpoint_barrier_groups
-            .back_mut()
-            .expect("non-empty");
+        // The oldest pending barrier is in the oldest checkpoint group. When the next checkpoint
+        // barrier has not been received from upstream yet, it is the oldest of the non-checkpoint
+        // barriers received after the last checkpoint barrier.
+        let in_checkpoint_group = !self.checkpoint_barrier_groups.is_empty();
+        let barriers = if in_checkpoint_group {
+            self.checkpoint_barrier_groups
+                .back_mut()
+                .expect("non-empty")
+        } else {
+            &mut self.pending_non_checkpoint_barriers
+        };
         let oldest_upstream_barrier = barriers.back().expect("non-empty");
         assert!(
             oldest_upstream_barrier.epoch.prev >= epoch.prev,
@@ -633,7 +680,7 @@ impl PendingBarriers {
         if oldest_upstream_barrier.epoch.prev == epoch.prev {
             assert_eq!(oldest_upstream_barrier.epoch, epoch);
             barriers.pop_back();
-            if barriers.is_empty() {
+            if in_checkpoint_group && barriers.is_empty() {
                 self.checkpoint_barrier_groups.pop_back();
             }
         }
@@ -648,10 +695,6 @@ impl PendingBarriers {
                     .and_then(|barriers| barriers.front())
             })
             .map(|barrier| barrier.epoch)
-    }
-
-    fn checkpoint_epoch_count(&self) -> usize {
-        self.checkpoint_barrier_groups.len()
     }
 
     fn has_checkpoint_epoch(&self) -> bool {
@@ -803,8 +846,15 @@ impl<S> UpstreamBuffer<S> {
         }
     }
 
-    /// Consume the upstream until seeing the next barrier.
+    /// Consume the upstream until seeing the next checkpoint barrier.
     async fn consume_until_next_checkpoint_barrier(&mut self) -> StreamExecutorResult<()> {
+        while !self.consume_until_next_barrier().await? {}
+        Ok(())
+    }
+
+    /// Consume the upstream until seeing the next barrier. Return whether it is a checkpoint
+    /// barrier.
+    async fn consume_until_next_barrier(&mut self) -> StreamExecutorResult<bool> {
         loop {
             let msg: DispatcherMessage = self
                 .upstream
@@ -820,19 +870,14 @@ impl<S> UpstreamBuffer<S> {
                 DispatcherMessage::Barrier(barrier) => {
                     let is_checkpoint = barrier.kind.is_checkpoint();
                     self.upstream_pending_barriers.add(barrier);
-                    if is_checkpoint {
-                        self.is_polling_epoch_data = false;
-                        break;
-                    } else {
-                        self.is_polling_epoch_data = true;
-                    }
+                    self.is_polling_epoch_data = !is_checkpoint;
+                    return Ok(is_checkpoint);
                 }
                 DispatcherMessage::Watermark(_) => {
                     self.is_polling_epoch_data = true;
                 }
             }
         }
-        Ok(())
     }
 }
 
@@ -840,12 +885,17 @@ impl UpstreamBuffer<ConsumingLogStore> {
     #[await_tree::instrument("consumed_epoch: {:?}", epoch)]
     async fn consumed_epoch(&mut self, epoch: EpochPair) -> StreamExecutorResult<bool> {
         assert!(!self.is_finished());
-        if !self.upstream_pending_barriers.has_checkpoint_epoch() {
+        while self.upstream_pending_barriers.is_empty() {
             // when upstream_pending_barriers is empty and not polling any intermediate epoch data,
             // we must have returned true to indicate finish, and should not be called again.
             assert!(self.is_polling_epoch_data);
-            self.consume_until_next_checkpoint_barrier().await?;
-            assert_eq!(self.upstream_pending_barriers.checkpoint_epoch_count(), 1);
+            // Only wait for the next upstream barrier, which is the one of this epoch or of a later
+            // one, and not for the next checkpoint barrier. With non-checkpoint barriers, the
+            // upstream may be unable to emit its next checkpoint barrier before this epoch is
+            // consumed: another scan of the same upstream in this job, already consuming the
+            // upstream directly, back-pressures the upstream actor when its own downstream waits
+            // for the barrier of this epoch (e.g. through a join), which is a deadlock.
+            self.consume_until_next_barrier().await?;
         }
         self.upstream_pending_barriers.consume_epoch(epoch);
 
@@ -1193,7 +1243,9 @@ mod tests {
     use crate::common::table::test_utils::gen_pbtable_with_value_indices;
     use crate::executor::exchange::input::{Input, LocalInput};
     use crate::executor::exchange::permit::channel_for_test;
-    use crate::executor::{ActorContext, DispatcherMessage, ExecutorInfo, MergeExecutorUpstream};
+    use crate::executor::{
+        ActorContext, BarrierKind, DispatcherMessage, ExecutorInfo, MergeExecutorUpstream,
+    };
     use crate::task::LocalBarrierManager;
 
     const SOURCE_TABLE_ID: TableId = TableId::new(0x233);
@@ -1482,6 +1534,106 @@ mod tests {
         );
 
         expect_pending_with_timeout(&mut executor, "next local barrier").await;
+    }
+
+    /// With non-checkpoint barriers (`checkpoint_frequency` > 1), consuming the barrier of an epoch
+    /// must only depend on upstream barriers up to that epoch, and not on the next checkpoint
+    /// barrier of the upstream. Otherwise the scan holds its barrier while the upstream actor may
+    /// be back-pressured by another scan of the same job that waits for this barrier downstream
+    /// (e.g. through a join), and the upstream never emits the checkpoint barrier.
+    #[tokio::test]
+    async fn test_consumed_epoch_does_not_wait_for_next_upstream_checkpoint() {
+        fn non_checkpoint_barrier(epoch: u64) -> Barrier {
+            Barrier {
+                kind: BarrierKind::Barrier,
+                ..Barrier::new_test_barrier(test_epoch(epoch))
+            }
+        }
+
+        let barrier_manager = LocalBarrierManager::for_test();
+        let actor_ctx = ActorContext::for_test(1235);
+        let (upstream_tx, upstream_rx) = channel_for_test();
+        let consume_upstream_row_count = StreamingMetrics::unused()
+            .snapshot_backfill_consume_row_count
+            .with_guarded_label_values(&["table", "actor", "consume_upstream"]);
+
+        // The first upstream barrier (epoch 1 -> 2) is a checkpoint, followed by non-checkpoint
+        // barriers (2 -> 3) and (3 -> 4).
+        let mut buffer = UpstreamBuffer::new(
+            make_upstream_input(barrier_manager, actor_ctx, upstream_rx),
+            Barrier::new_test_barrier(test_epoch(2)).into_dispatcher(),
+            consume_upstream_row_count,
+        );
+        for epoch in [3, 4] {
+            upstream_tx
+                .send(
+                    DispatcherMessage::Barrier(non_checkpoint_barrier(epoch).into_dispatcher())
+                        .into(),
+                )
+                .await
+                .unwrap();
+        }
+        // Let the buffer receive the non-checkpoint barriers while consuming the snapshot.
+        assert!(
+            timeout(
+                Duration::from_millis(200),
+                buffer.run_future(futures::future::pending::<StreamExecutorResult<()>>()),
+            )
+            .await
+            .is_err()
+        );
+
+        // The snapshot is at epoch 1, so the checkpoint barrier (1 -> 2) is consumed already. The
+        // buffer is in the middle of a checkpoint interval and cannot finish yet.
+        let mut buffer = match buffer.start_consuming_log_store(test_epoch(1)) {
+            Either::Left(buffer) => buffer,
+            Either::Right(_) => panic!("should not finish in the middle of a checkpoint interval"),
+        };
+
+        // The upstream barriers of these epochs are received: no need to wait for the next
+        // checkpoint barrier of the upstream, which is not sent yet.
+        for epoch in [3, 4] {
+            let is_finished = timeout(
+                Duration::from_secs(10),
+                buffer.consumed_epoch(EpochPair::new_test_epoch(test_epoch(epoch))),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                panic!("epoch {epoch} waits for the next checkpoint barrier of the upstream")
+            })
+            .unwrap();
+            assert!(!is_finished);
+        }
+        assert_eq!(buffer.pending_epoch_lag(), 0);
+
+        // The upstream barrier (4 -> 5) is not received yet: the epoch cannot be consumed.
+        assert!(
+            timeout(
+                Duration::from_millis(200),
+                buffer.consumed_epoch(EpochPair::new_test_epoch(test_epoch(5))),
+            )
+            .await
+            .is_err()
+        );
+        // Once the checkpoint barrier is received and consumed, the log store is caught up.
+        upstream_tx
+            .send(
+                DispatcherMessage::Barrier(
+                    Barrier::new_test_barrier(test_epoch(5)).into_dispatcher(),
+                )
+                .into(),
+            )
+            .await
+            .unwrap();
+        let is_finished = timeout(
+            Duration::from_secs(10),
+            buffer.consumed_epoch(EpochPair::new_test_epoch(test_epoch(5))),
+        )
+        .await
+        .expect("checkpoint barrier is received")
+        .unwrap();
+        assert!(is_finished);
+        let _upstream = buffer.start_consuming_upstream();
     }
 
     #[tokio::test]

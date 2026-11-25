@@ -38,10 +38,11 @@ use crate::connector_common::{SslMode, create_pg_client, pg_connection_config_fr
 use crate::error::ConnectorResult;
 use crate::sink::sqlserver::SqlServerClient;
 use crate::source::cdc::external::mysql::build_mysql_connection_pool;
+use crate::source::cdc::native::{CDC_ENGINE_KEY, CdcEngine, validate_postgres_source};
 use crate::source::cdc::split::{extract_binlog_file_seq, parse_sql_server_lsn_str};
 use crate::source::cdc::{
-    CdcProperties, CdcSourceTypeTrait, Citus, DebeziumCdcSplit, Mongodb, Mysql, Postgres,
-    SqlServer, table_schema_exclude_additional_columns,
+    CdcProperties, CdcSourceType, CdcSourceTypeTrait, Citus, DebeziumCdcSplit, Mongodb, Mysql,
+    Postgres, SqlServer, table_schema_exclude_additional_columns,
 };
 use crate::source::monitor::metrics::EnumeratorMetrics;
 use crate::source::{SourceEnumeratorContextRef, SplitEnumerator};
@@ -101,7 +102,6 @@ where
             SourceType::from(T::source_type())
         );
 
-        let jvm = Jvm::get_or_init()?;
         let source_id = context.info.source_id;
 
         // Extract fields before moving props
@@ -112,43 +112,63 @@ where
         let properties_arc_for_validation = properties_arc.clone();
         let table_schema_for_validation = props.table_schema;
 
-        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            execute_with_jni_env(jvm, |env| {
-                let validate_source_request = ValidateSourceRequest {
-                    source_id: source_id.as_raw_id() as u64,
-                    source_type: source_type_pb as _,
-                    properties: (*properties_arc_for_validation).clone(),
-                    table_schema: Some(table_schema_exclude_additional_columns(
-                        &table_schema_for_validation,
-                    )),
-                    is_source_job: props.is_cdc_source_job,
-                    is_backfill_table: props.is_backfill_table,
-                };
+        // The sources read by the native engine are validated without the JVM.
+        let is_native_engine = matches!(T::source_type(), CdcSourceType::Postgres)
+            && CdcEngine::from_option(properties_arc.get(CDC_ENGINE_KEY).map(|v| v.as_str()))?
+                == CdcEngine::Native;
+        if is_native_engine {
+            validate_postgres_source(
+                &properties_arc,
+                &table_schema_exclude_additional_columns(&table_schema_for_validation),
+                props.is_cdc_source_job,
+            )
+            .await
+            .context("source validation failed")?;
+        } else {
+            let jvm = Jvm::get_or_init()?;
+            tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                execute_with_jni_env(jvm, |env| {
+                    let validate_source_request = ValidateSourceRequest {
+                        source_id: source_id.as_raw_id() as u64,
+                        source_type: source_type_pb as _,
+                        properties: (*properties_arc_for_validation).clone(),
+                        table_schema: Some(table_schema_exclude_additional_columns(
+                            &table_schema_for_validation,
+                        )),
+                        is_source_job: props.is_cdc_source_job,
+                        is_backfill_table: props.is_backfill_table,
+                    };
 
-                let validate_source_request_bytes =
-                    env.byte_array_from_slice(&Message::encode_to_vec(&validate_source_request))?;
+                    let validate_source_request_bytes = env
+                        .byte_array_from_slice(&Message::encode_to_vec(&validate_source_request))?;
 
-                let validate_source_response_bytes = call_static_method!(
-                    env,
-                    {com.risingwave.connector.source.JniSourceValidateHandler},
-                    {byte[] validate(byte[] validateSourceRequestBytes)},
-                    &validate_source_request_bytes
-                )?;
+                    let validate_source_response_bytes = call_static_method!(
+                        env,
+                        {com.risingwave.connector.source.JniSourceValidateHandler},
+                        {byte[] validate(byte[] validateSourceRequestBytes)},
+                        &validate_source_request_bytes
+                    )?;
 
-                let validate_source_response: ValidateSourceResponse = Message::decode(
-                    risingwave_jni_core::to_guarded_slice(&validate_source_response_bytes, env)?
+                    let validate_source_response: ValidateSourceResponse = Message::decode(
+                        risingwave_jni_core::to_guarded_slice(
+                            &validate_source_response_bytes,
+                            env,
+                        )?
                         .deref(),
-                )?;
+                    )?;
 
-                if let Some(error) = validate_source_response.error {
-                    return Err(anyhow!(error.error_message).context("source validation failed"));
-                }
+                    if let Some(error) = validate_source_response.error {
+                        return Err(
+                            anyhow!(error.error_message).context("source validation failed")
+                        );
+                    }
 
-                Ok(())
+                    Ok(())
+                })
             })
-        })
-        .await
-        .context("failed to validate source")??;
+            .await
+            .context("failed to validate source")??;
+        }
 
         tracing::debug!("validate cdc source properties success");
         Ok(Self {

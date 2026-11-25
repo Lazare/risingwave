@@ -43,7 +43,8 @@ use crate::optimizer::{
     RelationCollectorVisitor, SysTableVisitor,
 };
 use crate::planner::Planner;
-use crate::scheduler::plan_fragmenter::Query;
+use crate::scheduler::batch_limits::batch_limits;
+use crate::scheduler::plan_fragmenter::{Query, move_stateful_operators_out_of_root_stage};
 use crate::scheduler::{
     BatchPlanFragmenter, DistributedQueryStream, ExecutionContext, ExecutionContextRef,
     LocalQueryExecution, LocalQueryStream,
@@ -470,11 +471,28 @@ pub fn gen_batch_plan_fragmenter(
         session.env().worker_node_manager_ref(),
         session.is_barrier_read(),
     );
-    let plan_fragmenter = BatchPlanFragmenter::new(
+    // The local execution mode runs the plan in the frontend, where these limits do not apply.
+    let batch_limits = (query_mode == QueryMode::Distributed)
+        .then(|| {
+            batch_limits(
+                &worker_node_manager_reader
+                    .manager
+                    .list_serving_worker_nodes(),
+                &session.env().client_pool(),
+            )
+        })
+        .flatten();
+    let plan = if query_mode == QueryMode::Distributed {
+        move_stateful_operators_out_of_root_stage(plan)
+    } else {
+        plan
+    };
+    let plan_fragmenter = BatchPlanFragmenter::new_with_limits(
         worker_node_manager_reader,
         session.env().catalog_reader().clone(),
         session.config().batch_parallelism().0,
         plan,
+        batch_limits,
     )?;
 
     Ok(BatchPlanFragmenterResult {

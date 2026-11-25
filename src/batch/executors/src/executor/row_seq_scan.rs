@@ -127,6 +127,8 @@ impl BoxedExecutorBuilder for RowSeqScanExecutorBuilder {
 
         dispatch_state_store!(source.context().state_store(), state_store, {
             let table = BatchTable::new_partial(state_store, column_ids, vnodes, table_desc);
+            // The scan may start long after the task: keep the version that the query reads.
+            table.pin_batch_query_snapshot(query_epoch.into()).await?;
             Ok(Box::new(RowSeqScanExecutor::new(
                 table,
                 scan_ranges,

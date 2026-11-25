@@ -15,6 +15,7 @@
 use risingwave_common::id::{FunctionId, SchemaId, UserId};
 use risingwave_common::types::{Fields, Timestamptz};
 use risingwave_frontend_macro::system_catalog;
+use risingwave_pb::expr::PbUdfVolatility;
 
 use crate::catalog::system_catalog::{SysCatalogReaderImpl, get_acl_items};
 use crate::error::Result;
@@ -33,6 +34,7 @@ struct RwFunction {
     link: Option<String>,
     acl: Vec<String>,
     always_retry_on_network_error: bool,
+    volatility: Option<String>,
     created_at: Option<Timestamptz>,
     created_at_cluster_version: Option<String>,
 }
@@ -64,6 +66,12 @@ fn read(reader: &SysCatalogReaderImpl) -> Result<Vec<RwFunction>> {
                     link: function.link.clone(),
                     acl: get_acl_items(function.id, false, &users, username_map),
                     always_retry_on_network_error: function.always_retry_on_network_error,
+                    volatility: match function.volatility {
+                        PbUdfVolatility::Unspecified => None,
+                        PbUdfVolatility::Immutable => Some("IMMUTABLE".to_owned()),
+                        PbUdfVolatility::Stable => Some("STABLE".to_owned()),
+                        PbUdfVolatility::Volatile => Some("VOLATILE".to_owned()),
+                    },
                     created_at: function.created_at_epoch.map(|e| e.as_timestamptz()),
                     created_at_cluster_version: function.created_at_cluster_version.clone(),
                 })

@@ -34,6 +34,8 @@ mod panic_hook;
 pub use panic_hook::*;
 mod prof;
 use prof::*;
+mod resource_journal;
+pub use resource_journal::*;
 use tokio::signal::unix::SignalKind;
 
 const MIN_WORKER_THREADS: usize = 4;
@@ -80,6 +82,9 @@ where
         })
         .unwrap();
     risingwave_variables::init_server_start_time();
+
+    raise_nofile_limit();
+    spawn_resource_journal();
 
     // `TOKIO` will be read by tokio. Duplicate `RW` for compatibility.
     if let Some(worker_threads) = std::env::var_os("RW_WORKER_THREADS") {

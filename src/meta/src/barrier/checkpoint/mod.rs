@@ -15,6 +15,7 @@
 mod control;
 pub(crate) mod independent_job;
 mod recovery;
+mod selective;
 mod state;
 
 pub(super) use control::{

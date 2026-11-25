@@ -326,7 +326,10 @@ impl LogicalScan {
 
         predicate = predicate.rewrite_expr(&mut inverse_mapping);
 
-        let scan_without_predicate = generic::TableScan::new(
+        // Keep the stream key of this scan. It may have been extended with the primary key of the
+        // table in `logical_rewrite_for_stream`, and the operators above the scan were planned
+        // with it: a narrower stream key here would break their distribution requirements.
+        let scan_without_predicate = generic::TableScan::new_inner(
             self.required_col_idx().clone(),
             self.core.table_catalog.clone(),
             self.table_indexes().to_vec(),
@@ -334,6 +337,7 @@ impl LogicalScan {
             self.ctx(),
             Condition::true_cond(),
             self.as_of(),
+            self.core.table_scan_stream_key().map(ToOwned::to_owned),
         );
         let project_expr = if self.required_col_idx() != self.output_col_idx() {
             Some(self.output_idx_to_input_ref())

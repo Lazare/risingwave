@@ -968,6 +968,127 @@ mod tests {
         }
     }
 
+    /// The barrier of an epoch without data is not persisted: the live reader still receives it
+    /// from the buffer, and a reader replaying the persisted log skips it.
+    #[tokio::test]
+    async fn test_empty_epoch_barrier_not_persisted() {
+        let pk_info = &KV_LOG_STORE_V2_INFO;
+        let test_env = prepare_hummock_test_env().await;
+        let table = gen_test_log_store_table(pk_info);
+        test_env.register_table(table.clone()).await;
+
+        let stream_chunk1 = gen_stream_chunk_with_info(0, pk_info);
+        let stream_chunk2 = gen_stream_chunk_with_info(10, pk_info);
+        let bitmap = Arc::new(calculate_vnode_bitmap(
+            stream_chunk1.rows().chain(stream_chunk2.rows()),
+        ));
+        let build = || {
+            KvLogStoreFactory::new(
+                test_env.storage.clone(),
+                table.clone(),
+                Some(bitmap.clone()),
+                1024,
+                1024,
+                KvLogStoreMetrics::for_test(),
+                "test",
+                None,
+                pk_info,
+            )
+            .build()
+        };
+        let (mut reader, mut writer) = build().await;
+
+        let epoch1 = test_env
+            .storage
+            .get_pinned_version()
+            .table_committed_epoch(table.id)
+            .unwrap()
+            .next_epoch();
+        let epoch2 = epoch1.next_epoch();
+        let epoch3 = epoch2.next_epoch();
+        let epoch4 = epoch3.next_epoch();
+        let epoch5 = epoch4.next_epoch();
+        test_env
+            .storage
+            .start_epoch(epoch1, HashSet::from_iter([table.id]));
+        writer
+            .init(EpochPair::new_test_epoch(epoch1), false)
+            .await
+            .unwrap();
+        // Data in epoch 1, nothing in epochs 2 and 3, data in epoch 4.
+        writer.write_chunk(stream_chunk1.clone()).await.unwrap();
+        for (next, chunk) in [
+            (epoch2, None),
+            (epoch3, None),
+            (epoch4, None),
+            (epoch5, Some(stream_chunk2.clone())),
+        ] {
+            if let Some(chunk) = chunk {
+                writer.write_chunk(chunk).await.unwrap();
+            }
+            test_env
+                .storage
+                .start_epoch(next, HashSet::from_iter([table.id]));
+            writer.flush_current_epoch_for_test(next, true).await.unwrap();
+        }
+
+        // The live reader receives every barrier.
+        reader.init().await.unwrap();
+        reader.start_from(None).await.unwrap();
+        let mut items = vec![];
+        for _ in 0..6 {
+            items.push(match reader.next_item().await.unwrap() {
+                (epoch, LogStoreReadItem::StreamChunk { .. }) => (epoch, true),
+                (epoch, LogStoreReadItem::Barrier { .. }) => (epoch, false),
+            });
+        }
+        assert_eq!(
+            items,
+            vec![
+                (epoch1, true),
+                (epoch1, false),
+                (epoch2, false),
+                (epoch3, false),
+                (epoch4, true),
+                (epoch4, false),
+            ]
+        );
+
+        test_env.commit_epoch(epoch4).await;
+        drop(writer);
+        drop(reader);
+        test_env.storage.clear_shared_buffer().await;
+
+        // A reader replaying the persisted log gets every row, and only the barriers of the
+        // epochs with data.
+        let (mut reader, mut writer) = build().await;
+        test_env
+            .storage
+            .start_epoch(epoch5, HashSet::from_iter([table.id]));
+        writer
+            .init(EpochPair::new_test_epoch(epoch5), false)
+            .await
+            .unwrap();
+        reader.init().await.unwrap();
+        reader.start_from(None).await.unwrap();
+        for (expected_epoch, expected_chunk) in [(epoch1, &stream_chunk1), (epoch4, &stream_chunk2)] {
+            match reader.next_item().await.unwrap() {
+                (epoch, LogStoreReadItem::StreamChunk { chunk, .. }) => {
+                    assert_eq!(epoch, expected_epoch);
+                    assert!(check_stream_chunk_eq(expected_chunk, &chunk));
+                }
+                _ => unreachable!(),
+            }
+            match reader.next_item().await.unwrap() {
+                (epoch, LogStoreReadItem::Barrier { is_checkpoint, .. }) => {
+                    assert_eq!(epoch, expected_epoch);
+                    assert!(is_checkpoint);
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
     #[tokio::test]
     async fn test_truncate() {
         for count in (2..10).step_by(3) {

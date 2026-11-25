@@ -36,7 +36,7 @@ use crate::executor::{
     BoxedDataChunkListStream, BoxedExecutor, BufferChunkExecutor, EquiJoinParams, HashJoinExecutor,
     JoinHashMap, JoinType, LookupExecutorBuilder, RowId, utils,
 };
-use crate::task::ShutdownToken;
+use crate::task::{ExecutorMemory, ShutdownToken};
 
 /// Lookup Join Base.
 /// Used by `LocalLookupJoinExecutor` and `DistributedLookupJoinExecutor`.
@@ -59,6 +59,7 @@ pub struct LookupJoinBase<K, B: LookupExecutorBuilder> {
     pub identity: String,
     pub shutdown_rx: ShutdownToken,
     pub mem_ctx: MemoryContext,
+    pub memory: ExecutorMemory,
     pub _phantom: PhantomData<K>,
 }
 
@@ -136,6 +137,7 @@ impl<K: HashKey, B: LookupExecutorBuilder> LookupJoinBase<K, B> {
                     build_row_count += build_chunk.cardinality();
                     let chunk_estimated_heap_size = build_chunk.estimated_heap_size() as i64;
                     self.mem_ctx.add(chunk_estimated_heap_size);
+                    self.memory.settle().await?;
                     tmp_heap_size += chunk_estimated_heap_size;
                     build_side.push(build_chunk);
                 }
@@ -167,6 +169,7 @@ impl<K: HashKey, B: LookupExecutorBuilder> LookupJoinBase<K, B> {
                         next_build_row_with_same_key[row_id] = hash_map.insert(build_key, row_id);
                     }
                 }
+                self.memory.settle().await?;
             }
 
             let params = EquiJoinParams::new(
@@ -242,6 +245,7 @@ impl<K: HashKey, B: LookupExecutorBuilder> LookupJoinBase<K, B> {
             }
 
             self.mem_ctx.add(-tmp_heap_size);
+            self.memory.settle().await?;
         }
     }
 }

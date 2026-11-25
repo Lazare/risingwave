@@ -536,6 +536,7 @@ pub fn start(
                     .developer
                     .cached_traces_memory_limit_bytes,
                 enable_trivial_move: config.meta.developer.enable_trivial_move,
+                enable_selective_barrier: config.meta.developer.enable_selective_barrier,
                 enable_check_task_level_overlap: config
                     .meta
                     .developer
