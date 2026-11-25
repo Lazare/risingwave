@@ -299,6 +299,65 @@
       │ ├─LogicalScan { table: f, columns: [f.id, f.dim_id, f.other_id] }
       │ └─LogicalScan { table: d, columns: [d.id, d.name] }
       └─LogicalScan { table: e, columns: [e.id, e.code] }
+- name: exists on the same table with a filter
+  before:
+  - setup
+  sql: |
+    select a.id, a.name from d a where exists (select 1 from da b where b.id = a.id);
+  optimized_logical_plan_for_stream: 'LogicalScan { table: d, output_columns: [d.id, d.name], required_columns: [d.id, d.name, d.active], predicate: IsNotNull(d.id) AND d.active }'
+  stream_plan: |-
+    StreamMaterialize { columns: [id, name], stream_key: [id], pk_columns: [id], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [d.id, d.name] }
+      └─StreamFilter { predicate: IsNotNull(d.id) AND d.active }
+        └─StreamTableScan { table: d, columns: [d.id, d.name, d.active], stream_scan_type: SnapshotBackfill, stream_key: [d.id], pk: [id], dist: UpstreamHashShard(d.id) }
+- name: not exists on the same table with a filter
+  before:
+  - setup
+  sql: |
+    select a.id, a.name from d a where not exists (select 1 from da b where b.id = a.id);
+  optimized_logical_plan_for_stream: 'LogicalScan { table: d, output_columns: [d.id, d.name], required_columns: [d.id, d.name, d.active], predicate: Not(Coalesce((IsNotNull(d.id) AND d.active), false:Boolean)) }'
+  stream_plan: |-
+    StreamMaterialize { columns: [id, name], stream_key: [id], pk_columns: [id], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [d.id, d.name] }
+      └─StreamFilter { predicate: Not(Coalesce((IsNotNull(d.id) AND d.active), false:Boolean)) }
+        └─StreamTableScan { table: d, columns: [d.id, d.name, d.active], stream_scan_type: SnapshotBackfill, stream_key: [d.id], pk: [id], dist: UpstreamHashShard(d.id) }
+- name: not exists on the same table without filter - only a NULL key has no match
+  before:
+  - setup
+  sql: |
+    select a.id, a.name from d a where not exists (select 1 from d b where b.id = a.id);
+  optimized_logical_plan_for_stream: 'LogicalScan { table: d, columns: [d.id, d.name], predicate: Not(Coalesce(IsNotNull(d.id), false:Boolean)) }'
+- name: not exists on a table that an inner lookup already reads
+  before:
+  - setup
+  sql: |
+    select f.id, a.name from f join d a on f.dim_id = a.id
+    where not exists (select 1 from d b where b.id = f.dim_id and b.grp = 2);
+  optimized_logical_plan_for_stream: |-
+    LogicalJoin { type: Inner, on: (f.dim_id = d.id), output: [f.id, d.name] }
+    ├─LogicalScan { table: f, columns: [f.id, f.dim_id] }
+    └─LogicalScan { table: d, output_columns: [d.id, d.name], required_columns: [d.id, d.name, d.grp], predicate: Not(Coalesce((d.grp = 2:Int32), false:Boolean)) }
+- name: not exists on a table that a left lookup already reads
+  before:
+  - setup
+  sql: |
+    select f.id, a.name from f left join d a on f.dim_id = a.id
+    where not exists (select 1 from da b where b.id = f.dim_id);
+  optimized_logical_plan_for_stream: |-
+    LogicalProject { exprs: [f.id, d.name] }
+    └─LogicalFilter { predicate: Not(Coalesce((IsNotNull(d.id) AND d.active), false:Boolean)) }
+      └─LogicalJoin { type: LeftOuter, on: (f.dim_id = d.id), output: [f.id, d.id, d.name, d.active] }
+        ├─LogicalScan { table: f, columns: [f.id, f.dim_id] }
+        └─LogicalScan { table: d, columns: [d.id, d.name, d.active] }
+- name: kept - not exists on a column that is not the key
+  before:
+  - setup
+  sql: |
+    select a.id, a.name from d a where not exists (select 1 from d b where b.grp = a.id);
+  optimized_logical_plan_for_stream: |-
+    LogicalJoin { type: LeftAnti, on: (d.grp = d.id), output: all }
+    ├─LogicalScan { table: d, columns: [d.id, d.name] }
+    └─LogicalScan { table: d, columns: [d.grp] }
 - name: kept - lookups of two different rows
   before:
   - setup

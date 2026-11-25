@@ -56,6 +56,7 @@ use risingwave_pb::plan_common::JoinType;
 use super::column_facts_simplify_rule::column_facts;
 use super::never_true_predicate_rule::is_simple_type;
 use super::prelude::{PlanRef, *};
+use super::unique_key_simplify_rule::is_unique_on_compared_columns;
 use crate::catalog::table_catalog::TableType;
 use crate::expr::{Expr, ExprImpl, ExprRewriter, ExprType, FunctionCall, InputRef};
 use crate::optimizer::plan_node::generic::GenericPlanRef;
@@ -695,8 +696,8 @@ fn widen_outer_lookup(
     })
 }
 
-/// Removes an inner or left outer join that looks up a row of a table that the other side of the
-/// join already carries. See the documentation of the module.
+/// Removes an inner, left outer, left semi or left anti join that looks up a row of a table that
+/// the other side of the join already carries. See the documentation of the module.
 ///
 /// The lookup is removed when its condition compares every column of the key of the table with a
 /// column that designates the row of one instance of the table in the other side:
@@ -710,15 +711,16 @@ fn widen_outer_lookup(
 ///
 /// The columns of the lookup are computed from the row of the instance. The row is found by the
 /// lookup when the compared columns are not `NULL`, the row satisfies the predicate of the
-/// lookup and the rest of the join condition holds: the rows of an inner join are filtered on
-/// that, and the columns of a left outer join are `NULL` otherwise.
+/// lookup and the rest of the join condition holds: the rows of an inner or semi join are
+/// filtered on that, those of an anti join on the opposite, and the columns of a left outer join
+/// are `NULL` otherwise.
 pub struct RepeatedLookupMergeRule;
 
 impl Rule<Logical> for RepeatedLookupMergeRule {
     fn apply(&self, plan: PlanRef) -> Option<PlanRef> {
         let join = plan.as_logical_join()?;
         match join.join_type() {
-            JoinType::LeftOuter => merge_lookup(join),
+            JoinType::LeftOuter | JoinType::LeftSemi | JoinType::LeftAnti => merge_lookup(join),
             JoinType::Inner => merge_lookup(join).or_else(|| merge_lookup(&commute(join))),
             _ => None,
         }
@@ -758,17 +760,15 @@ fn commute(join: &LogicalJoin) -> LogicalJoin {
     )
 }
 
-/// Removes the join if its right side is a lookup that its left side makes redundant.
-fn merge_lookup(join: &LogicalJoin) -> Option<PlanRef> {
-    let left = join.left();
-    let left_len = left.schema().len();
-    let pure = pure_scan(&join.right())?;
-    let key = pure.key();
-    let conjuncts = &join.on().conjunctions;
-    // For each column of the key, the columns of the left side that the condition compares it
-    // with, and the conjunct that does.
+/// For each column of the key of the table that the right side of a join reads, the columns of
+/// the left side that the condition compares it with, and the conjunct that does.
+fn compared_key_columns(
+    join: &LogicalJoin,
+    pure: &PureScan,
+) -> BTreeMap<usize, Vec<(usize, usize)>> {
+    let left_len = join.left().schema().len();
     let mut compared: BTreeMap<usize, Vec<(usize, usize)>> = BTreeMap::new();
-    for (position, conjunct) in conjuncts.iter().enumerate() {
+    for (position, conjunct) in join.on().conjunctions.iter().enumerate() {
         if let Some((first, second)) = conjunct.as_eq_cond()
             && first.index() < left_len
             && second.index() >= left_len
@@ -782,6 +782,15 @@ fn merge_lookup(join: &LogicalJoin) -> Option<PlanRef> {
                 .push((first.index(), position));
         }
     }
+    compared
+}
+
+/// Removes the join if its right side is a lookup that its left side makes redundant.
+fn merge_lookup(join: &LogicalJoin) -> Option<PlanRef> {
+    let left = join.left();
+    let pure = pure_scan(&join.right())?;
+    let key = pure.key();
+    let compared = compared_key_columns(join, &pure);
     if !key.iter().all(|column| compared.contains_key(column)) {
         return None;
     }
@@ -930,7 +939,9 @@ fn replace_lookup(
     }));
     let is_only_matched = is_only_matched && found.len() == 1;
 
-    let is_inner = join.join_type() == JoinType::Inner;
+    let join_type = join.join_type();
+    // The joins that only keep the rows for which the lookup finds a row.
+    let is_inner = matches!(join_type, JoinType::Inner | JoinType::LeftSemi);
     let exprs: Vec<ExprImpl> = join
         .output_indices()
         .iter()
@@ -949,16 +960,107 @@ fn replace_lookup(
             }
         })
         .collect();
-    let input = if is_inner && !found.is_empty() {
-        LogicalFilter::new(
-            new_left,
-            Condition {
-                conjunctions: found,
-            },
-        )
-        .into()
-    } else {
+    let conjunctions = match join_type {
+        // An anti join keeps the rows for which the lookup finds no row: "found" is not true.
+        JoinType::LeftAnti if found.is_empty() => vec![ExprImpl::literal_bool(false)],
+        JoinType::LeftAnti => {
+            let found_or_false = FunctionCall::new_unchecked(
+                ExprType::Coalesce,
+                vec![and_all(found), ExprImpl::literal_bool(false)],
+                DataType::Boolean,
+            );
+            vec![
+                FunctionCall::new_unchecked(
+                    ExprType::Not,
+                    vec![found_or_false.into()],
+                    DataType::Boolean,
+                )
+                .into(),
+            ]
+        }
+        _ if is_inner => found,
+        _ => vec![],
+    };
+    let input = if conjunctions.is_empty() {
         new_left
+    } else {
+        LogicalFilter::new(new_left, Condition { conjunctions }).into()
     };
     Some(LogicalProject::new(input, exprs).into())
+}
+
+/// Prints, for every join of a plan whose two sides read the same relation (a table, or a shared
+/// sub-plan), the operators between the join and the relation on each side, and whether each
+/// side is unique on the columns that the join compares. Only when the environment variable
+/// `RW_MERGE_LOOKUP_DIAG` is set: a development aid to find the shapes of repeated reads that the
+/// rule does not handle.
+pub fn diagnose_repeated_reads(plan: &PlanRef) {
+    if std::env::var("RW_MERGE_LOOKUP_DIAG").is_err() {
+        return;
+    }
+    let mut visited = BTreeSet::new();
+    let mut stack = vec![plan.clone()];
+    while let Some(node) = stack.pop() {
+        if !visited.insert(node.id().0) {
+            continue;
+        }
+        stack.extend(node.inputs());
+        let Some(join) = node.as_logical_join() else {
+            continue;
+        };
+        let left_paths = relation_paths(&join.left());
+        let right_paths = relation_paths(&join.right());
+        let (left_unique, right_unique) = is_unique_on_compared_columns(join);
+        for (relation, right_path) in &right_paths {
+            let Some(left_path) = left_paths.get(relation) else {
+                continue;
+            };
+            eprintln!(
+                "MERGE_DIAG\t{relation}\t{:?}\tR:{}\tL:{}\tright_unique={right_unique}\tleft_unique={left_unique}",
+                join.join_type(),
+                right_path.join(">"),
+                left_path.join(">"),
+            );
+        }
+    }
+}
+
+/// For each relation that a plan reads (a table, or a shared sub-plan, which is not entered), the
+/// operators from the plan down to the relation, the shortest way. Projections and filters are
+/// not listed.
+fn relation_paths(plan: &PlanRef) -> BTreeMap<String, Vec<String>> {
+    if let Some(scan) = plan.as_logical_scan() {
+        return BTreeMap::from([(format!("table {}", scan.table().name), vec![])]);
+    }
+    if let Some(share) = plan.as_logical_share() {
+        let kind = format!("{:?}", share.input().node_type()).replace("Logical", "");
+        return BTreeMap::from([(format!("share {} of {kind}", plan.id().0), vec![])]);
+    }
+    let here = if let Some(join) = plan.as_logical_join() {
+        Some(format!("Join{:?}", join.join_type()))
+    } else if plan.as_logical_project().is_some() || plan.as_logical_filter().is_some() {
+        None
+    } else {
+        Some(format!("{:?}", plan.node_type()).replace("Logical", ""))
+    };
+    let mut paths: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (index, input) in plan.inputs().iter().enumerate() {
+        for (relation, mut path) in relation_paths(input) {
+            if let Some(here) = &here {
+                let side = if plan.as_logical_join().is_some() {
+                    ["(l)", "(r)"][index.min(1)]
+                } else {
+                    ""
+                };
+                path.insert(0, format!("{here}{side}"));
+            }
+            match paths.get(&relation) {
+                Some(other) if other.len() <= path.len() => {}
+                _ => {
+                    paths.insert(relation, path);
+                }
+            }
+        }
+    }
+    paths
 }

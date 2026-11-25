@@ -227,6 +227,17 @@ fn bound_columns(join: &LogicalJoin) -> (BTreeSet<usize>, BTreeSet<usize>) {
     (bound_left, bound_right)
 }
 
+/// Returns whether the left side, then the right side, of a join is unique on the columns that
+/// the condition of the join binds: a row of the other side matches at most one row.
+pub(super) fn is_unique_on_compared_columns(join: &LogicalJoin) -> (bool, bool) {
+    let (bound_left, bound_right) = bound_columns(join);
+    let mut memo = HashMap::new();
+    (
+        has_key_within(&join.left(), &bound_left, &mut memo),
+        has_key_within(&join.right(), &bound_right, &mut memo),
+    )
+}
+
 /// Returns the keys of a join.
 ///
 /// When the condition binds a key of the right side (see [`bound_columns`]), a row of the left

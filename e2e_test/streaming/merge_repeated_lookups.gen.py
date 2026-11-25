@@ -129,6 +129,24 @@ CASES = [
     ('same_column_left', 'left lookups of the same columns with an outer join in between',
      f"select f.id as fid, a.name as an, a.id as aid, e.code as ec, b.name as bn, b.id as bid from {F} f "
      f"left join {D} a on f.dim_id = a.id left join {E} e on f.other_id = e.id left join {D} b on f.dim_id = b.id"),
+    # Semi and anti joins: the lookup only tells whether the row is found.
+    ('exists_self', 'exists on the same table with a filter',
+     f"select a.id as aid, a.name as an from {D} a where exists (select 1 from {DA} b where b.id = a.id)"),
+    ('not_exists_self', 'not exists on the same table with a filter',
+     f"select a.id as aid, a.name as an from {D} a where not exists (select 1 from {DA} b where b.id = a.id)"),
+    ('not_exists_self_null_filter', 'not exists on the same table with a filter that can be NULL',
+     f"select a.id as aid, a.name as an from {D} a where not exists (select 1 from {D} b where b.id = a.id and b.grp > 1)"),
+    ('not_exists_plain', 'not exists on the same table without filter',
+     f"select a.id as aid, a.cnt as ac from {DM} a where not exists (select 1 from {DM} b where b.id = a.id)"),
+    ('not_exists_inner', 'not exists on a table that an inner lookup already reads',
+     f"select f.id as fid, a.name as an from {F} f join {D} a on f.dim_id = a.id "
+     f"where not exists (select 1 from {D} b where b.id = f.dim_id and b.grp = 2)"),
+    ('not_exists_left', 'not exists on a table that a left lookup already reads',
+     f"select f.id as fid, a.name as an from {F} f left join {D} a on f.dim_id = a.id "
+     f"where not exists (select 1 from {DA} b where b.id = f.dim_id)"),
+    ('exists_left', 'exists on a table that a left lookup already reads',
+     f"select f.id as fid, a.name as an from {F} f left join {D} a on f.dim_id = a.id "
+     f"where exists (select 1 from {DA} b where b.id = f.dim_id and b.grp < f.amt)"),
     # A key that can be NULL.
     ('null_key_left', 'left lookups in a relation whose key can be NULL',
      f"select f.id as fid, a.cnt as ac, b.top as bt from {F} f left join {DM} a on f.amt = a.id left join {DM} b on f.amt = b.id"),

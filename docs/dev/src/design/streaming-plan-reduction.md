@@ -179,6 +179,8 @@ input joined on their group key: one aggregation with a `FILTER` per call.
     condition of the first join to be exactly the equalities on the key.
   - The kept scan is widened with the columns that the removed lookup needs, appended to the
     output of every node on the way up, so that existing column references stay valid.
+  - A semi or anti join on the key (`EXISTS` / `NOT EXISTS` on a table that the other side
+    carries) becomes a filter on "found", or on its opposite.
   - Not followed yet: an instance below an aggregation, top-n, union or a shared sub-plan that
     is more than a scan; a lookup written as `IS NOT DISTINCT FROM`; a key column compared with
     a constant; a key of a type outside the simple types.

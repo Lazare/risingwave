@@ -185,6 +185,48 @@
   expected_outputs:
   - optimized_logical_plan_for_stream
 
+# Semi and anti joins: the lookup only tells whether the row is found.
+- name: exists on the same table with a filter
+  before: [setup]
+  sql: |
+    select a.id, a.name from d a where exists (select 1 from da b where b.id = a.id);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: not exists on the same table with a filter
+  before: [setup]
+  sql: |
+    select a.id, a.name from d a where not exists (select 1 from da b where b.id = a.id);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: not exists on the same table without filter - only a NULL key has no match
+  before: [setup]
+  sql: |
+    select a.id, a.name from d a where not exists (select 1 from d b where b.id = a.id);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: not exists on a table that an inner lookup already reads
+  before: [setup]
+  sql: |
+    select f.id, a.name from f join d a on f.dim_id = a.id
+    where not exists (select 1 from d b where b.id = f.dim_id and b.grp = 2);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: not exists on a table that a left lookup already reads
+  before: [setup]
+  sql: |
+    select f.id, a.name from f left join d a on f.dim_id = a.id
+    where not exists (select 1 from da b where b.id = f.dim_id);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - not exists on a column that is not the key
+  before: [setup]
+  sql: |
+    select a.id, a.name from d a where not exists (select 1 from d b where b.grp = a.id);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+
 # Lookups that are kept.
 - name: kept - lookups of two different rows
   before: [setup]

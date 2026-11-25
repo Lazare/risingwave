@@ -271,6 +271,41 @@ create materialized view mrl_same_column_between_off as select f.id as fid, a.na
 statement ok
 create materialized view mrl_same_column_left_off as select f.id as fid, a.name as an, a.id as aid, e.code as ec, b.name as bn, b.id as bid from mrl_f f left join mrl_d a on f.dim_id = a.id left join mrl_e e on f.other_id = e.id left join mrl_d b on f.dim_id = b.id;
 
+# exists on the same table with a filter
+
+statement ok
+create materialized view mrl_exists_self_off as select a.id as aid, a.name as an from mrl_d a where exists (select 1 from mrl_da b where b.id = a.id);
+
+# not exists on the same table with a filter
+
+statement ok
+create materialized view mrl_not_exists_self_off as select a.id as aid, a.name as an from mrl_d a where not exists (select 1 from mrl_da b where b.id = a.id);
+
+# not exists on the same table with a filter that can be NULL
+
+statement ok
+create materialized view mrl_not_exists_self_null_filter_off as select a.id as aid, a.name as an from mrl_d a where not exists (select 1 from mrl_d b where b.id = a.id and b.grp > 1);
+
+# not exists on the same table without filter
+
+statement ok
+create materialized view mrl_not_exists_plain_off as select a.id as aid, a.cnt as ac from mrl_dm a where not exists (select 1 from mrl_dm b where b.id = a.id);
+
+# not exists on a table that an inner lookup already reads
+
+statement ok
+create materialized view mrl_not_exists_inner_off as select f.id as fid, a.name as an from mrl_f f join mrl_d a on f.dim_id = a.id where not exists (select 1 from mrl_d b where b.id = f.dim_id and b.grp = 2);
+
+# not exists on a table that a left lookup already reads
+
+statement ok
+create materialized view mrl_not_exists_left_off as select f.id as fid, a.name as an from mrl_f f left join mrl_d a on f.dim_id = a.id where not exists (select 1 from mrl_da b where b.id = f.dim_id);
+
+# exists on a table that a left lookup already reads
+
+statement ok
+create materialized view mrl_exists_left_off as select f.id as fid, a.name as an from mrl_f f left join mrl_d a on f.dim_id = a.id where exists (select 1 from mrl_da b where b.id = f.dim_id and b.grp < f.amt);
+
 # left lookups in a relation whose key can be NULL
 
 statement ok
@@ -533,6 +568,41 @@ create materialized view mrl_same_column_between_on as select f.id as fid, a.nam
 
 statement ok
 create materialized view mrl_same_column_left_on as select f.id as fid, a.name as an, a.id as aid, e.code as ec, b.name as bn, b.id as bid from mrl_f f left join mrl_d a on f.dim_id = a.id left join mrl_e e on f.other_id = e.id left join mrl_d b on f.dim_id = b.id;
+
+# exists on the same table with a filter
+
+statement ok
+create materialized view mrl_exists_self_on as select a.id as aid, a.name as an from mrl_d a where exists (select 1 from mrl_da b where b.id = a.id);
+
+# not exists on the same table with a filter
+
+statement ok
+create materialized view mrl_not_exists_self_on as select a.id as aid, a.name as an from mrl_d a where not exists (select 1 from mrl_da b where b.id = a.id);
+
+# not exists on the same table with a filter that can be NULL
+
+statement ok
+create materialized view mrl_not_exists_self_null_filter_on as select a.id as aid, a.name as an from mrl_d a where not exists (select 1 from mrl_d b where b.id = a.id and b.grp > 1);
+
+# not exists on the same table without filter
+
+statement ok
+create materialized view mrl_not_exists_plain_on as select a.id as aid, a.cnt as ac from mrl_dm a where not exists (select 1 from mrl_dm b where b.id = a.id);
+
+# not exists on a table that an inner lookup already reads
+
+statement ok
+create materialized view mrl_not_exists_inner_on as select f.id as fid, a.name as an from mrl_f f join mrl_d a on f.dim_id = a.id where not exists (select 1 from mrl_d b where b.id = f.dim_id and b.grp = 2);
+
+# not exists on a table that a left lookup already reads
+
+statement ok
+create materialized view mrl_not_exists_left_on as select f.id as fid, a.name as an from mrl_f f left join mrl_d a on f.dim_id = a.id where not exists (select 1 from mrl_da b where b.id = f.dim_id);
+
+# exists on a table that a left lookup already reads
+
+statement ok
+create materialized view mrl_exists_left_on as select f.id as fid, a.name as an from mrl_f f left join mrl_d a on f.dim_id = a.id where exists (select 1 from mrl_da b where b.id = f.dim_id and b.grp < f.amt);
 
 # left lookups in a relation whose key can be NULL
 
@@ -919,6 +989,62 @@ select
   (select count(*) from (select * from mrl_same_column_left_on except select * from mrl_same_column_left_off) x),
   (select count(*) from (select * from mrl_same_column_left_off except select * from mrl_same_column_left_on) y),
   (select count(*) from mrl_same_column_left_on) - (select count(*) from mrl_same_column_left_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_exists_self_on except select * from mrl_exists_self_off) x),
+  (select count(*) from (select * from mrl_exists_self_off except select * from mrl_exists_self_on) y),
+  (select count(*) from mrl_exists_self_on) - (select count(*) from mrl_exists_self_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_not_exists_self_on except select * from mrl_not_exists_self_off) x),
+  (select count(*) from (select * from mrl_not_exists_self_off except select * from mrl_not_exists_self_on) y),
+  (select count(*) from mrl_not_exists_self_on) - (select count(*) from mrl_not_exists_self_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_not_exists_self_null_filter_on except select * from mrl_not_exists_self_null_filter_off) x),
+  (select count(*) from (select * from mrl_not_exists_self_null_filter_off except select * from mrl_not_exists_self_null_filter_on) y),
+  (select count(*) from mrl_not_exists_self_null_filter_on) - (select count(*) from mrl_not_exists_self_null_filter_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_not_exists_plain_on except select * from mrl_not_exists_plain_off) x),
+  (select count(*) from (select * from mrl_not_exists_plain_off except select * from mrl_not_exists_plain_on) y),
+  (select count(*) from mrl_not_exists_plain_on) - (select count(*) from mrl_not_exists_plain_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_not_exists_inner_on except select * from mrl_not_exists_inner_off) x),
+  (select count(*) from (select * from mrl_not_exists_inner_off except select * from mrl_not_exists_inner_on) y),
+  (select count(*) from mrl_not_exists_inner_on) - (select count(*) from mrl_not_exists_inner_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_not_exists_left_on except select * from mrl_not_exists_left_off) x),
+  (select count(*) from (select * from mrl_not_exists_left_off except select * from mrl_not_exists_left_on) y),
+  (select count(*) from mrl_not_exists_left_on) - (select count(*) from mrl_not_exists_left_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_exists_left_on except select * from mrl_exists_left_off) x),
+  (select count(*) from (select * from mrl_exists_left_off except select * from mrl_exists_left_on) y),
+  (select count(*) from mrl_exists_left_on) - (select count(*) from mrl_exists_left_off);
 ----
 0 0 0
 
@@ -1412,6 +1538,62 @@ select
 
 query III
 select
+  (select count(*) from (select * from mrl_exists_self_on except select * from mrl_exists_self_off) x),
+  (select count(*) from (select * from mrl_exists_self_off except select * from mrl_exists_self_on) y),
+  (select count(*) from mrl_exists_self_on) - (select count(*) from mrl_exists_self_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_not_exists_self_on except select * from mrl_not_exists_self_off) x),
+  (select count(*) from (select * from mrl_not_exists_self_off except select * from mrl_not_exists_self_on) y),
+  (select count(*) from mrl_not_exists_self_on) - (select count(*) from mrl_not_exists_self_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_not_exists_self_null_filter_on except select * from mrl_not_exists_self_null_filter_off) x),
+  (select count(*) from (select * from mrl_not_exists_self_null_filter_off except select * from mrl_not_exists_self_null_filter_on) y),
+  (select count(*) from mrl_not_exists_self_null_filter_on) - (select count(*) from mrl_not_exists_self_null_filter_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_not_exists_plain_on except select * from mrl_not_exists_plain_off) x),
+  (select count(*) from (select * from mrl_not_exists_plain_off except select * from mrl_not_exists_plain_on) y),
+  (select count(*) from mrl_not_exists_plain_on) - (select count(*) from mrl_not_exists_plain_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_not_exists_inner_on except select * from mrl_not_exists_inner_off) x),
+  (select count(*) from (select * from mrl_not_exists_inner_off except select * from mrl_not_exists_inner_on) y),
+  (select count(*) from mrl_not_exists_inner_on) - (select count(*) from mrl_not_exists_inner_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_not_exists_left_on except select * from mrl_not_exists_left_off) x),
+  (select count(*) from (select * from mrl_not_exists_left_off except select * from mrl_not_exists_left_on) y),
+  (select count(*) from mrl_not_exists_left_on) - (select count(*) from mrl_not_exists_left_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_exists_left_on except select * from mrl_exists_left_off) x),
+  (select count(*) from (select * from mrl_exists_left_off except select * from mrl_exists_left_on) y),
+  (select count(*) from mrl_exists_left_on) - (select count(*) from mrl_exists_left_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from mrl_null_key_left_on except select * from mrl_null_key_left_off) x),
   (select count(*) from (select * from mrl_null_key_left_off except select * from mrl_null_key_left_on) y),
   (select count(*) from mrl_null_key_left_on) - (select count(*) from mrl_null_key_left_off);
@@ -1889,6 +2071,62 @@ select
 
 query III
 select
+  (select count(*) from (select * from mrl_exists_self_on except select * from mrl_exists_self_off) x),
+  (select count(*) from (select * from mrl_exists_self_off except select * from mrl_exists_self_on) y),
+  (select count(*) from mrl_exists_self_on) - (select count(*) from mrl_exists_self_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_not_exists_self_on except select * from mrl_not_exists_self_off) x),
+  (select count(*) from (select * from mrl_not_exists_self_off except select * from mrl_not_exists_self_on) y),
+  (select count(*) from mrl_not_exists_self_on) - (select count(*) from mrl_not_exists_self_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_not_exists_self_null_filter_on except select * from mrl_not_exists_self_null_filter_off) x),
+  (select count(*) from (select * from mrl_not_exists_self_null_filter_off except select * from mrl_not_exists_self_null_filter_on) y),
+  (select count(*) from mrl_not_exists_self_null_filter_on) - (select count(*) from mrl_not_exists_self_null_filter_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_not_exists_plain_on except select * from mrl_not_exists_plain_off) x),
+  (select count(*) from (select * from mrl_not_exists_plain_off except select * from mrl_not_exists_plain_on) y),
+  (select count(*) from mrl_not_exists_plain_on) - (select count(*) from mrl_not_exists_plain_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_not_exists_inner_on except select * from mrl_not_exists_inner_off) x),
+  (select count(*) from (select * from mrl_not_exists_inner_off except select * from mrl_not_exists_inner_on) y),
+  (select count(*) from mrl_not_exists_inner_on) - (select count(*) from mrl_not_exists_inner_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_not_exists_left_on except select * from mrl_not_exists_left_off) x),
+  (select count(*) from (select * from mrl_not_exists_left_off except select * from mrl_not_exists_left_on) y),
+  (select count(*) from mrl_not_exists_left_on) - (select count(*) from mrl_not_exists_left_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_exists_left_on except select * from mrl_exists_left_off) x),
+  (select count(*) from (select * from mrl_exists_left_off except select * from mrl_exists_left_on) y),
+  (select count(*) from mrl_exists_left_on) - (select count(*) from mrl_exists_left_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from mrl_null_key_left_on except select * from mrl_null_key_left_off) x),
   (select count(*) from (select * from mrl_null_key_left_off except select * from mrl_null_key_left_on) y),
   (select count(*) from mrl_null_key_left_on) - (select count(*) from mrl_null_key_left_off);
@@ -2307,6 +2545,62 @@ select
   (select count(*) from (select * from mrl_same_column_left_on except select * from mrl_same_column_left_off) x),
   (select count(*) from (select * from mrl_same_column_left_off except select * from mrl_same_column_left_on) y),
   (select count(*) from mrl_same_column_left_on) - (select count(*) from mrl_same_column_left_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_exists_self_on except select * from mrl_exists_self_off) x),
+  (select count(*) from (select * from mrl_exists_self_off except select * from mrl_exists_self_on) y),
+  (select count(*) from mrl_exists_self_on) - (select count(*) from mrl_exists_self_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_not_exists_self_on except select * from mrl_not_exists_self_off) x),
+  (select count(*) from (select * from mrl_not_exists_self_off except select * from mrl_not_exists_self_on) y),
+  (select count(*) from mrl_not_exists_self_on) - (select count(*) from mrl_not_exists_self_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_not_exists_self_null_filter_on except select * from mrl_not_exists_self_null_filter_off) x),
+  (select count(*) from (select * from mrl_not_exists_self_null_filter_off except select * from mrl_not_exists_self_null_filter_on) y),
+  (select count(*) from mrl_not_exists_self_null_filter_on) - (select count(*) from mrl_not_exists_self_null_filter_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_not_exists_plain_on except select * from mrl_not_exists_plain_off) x),
+  (select count(*) from (select * from mrl_not_exists_plain_off except select * from mrl_not_exists_plain_on) y),
+  (select count(*) from mrl_not_exists_plain_on) - (select count(*) from mrl_not_exists_plain_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_not_exists_inner_on except select * from mrl_not_exists_inner_off) x),
+  (select count(*) from (select * from mrl_not_exists_inner_off except select * from mrl_not_exists_inner_on) y),
+  (select count(*) from mrl_not_exists_inner_on) - (select count(*) from mrl_not_exists_inner_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_not_exists_left_on except select * from mrl_not_exists_left_off) x),
+  (select count(*) from (select * from mrl_not_exists_left_off except select * from mrl_not_exists_left_on) y),
+  (select count(*) from mrl_not_exists_left_on) - (select count(*) from mrl_not_exists_left_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_exists_left_on except select * from mrl_exists_left_off) x),
+  (select count(*) from (select * from mrl_exists_left_off except select * from mrl_exists_left_on) y),
+  (select count(*) from mrl_exists_left_on) - (select count(*) from mrl_exists_left_off);
 ----
 0 0 0
 
@@ -2736,6 +3030,62 @@ select
 
 query III
 select
+  (select count(*) from (select * from mrl_exists_self_on except select * from mrl_exists_self_off) x),
+  (select count(*) from (select * from mrl_exists_self_off except select * from mrl_exists_self_on) y),
+  (select count(*) from mrl_exists_self_on) - (select count(*) from mrl_exists_self_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_not_exists_self_on except select * from mrl_not_exists_self_off) x),
+  (select count(*) from (select * from mrl_not_exists_self_off except select * from mrl_not_exists_self_on) y),
+  (select count(*) from mrl_not_exists_self_on) - (select count(*) from mrl_not_exists_self_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_not_exists_self_null_filter_on except select * from mrl_not_exists_self_null_filter_off) x),
+  (select count(*) from (select * from mrl_not_exists_self_null_filter_off except select * from mrl_not_exists_self_null_filter_on) y),
+  (select count(*) from mrl_not_exists_self_null_filter_on) - (select count(*) from mrl_not_exists_self_null_filter_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_not_exists_plain_on except select * from mrl_not_exists_plain_off) x),
+  (select count(*) from (select * from mrl_not_exists_plain_off except select * from mrl_not_exists_plain_on) y),
+  (select count(*) from mrl_not_exists_plain_on) - (select count(*) from mrl_not_exists_plain_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_not_exists_inner_on except select * from mrl_not_exists_inner_off) x),
+  (select count(*) from (select * from mrl_not_exists_inner_off except select * from mrl_not_exists_inner_on) y),
+  (select count(*) from mrl_not_exists_inner_on) - (select count(*) from mrl_not_exists_inner_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_not_exists_left_on except select * from mrl_not_exists_left_off) x),
+  (select count(*) from (select * from mrl_not_exists_left_off except select * from mrl_not_exists_left_on) y),
+  (select count(*) from mrl_not_exists_left_on) - (select count(*) from mrl_not_exists_left_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_exists_left_on except select * from mrl_exists_left_off) x),
+  (select count(*) from (select * from mrl_exists_left_off except select * from mrl_exists_left_on) y),
+  (select count(*) from mrl_exists_left_on) - (select count(*) from mrl_exists_left_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from mrl_null_key_left_on except select * from mrl_null_key_left_off) x),
   (select count(*) from (select * from mrl_null_key_left_off except select * from mrl_null_key_left_on) y),
   (select count(*) from mrl_null_key_left_on) - (select count(*) from mrl_null_key_left_off);
@@ -2845,6 +3195,27 @@ drop materialized view mrl_null_key_self_on;
 
 statement ok
 drop materialized view mrl_null_key_left_on;
+
+statement ok
+drop materialized view mrl_exists_left_on;
+
+statement ok
+drop materialized view mrl_not_exists_left_on;
+
+statement ok
+drop materialized view mrl_not_exists_inner_on;
+
+statement ok
+drop materialized view mrl_not_exists_plain_on;
+
+statement ok
+drop materialized view mrl_not_exists_self_null_filter_on;
+
+statement ok
+drop materialized view mrl_not_exists_self_on;
+
+statement ok
+drop materialized view mrl_exists_self_on;
 
 statement ok
 drop materialized view mrl_same_column_left_on;
@@ -3001,6 +3372,27 @@ drop materialized view mrl_null_key_self_off;
 
 statement ok
 drop materialized view mrl_null_key_left_off;
+
+statement ok
+drop materialized view mrl_exists_left_off;
+
+statement ok
+drop materialized view mrl_not_exists_left_off;
+
+statement ok
+drop materialized view mrl_not_exists_inner_off;
+
+statement ok
+drop materialized view mrl_not_exists_plain_off;
+
+statement ok
+drop materialized view mrl_not_exists_self_null_filter_off;
+
+statement ok
+drop materialized view mrl_not_exists_self_off;
+
+statement ok
+drop materialized view mrl_exists_self_off;
 
 statement ok
 drop materialized view mrl_same_column_left_off;

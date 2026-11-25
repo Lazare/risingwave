@@ -920,6 +920,7 @@ impl LogicalOptimizer {
         {
             let applied_before = ctx.total_rule_applied();
             plan = plan.optimize_by_rules(&STREAM_MERGE_REPEATED_LOOKUPS)?;
+            crate::optimizer::rule::diagnose_repeated_reads(&plan);
             let applied = ctx.total_rule_applied() - applied_before;
             if applied > 0 {
                 ctx.add_stream_prune_rule_applied(applied);
