@@ -499,6 +499,19 @@ static BATCH_PRUNE_EMPTY_RELATION: LazyLock<OptimizationStage> = LazyLock::new(|
     )
 });
 
+static STREAM_PRUNE_EMPTY_RELATION: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Prune Empty Relation For Stream",
+        vec![
+            NeverTruePredicateRule::create(),
+            EmptyRelationPropagateRule::create(),
+            EmptyInputSimplifyRule::create(),
+        ],
+        // Must be bottom-up so that an empty relation is propagated to the top in one pass.
+        ApplyOrder::BottomUp,
+    )
+});
+
 static LIMIT_PUSH_DOWN: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Push Down Limit",
@@ -836,6 +849,14 @@ impl LogicalOptimizer {
         // Do a final column pruning and predicate pushing down to clean up the plan.
         plan = Self::column_pruning(plan, explain_trace, &ctx);
         plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+
+        // After the final predicate pushdown, the conjuncts that contradict each other have been
+        // merged into the same filter, scan or join. Remove the sub-plans that are proven to be
+        // empty, so that their fragments, backfills and states are never created. On demand
+        // only: the plan of a streaming job is frozen when the job is created.
+        if ctx.session_ctx().config().streaming_prune_empty_relation() {
+            plan = plan.optimize_by_rules(&STREAM_PRUNE_EMPTY_RELATION)?;
+        }
 
         plan = plan.optimize_by_rules(&CONSTANT_OUTPUT_REMOVE)?;
         plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;

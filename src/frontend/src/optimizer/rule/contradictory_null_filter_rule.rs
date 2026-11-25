@@ -68,7 +68,7 @@ impl ContradictoryNullFilterRule {
 
 /// Returns whether the conjunction contains `IsNull(#i)` together with a conjunct that can not be
 /// `TRUE` when `#i` is `NULL`.
-fn is_null_contradiction(predicate: &Condition) -> bool {
+pub(super) fn is_null_contradiction(predicate: &Condition) -> bool {
     let is_null_columns: HashSet<usize> = predicate
         .conjunctions
         .iter()

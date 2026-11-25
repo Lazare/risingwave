@@ -207,6 +207,10 @@ mod contradictory_null_filter_rule;
 pub use contradictory_null_filter_rule::*;
 mod empty_relation_propagate_rule;
 pub use empty_relation_propagate_rule::*;
+mod empty_input_simplify_rule;
+pub use empty_input_simplify_rule::*;
+mod never_true_predicate_rule;
+pub use never_true_predicate_rule::*;
 mod join_project_transpose_rule;
 pub use join_project_transpose_rule::*;
 mod limit_push_down_rule;
@@ -347,6 +351,8 @@ macro_rules! for_all_rules {
             , { AlwaysFalseFilterRule }
             , { ContradictoryNullFilterRule }
             , { EmptyRelationPropagateRule }
+            , { EmptyInputSimplifyRule }
+            , { NeverTruePredicateRule }
             , { BushyTreeJoinOrderingRule }
             , { StreamProjectMergeRule }
             , { StreamProjectSplitRule }

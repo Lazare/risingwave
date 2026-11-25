@@ -274,6 +274,12 @@ pub struct SessionConfig {
     #[parameter(default = false)]
     streaming_unsafe_allow_upsert_sink_pk_mismatch: bool,
 
+    /// Remove from the plan of a new streaming job the sub-plans that are proven to never
+    /// produce a row, e.g. below a filter such as `x IS NULL AND x = 1` or `'b' = 'a'`, so that
+    /// their fragments, backfills and states are not created. Defaults to false.
+    #[parameter(default = false)]
+    streaming_prune_empty_relation: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,
