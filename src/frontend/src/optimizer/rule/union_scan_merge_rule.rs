@@ -40,8 +40,9 @@
 //! computes, which stays shared with its other consumers, or a scan of the same table.
 //!
 //! The branches that are not merged this way (a join, a table function above the scan of a
-//! table) still read the same table in several places: [`UnionScanShareRule`] then reads it once,
-//! in a shared scan that each of them filters and projects as its own scan did.
+//! table) still read the same table in several places: [`UnionScanShareRule`], behind its own
+//! variable `streaming_share_union_scans`, then reads it once, in a shared scan that each of them
+//! filters and projects as its own scan did.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -486,7 +487,9 @@ fn replace_scans(plan: &PlanRef, replacements: &HashMap<PlanNodeId, PlanRef>) ->
 /// the rows of every branch are unchanged. The table is scanned and backfilled once instead of
 /// once per scan. Only the scans of the table in at least two branches are shared, and only
 /// outside the shared sub-plans of the branches. Applied after [`UnionScanMergeRule`], which
-/// leaves fewer operators when the branches only filter and project the table.
+/// leaves fewer operators when the branches only filter and project the table. Each shared scan
+/// adds a fragment: fewer scans and backfills against more actors and exchanges, a trade-off
+/// left to its own variable `streaming_share_union_scans`.
 pub struct UnionScanShareRule;
 
 impl Rule<Logical> for UnionScanShareRule {

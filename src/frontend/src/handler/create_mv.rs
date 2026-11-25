@@ -384,6 +384,8 @@ pub(crate) fn gen_create_mv_graph(
             || config.streaming_merge_stacked_aggregations()
             || config.streaming_share_identical_subplans()
             || config.streaming_unnest_lateral_functions()
+            // Rule `UnionScanShareRule`.
+            || config.streaming_share_union_scans()
     };
     let baseline_args = prune_enabled.then(|| {
         (

@@ -334,6 +334,13 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     streaming_unnest_lateral_functions: bool,
 
+    /// In the plan of a new streaming job, read once, in a shared scan, a table that several
+    /// branches of a union scan below a join, a table function or anything else: each branch
+    /// filters and projects the shared scan as its own scan did. Fewer scans and backfills, but
+    /// one more fragment per shared scan. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    streaming_share_union_scans: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,
