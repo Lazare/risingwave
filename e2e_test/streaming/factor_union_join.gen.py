@@ -8,6 +8,9 @@ import sys
 
 F, D, E, G = 'fuj_f', 'fuj_d', 'fuj_e', 'fuj_g'
 DA = 'fuj_da'  # view: the active rows of D
+# Derived relations joined in several branches: a join with duplicates, an aggregation (with a
+# NULL group), a left join.
+DJ, DAGG, DL = 'fuj_dj', 'fuj_dagg', 'fuj_dl'
 LABELS = f"(select id, coalesce(name, 'none') as label from {D})"
 
 CASES = [
@@ -82,6 +85,47 @@ CASES = [
     ('union_distinct', 'union without all',
      f"select d.name as dn, d.grp as dg from {F} f join {D} d on f.dim_id = d.id "
      f"union select d.name, d.grp from {E} e join {D} d on e.ref_id = d.id"),
+    # The joined side is a derived relation, the same in every branch.
+    ('dv_inner', 'a view with a join, inner joins',
+     f"select f.id as id, v.name as dn, v.a as va from {F} f join {DJ} v on f.dim_id = v.id "
+     f"union all select e.id, v.name, v.a from {E} e join {DJ} v on e.ref_id = v.id"),
+    ('dv_agg_left', 'an aggregating view, left joins',
+     f"select f.id as id, v.cnt as cnt, v.mx as mx from {F} f left join {DAGG} v on f.amt = v.grp "
+     f"union all select e.id, v.cnt, e.code from {E} e left join {DAGG} v on e.ref_id = v.grp"),
+    ('dv_anti', 'anti joins with a view with a join',
+     f"select f.id as id, f.label as txt from {F} f where not exists (select 1 from {DJ} v where v.id = f.dim_id) "
+     f"union all select e.id, e.code from {E} e where not exists (select 1 from {DJ} v where v.id = e.ref_id)"),
+    ('dv_semi_filters', 'semi joins with a different filter of the aggregating view',
+     f"select f.id as id, f.label as txt from {F} f where exists (select 1 from {DAGG} v where v.grp = f.amt and v.cnt > 1) "
+     f"union all select e.id, e.code from {E} e where exists (select 1 from {DAGG} v where v.grp = e.ref_id and v.mx is not null)"),
+    ('dv_filters', 'inner joins with a different filter of the aggregating view',
+     f"select f.id as id, v.cnt as cnt from {F} f join {DAGG} v on f.amt = v.grp where v.cnt > 1 "
+     f"union all select e.id, v.cnt from {E} e join {DAGG} v on e.ref_id = v.grp where v.mx is not null"),
+    ('dv_condition', 'an extra condition on the view in one branch',
+     f"select f.id as id, v.name as dn from {F} f left join {DJ} v on f.dim_id = v.id and v.a > f.amt "
+     f"union all select e.id, v.name from {E} e left join {DJ} v on e.ref_id = v.id"),
+    ('dv_left_view', 'a view with a left join, left joins',
+     f"select f.id as id, v.name as dn, v.a as va from {F} f left join {DL} v on f.dim_id = v.id "
+     f"union all select e.id, v.name, v.a from {E} e left join {DL} v on e.ref_id = v.id"),
+    ('dv_inline', 'the same aggregating subquery written in each branch',
+     f"select f.id as id, v.cnt as cnt from {F} f join (select grp, count(*) as cnt from {D} group by grp) v on f.amt = v.grp "
+     f"union all select e.id, v.cnt from {E} e join (select grp, count(*) as cnt from {D} group by grp) v on e.ref_id = v.grp"),
+    # Several joins, and semi or anti joins above the join.
+    ('chain', 'two joins common to the branches',
+     f"select f.id as id, g.a as ga, d.name as dn from {F} f join {D} d on f.dim_id = d.id join {G} g on d.grp = g.b "
+     f"union all select e.id, g.a, d.name from {E} e join {D} d on e.ref_id = d.id join {G} g on d.grp = g.b"),
+    ('two_anti', 'two anti joins in each branch',
+     f"select f.id as id, f.label as txt from {F} f where not exists (select 1 from {G} g where g.a = f.other_id and g.b > 1) "
+     f"and not exists (select 1 from {D} d where d.id = f.other_id) "
+     f"union all select e.id, e.code from {E} e where not exists (select 1 from {G} g where g.a = e.ref_id and g.b > 1) "
+     f"and not exists (select 1 from {D} d where d.id = e.ref_id)"),
+    ('anti_above_left', 'anti join on the other input above a left join in one branch',
+     f"select f.id as id, d.name as dn from {F} f left join {D} d on f.dim_id = d.id "
+     f"where not exists (select 1 from {G} g where g.a = f.other_id) "
+     f"union all select e.id, d.name from {E} e left join {D} d on e.ref_id = d.id"),
+    ('semi_above_inner', 'semi join on the joined table above inner joins',
+     f"select f.id as id, d.name as dn from {F} f join {D} d on f.dim_id = d.id where exists (select 1 from {G} g where g.b = d.grp) "
+     f"union all select e.id, d.name from {E} e join {D} d on e.ref_id = d.id where exists (select 1 from {G} g where g.b = d.grp)"),
     # Unions that are kept.
     ('kept_types', 'kept: an inner join and a left join',
      f"select f.id as id, d.name as dn from {F} f join {D} d on f.dim_id = d.id "
@@ -89,6 +133,10 @@ CASES = [
     ('kept_columns', 'kept: joins on different columns of the joined table',
      f"select f.id as id, d.name as dn from {F} f join {D} d on f.dim_id = d.id "
      f"union all select e.id, d.name from {E} e join {D} d on e.ref_id = d.grp"),
+    ('kept_anti_padded', 'kept: anti join on the padded side of a left join',
+     f"select f.id as id, d.name as dn from {F} f left join {D} d on f.dim_id = d.id "
+     f"where not exists (select 1 from {G} g where g.a = d.grp) "
+     f"union all select e.id, d.name from {E} e left join {D} d on e.ref_id = d.id"),
 ]
 
 out = []
@@ -126,6 +174,9 @@ stmt(f"create table {D} (id int primary key, name varchar, grp int, active boole
 stmt(f"create table {E} (id int primary key, code varchar, ref_id int)")
 stmt(f"create table {G} (id int primary key, a int, b int)")
 stmt(f"create view {DA} as select * from {D} where active")
+stmt(f"create view {DJ} as select d.id, d.name, d.grp, g.a from {D} d join {G} g on d.grp = g.b")
+stmt(f"create view {DAGG} as select grp, count(*) as cnt, max(name) as mx from {D} group by grp")
+stmt(f"create view {DL} as select d.id, d.name, g.a from {D} d left join {G} g on d.grp = g.b")
 out.append("# Rows present before the materialized views are created: they go through the backfill.\n")
 stmt(f"insert into {D} values (1, 'one', 1, true), (2, 'two', 1, false), (3, 'three', 2, true), "
      f"(4, null, null, null), (5, 'five', 2, null), (6, 'six', null, true), (7, null, 3, false)")
@@ -182,6 +233,13 @@ stmt(f"delete from {E} where id = 111")
 stmt(f"update {G} set b = 2 where id = 201")
 stmt(f"update {G} set a = 3 where id = 205")
 stmt(f"delete from {G} where id = 204")
+out.append("# Rows of the derived relations move: duplicates appear and go, groups change.\n")
+stmt(f"insert into {G} values (211, 4, 1), (212, null, 2), (213, 2, null)")
+stmt(f"update {G} set b = 3 where id = 202")
+stmt(f"update {D} set grp = null where id = 7")
+stmt(f"update {F} set amt = null where id = 17")
+stmt(f"update {F} set amt = 2, other_id = 4 where id = 19")
+stmt(f"update {E} set ref_id = 1 where id = 110")
 compare_all("After the updates and deletes")
 
 out.append("# Third round of changes: the joined table is emptied and filled again.\n")
@@ -195,7 +253,8 @@ out.append("# Cleanup.\n")
 for sfx in ('on', 'off'):
     for name, _, _ in reversed(CASES):
         stmt(f"drop materialized view fuj_{name}_{sfx}")
-stmt(f"drop view {DA}")
+for view in (DL, DAGG, DJ, DA):
+    stmt(f"drop view {view}")
 for table in (G, E, D, F):
     stmt(f"drop table {table}")
 switch(False)
