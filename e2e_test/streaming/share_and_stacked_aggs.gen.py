@@ -41,7 +41,7 @@ CASES = [
      f"select a.id, coalesce(x.s, 0) as s, y.c from {A} a "
      f"left join (select sid, sum(v) as s from {H} where v is not null group by sid) x on a.k = x.sid "
      f"left join (select sid, count(*) as c from {H} where v is not null and st = 'x' group by sid) y on a.k = y.sid"),
-    ('scalar_filters', 'two aggregations without group key with different filters',
+    ('kept_scalar_filters', 'two aggregations without group key with different filters',
      f"select a.id from {A} a where a.x < (select max(v) from {H} where st = 'x') "
      f"union all select b.id from {B} b where b.y < (select max(v) from {H} where st = 'y')"),
     # Merge of stacked aggregations.

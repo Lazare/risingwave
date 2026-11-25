@@ -101,7 +101,7 @@ create materialized view ssa_agg_filters_off as select a.id, coalesce(x.s, 0) as
 # two aggregations without group key with different filters
 
 statement ok
-create materialized view ssa_scalar_filters_off as select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y');
+create materialized view ssa_kept_scalar_filters_off as select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y');
 
 # sum of sums, sum of counts, max of maxes, min of mins on fewer columns
 
@@ -267,7 +267,7 @@ create materialized view ssa_agg_filters_on as select a.id, coalesce(x.s, 0) as 
 # two aggregations without group key with different filters
 
 statement ok
-create materialized view ssa_scalar_filters_on as select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y');
+create materialized view ssa_kept_scalar_filters_on as select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y');
 
 # sum of sums, sum of counts, max of maxes, min of mins on fewer columns
 
@@ -458,9 +458,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssa_scalar_filters_on except select * from ssa_scalar_filters_off) x),
-  (select count(*) from (select * from ssa_scalar_filters_off except select * from ssa_scalar_filters_on) y),
-  (select count(*) from ssa_scalar_filters_on) - (select count(*) from ssa_scalar_filters_off);
+  (select count(*) from (select * from ssa_kept_scalar_filters_on except select * from ssa_kept_scalar_filters_off) x),
+  (select count(*) from (select * from ssa_kept_scalar_filters_off except select * from ssa_kept_scalar_filters_on) y),
+  (select count(*) from ssa_kept_scalar_filters_on) - (select count(*) from ssa_kept_scalar_filters_off);
 ----
 0 0 0
 
@@ -716,9 +716,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssa_scalar_filters_on except select * from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q) x),
-  (select count(*) from (select * from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q except select * from ssa_scalar_filters_on) y),
-  (select count(*) from ssa_scalar_filters_on) - (select count(*) from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q);
+  (select count(*) from (select * from ssa_kept_scalar_filters_on except select * from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q) x),
+  (select count(*) from (select * from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q except select * from ssa_kept_scalar_filters_on) y),
+  (select count(*) from ssa_kept_scalar_filters_on) - (select count(*) from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q);
 ----
 0 0 0
 
@@ -1026,9 +1026,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssa_scalar_filters_on except select * from ssa_scalar_filters_off) x),
-  (select count(*) from (select * from ssa_scalar_filters_off except select * from ssa_scalar_filters_on) y),
-  (select count(*) from ssa_scalar_filters_on) - (select count(*) from ssa_scalar_filters_off);
+  (select count(*) from (select * from ssa_kept_scalar_filters_on except select * from ssa_kept_scalar_filters_off) x),
+  (select count(*) from (select * from ssa_kept_scalar_filters_off except select * from ssa_kept_scalar_filters_on) y),
+  (select count(*) from ssa_kept_scalar_filters_on) - (select count(*) from ssa_kept_scalar_filters_off);
 ----
 0 0 0
 
@@ -1284,9 +1284,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssa_scalar_filters_on except select * from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q) x),
-  (select count(*) from (select * from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q except select * from ssa_scalar_filters_on) y),
-  (select count(*) from ssa_scalar_filters_on) - (select count(*) from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q);
+  (select count(*) from (select * from ssa_kept_scalar_filters_on except select * from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q) x),
+  (select count(*) from (select * from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q except select * from ssa_kept_scalar_filters_on) y),
+  (select count(*) from ssa_kept_scalar_filters_on) - (select count(*) from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q);
 ----
 0 0 0
 
@@ -1590,9 +1590,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssa_scalar_filters_on except select * from ssa_scalar_filters_off) x),
-  (select count(*) from (select * from ssa_scalar_filters_off except select * from ssa_scalar_filters_on) y),
-  (select count(*) from ssa_scalar_filters_on) - (select count(*) from ssa_scalar_filters_off);
+  (select count(*) from (select * from ssa_kept_scalar_filters_on except select * from ssa_kept_scalar_filters_off) x),
+  (select count(*) from (select * from ssa_kept_scalar_filters_off except select * from ssa_kept_scalar_filters_on) y),
+  (select count(*) from ssa_kept_scalar_filters_on) - (select count(*) from ssa_kept_scalar_filters_off);
 ----
 0 0 0
 
@@ -1848,9 +1848,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssa_scalar_filters_on except select * from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q) x),
-  (select count(*) from (select * from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q except select * from ssa_scalar_filters_on) y),
-  (select count(*) from ssa_scalar_filters_on) - (select count(*) from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q);
+  (select count(*) from (select * from ssa_kept_scalar_filters_on except select * from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q) x),
+  (select count(*) from (select * from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q except select * from ssa_kept_scalar_filters_on) y),
+  (select count(*) from ssa_kept_scalar_filters_on) - (select count(*) from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q);
 ----
 0 0 0
 
@@ -2117,9 +2117,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssa_scalar_filters_on except select * from ssa_scalar_filters_off) x),
-  (select count(*) from (select * from ssa_scalar_filters_off except select * from ssa_scalar_filters_on) y),
-  (select count(*) from ssa_scalar_filters_on) - (select count(*) from ssa_scalar_filters_off);
+  (select count(*) from (select * from ssa_kept_scalar_filters_on except select * from ssa_kept_scalar_filters_off) x),
+  (select count(*) from (select * from ssa_kept_scalar_filters_off except select * from ssa_kept_scalar_filters_on) y),
+  (select count(*) from ssa_kept_scalar_filters_on) - (select count(*) from ssa_kept_scalar_filters_off);
 ----
 0 0 0
 
@@ -2375,9 +2375,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssa_scalar_filters_on except select * from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q) x),
-  (select count(*) from (select * from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q except select * from ssa_scalar_filters_on) y),
-  (select count(*) from ssa_scalar_filters_on) - (select count(*) from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q);
+  (select count(*) from (select * from ssa_kept_scalar_filters_on except select * from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q) x),
+  (select count(*) from (select * from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q except select * from ssa_kept_scalar_filters_on) y),
+  (select count(*) from ssa_kept_scalar_filters_on) - (select count(*) from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q);
 ----
 0 0 0
 
@@ -2642,9 +2642,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssa_scalar_filters_on except select * from ssa_scalar_filters_off) x),
-  (select count(*) from (select * from ssa_scalar_filters_off except select * from ssa_scalar_filters_on) y),
-  (select count(*) from ssa_scalar_filters_on) - (select count(*) from ssa_scalar_filters_off);
+  (select count(*) from (select * from ssa_kept_scalar_filters_on except select * from ssa_kept_scalar_filters_off) x),
+  (select count(*) from (select * from ssa_kept_scalar_filters_off except select * from ssa_kept_scalar_filters_on) y),
+  (select count(*) from ssa_kept_scalar_filters_on) - (select count(*) from ssa_kept_scalar_filters_off);
 ----
 0 0 0
 
@@ -2900,9 +2900,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssa_scalar_filters_on except select * from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q) x),
-  (select count(*) from (select * from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q except select * from ssa_scalar_filters_on) y),
-  (select count(*) from ssa_scalar_filters_on) - (select count(*) from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q);
+  (select count(*) from (select * from ssa_kept_scalar_filters_on except select * from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q) x),
+  (select count(*) from (select * from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q except select * from ssa_kept_scalar_filters_on) y),
+  (select count(*) from ssa_kept_scalar_filters_on) - (select count(*) from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q);
 ----
 0 0 0
 
@@ -3162,7 +3162,7 @@ statement ok
 drop materialized view ssa_stacked_on;
 
 statement ok
-drop materialized view ssa_scalar_filters_on;
+drop materialized view ssa_kept_scalar_filters_on;
 
 statement ok
 drop materialized view ssa_agg_filters_on;
@@ -3258,7 +3258,7 @@ statement ok
 drop materialized view ssa_stacked_off;
 
 statement ok
-drop materialized view ssa_scalar_filters_off;
+drop materialized view ssa_kept_scalar_filters_off;
 
 statement ok
 drop materialized view ssa_agg_filters_off;

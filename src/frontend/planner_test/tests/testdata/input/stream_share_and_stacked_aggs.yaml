@@ -147,7 +147,7 @@
   expected_outputs:
   - stream_plan
 
-- name: aggregations without group key with different filters become one with FILTER
+- name: kept - aggregations without group key with different filters, read by dynamic filters
   before: [setup_share]
   sql: |
     select a.id from a where a.x < (select max(v) from h where st = 'x')

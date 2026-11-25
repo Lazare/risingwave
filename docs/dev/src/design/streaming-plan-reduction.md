@@ -406,9 +406,11 @@ consumer and do not rewrite a shared sub-plan.
     columns. Not through the optional side of an outer join: those copies are not merged;
   - below an aggregation, residual conjuncts that read other columns become a `FILTER` on the
     calls of that copy, and the copy keeps the groups where `count(*) FILTER (WHERE ...)` is
-    positive, the groups its own input had. Without group key both plans emit one row, the
-    `FILTER` alone is exact. This merges several aggregations of the same input and group key that
-    differ by their filters;
+    positive, the groups its own input had. This merges several aggregations of the same input
+    and group key that differ by their filters. Not for aggregations without group key: they are
+    typically read by a dynamic filter, which needs a single column, and the projection that
+    selects it from the shared core is merged into the join above (planning then fails on a
+    nested-loop join);
   - joins must have the same type and condition, aggregations the same group key (calls are
     united), scans the same table; other nodes must be equal.
   Each copy becomes `Project <- Filter(residual) <- Share(core)`, then column pruning narrows the

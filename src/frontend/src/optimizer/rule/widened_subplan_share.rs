@@ -31,9 +31,10 @@
 //!   anti join: the copy is then not merged;
 //! - below an aggregation, the residual conjuncts of a copy that read other columns become a
 //!   `FILTER` on the aggregate calls of that copy, and the copy keeps the groups where
-//!   `count(*) FILTER (WHERE <conjuncts>)` is positive: the groups that its own input had. Without
-//!   group key the aggregation emits one row in both plans, the `FILTER` is enough. This merges
-//!   several aggregations of the same input and group key with different filters into one;
+//!   `count(*) FILTER (WHERE <conjuncts>)` is positive: the groups that its own input had. This
+//!   merges several aggregations of the same input and group key with different filters into one.
+//!   An aggregation without group key is not a copy: its consumer may be a dynamic filter, which
+//!   needs one column, and a projection of the shared core is merged into the join above it;
 //! - joins must have the same type and condition, aggregations the same group key (their calls
 //!   are united), scans the same table; any other node must be equal in every copy.
 //!
@@ -142,7 +143,7 @@ pub fn share_widened_subplans(plan: PlanRef) -> (PlanRef, usize) {
     (replace(&plan, &replacements, &mut memo), count)
 }
 
-/// The joins and aggregations of the plan, outside of shares.
+/// The joins and the aggregations with a group key of the plan, outside of shares.
 fn collect_candidates(
     plan: &PlanRef,
     visited: &mut HashSet<PlanNodeId>,
@@ -151,7 +152,12 @@ fn collect_candidates(
     if !visited.insert(plan.id()) || plan.as_logical_share().is_some() {
         return;
     }
-    if plan.as_logical_join().is_some() || plan.as_logical_agg().is_some() {
+    // Not an aggregation without group key: its consumer may need a single column of one row
+    // (a dynamic filter), where the shared core would give the columns of every copy.
+    let grouped_agg = plan
+        .as_logical_agg()
+        .is_some_and(|agg| !agg.group_key().is_empty());
+    if plan.as_logical_join().is_some() || grouped_agg {
         candidates.push(plan.clone());
     }
     for input in plan.inputs() {
