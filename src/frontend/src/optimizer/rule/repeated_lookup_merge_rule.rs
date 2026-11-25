@@ -1157,21 +1157,14 @@ fn compared_key_columns(join: &LogicalJoin, pure: &Lookup) -> BTreeMap<usize, Ve
     compared
 }
 
-/// For an instance found by a left outer join that looks its row up by its key (see
-/// [`OuterLookup`]) with the same conjuncts as another lookup, a column bound to a column of the
-/// key: the other lookup finds a row exactly when that column is not `NULL`.
-fn searched_as_bound(
-    instance: &Carried,
-    key_column: usize,
-    predicate: &[ExprImpl],
-) -> Option<usize> {
-    let lookup = instance.outer_lookup.as_ref()?;
-    let same_rows = lookup.predicate.iter().all(|c| predicate.contains(c))
-        && predicate.iter().all(|c| lookup.predicate.contains(c));
-    if !same_rows {
-        return None;
-    }
-    instance.bound.get(&key_column)?.first().copied()
+/// Whether the left outer join that found an instance (see [`OuterLookup`]) reads the same rows
+/// as a lookup with these conjuncts: then, from the same columns, the lookup finds a row exactly
+/// when the instance is matched, and that row.
+fn searched_same_rows(instance: &Carried, predicate: &[ExprImpl]) -> bool {
+    instance.outer_lookup.as_ref().is_some_and(|lookup| {
+        lookup.predicate.iter().all(|c| predicate.contains(c))
+            && predicate.iter().all(|c| lookup.predicate.contains(c))
+    })
 }
 
 /// Removes the join if its right side is a lookup that its left side makes redundant.
@@ -1204,21 +1197,6 @@ fn merge_lookup(join: &LogicalJoin) -> Option<PlanRef> {
                     .iter()
                     .find(|(left_column, _)| bound.is_some_and(|c| c.contains(left_column)))
                     .map(|&(left_column, conjunct)| (left_column, conjunct, true))
-                    .or_else(|| {
-                        // The outer join of the instance searched the same rows: the lookup
-                        // finds its row exactly when the instance is matched, which a bound
-                        // column of the key tells.
-                        // A table is widened by `widen_outer_lookup` instead, which keeps the
-                        // columns of the table as they are; a shared sub-plan can not be.
-                        if !matches!(instance.relation, Relation::Share(_)) {
-                            return None;
-                        }
-                        let bound_key = searched_as_bound(&instance, *column, &pure.predicate)?;
-                        candidates
-                            .iter()
-                            .find(|(left_column, _)| searched == Some(left_column))
-                            .map(|&(_, conjunct)| (bound_key, conjunct, true))
-                    })
                     .or_else(|| {
                         candidates
                             .iter()
@@ -1292,6 +1270,15 @@ fn replace_lookup(
             scan_id: instance.scan_id,
             columns: &columns,
             outer_lookup: match (&instance.outer_lookup, through_outer_lookup) {
+                // A shared sub-plan can not be widened; with the same conjuncts, the row of the
+                // instance is the one of the lookup, and is matched when its key is not `NULL`.
+                (Some(_), true)
+                    if matches!(instance.relation, Relation::Share(_))
+                        && searched_same_rows(instance, &pure.predicate) =>
+                {
+                    None
+                }
+                (Some(_), true) if matches!(instance.relation, Relation::Share(_)) => return None,
                 (Some(lookup), true) => Some((lookup.join_id, &pure.predicate)),
                 (None, true) => return None,
                 (_, false) => None,
