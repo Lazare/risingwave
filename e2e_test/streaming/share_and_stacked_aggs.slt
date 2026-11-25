@@ -83,6 +83,26 @@ create materialized view ssa_share_cte_off as with j as (select a.id, h.v from s
 statement ok
 create materialized view ssa_share_scans_off as select a.id from ssa_a a where exists (select 1 from ssa_h h where h.sid = a.k and h.v > 0) union all select b.id from ssa_b b where exists (select 1 from ssa_h h where h.sid = b.k and h.v > 0);
 
+# the same join with a different filter in each copy
+
+statement ok
+create materialized view ssa_widen_filters_off as select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x';
+
+# a left join filtered on its preserved side in one copy
+
+statement ok
+create materialized view ssa_widen_left_off as select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid;
+
+# two aggregations of the same input and key with different filters
+
+statement ok
+create materialized view ssa_agg_filters_off as select a.id, coalesce(x.s, 0) as s, y.c from ssa_a a left join (select sid, sum(v) as s from ssa_h where v is not null group by sid) x on a.k = x.sid left join (select sid, count(*) as c from ssa_h where v is not null and st = 'x' group by sid) y on a.k = y.sid;
+
+# two aggregations without group key with different filters
+
+statement ok
+create materialized view ssa_kept_scalar_filters_off as select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y');
+
 # sum of sums, sum of counts, max of maxes, min of mins on fewer columns
 
 statement ok
@@ -138,6 +158,21 @@ create materialized view ssa_three_levels_off as select g, coalesce(sum(s2), 0) 
 statement ok
 create materialized view ssa_both_off as select x.g, x.s, y.m from (select g, coalesce(sum(sv), 0) as s from (select g, w, sum(v) as sv from ssa_t group by g, w) i group by g) x join (select g, coalesce(sum(sv), 0) as m from (select g, v, sum(v) as sv from ssa_t group by g, v) j group by g) y on x.g = y.g;
 
+# an outer group key computed from inner group key columns
+
+statement ok
+create materialized view ssa_group_expr_off as select g + w as gw, coalesce(sum(sv), 0) as s from (select g, w, v, sum(v) as sv from ssa_t group by g, w, v) x group by g + w;
+
+# a union of aggregations, one with FILTER, one with HAVING
+
+statement ok
+create materialized view ssa_union_aggs_off as select g, coalesce(sum(sv), 0) as s, min(mn) as mn from (select g, sum(v) filter (where w > 0) as sv, min(v) as mn from ssa_t group by g union all select g, sum(v), min(v) from ssa_s group by g having count(*) > 1) u group by g;
+
+# a union of an aggregation and of rows
+
+statement ok
+create materialized view ssa_union_rows_off as select g, min(mv) as mn, max(xv) as mx from (select g, min(v) as mv, max(v) as xv from ssa_t group by g union all select g, v, v from ssa_s) u group by g;
+
 # count of counts counts inner groups
 
 statement ok
@@ -176,7 +211,7 @@ create materialized view ssa_kept_shared_inner_off as with x as (select g, w, su
 # sums of the aggregations of the branches of a union
 
 statement ok
-create materialized view ssa_kept_union_off as select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g;
+create materialized view ssa_union_sums_off as select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g;
 
 # semi join over a DISTINCT
 
@@ -213,6 +248,26 @@ create materialized view ssa_share_cte_on as with j as (select a.id, h.v from ss
 
 statement ok
 create materialized view ssa_share_scans_on as select a.id from ssa_a a where exists (select 1 from ssa_h h where h.sid = a.k and h.v > 0) union all select b.id from ssa_b b where exists (select 1 from ssa_h h where h.sid = b.k and h.v > 0);
+
+# the same join with a different filter in each copy
+
+statement ok
+create materialized view ssa_widen_filters_on as select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x';
+
+# a left join filtered on its preserved side in one copy
+
+statement ok
+create materialized view ssa_widen_left_on as select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid;
+
+# two aggregations of the same input and key with different filters
+
+statement ok
+create materialized view ssa_agg_filters_on as select a.id, coalesce(x.s, 0) as s, y.c from ssa_a a left join (select sid, sum(v) as s from ssa_h where v is not null group by sid) x on a.k = x.sid left join (select sid, count(*) as c from ssa_h where v is not null and st = 'x' group by sid) y on a.k = y.sid;
+
+# two aggregations without group key with different filters
+
+statement ok
+create materialized view ssa_kept_scalar_filters_on as select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y');
 
 # sum of sums, sum of counts, max of maxes, min of mins on fewer columns
 
@@ -269,6 +324,21 @@ create materialized view ssa_three_levels_on as select g, coalesce(sum(s2), 0) a
 statement ok
 create materialized view ssa_both_on as select x.g, x.s, y.m from (select g, coalesce(sum(sv), 0) as s from (select g, w, sum(v) as sv from ssa_t group by g, w) i group by g) x join (select g, coalesce(sum(sv), 0) as m from (select g, v, sum(v) as sv from ssa_t group by g, v) j group by g) y on x.g = y.g;
 
+# an outer group key computed from inner group key columns
+
+statement ok
+create materialized view ssa_group_expr_on as select g + w as gw, coalesce(sum(sv), 0) as s from (select g, w, v, sum(v) as sv from ssa_t group by g, w, v) x group by g + w;
+
+# a union of aggregations, one with FILTER, one with HAVING
+
+statement ok
+create materialized view ssa_union_aggs_on as select g, coalesce(sum(sv), 0) as s, min(mn) as mn from (select g, sum(v) filter (where w > 0) as sv, min(v) as mn from ssa_t group by g union all select g, sum(v), min(v) from ssa_s group by g having count(*) > 1) u group by g;
+
+# a union of an aggregation and of rows
+
+statement ok
+create materialized view ssa_union_rows_on as select g, min(mv) as mn, max(xv) as mx from (select g, min(v) as mv, max(v) as xv from ssa_t group by g union all select g, v, v from ssa_s) u group by g;
+
 # count of counts counts inner groups
 
 statement ok
@@ -307,7 +377,7 @@ create materialized view ssa_kept_shared_inner_on as with x as (select g, w, sum
 # sums of the aggregations of the branches of a union
 
 statement ok
-create materialized view ssa_kept_union_on as select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g;
+create materialized view ssa_union_sums_on as select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g;
 
 # semi join over a DISTINCT
 
@@ -359,6 +429,38 @@ select
   (select count(*) from (select * from ssa_share_scans_on except select * from ssa_share_scans_off) x),
   (select count(*) from (select * from ssa_share_scans_off except select * from ssa_share_scans_on) y),
   (select count(*) from ssa_share_scans_on) - (select count(*) from ssa_share_scans_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_widen_filters_on except select * from ssa_widen_filters_off) x),
+  (select count(*) from (select * from ssa_widen_filters_off except select * from ssa_widen_filters_on) y),
+  (select count(*) from ssa_widen_filters_on) - (select count(*) from ssa_widen_filters_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_widen_left_on except select * from ssa_widen_left_off) x),
+  (select count(*) from (select * from ssa_widen_left_off except select * from ssa_widen_left_on) y),
+  (select count(*) from ssa_widen_left_on) - (select count(*) from ssa_widen_left_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_agg_filters_on except select * from ssa_agg_filters_off) x),
+  (select count(*) from (select * from ssa_agg_filters_off except select * from ssa_agg_filters_on) y),
+  (select count(*) from ssa_agg_filters_on) - (select count(*) from ssa_agg_filters_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_kept_scalar_filters_on except select * from ssa_kept_scalar_filters_off) x),
+  (select count(*) from (select * from ssa_kept_scalar_filters_off except select * from ssa_kept_scalar_filters_on) y),
+  (select count(*) from ssa_kept_scalar_filters_on) - (select count(*) from ssa_kept_scalar_filters_off);
 ----
 0 0 0
 
@@ -452,6 +554,30 @@ select
 
 query III
 select
+  (select count(*) from (select * from ssa_group_expr_on except select * from ssa_group_expr_off) x),
+  (select count(*) from (select * from ssa_group_expr_off except select * from ssa_group_expr_on) y),
+  (select count(*) from ssa_group_expr_on) - (select count(*) from ssa_group_expr_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_union_aggs_on except select * from ssa_union_aggs_off) x),
+  (select count(*) from (select * from ssa_union_aggs_off except select * from ssa_union_aggs_on) y),
+  (select count(*) from ssa_union_aggs_on) - (select count(*) from ssa_union_aggs_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_union_rows_on except select * from ssa_union_rows_off) x),
+  (select count(*) from (select * from ssa_union_rows_off except select * from ssa_union_rows_on) y),
+  (select count(*) from ssa_union_rows_on) - (select count(*) from ssa_union_rows_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from ssa_kept_count_count_on except select * from ssa_kept_count_count_off) x),
   (select count(*) from (select * from ssa_kept_count_count_off except select * from ssa_kept_count_count_on) y),
   (select count(*) from ssa_kept_count_count_on) - (select count(*) from ssa_kept_count_count_off);
@@ -508,9 +634,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssa_kept_union_on except select * from ssa_kept_union_off) x),
-  (select count(*) from (select * from ssa_kept_union_off except select * from ssa_kept_union_on) y),
-  (select count(*) from ssa_kept_union_on) - (select count(*) from ssa_kept_union_off);
+  (select count(*) from (select * from ssa_union_sums_on except select * from ssa_union_sums_off) x),
+  (select count(*) from (select * from ssa_union_sums_off except select * from ssa_union_sums_on) y),
+  (select count(*) from ssa_union_sums_on) - (select count(*) from ssa_union_sums_off);
 ----
 0 0 0
 
@@ -561,6 +687,38 @@ select
   (select count(*) from (select * from ssa_share_scans_on except select * from (select a.id from ssa_a a where exists (select 1 from ssa_h h where h.sid = a.k and h.v > 0) union all select b.id from ssa_b b where exists (select 1 from ssa_h h where h.sid = b.k and h.v > 0)) q) x),
   (select count(*) from (select * from (select a.id from ssa_a a where exists (select 1 from ssa_h h where h.sid = a.k and h.v > 0) union all select b.id from ssa_b b where exists (select 1 from ssa_h h where h.sid = b.k and h.v > 0)) q except select * from ssa_share_scans_on) y),
   (select count(*) from ssa_share_scans_on) - (select count(*) from (select a.id from ssa_a a where exists (select 1 from ssa_h h where h.sid = a.k and h.v > 0) union all select b.id from ssa_b b where exists (select 1 from ssa_h h where h.sid = b.k and h.v > 0)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_widen_filters_on except select * from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x') q) x),
+  (select count(*) from (select * from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x') q except select * from ssa_widen_filters_on) y),
+  (select count(*) from ssa_widen_filters_on) - (select count(*) from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x') q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_widen_left_on except select * from (select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid) q) x),
+  (select count(*) from (select * from (select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid) q except select * from ssa_widen_left_on) y),
+  (select count(*) from ssa_widen_left_on) - (select count(*) from (select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_agg_filters_on except select * from (select a.id, coalesce(x.s, 0) as s, y.c from ssa_a a left join (select sid, sum(v) as s from ssa_h where v is not null group by sid) x on a.k = x.sid left join (select sid, count(*) as c from ssa_h where v is not null and st = 'x' group by sid) y on a.k = y.sid) q) x),
+  (select count(*) from (select * from (select a.id, coalesce(x.s, 0) as s, y.c from ssa_a a left join (select sid, sum(v) as s from ssa_h where v is not null group by sid) x on a.k = x.sid left join (select sid, count(*) as c from ssa_h where v is not null and st = 'x' group by sid) y on a.k = y.sid) q except select * from ssa_agg_filters_on) y),
+  (select count(*) from ssa_agg_filters_on) - (select count(*) from (select a.id, coalesce(x.s, 0) as s, y.c from ssa_a a left join (select sid, sum(v) as s from ssa_h where v is not null group by sid) x on a.k = x.sid left join (select sid, count(*) as c from ssa_h where v is not null and st = 'x' group by sid) y on a.k = y.sid) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_kept_scalar_filters_on except select * from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q) x),
+  (select count(*) from (select * from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q except select * from ssa_kept_scalar_filters_on) y),
+  (select count(*) from ssa_kept_scalar_filters_on) - (select count(*) from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q);
 ----
 0 0 0
 
@@ -654,6 +812,30 @@ select
 
 query III
 select
+  (select count(*) from (select * from ssa_group_expr_on except select * from (select g + w as gw, coalesce(sum(sv), 0) as s from (select g, w, v, sum(v) as sv from ssa_t group by g, w, v) x group by g + w) q) x),
+  (select count(*) from (select * from (select g + w as gw, coalesce(sum(sv), 0) as s from (select g, w, v, sum(v) as sv from ssa_t group by g, w, v) x group by g + w) q except select * from ssa_group_expr_on) y),
+  (select count(*) from ssa_group_expr_on) - (select count(*) from (select g + w as gw, coalesce(sum(sv), 0) as s from (select g, w, v, sum(v) as sv from ssa_t group by g, w, v) x group by g + w) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_union_aggs_on except select * from (select g, coalesce(sum(sv), 0) as s, min(mn) as mn from (select g, sum(v) filter (where w > 0) as sv, min(v) as mn from ssa_t group by g union all select g, sum(v), min(v) from ssa_s group by g having count(*) > 1) u group by g) q) x),
+  (select count(*) from (select * from (select g, coalesce(sum(sv), 0) as s, min(mn) as mn from (select g, sum(v) filter (where w > 0) as sv, min(v) as mn from ssa_t group by g union all select g, sum(v), min(v) from ssa_s group by g having count(*) > 1) u group by g) q except select * from ssa_union_aggs_on) y),
+  (select count(*) from ssa_union_aggs_on) - (select count(*) from (select g, coalesce(sum(sv), 0) as s, min(mn) as mn from (select g, sum(v) filter (where w > 0) as sv, min(v) as mn from ssa_t group by g union all select g, sum(v), min(v) from ssa_s group by g having count(*) > 1) u group by g) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_union_rows_on except select * from (select g, min(mv) as mn, max(xv) as mx from (select g, min(v) as mv, max(v) as xv from ssa_t group by g union all select g, v, v from ssa_s) u group by g) q) x),
+  (select count(*) from (select * from (select g, min(mv) as mn, max(xv) as mx from (select g, min(v) as mv, max(v) as xv from ssa_t group by g union all select g, v, v from ssa_s) u group by g) q except select * from ssa_union_rows_on) y),
+  (select count(*) from ssa_union_rows_on) - (select count(*) from (select g, min(mv) as mn, max(xv) as mx from (select g, min(v) as mv, max(v) as xv from ssa_t group by g union all select g, v, v from ssa_s) u group by g) q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from ssa_kept_count_count_on except select * from (select g, count(c) as n, count(*) as m from (select g, w, count(*) as c from ssa_t group by g, w) x group by g) q) x),
   (select count(*) from (select * from (select g, count(c) as n, count(*) as m from (select g, w, count(*) as c from ssa_t group by g, w) x group by g) q except select * from ssa_kept_count_count_on) y),
   (select count(*) from ssa_kept_count_count_on) - (select count(*) from (select g, count(c) as n, count(*) as m from (select g, w, count(*) as c from ssa_t group by g, w) x group by g) q);
@@ -710,9 +892,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssa_kept_union_on except select * from (select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g) q) x),
-  (select count(*) from (select * from (select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g) q except select * from ssa_kept_union_on) y),
-  (select count(*) from ssa_kept_union_on) - (select count(*) from (select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g) q);
+  (select count(*) from (select * from ssa_union_sums_on except select * from (select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g) q) x),
+  (select count(*) from (select * from (select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g) q except select * from ssa_union_sums_on) y),
+  (select count(*) from ssa_union_sums_on) - (select count(*) from (select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g) q);
 ----
 0 0 0
 
@@ -820,6 +1002,38 @@ select
 
 query III
 select
+  (select count(*) from (select * from ssa_widen_filters_on except select * from ssa_widen_filters_off) x),
+  (select count(*) from (select * from ssa_widen_filters_off except select * from ssa_widen_filters_on) y),
+  (select count(*) from ssa_widen_filters_on) - (select count(*) from ssa_widen_filters_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_widen_left_on except select * from ssa_widen_left_off) x),
+  (select count(*) from (select * from ssa_widen_left_off except select * from ssa_widen_left_on) y),
+  (select count(*) from ssa_widen_left_on) - (select count(*) from ssa_widen_left_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_agg_filters_on except select * from ssa_agg_filters_off) x),
+  (select count(*) from (select * from ssa_agg_filters_off except select * from ssa_agg_filters_on) y),
+  (select count(*) from ssa_agg_filters_on) - (select count(*) from ssa_agg_filters_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_kept_scalar_filters_on except select * from ssa_kept_scalar_filters_off) x),
+  (select count(*) from (select * from ssa_kept_scalar_filters_off except select * from ssa_kept_scalar_filters_on) y),
+  (select count(*) from ssa_kept_scalar_filters_on) - (select count(*) from ssa_kept_scalar_filters_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from ssa_stacked_on except select * from ssa_stacked_off) x),
   (select count(*) from (select * from ssa_stacked_off except select * from ssa_stacked_on) y),
   (select count(*) from ssa_stacked_on) - (select count(*) from ssa_stacked_off);
@@ -908,6 +1122,30 @@ select
 
 query III
 select
+  (select count(*) from (select * from ssa_group_expr_on except select * from ssa_group_expr_off) x),
+  (select count(*) from (select * from ssa_group_expr_off except select * from ssa_group_expr_on) y),
+  (select count(*) from ssa_group_expr_on) - (select count(*) from ssa_group_expr_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_union_aggs_on except select * from ssa_union_aggs_off) x),
+  (select count(*) from (select * from ssa_union_aggs_off except select * from ssa_union_aggs_on) y),
+  (select count(*) from ssa_union_aggs_on) - (select count(*) from ssa_union_aggs_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_union_rows_on except select * from ssa_union_rows_off) x),
+  (select count(*) from (select * from ssa_union_rows_off except select * from ssa_union_rows_on) y),
+  (select count(*) from ssa_union_rows_on) - (select count(*) from ssa_union_rows_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from ssa_kept_count_count_on except select * from ssa_kept_count_count_off) x),
   (select count(*) from (select * from ssa_kept_count_count_off except select * from ssa_kept_count_count_on) y),
   (select count(*) from ssa_kept_count_count_on) - (select count(*) from ssa_kept_count_count_off);
@@ -964,9 +1202,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssa_kept_union_on except select * from ssa_kept_union_off) x),
-  (select count(*) from (select * from ssa_kept_union_off except select * from ssa_kept_union_on) y),
-  (select count(*) from ssa_kept_union_on) - (select count(*) from ssa_kept_union_off);
+  (select count(*) from (select * from ssa_union_sums_on except select * from ssa_union_sums_off) x),
+  (select count(*) from (select * from ssa_union_sums_off except select * from ssa_union_sums_on) y),
+  (select count(*) from ssa_union_sums_on) - (select count(*) from ssa_union_sums_off);
 ----
 0 0 0
 
@@ -1017,6 +1255,38 @@ select
   (select count(*) from (select * from ssa_share_scans_on except select * from (select a.id from ssa_a a where exists (select 1 from ssa_h h where h.sid = a.k and h.v > 0) union all select b.id from ssa_b b where exists (select 1 from ssa_h h where h.sid = b.k and h.v > 0)) q) x),
   (select count(*) from (select * from (select a.id from ssa_a a where exists (select 1 from ssa_h h where h.sid = a.k and h.v > 0) union all select b.id from ssa_b b where exists (select 1 from ssa_h h where h.sid = b.k and h.v > 0)) q except select * from ssa_share_scans_on) y),
   (select count(*) from ssa_share_scans_on) - (select count(*) from (select a.id from ssa_a a where exists (select 1 from ssa_h h where h.sid = a.k and h.v > 0) union all select b.id from ssa_b b where exists (select 1 from ssa_h h where h.sid = b.k and h.v > 0)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_widen_filters_on except select * from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x') q) x),
+  (select count(*) from (select * from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x') q except select * from ssa_widen_filters_on) y),
+  (select count(*) from ssa_widen_filters_on) - (select count(*) from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x') q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_widen_left_on except select * from (select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid) q) x),
+  (select count(*) from (select * from (select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid) q except select * from ssa_widen_left_on) y),
+  (select count(*) from ssa_widen_left_on) - (select count(*) from (select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_agg_filters_on except select * from (select a.id, coalesce(x.s, 0) as s, y.c from ssa_a a left join (select sid, sum(v) as s from ssa_h where v is not null group by sid) x on a.k = x.sid left join (select sid, count(*) as c from ssa_h where v is not null and st = 'x' group by sid) y on a.k = y.sid) q) x),
+  (select count(*) from (select * from (select a.id, coalesce(x.s, 0) as s, y.c from ssa_a a left join (select sid, sum(v) as s from ssa_h where v is not null group by sid) x on a.k = x.sid left join (select sid, count(*) as c from ssa_h where v is not null and st = 'x' group by sid) y on a.k = y.sid) q except select * from ssa_agg_filters_on) y),
+  (select count(*) from ssa_agg_filters_on) - (select count(*) from (select a.id, coalesce(x.s, 0) as s, y.c from ssa_a a left join (select sid, sum(v) as s from ssa_h where v is not null group by sid) x on a.k = x.sid left join (select sid, count(*) as c from ssa_h where v is not null and st = 'x' group by sid) y on a.k = y.sid) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_kept_scalar_filters_on except select * from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q) x),
+  (select count(*) from (select * from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q except select * from ssa_kept_scalar_filters_on) y),
+  (select count(*) from ssa_kept_scalar_filters_on) - (select count(*) from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q);
 ----
 0 0 0
 
@@ -1110,6 +1380,30 @@ select
 
 query III
 select
+  (select count(*) from (select * from ssa_group_expr_on except select * from (select g + w as gw, coalesce(sum(sv), 0) as s from (select g, w, v, sum(v) as sv from ssa_t group by g, w, v) x group by g + w) q) x),
+  (select count(*) from (select * from (select g + w as gw, coalesce(sum(sv), 0) as s from (select g, w, v, sum(v) as sv from ssa_t group by g, w, v) x group by g + w) q except select * from ssa_group_expr_on) y),
+  (select count(*) from ssa_group_expr_on) - (select count(*) from (select g + w as gw, coalesce(sum(sv), 0) as s from (select g, w, v, sum(v) as sv from ssa_t group by g, w, v) x group by g + w) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_union_aggs_on except select * from (select g, coalesce(sum(sv), 0) as s, min(mn) as mn from (select g, sum(v) filter (where w > 0) as sv, min(v) as mn from ssa_t group by g union all select g, sum(v), min(v) from ssa_s group by g having count(*) > 1) u group by g) q) x),
+  (select count(*) from (select * from (select g, coalesce(sum(sv), 0) as s, min(mn) as mn from (select g, sum(v) filter (where w > 0) as sv, min(v) as mn from ssa_t group by g union all select g, sum(v), min(v) from ssa_s group by g having count(*) > 1) u group by g) q except select * from ssa_union_aggs_on) y),
+  (select count(*) from ssa_union_aggs_on) - (select count(*) from (select g, coalesce(sum(sv), 0) as s, min(mn) as mn from (select g, sum(v) filter (where w > 0) as sv, min(v) as mn from ssa_t group by g union all select g, sum(v), min(v) from ssa_s group by g having count(*) > 1) u group by g) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_union_rows_on except select * from (select g, min(mv) as mn, max(xv) as mx from (select g, min(v) as mv, max(v) as xv from ssa_t group by g union all select g, v, v from ssa_s) u group by g) q) x),
+  (select count(*) from (select * from (select g, min(mv) as mn, max(xv) as mx from (select g, min(v) as mv, max(v) as xv from ssa_t group by g union all select g, v, v from ssa_s) u group by g) q except select * from ssa_union_rows_on) y),
+  (select count(*) from ssa_union_rows_on) - (select count(*) from (select g, min(mv) as mn, max(xv) as mx from (select g, min(v) as mv, max(v) as xv from ssa_t group by g union all select g, v, v from ssa_s) u group by g) q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from ssa_kept_count_count_on except select * from (select g, count(c) as n, count(*) as m from (select g, w, count(*) as c from ssa_t group by g, w) x group by g) q) x),
   (select count(*) from (select * from (select g, count(c) as n, count(*) as m from (select g, w, count(*) as c from ssa_t group by g, w) x group by g) q except select * from ssa_kept_count_count_on) y),
   (select count(*) from ssa_kept_count_count_on) - (select count(*) from (select g, count(c) as n, count(*) as m from (select g, w, count(*) as c from ssa_t group by g, w) x group by g) q);
@@ -1166,9 +1460,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssa_kept_union_on except select * from (select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g) q) x),
-  (select count(*) from (select * from (select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g) q except select * from ssa_kept_union_on) y),
-  (select count(*) from ssa_kept_union_on) - (select count(*) from (select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g) q);
+  (select count(*) from (select * from ssa_union_sums_on except select * from (select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g) q) x),
+  (select count(*) from (select * from (select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g) q except select * from ssa_union_sums_on) y),
+  (select count(*) from ssa_union_sums_on) - (select count(*) from (select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g) q);
 ----
 0 0 0
 
@@ -1272,6 +1566,38 @@ select
 
 query III
 select
+  (select count(*) from (select * from ssa_widen_filters_on except select * from ssa_widen_filters_off) x),
+  (select count(*) from (select * from ssa_widen_filters_off except select * from ssa_widen_filters_on) y),
+  (select count(*) from ssa_widen_filters_on) - (select count(*) from ssa_widen_filters_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_widen_left_on except select * from ssa_widen_left_off) x),
+  (select count(*) from (select * from ssa_widen_left_off except select * from ssa_widen_left_on) y),
+  (select count(*) from ssa_widen_left_on) - (select count(*) from ssa_widen_left_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_agg_filters_on except select * from ssa_agg_filters_off) x),
+  (select count(*) from (select * from ssa_agg_filters_off except select * from ssa_agg_filters_on) y),
+  (select count(*) from ssa_agg_filters_on) - (select count(*) from ssa_agg_filters_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_kept_scalar_filters_on except select * from ssa_kept_scalar_filters_off) x),
+  (select count(*) from (select * from ssa_kept_scalar_filters_off except select * from ssa_kept_scalar_filters_on) y),
+  (select count(*) from ssa_kept_scalar_filters_on) - (select count(*) from ssa_kept_scalar_filters_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from ssa_stacked_on except select * from ssa_stacked_off) x),
   (select count(*) from (select * from ssa_stacked_off except select * from ssa_stacked_on) y),
   (select count(*) from ssa_stacked_on) - (select count(*) from ssa_stacked_off);
@@ -1360,6 +1686,30 @@ select
 
 query III
 select
+  (select count(*) from (select * from ssa_group_expr_on except select * from ssa_group_expr_off) x),
+  (select count(*) from (select * from ssa_group_expr_off except select * from ssa_group_expr_on) y),
+  (select count(*) from ssa_group_expr_on) - (select count(*) from ssa_group_expr_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_union_aggs_on except select * from ssa_union_aggs_off) x),
+  (select count(*) from (select * from ssa_union_aggs_off except select * from ssa_union_aggs_on) y),
+  (select count(*) from ssa_union_aggs_on) - (select count(*) from ssa_union_aggs_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_union_rows_on except select * from ssa_union_rows_off) x),
+  (select count(*) from (select * from ssa_union_rows_off except select * from ssa_union_rows_on) y),
+  (select count(*) from ssa_union_rows_on) - (select count(*) from ssa_union_rows_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from ssa_kept_count_count_on except select * from ssa_kept_count_count_off) x),
   (select count(*) from (select * from ssa_kept_count_count_off except select * from ssa_kept_count_count_on) y),
   (select count(*) from ssa_kept_count_count_on) - (select count(*) from ssa_kept_count_count_off);
@@ -1416,9 +1766,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssa_kept_union_on except select * from ssa_kept_union_off) x),
-  (select count(*) from (select * from ssa_kept_union_off except select * from ssa_kept_union_on) y),
-  (select count(*) from ssa_kept_union_on) - (select count(*) from ssa_kept_union_off);
+  (select count(*) from (select * from ssa_union_sums_on except select * from ssa_union_sums_off) x),
+  (select count(*) from (select * from ssa_union_sums_off except select * from ssa_union_sums_on) y),
+  (select count(*) from ssa_union_sums_on) - (select count(*) from ssa_union_sums_off);
 ----
 0 0 0
 
@@ -1469,6 +1819,38 @@ select
   (select count(*) from (select * from ssa_share_scans_on except select * from (select a.id from ssa_a a where exists (select 1 from ssa_h h where h.sid = a.k and h.v > 0) union all select b.id from ssa_b b where exists (select 1 from ssa_h h where h.sid = b.k and h.v > 0)) q) x),
   (select count(*) from (select * from (select a.id from ssa_a a where exists (select 1 from ssa_h h where h.sid = a.k and h.v > 0) union all select b.id from ssa_b b where exists (select 1 from ssa_h h where h.sid = b.k and h.v > 0)) q except select * from ssa_share_scans_on) y),
   (select count(*) from ssa_share_scans_on) - (select count(*) from (select a.id from ssa_a a where exists (select 1 from ssa_h h where h.sid = a.k and h.v > 0) union all select b.id from ssa_b b where exists (select 1 from ssa_h h where h.sid = b.k and h.v > 0)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_widen_filters_on except select * from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x') q) x),
+  (select count(*) from (select * from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x') q except select * from ssa_widen_filters_on) y),
+  (select count(*) from ssa_widen_filters_on) - (select count(*) from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x') q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_widen_left_on except select * from (select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid) q) x),
+  (select count(*) from (select * from (select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid) q except select * from ssa_widen_left_on) y),
+  (select count(*) from ssa_widen_left_on) - (select count(*) from (select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_agg_filters_on except select * from (select a.id, coalesce(x.s, 0) as s, y.c from ssa_a a left join (select sid, sum(v) as s from ssa_h where v is not null group by sid) x on a.k = x.sid left join (select sid, count(*) as c from ssa_h where v is not null and st = 'x' group by sid) y on a.k = y.sid) q) x),
+  (select count(*) from (select * from (select a.id, coalesce(x.s, 0) as s, y.c from ssa_a a left join (select sid, sum(v) as s from ssa_h where v is not null group by sid) x on a.k = x.sid left join (select sid, count(*) as c from ssa_h where v is not null and st = 'x' group by sid) y on a.k = y.sid) q except select * from ssa_agg_filters_on) y),
+  (select count(*) from ssa_agg_filters_on) - (select count(*) from (select a.id, coalesce(x.s, 0) as s, y.c from ssa_a a left join (select sid, sum(v) as s from ssa_h where v is not null group by sid) x on a.k = x.sid left join (select sid, count(*) as c from ssa_h where v is not null and st = 'x' group by sid) y on a.k = y.sid) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_kept_scalar_filters_on except select * from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q) x),
+  (select count(*) from (select * from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q except select * from ssa_kept_scalar_filters_on) y),
+  (select count(*) from ssa_kept_scalar_filters_on) - (select count(*) from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q);
 ----
 0 0 0
 
@@ -1562,6 +1944,30 @@ select
 
 query III
 select
+  (select count(*) from (select * from ssa_group_expr_on except select * from (select g + w as gw, coalesce(sum(sv), 0) as s from (select g, w, v, sum(v) as sv from ssa_t group by g, w, v) x group by g + w) q) x),
+  (select count(*) from (select * from (select g + w as gw, coalesce(sum(sv), 0) as s from (select g, w, v, sum(v) as sv from ssa_t group by g, w, v) x group by g + w) q except select * from ssa_group_expr_on) y),
+  (select count(*) from ssa_group_expr_on) - (select count(*) from (select g + w as gw, coalesce(sum(sv), 0) as s from (select g, w, v, sum(v) as sv from ssa_t group by g, w, v) x group by g + w) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_union_aggs_on except select * from (select g, coalesce(sum(sv), 0) as s, min(mn) as mn from (select g, sum(v) filter (where w > 0) as sv, min(v) as mn from ssa_t group by g union all select g, sum(v), min(v) from ssa_s group by g having count(*) > 1) u group by g) q) x),
+  (select count(*) from (select * from (select g, coalesce(sum(sv), 0) as s, min(mn) as mn from (select g, sum(v) filter (where w > 0) as sv, min(v) as mn from ssa_t group by g union all select g, sum(v), min(v) from ssa_s group by g having count(*) > 1) u group by g) q except select * from ssa_union_aggs_on) y),
+  (select count(*) from ssa_union_aggs_on) - (select count(*) from (select g, coalesce(sum(sv), 0) as s, min(mn) as mn from (select g, sum(v) filter (where w > 0) as sv, min(v) as mn from ssa_t group by g union all select g, sum(v), min(v) from ssa_s group by g having count(*) > 1) u group by g) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_union_rows_on except select * from (select g, min(mv) as mn, max(xv) as mx from (select g, min(v) as mv, max(v) as xv from ssa_t group by g union all select g, v, v from ssa_s) u group by g) q) x),
+  (select count(*) from (select * from (select g, min(mv) as mn, max(xv) as mx from (select g, min(v) as mv, max(v) as xv from ssa_t group by g union all select g, v, v from ssa_s) u group by g) q except select * from ssa_union_rows_on) y),
+  (select count(*) from ssa_union_rows_on) - (select count(*) from (select g, min(mv) as mn, max(xv) as mx from (select g, min(v) as mv, max(v) as xv from ssa_t group by g union all select g, v, v from ssa_s) u group by g) q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from ssa_kept_count_count_on except select * from (select g, count(c) as n, count(*) as m from (select g, w, count(*) as c from ssa_t group by g, w) x group by g) q) x),
   (select count(*) from (select * from (select g, count(c) as n, count(*) as m from (select g, w, count(*) as c from ssa_t group by g, w) x group by g) q except select * from ssa_kept_count_count_on) y),
   (select count(*) from ssa_kept_count_count_on) - (select count(*) from (select g, count(c) as n, count(*) as m from (select g, w, count(*) as c from ssa_t group by g, w) x group by g) q);
@@ -1618,9 +2024,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssa_kept_union_on except select * from (select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g) q) x),
-  (select count(*) from (select * from (select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g) q except select * from ssa_kept_union_on) y),
-  (select count(*) from ssa_kept_union_on) - (select count(*) from (select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g) q);
+  (select count(*) from (select * from ssa_union_sums_on except select * from (select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g) q) x),
+  (select count(*) from (select * from (select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g) q except select * from ssa_union_sums_on) y),
+  (select count(*) from ssa_union_sums_on) - (select count(*) from (select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g) q);
 ----
 0 0 0
 
@@ -1687,6 +2093,38 @@ select
 
 query III
 select
+  (select count(*) from (select * from ssa_widen_filters_on except select * from ssa_widen_filters_off) x),
+  (select count(*) from (select * from ssa_widen_filters_off except select * from ssa_widen_filters_on) y),
+  (select count(*) from ssa_widen_filters_on) - (select count(*) from ssa_widen_filters_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_widen_left_on except select * from ssa_widen_left_off) x),
+  (select count(*) from (select * from ssa_widen_left_off except select * from ssa_widen_left_on) y),
+  (select count(*) from ssa_widen_left_on) - (select count(*) from ssa_widen_left_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_agg_filters_on except select * from ssa_agg_filters_off) x),
+  (select count(*) from (select * from ssa_agg_filters_off except select * from ssa_agg_filters_on) y),
+  (select count(*) from ssa_agg_filters_on) - (select count(*) from ssa_agg_filters_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_kept_scalar_filters_on except select * from ssa_kept_scalar_filters_off) x),
+  (select count(*) from (select * from ssa_kept_scalar_filters_off except select * from ssa_kept_scalar_filters_on) y),
+  (select count(*) from ssa_kept_scalar_filters_on) - (select count(*) from ssa_kept_scalar_filters_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from ssa_stacked_on except select * from ssa_stacked_off) x),
   (select count(*) from (select * from ssa_stacked_off except select * from ssa_stacked_on) y),
   (select count(*) from ssa_stacked_on) - (select count(*) from ssa_stacked_off);
@@ -1775,6 +2213,30 @@ select
 
 query III
 select
+  (select count(*) from (select * from ssa_group_expr_on except select * from ssa_group_expr_off) x),
+  (select count(*) from (select * from ssa_group_expr_off except select * from ssa_group_expr_on) y),
+  (select count(*) from ssa_group_expr_on) - (select count(*) from ssa_group_expr_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_union_aggs_on except select * from ssa_union_aggs_off) x),
+  (select count(*) from (select * from ssa_union_aggs_off except select * from ssa_union_aggs_on) y),
+  (select count(*) from ssa_union_aggs_on) - (select count(*) from ssa_union_aggs_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_union_rows_on except select * from ssa_union_rows_off) x),
+  (select count(*) from (select * from ssa_union_rows_off except select * from ssa_union_rows_on) y),
+  (select count(*) from ssa_union_rows_on) - (select count(*) from ssa_union_rows_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from ssa_kept_count_count_on except select * from ssa_kept_count_count_off) x),
   (select count(*) from (select * from ssa_kept_count_count_off except select * from ssa_kept_count_count_on) y),
   (select count(*) from ssa_kept_count_count_on) - (select count(*) from ssa_kept_count_count_off);
@@ -1831,9 +2293,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssa_kept_union_on except select * from ssa_kept_union_off) x),
-  (select count(*) from (select * from ssa_kept_union_off except select * from ssa_kept_union_on) y),
-  (select count(*) from ssa_kept_union_on) - (select count(*) from ssa_kept_union_off);
+  (select count(*) from (select * from ssa_union_sums_on except select * from ssa_union_sums_off) x),
+  (select count(*) from (select * from ssa_union_sums_off except select * from ssa_union_sums_on) y),
+  (select count(*) from ssa_union_sums_on) - (select count(*) from ssa_union_sums_off);
 ----
 0 0 0
 
@@ -1884,6 +2346,38 @@ select
   (select count(*) from (select * from ssa_share_scans_on except select * from (select a.id from ssa_a a where exists (select 1 from ssa_h h where h.sid = a.k and h.v > 0) union all select b.id from ssa_b b where exists (select 1 from ssa_h h where h.sid = b.k and h.v > 0)) q) x),
   (select count(*) from (select * from (select a.id from ssa_a a where exists (select 1 from ssa_h h where h.sid = a.k and h.v > 0) union all select b.id from ssa_b b where exists (select 1 from ssa_h h where h.sid = b.k and h.v > 0)) q except select * from ssa_share_scans_on) y),
   (select count(*) from ssa_share_scans_on) - (select count(*) from (select a.id from ssa_a a where exists (select 1 from ssa_h h where h.sid = a.k and h.v > 0) union all select b.id from ssa_b b where exists (select 1 from ssa_h h where h.sid = b.k and h.v > 0)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_widen_filters_on except select * from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x') q) x),
+  (select count(*) from (select * from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x') q except select * from ssa_widen_filters_on) y),
+  (select count(*) from ssa_widen_filters_on) - (select count(*) from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x') q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_widen_left_on except select * from (select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid) q) x),
+  (select count(*) from (select * from (select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid) q except select * from ssa_widen_left_on) y),
+  (select count(*) from ssa_widen_left_on) - (select count(*) from (select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_agg_filters_on except select * from (select a.id, coalesce(x.s, 0) as s, y.c from ssa_a a left join (select sid, sum(v) as s from ssa_h where v is not null group by sid) x on a.k = x.sid left join (select sid, count(*) as c from ssa_h where v is not null and st = 'x' group by sid) y on a.k = y.sid) q) x),
+  (select count(*) from (select * from (select a.id, coalesce(x.s, 0) as s, y.c from ssa_a a left join (select sid, sum(v) as s from ssa_h where v is not null group by sid) x on a.k = x.sid left join (select sid, count(*) as c from ssa_h where v is not null and st = 'x' group by sid) y on a.k = y.sid) q except select * from ssa_agg_filters_on) y),
+  (select count(*) from ssa_agg_filters_on) - (select count(*) from (select a.id, coalesce(x.s, 0) as s, y.c from ssa_a a left join (select sid, sum(v) as s from ssa_h where v is not null group by sid) x on a.k = x.sid left join (select sid, count(*) as c from ssa_h where v is not null and st = 'x' group by sid) y on a.k = y.sid) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_kept_scalar_filters_on except select * from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q) x),
+  (select count(*) from (select * from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q except select * from ssa_kept_scalar_filters_on) y),
+  (select count(*) from ssa_kept_scalar_filters_on) - (select count(*) from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q);
 ----
 0 0 0
 
@@ -1977,6 +2471,30 @@ select
 
 query III
 select
+  (select count(*) from (select * from ssa_group_expr_on except select * from (select g + w as gw, coalesce(sum(sv), 0) as s from (select g, w, v, sum(v) as sv from ssa_t group by g, w, v) x group by g + w) q) x),
+  (select count(*) from (select * from (select g + w as gw, coalesce(sum(sv), 0) as s from (select g, w, v, sum(v) as sv from ssa_t group by g, w, v) x group by g + w) q except select * from ssa_group_expr_on) y),
+  (select count(*) from ssa_group_expr_on) - (select count(*) from (select g + w as gw, coalesce(sum(sv), 0) as s from (select g, w, v, sum(v) as sv from ssa_t group by g, w, v) x group by g + w) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_union_aggs_on except select * from (select g, coalesce(sum(sv), 0) as s, min(mn) as mn from (select g, sum(v) filter (where w > 0) as sv, min(v) as mn from ssa_t group by g union all select g, sum(v), min(v) from ssa_s group by g having count(*) > 1) u group by g) q) x),
+  (select count(*) from (select * from (select g, coalesce(sum(sv), 0) as s, min(mn) as mn from (select g, sum(v) filter (where w > 0) as sv, min(v) as mn from ssa_t group by g union all select g, sum(v), min(v) from ssa_s group by g having count(*) > 1) u group by g) q except select * from ssa_union_aggs_on) y),
+  (select count(*) from ssa_union_aggs_on) - (select count(*) from (select g, coalesce(sum(sv), 0) as s, min(mn) as mn from (select g, sum(v) filter (where w > 0) as sv, min(v) as mn from ssa_t group by g union all select g, sum(v), min(v) from ssa_s group by g having count(*) > 1) u group by g) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_union_rows_on except select * from (select g, min(mv) as mn, max(xv) as mx from (select g, min(v) as mv, max(v) as xv from ssa_t group by g union all select g, v, v from ssa_s) u group by g) q) x),
+  (select count(*) from (select * from (select g, min(mv) as mn, max(xv) as mx from (select g, min(v) as mv, max(v) as xv from ssa_t group by g union all select g, v, v from ssa_s) u group by g) q except select * from ssa_union_rows_on) y),
+  (select count(*) from ssa_union_rows_on) - (select count(*) from (select g, min(mv) as mn, max(xv) as mx from (select g, min(v) as mv, max(v) as xv from ssa_t group by g union all select g, v, v from ssa_s) u group by g) q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from ssa_kept_count_count_on except select * from (select g, count(c) as n, count(*) as m from (select g, w, count(*) as c from ssa_t group by g, w) x group by g) q) x),
   (select count(*) from (select * from (select g, count(c) as n, count(*) as m from (select g, w, count(*) as c from ssa_t group by g, w) x group by g) q except select * from ssa_kept_count_count_on) y),
   (select count(*) from ssa_kept_count_count_on) - (select count(*) from (select g, count(c) as n, count(*) as m from (select g, w, count(*) as c from ssa_t group by g, w) x group by g) q);
@@ -2033,9 +2551,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssa_kept_union_on except select * from (select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g) q) x),
-  (select count(*) from (select * from (select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g) q except select * from ssa_kept_union_on) y),
-  (select count(*) from ssa_kept_union_on) - (select count(*) from (select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g) q);
+  (select count(*) from (select * from ssa_union_sums_on except select * from (select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g) q) x),
+  (select count(*) from (select * from (select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g) q except select * from ssa_union_sums_on) y),
+  (select count(*) from ssa_union_sums_on) - (select count(*) from (select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g) q);
 ----
 0 0 0
 
@@ -2100,6 +2618,38 @@ select
 
 query III
 select
+  (select count(*) from (select * from ssa_widen_filters_on except select * from ssa_widen_filters_off) x),
+  (select count(*) from (select * from ssa_widen_filters_off except select * from ssa_widen_filters_on) y),
+  (select count(*) from ssa_widen_filters_on) - (select count(*) from ssa_widen_filters_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_widen_left_on except select * from ssa_widen_left_off) x),
+  (select count(*) from (select * from ssa_widen_left_off except select * from ssa_widen_left_on) y),
+  (select count(*) from ssa_widen_left_on) - (select count(*) from ssa_widen_left_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_agg_filters_on except select * from ssa_agg_filters_off) x),
+  (select count(*) from (select * from ssa_agg_filters_off except select * from ssa_agg_filters_on) y),
+  (select count(*) from ssa_agg_filters_on) - (select count(*) from ssa_agg_filters_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_kept_scalar_filters_on except select * from ssa_kept_scalar_filters_off) x),
+  (select count(*) from (select * from ssa_kept_scalar_filters_off except select * from ssa_kept_scalar_filters_on) y),
+  (select count(*) from ssa_kept_scalar_filters_on) - (select count(*) from ssa_kept_scalar_filters_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from ssa_stacked_on except select * from ssa_stacked_off) x),
   (select count(*) from (select * from ssa_stacked_off except select * from ssa_stacked_on) y),
   (select count(*) from ssa_stacked_on) - (select count(*) from ssa_stacked_off);
@@ -2188,6 +2738,30 @@ select
 
 query III
 select
+  (select count(*) from (select * from ssa_group_expr_on except select * from ssa_group_expr_off) x),
+  (select count(*) from (select * from ssa_group_expr_off except select * from ssa_group_expr_on) y),
+  (select count(*) from ssa_group_expr_on) - (select count(*) from ssa_group_expr_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_union_aggs_on except select * from ssa_union_aggs_off) x),
+  (select count(*) from (select * from ssa_union_aggs_off except select * from ssa_union_aggs_on) y),
+  (select count(*) from ssa_union_aggs_on) - (select count(*) from ssa_union_aggs_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_union_rows_on except select * from ssa_union_rows_off) x),
+  (select count(*) from (select * from ssa_union_rows_off except select * from ssa_union_rows_on) y),
+  (select count(*) from ssa_union_rows_on) - (select count(*) from ssa_union_rows_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from ssa_kept_count_count_on except select * from ssa_kept_count_count_off) x),
   (select count(*) from (select * from ssa_kept_count_count_off except select * from ssa_kept_count_count_on) y),
   (select count(*) from ssa_kept_count_count_on) - (select count(*) from ssa_kept_count_count_off);
@@ -2244,9 +2818,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssa_kept_union_on except select * from ssa_kept_union_off) x),
-  (select count(*) from (select * from ssa_kept_union_off except select * from ssa_kept_union_on) y),
-  (select count(*) from ssa_kept_union_on) - (select count(*) from ssa_kept_union_off);
+  (select count(*) from (select * from ssa_union_sums_on except select * from ssa_union_sums_off) x),
+  (select count(*) from (select * from ssa_union_sums_off except select * from ssa_union_sums_on) y),
+  (select count(*) from ssa_union_sums_on) - (select count(*) from ssa_union_sums_off);
 ----
 0 0 0
 
@@ -2297,6 +2871,38 @@ select
   (select count(*) from (select * from ssa_share_scans_on except select * from (select a.id from ssa_a a where exists (select 1 from ssa_h h where h.sid = a.k and h.v > 0) union all select b.id from ssa_b b where exists (select 1 from ssa_h h where h.sid = b.k and h.v > 0)) q) x),
   (select count(*) from (select * from (select a.id from ssa_a a where exists (select 1 from ssa_h h where h.sid = a.k and h.v > 0) union all select b.id from ssa_b b where exists (select 1 from ssa_h h where h.sid = b.k and h.v > 0)) q except select * from ssa_share_scans_on) y),
   (select count(*) from ssa_share_scans_on) - (select count(*) from (select a.id from ssa_a a where exists (select 1 from ssa_h h where h.sid = a.k and h.v > 0) union all select b.id from ssa_b b where exists (select 1 from ssa_h h where h.sid = b.k and h.v > 0)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_widen_filters_on except select * from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x') q) x),
+  (select count(*) from (select * from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x') q except select * from ssa_widen_filters_on) y),
+  (select count(*) from ssa_widen_filters_on) - (select count(*) from (select a.id, h.v from ssa_a a join ssa_h h on a.k = h.sid where h.v > 0 union all select a.id, h.id from ssa_a a join ssa_h h on a.k = h.sid where h.st = 'x') q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_widen_left_on except select * from (select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid) q) x),
+  (select count(*) from (select * from (select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid) q except select * from ssa_widen_left_on) y),
+  (select count(*) from ssa_widen_left_on) - (select count(*) from (select a.id, h.v from ssa_a a left join ssa_h h on a.k = h.sid where a.x > 0 union all select a.id, h.id from ssa_a a left join ssa_h h on a.k = h.sid) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_agg_filters_on except select * from (select a.id, coalesce(x.s, 0) as s, y.c from ssa_a a left join (select sid, sum(v) as s from ssa_h where v is not null group by sid) x on a.k = x.sid left join (select sid, count(*) as c from ssa_h where v is not null and st = 'x' group by sid) y on a.k = y.sid) q) x),
+  (select count(*) from (select * from (select a.id, coalesce(x.s, 0) as s, y.c from ssa_a a left join (select sid, sum(v) as s from ssa_h where v is not null group by sid) x on a.k = x.sid left join (select sid, count(*) as c from ssa_h where v is not null and st = 'x' group by sid) y on a.k = y.sid) q except select * from ssa_agg_filters_on) y),
+  (select count(*) from ssa_agg_filters_on) - (select count(*) from (select a.id, coalesce(x.s, 0) as s, y.c from ssa_a a left join (select sid, sum(v) as s from ssa_h where v is not null group by sid) x on a.k = x.sid left join (select sid, count(*) as c from ssa_h where v is not null and st = 'x' group by sid) y on a.k = y.sid) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_kept_scalar_filters_on except select * from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q) x),
+  (select count(*) from (select * from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q except select * from ssa_kept_scalar_filters_on) y),
+  (select count(*) from ssa_kept_scalar_filters_on) - (select count(*) from (select a.id from ssa_a a where a.x < (select max(v) from ssa_h where st = 'x') union all select b.id from ssa_b b where b.y < (select max(v) from ssa_h where st = 'y')) q);
 ----
 0 0 0
 
@@ -2390,6 +2996,30 @@ select
 
 query III
 select
+  (select count(*) from (select * from ssa_group_expr_on except select * from (select g + w as gw, coalesce(sum(sv), 0) as s from (select g, w, v, sum(v) as sv from ssa_t group by g, w, v) x group by g + w) q) x),
+  (select count(*) from (select * from (select g + w as gw, coalesce(sum(sv), 0) as s from (select g, w, v, sum(v) as sv from ssa_t group by g, w, v) x group by g + w) q except select * from ssa_group_expr_on) y),
+  (select count(*) from ssa_group_expr_on) - (select count(*) from (select g + w as gw, coalesce(sum(sv), 0) as s from (select g, w, v, sum(v) as sv from ssa_t group by g, w, v) x group by g + w) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_union_aggs_on except select * from (select g, coalesce(sum(sv), 0) as s, min(mn) as mn from (select g, sum(v) filter (where w > 0) as sv, min(v) as mn from ssa_t group by g union all select g, sum(v), min(v) from ssa_s group by g having count(*) > 1) u group by g) q) x),
+  (select count(*) from (select * from (select g, coalesce(sum(sv), 0) as s, min(mn) as mn from (select g, sum(v) filter (where w > 0) as sv, min(v) as mn from ssa_t group by g union all select g, sum(v), min(v) from ssa_s group by g having count(*) > 1) u group by g) q except select * from ssa_union_aggs_on) y),
+  (select count(*) from ssa_union_aggs_on) - (select count(*) from (select g, coalesce(sum(sv), 0) as s, min(mn) as mn from (select g, sum(v) filter (where w > 0) as sv, min(v) as mn from ssa_t group by g union all select g, sum(v), min(v) from ssa_s group by g having count(*) > 1) u group by g) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ssa_union_rows_on except select * from (select g, min(mv) as mn, max(xv) as mx from (select g, min(v) as mv, max(v) as xv from ssa_t group by g union all select g, v, v from ssa_s) u group by g) q) x),
+  (select count(*) from (select * from (select g, min(mv) as mn, max(xv) as mx from (select g, min(v) as mv, max(v) as xv from ssa_t group by g union all select g, v, v from ssa_s) u group by g) q except select * from ssa_union_rows_on) y),
+  (select count(*) from ssa_union_rows_on) - (select count(*) from (select g, min(mv) as mn, max(xv) as mx from (select g, min(v) as mv, max(v) as xv from ssa_t group by g union all select g, v, v from ssa_s) u group by g) q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from ssa_kept_count_count_on except select * from (select g, count(c) as n, count(*) as m from (select g, w, count(*) as c from ssa_t group by g, w) x group by g) q) x),
   (select count(*) from (select * from (select g, count(c) as n, count(*) as m from (select g, w, count(*) as c from ssa_t group by g, w) x group by g) q except select * from ssa_kept_count_count_on) y),
   (select count(*) from ssa_kept_count_count_on) - (select count(*) from (select g, count(c) as n, count(*) as m from (select g, w, count(*) as c from ssa_t group by g, w) x group by g) q);
@@ -2446,9 +3076,9 @@ select
 
 query III
 select
-  (select count(*) from (select * from ssa_kept_union_on except select * from (select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g) q) x),
-  (select count(*) from (select * from (select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g) q except select * from ssa_kept_union_on) y),
-  (select count(*) from ssa_kept_union_on) - (select count(*) from (select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g) q);
+  (select count(*) from (select * from ssa_union_sums_on except select * from (select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g) q) x),
+  (select count(*) from (select * from (select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g) q except select * from ssa_union_sums_on) y),
+  (select count(*) from ssa_union_sums_on) - (select count(*) from (select g, coalesce(sum(sv), 0) as s from (select g, sum(v) as sv from ssa_t group by g union all select g, sum(v) as sv from ssa_s group by g) u group by g) q);
 ----
 0 0 0
 
@@ -2466,7 +3096,7 @@ statement ok
 drop materialized view ssa_kept_semi_on;
 
 statement ok
-drop materialized view ssa_kept_union_on;
+drop materialized view ssa_union_sums_on;
 
 statement ok
 drop materialized view ssa_kept_shared_inner_on;
@@ -2488,6 +3118,15 @@ drop materialized view ssa_kept_sum_count_scalar_on;
 
 statement ok
 drop materialized view ssa_kept_count_count_on;
+
+statement ok
+drop materialized view ssa_union_rows_on;
+
+statement ok
+drop materialized view ssa_union_aggs_on;
+
+statement ok
+drop materialized view ssa_group_expr_on;
 
 statement ok
 drop materialized view ssa_both_on;
@@ -2523,6 +3162,18 @@ statement ok
 drop materialized view ssa_stacked_on;
 
 statement ok
+drop materialized view ssa_kept_scalar_filters_on;
+
+statement ok
+drop materialized view ssa_agg_filters_on;
+
+statement ok
+drop materialized view ssa_widen_left_on;
+
+statement ok
+drop materialized view ssa_widen_filters_on;
+
+statement ok
 drop materialized view ssa_share_scans_on;
 
 statement ok
@@ -2541,7 +3192,7 @@ statement ok
 drop materialized view ssa_kept_semi_off;
 
 statement ok
-drop materialized view ssa_kept_union_off;
+drop materialized view ssa_union_sums_off;
 
 statement ok
 drop materialized view ssa_kept_shared_inner_off;
@@ -2563,6 +3214,15 @@ drop materialized view ssa_kept_sum_count_scalar_off;
 
 statement ok
 drop materialized view ssa_kept_count_count_off;
+
+statement ok
+drop materialized view ssa_union_rows_off;
+
+statement ok
+drop materialized view ssa_union_aggs_off;
+
+statement ok
+drop materialized view ssa_group_expr_off;
 
 statement ok
 drop materialized view ssa_both_off;
@@ -2596,6 +3256,18 @@ drop materialized view ssa_types_off;
 
 statement ok
 drop materialized view ssa_stacked_off;
+
+statement ok
+drop materialized view ssa_kept_scalar_filters_off;
+
+statement ok
+drop materialized view ssa_agg_filters_off;
+
+statement ok
+drop materialized view ssa_widen_left_off;
+
+statement ok
+drop materialized view ssa_widen_filters_off;
 
 statement ok
 drop materialized view ssa_share_scans_off;

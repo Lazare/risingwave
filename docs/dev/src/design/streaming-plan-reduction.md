@@ -27,13 +27,12 @@ own rules.
 | 2 | Elimination of an aggregation, `DISTINCT` or top-n on a key | done (prototype) |
 | 3 | Elimination of a self-join on a key | in progress: repeated lookups of a table done on the branch `proto/streaming-merge-repeated-lookups`, lookups nested in trees of joins and semi or anti joins answered by a carried row done on the branch `proto/plan-reduction-flat-lookups`, aggregations next |
 | 5 | Aggregation pushed below a join onto the unique side | selected, not started |
-| 6 | Merge of two stacked aggregations | done (prototype, branch `proto/plan-reduction-shared-aggs`): stacked aggregations and a dedup below a distinct count; a dedup below a top-1 or a semi join not done (see 6) |
+| 6 | Merge of two stacked aggregations | done (prototype, branch `proto/plan-reduction-shared-aggs`): stacked aggregations, through a `UNION ALL` too, and a dedup below a distinct count; a dedup below a top-1 or a semi join not done (see 6) |
 | 7 | Join common to the branches of a `UNION ALL` joined once above the union | done (prototype, branch of idea 3); derived joined side, several joins and semi or anti joins above the join on the branch `proto/plan-reduction-union-derived` |
 | 8 | Aggregate of a constant over a group | done (prototype, branch of idea 3) |
 | 9 | Leftovers of subquery decorrelation (domain re-scan, aggregation and null-safe join back) | aggregating subqueries done (prototype, branch `proto/streaming-simplify-subquery-unnesting`); laterals without a table not started |
 | US | Branches of a `UNION ALL` that read the same table read it once (`Expand` per branch); scans of other branches shared (`streaming_share_union_scans`) | done (prototype, branch `proto/plan-reduction-union-scans`); dominance under a top-1 not done |
-| 10 | Sharing again, within one query, the sub-plans that became identical | done for stateful sub-plans (prototype, branch `proto/plan-reduction-shared-aggs`); scans that differ by their columns not done |
-| 9 | Leftovers of subquery decorrelation (domain re-scan, aggregation and null-safe join back) | aggregating subqueries done (prototype, branch `proto/streaming-simplify-subquery-unnesting`); laterals without a table done (prototype, branch `proto/plan-reduction-lateral`, see 9b) |
+| 10 | Sharing again, within one query, the sub-plans that became identical, or that differ by their columns or by commuting filters; aggregations of one input with different filters merged with `FILTER` | done for stateful cores (prototype, branch `proto/plan-reduction-shared-aggs`) |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -595,9 +594,25 @@ other stages of the prototype (three levels merge into one).
   - no aggregate at all: `DISTINCT` of `DISTINCT`, `GROUP BY` on fewer columns.
 - Kept: `avg`, `count` of `count`, `max` of `min`, `sum(DISTINCT)` of `sum`, an outer group key on an
   aggregate, `count(v)` over a dedup on more columns than the outer key and `v`.
+- Added in a second round:
+  - an outer group key computed by a projection from inner group key columns only (`GROUP BY g +
+    w` above `GROUP BY g, w, v`) is computed from the same columns of the input;
+  - through a `UNION ALL` (rule `StackedAggOverUnionMergeRule`): an aggregation over the union of
+    branches that aggregate on (a superset of) the outer group key becomes one aggregation over the
+    union of the rows of the branches. A branch that is such an aggregation contributes, per input
+    row, the argument of its aggregate (cast to the type of the aggregate, `NULL` where its
+    `FILTER` does not hold), or `1`/`0` for a count; any other branch (rows, an aggregation with a
+    `HAVING`) contributes its rows as they are, which the outer aggregation reads one by one
+    anyway. Outer aggregates: `sum`, `min`, `max`, `bool_and`, `bool_or`, with the same pairs as
+    above. At least one aggregation must go away.
+- Why the shapes of real view definitions rarely matched the first version: two levels are
+  usually separated by a `UNION ALL` of per-source aggregations, by a projection that computes the
+  outer group key, or by a `HAVING`; a column pruning also leaves one projection per level. The
+  first two are handled now; a `HAVING` stays (the filter reads aggregates), and an aggregation
+  above a join of an aggregation is the eager/lazy aggregation of idea 5, not a merge.
 - Not done, recorded:
-  - the same through a `UNION ALL` (an aggregation over the union of aggregations of the same
-    key): one aggregation over the union of the inputs. Same algebra, a wider pattern;
+  - `sum(coalesce(sum(x), 0))` is `coalesce(sum(x), 0)` when the outer group exists: exact, not
+    done yet;
   - a dedup below a top-1 per key (`row_number() = 1` over a `UNION` or a `DISTINCT` whose rows
     only carry the key and constants): the top-1 picks the same row from the set of distinct
     rows, but its state holds every input row, where it held every distinct row, and ties between
@@ -644,10 +659,32 @@ consumer and do not rewrite a shared sub-plan.
   `NULL` instead of 0 for the count of a row whose `a.k` is `NULL` in streaming: the two domains
   are full-outer-joined, filtered on `a.k IS NOT NULL`, then joined back with `IS NOT DISTINCT
   FROM`, so the row finds no match. Batch returns 0.
-- Not done: reads of the same table that differ by their columns or by a filter (one scan of the
-  union of the columns, each consumer projecting and filtering its part), and joins that differ
-  by a filter that commutes with them. Both need a widening of the shared sub-plan, and for scans
-  the trade above makes the gain doubtful.
+- **Widened sharing** (second round, same variable, `share_widened_subplans`, run before the
+  sharing of identical sub-plans): copies rooted at a join or an aggregation that differ by their
+  columns, or by filters that commute with them, are aligned node by node into one *core*:
+  - projections: the core keeps every column of its input and computes the expressions of every
+    copy once;
+  - filters and scan predicates: the core keeps the conjuncts of every copy; the other conjuncts
+    of a copy are *residual* and are lifted: through an inner join, the preserved side of an outer
+    join, the left side of a semi or anti join, and an aggregation when they only read group key
+    columns. Not through the optional side of an outer join: those copies are not merged;
+  - below an aggregation, residual conjuncts that read other columns become a `FILTER` on the
+    calls of that copy, and the copy keeps the groups where `count(*) FILTER (WHERE ...)` is
+    positive, the groups its own input had. This merges several aggregations of the same input
+    and group key that differ by their filters. Not for aggregations without group key: they are
+    typically read by a dynamic filter, which needs a single column, and the projection that
+    selects it from the shared core is merged into the join above (planning then fails on a
+    nested-loop join);
+  - joins must have the same type and condition, aggregations the same group key (calls are
+    united), scans the same table; other nodes must be equal.
+  Each copy becomes `Project <- Filter(residual) <- Share(core)`, then column pruning narrows the
+  core to what its consumers read. The joins of the consumers stay: two consumers joining the
+  merged aggregation on the same key still join it twice (idea 3 removes such repeated lookups of
+  a table, not of a shared sub-plan).
+  Cost: a lifted filter no longer reduces the state of the join or aggregation of the core.
+- Still not done: copies whose joins are in a different order (join reordering made them differ),
+  filters on the optional side of an outer join, a filter with `now()` (it is a join with the
+  `Now` source at that point and must be equal).
 
 ## Not for now: sharing between materialized views
 

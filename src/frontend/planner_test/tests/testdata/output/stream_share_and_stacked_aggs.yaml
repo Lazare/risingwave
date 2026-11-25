@@ -7,6 +7,11 @@
     create table b (id int primary key, k int, y int);
     create view v1 as select a.id, a.k, h.v from a join h on a.k = h.sid;
     create view g1 as select sid, count(*) as c, max(v) as m from h group by sid;
+    create table m (id int primary key, code varchar, dir varchar);
+    create table r (id varchar primary key, code varchar, x int);
+    create table p (id int primary key);
+    create table c (id int primary key, pid int, amt int, st varchar);
+    create table tg (k varchar primary key, tags jsonb);
 - id: setup_share_off
   sql: |
     create table a (id int primary key, k int, x int);
@@ -190,7 +195,7 @@
         └─StreamExchange { dist: HashShard(h.sid) }
           └─StreamFilter { predicate: (h.v > 0:Int32) }
             └─StreamTableScan { table: h, columns: [h.sid, h.v, h.id], stream_scan_type: SnapshotBackfill, stream_key: [h.id], pk: [id], dist: UpstreamHashShard(h.id) }
-- name: kept - the same join with different filters is not identical
+- name: the same join with different filters on one side is shared, each copy filters above
   before:
   - setup_share
   sql: |
@@ -220,7 +225,7 @@
                 └─StreamExchange { dist: HashShard(h.sid) }
                   └─StreamFilter { predicate: ((h.v > 0:Int32) OR (h.v < 0:Int32)) }
                     └─StreamTableScan { table: h, columns: [h.sid, h.v, h.id], stream_scan_type: SnapshotBackfill, stream_key: [h.id], pk: [id], dist: UpstreamHashShard(h.id) }
-- name: kept - the same join reading other columns is not identical
+- name: the same join reading other columns is shared with the columns of both
   before:
   - setup_share
   sql: |
@@ -232,18 +237,20 @@
     └─StreamUnion { all: true }
       ├─StreamExchange { dist: HashShard(a.id, h.id, a.k, 0:Int32) }
       │ └─StreamProject { exprs: [a.id, h.v, a.id, h.id, a.k, 0:Int32] }
-      │   └─StreamHashJoin { type: Inner, predicate: a.k = h.sid, output: [a.id, h.v, a.k, h.id] }
-      │     ├─StreamExchange { dist: HashShard(a.k) }
-      │     │ └─StreamTableScan { table: a, columns: [a.id, a.k], stream_scan_type: SnapshotBackfill, stream_key: [a.id], pk: [id], dist: UpstreamHashShard(a.id) }
-      │     └─StreamExchange { dist: HashShard(h.sid) }
-      │       └─StreamTableScan { table: h, columns: [h.sid, h.v, h.id], stream_scan_type: SnapshotBackfill, stream_key: [h.id], pk: [id], dist: UpstreamHashShard(h.id) }
+      │   └─StreamShare { id: 4 }
+      │     └─StreamHashJoin { type: Inner, predicate: a.k = h.sid, output: [a.id, h.id, h.v, a.k] }
+      │       ├─StreamExchange { dist: HashShard(a.k) }
+      │       │ └─StreamTableScan { table: a, columns: [a.id, a.k], stream_scan_type: SnapshotBackfill, stream_key: [a.id], pk: [id], dist: UpstreamHashShard(a.id) }
+      │       └─StreamExchange { dist: HashShard(h.sid) }
+      │         └─StreamTableScan { table: h, columns: [h.id, h.sid, h.v], stream_scan_type: SnapshotBackfill, stream_key: [h.id], pk: [id], dist: UpstreamHashShard(h.id) }
       └─StreamExchange { dist: HashShard(a.id, h.id, a.k, 1:Int32) }
         └─StreamProject { exprs: [a.id, h.id, a.id, h.id, a.k, 1:Int32] }
-          └─StreamHashJoin { type: Inner, predicate: a.k = h.sid, output: [a.id, h.id, a.k] }
-            ├─StreamExchange { dist: HashShard(a.k) }
-            │ └─StreamTableScan { table: a, columns: [a.id, a.k], stream_scan_type: SnapshotBackfill, stream_key: [a.id], pk: [id], dist: UpstreamHashShard(a.id) }
-            └─StreamExchange { dist: HashShard(h.sid) }
-              └─StreamTableScan { table: h, columns: [h.id, h.sid], stream_scan_type: SnapshotBackfill, stream_key: [h.id], pk: [id], dist: UpstreamHashShard(h.id) }
+          └─StreamShare { id: 4 }
+            └─StreamHashJoin { type: Inner, predicate: a.k = h.sid, output: [a.id, h.id, h.v, a.k] }
+              ├─StreamExchange { dist: HashShard(a.k) }
+              │ └─StreamTableScan { table: a, columns: [a.id, a.k], stream_scan_type: SnapshotBackfill, stream_key: [a.id], pk: [id], dist: UpstreamHashShard(a.id) }
+              └─StreamExchange { dist: HashShard(h.sid) }
+                └─StreamTableScan { table: h, columns: [h.id, h.sid, h.v], stream_scan_type: SnapshotBackfill, stream_key: [h.id], pk: [id], dist: UpstreamHashShard(h.id) }
 - name: kept - a sub-plan shared at the beginning stays shared
   before:
   - setup_share
@@ -271,6 +278,154 @@
               └─StreamExchange { dist: HashShard(h.sid) }
                 └─StreamFilter { predicate: (h.v > 0:Int32) }
                   └─StreamTableScan { table: h, columns: [h.sid, h.v, h.id], stream_scan_type: SnapshotBackfill, stream_key: [h.id], pk: [id], dist: UpstreamHashShard(h.id) }
+- name: a left join filtered on its preserved side in one copy is shared
+  before:
+  - setup_share
+  sql: |
+    select m.id, r.id as rid from m left join r on m.code = r.code where m.dir = 'c'
+    union all
+    select m.id, r.x::varchar from m left join r on m.code = r.code where m.id > 5;
+  stream_plan: |-
+    StreamMaterialize { columns: [id, rid, m.id(hidden), r.id(hidden), m.code(hidden), $src(hidden)], stream_key: [m.id, r.id, m.code, $src], pk_columns: [m.id, r.id, m.code, $src], pk_conflict: NoCheck }
+    └─StreamUnion { all: true }
+      ├─StreamExchange { dist: HashShard(m.id, r.id, m.code, 0:Int32) }
+      │ └─StreamProject { exprs: [m.id, r.id, m.id, r.id, m.code, 0:Int32] }
+      │   └─StreamFilter { predicate: (m.dir = 'c':Varchar) }
+      │     └─StreamShare { id: 5 }
+      │       └─StreamHashJoin { type: LeftOuter, predicate: m.code = r.code, output: [m.id, m.dir, r.id, r.x, m.code] }
+      │         ├─StreamExchange { dist: HashShard(m.code) }
+      │         │ └─StreamFilter { predicate: ((m.dir = 'c':Varchar) OR (m.id > 5:Int32)) }
+      │         │   └─StreamTableScan { table: m, columns: [m.id, m.code, m.dir], stream_scan_type: SnapshotBackfill, stream_key: [m.id], pk: [id], dist: UpstreamHashShard(m.id) }
+      │         └─StreamExchange { dist: HashShard(r.code) }
+      │           └─StreamTableScan { table: r, columns: [r.id, r.code, r.x], stream_scan_type: SnapshotBackfill, stream_key: [r.id], pk: [id], dist: UpstreamHashShard(r.id) }
+      └─StreamExchange { dist: HashShard(m.id, r.id, m.code, 1:Int32) }
+        └─StreamProject { exprs: [m.id, r.x::Varchar as $expr1, m.id, r.id, m.code, 1:Int32] }
+          └─StreamFilter { predicate: (m.id > 5:Int32) }
+            └─StreamShare { id: 5 }
+              └─StreamHashJoin { type: LeftOuter, predicate: m.code = r.code, output: [m.id, m.dir, r.id, r.x, m.code] }
+                ├─StreamExchange { dist: HashShard(m.code) }
+                │ └─StreamFilter { predicate: ((m.dir = 'c':Varchar) OR (m.id > 5:Int32)) }
+                │   └─StreamTableScan { table: m, columns: [m.id, m.code, m.dir], stream_scan_type: SnapshotBackfill, stream_key: [m.id], pk: [id], dist: UpstreamHashShard(m.id) }
+                └─StreamExchange { dist: HashShard(r.code) }
+                  └─StreamTableScan { table: r, columns: [r.id, r.code, r.x], stream_scan_type: SnapshotBackfill, stream_key: [r.id], pk: [id], dist: UpstreamHashShard(r.id) }
+- name: kept - a left join filtered on its optional side in one copy
+  before:
+  - setup_share
+  sql: |
+    select m.id, r.id as rid from m left join r on m.code = r.code
+    union all
+    select m.id, x.id from m left join (select * from r where r.x > 0) x on m.code = x.code;
+  stream_plan: |-
+    StreamMaterialize { columns: [id, rid, m.id(hidden), r.id(hidden), m.code(hidden), $src(hidden)], stream_key: [m.id, r.id, m.code, $src], pk_columns: [m.id, r.id, m.code, $src], pk_conflict: NoCheck }
+    └─StreamUnion { all: true }
+      ├─StreamExchange { dist: HashShard(m.id, r.id, m.code, 0:Int32) }
+      │ └─StreamProject { exprs: [m.id, r.id, m.id, r.id, m.code, 0:Int32] }
+      │   └─StreamHashJoin { type: LeftOuter, predicate: m.code = r.code, output: [m.id, r.id, m.code] }
+      │     ├─StreamExchange { dist: HashShard(m.code) }
+      │     │ └─StreamTableScan { table: m, columns: [m.id, m.code], stream_scan_type: SnapshotBackfill, stream_key: [m.id], pk: [id], dist: UpstreamHashShard(m.id) }
+      │     └─StreamExchange { dist: HashShard(r.code) }
+      │       └─StreamTableScan { table: r, columns: [r.id, r.code], stream_scan_type: SnapshotBackfill, stream_key: [r.id], pk: [id], dist: UpstreamHashShard(r.id) }
+      └─StreamExchange { dist: HashShard(m.id, r.id, m.code, 1:Int32) }
+        └─StreamProject { exprs: [m.id, r.id, m.id, r.id, m.code, 1:Int32] }
+          └─StreamHashJoin { type: LeftOuter, predicate: m.code = r.code, output: [m.id, r.id, m.code] }
+            ├─StreamExchange { dist: HashShard(m.code) }
+            │ └─StreamTableScan { table: m, columns: [m.id, m.code], stream_scan_type: SnapshotBackfill, stream_key: [m.id], pk: [id], dist: UpstreamHashShard(m.id) }
+            └─StreamExchange { dist: HashShard(r.code) }
+              └─StreamProject { exprs: [r.id, r.code] }
+                └─StreamFilter { predicate: (r.x > 0:Int32) }
+                  └─StreamTableScan { table: r, columns: [r.id, r.code, r.x], stream_scan_type: SnapshotBackfill, stream_key: [r.id], pk: [id], dist: UpstreamHashShard(r.id) }
+- name: two aggregations of the same input and key with different filters become one with FILTER
+  before:
+  - setup_share
+  sql: |
+    select p.id, a1.s1, a2.s2 from p
+    left join (select pid, sum(amt) as s1 from c where amt is not null group by pid) a1 on p.id = a1.pid
+    left join (select pid, sum(amt) as s2 from c where amt is not null and st not in ('x', 'y') group by pid) a2 on p.id = a2.pid;
+  stream_plan: |-
+    StreamMaterialize { columns: [id, s1, s2, c.pid(hidden)], stream_key: [id], pk_columns: [id], pk_conflict: NoCheck }
+    └─StreamExchange { dist: HashShard(p.id) }
+      └─StreamHashJoin { type: LeftOuter, predicate: p.id = c.pid, output: [p.id, sum(c.amt), sum(c.amt) filter(Not(In(c.st, 'x':Varchar, 'y':Varchar))), c.pid] }
+        ├─StreamHashJoin { type: LeftOuter, predicate: p.id = c.pid, output: [p.id, sum(c.amt), c.pid] }
+        │ ├─StreamExchange { dist: HashShard(p.id) }
+        │ │ └─StreamTableScan { table: p, columns: [p.id], stream_scan_type: SnapshotBackfill, stream_key: [p.id], pk: [id], dist: UpstreamHashShard(p.id) }
+        │ └─StreamProject { exprs: [c.pid, sum(c.amt)] }
+        │   └─StreamShare { id: 6 }
+        │     └─StreamProject { exprs: [c.pid, sum(c.amt), sum(c.amt) filter(Not(In(c.st, 'x':Varchar, 'y':Varchar))), count filter(Not(In(c.st, 'x':Varchar, 'y':Varchar)))] }
+        │       └─StreamHashAgg { group_key: [c.pid], aggs: [sum(c.amt), sum(c.amt) filter(Not(In(c.st, 'x':Varchar, 'y':Varchar))), count filter(Not(In(c.st, 'x':Varchar, 'y':Varchar))), count] }
+        │         └─StreamExchange { dist: HashShard(c.pid) }
+        │           └─StreamFilter { predicate: IsNotNull(c.amt) }
+        │             └─StreamTableScan { table: c, columns: [c.pid, c.amt, c.st, c.id], stream_scan_type: SnapshotBackfill, stream_key: [c.id], pk: [id], dist: UpstreamHashShard(c.id) }
+        └─StreamProject { exprs: [c.pid, sum(c.amt) filter(Not(In(c.st, 'x':Varchar, 'y':Varchar)))] }
+          └─StreamFilter { predicate: (count filter(Not(In(c.st, 'x':Varchar, 'y':Varchar))) > 0:Int64) }
+            └─StreamProject { exprs: [c.pid, sum(c.amt) filter(Not(In(c.st, 'x':Varchar, 'y':Varchar))), count filter(Not(In(c.st, 'x':Varchar, 'y':Varchar)))] }
+              └─StreamShare { id: 6 }
+                └─StreamProject { exprs: [c.pid, sum(c.amt), sum(c.amt) filter(Not(In(c.st, 'x':Varchar, 'y':Varchar))), count filter(Not(In(c.st, 'x':Varchar, 'y':Varchar)))] }
+                  └─StreamHashAgg { group_key: [c.pid], aggs: [sum(c.amt), sum(c.amt) filter(Not(In(c.st, 'x':Varchar, 'y':Varchar))), count filter(Not(In(c.st, 'x':Varchar, 'y':Varchar))), count] }
+                    └─StreamExchange { dist: HashShard(c.pid) }
+                      └─StreamFilter { predicate: IsNotNull(c.amt) }
+                        └─StreamTableScan { table: c, columns: [c.pid, c.amt, c.st, c.id], stream_scan_type: SnapshotBackfill, stream_key: [c.id], pk: [id], dist: UpstreamHashShard(c.id) }
+- name: kept - aggregations without group key with different filters, read by dynamic filters
+  before:
+  - setup_share
+  sql: |
+    select a.id from a where a.x < (select max(v) from h where st = 'x')
+    union all
+    select b.id from b where b.y < (select max(v) from h where st = 'y');
+  stream_plan: |-
+    StreamMaterialize { columns: [id, $src(hidden)], stream_key: [id, $src], pk_columns: [id, $src], pk_conflict: NoCheck }
+    └─StreamUnion { all: true }
+      ├─StreamExchange { dist: HashShard(a.id, 0:Int32) }
+      │ └─StreamProject { exprs: [a.id, 0:Int32] }
+      │   └─StreamDynamicFilter { predicate: (a.x < max(max(h.v))), output: [a.id, a.x] }
+      │     ├─StreamTableScan { table: a, columns: [a.id, a.x], stream_scan_type: SnapshotBackfill, stream_key: [a.id], pk: [id], dist: UpstreamHashShard(a.id) }
+      │     └─StreamExchange { dist: Broadcast }
+      │       └─StreamProject { exprs: [max(max(h.v))] }
+      │         └─StreamSimpleAgg { aggs: [max(max(h.v)), count] }
+      │           └─StreamExchange { dist: Single }
+      │             └─StreamHashAgg { group_key: [_vnode], aggs: [max(h.v), count] }
+      │               └─StreamProject { exprs: [h.v, h.id, Vnode(h.id) as _vnode] }
+      │                 └─StreamFilter { predicate: (h.st = 'x':Varchar) }
+      │                   └─StreamTableScan { table: h, columns: [h.v, h.id, h.st], stream_scan_type: SnapshotBackfill, stream_key: [h.id], pk: [id], dist: UpstreamHashShard(h.id) }
+      └─StreamExchange { dist: HashShard(b.id, 1:Int32) }
+        └─StreamProject { exprs: [b.id, 1:Int32] }
+          └─StreamDynamicFilter { predicate: (b.y < max(max(h.v))), output: [b.id, b.y] }
+            ├─StreamTableScan { table: b, columns: [b.id, b.y], stream_scan_type: SnapshotBackfill, stream_key: [b.id], pk: [id], dist: UpstreamHashShard(b.id) }
+            └─StreamExchange { dist: Broadcast }
+              └─StreamProject { exprs: [max(max(h.v))] }
+                └─StreamSimpleAgg { aggs: [max(max(h.v)), count] }
+                  └─StreamExchange { dist: Single }
+                    └─StreamHashAgg { group_key: [_vnode], aggs: [max(h.v), count] }
+                      └─StreamProject { exprs: [h.v, h.id, Vnode(h.id) as _vnode] }
+                        └─StreamFilter { predicate: (h.st = 'y':Varchar) }
+                          └─StreamTableScan { table: h, columns: [h.v, h.id, h.st], stream_scan_type: SnapshotBackfill, stream_key: [h.id], pk: [id], dist: UpstreamHashShard(h.id) }
+- name: kept - aggregations of the same input on different group keys
+  before:
+  - setup_share
+  sql: |
+    select a.id, x.c from a join (select sid, count(*) as c from h group by sid) x on a.k = x.c
+    union all
+    select b.id, y.c from b join (select v, count(*) as c from h group by v) y on b.k = y.v;
+  stream_plan: |-
+    StreamMaterialize { columns: [id, c, a.id(hidden), h.sid(hidden), $expr1(hidden), $src(hidden)], stream_key: [a.id, h.sid, $expr1, $src], pk_columns: [a.id, h.sid, $expr1, $src], pk_conflict: NoCheck }
+    └─StreamUnion { all: true }
+      ├─StreamExchange { dist: HashShard(a.id, h.sid, $expr1, 0:Int32) }
+      │ └─StreamProject { exprs: [a.id, count, a.id, h.sid, $expr1, 0:Int32] }
+      │   └─StreamHashJoin { type: Inner, predicate: $expr1 = count, output: [a.id, count, $expr1, h.sid] }
+      │     ├─StreamExchange { dist: HashShard($expr1) }
+      │     │ └─StreamProject { exprs: [a.id, a.k::Int64 as $expr1] }
+      │     │   └─StreamTableScan { table: a, columns: [a.id, a.k], stream_scan_type: SnapshotBackfill, stream_key: [a.id], pk: [id], dist: UpstreamHashShard(a.id) }
+      │     └─StreamExchange { dist: HashShard(count) }
+      │       └─StreamHashAgg { group_key: [h.sid], aggs: [count] }
+      │         └─StreamExchange { dist: HashShard(h.sid) }
+      │           └─StreamTableScan { table: h, columns: [h.sid, h.id], stream_scan_type: SnapshotBackfill, stream_key: [h.id], pk: [id], dist: UpstreamHashShard(h.id) }
+      └─StreamExchange { dist: HashShard(b.id, b.k, null:Int64, 1:Int32) }
+        └─StreamProject { exprs: [b.id, count, b.id, b.k, null:Int64, 1:Int32] }
+          └─StreamHashJoin { type: Inner, predicate: b.k = h.v, output: [b.id, count, b.k, h.v] }
+            ├─StreamExchange { dist: HashShard(b.k) }
+            │ └─StreamTableScan { table: b, columns: [b.id, b.k], stream_scan_type: SnapshotBackfill, stream_key: [b.id], pk: [id], dist: UpstreamHashShard(b.id) }
+            └─StreamHashAgg { group_key: [h.v], aggs: [count] }
+              └─StreamExchange { dist: HashShard(h.v) }
+                └─StreamTableScan { table: h, columns: [h.v, h.id], stream_scan_type: SnapshotBackfill, stream_key: [h.id], pk: [id], dist: UpstreamHashShard(h.id) }
 - name: off by default - sum of sums
   before:
   - setup_aggs_off
@@ -422,6 +577,88 @@
       └─StreamHashAgg { group_key: [t.g], aggs: [sum(t.n), count] }
         └─StreamExchange { dist: HashShard(t.g) }
           └─StreamTableScan { table: t, columns: [t.g, t.n, t.id], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
+- name: outer group key computed from inner group key columns
+  before:
+  - setup_aggs
+  sql: |
+    select g + w as gw, sum(sv) as s from (select g, w, v, sum(v) as sv from t group by g, w, v) x group by g + w;
+  stream_plan: |-
+    StreamMaterialize { columns: [gw, s], stream_key: [gw], pk_columns: [gw], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [$expr1, sum($expr2)] }
+      └─StreamHashAgg { group_key: [$expr1], aggs: [sum($expr2), count] }
+        └─StreamExchange { dist: HashShard($expr1) }
+          └─StreamProject { exprs: [(t.g + t.w) as $expr1, t.v::Int64 as $expr2, t.id] }
+            └─StreamTableScan { table: t, columns: [t.g, t.w, t.v, t.id], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
+- name: union of an aggregation and of rows, min and max
+  before:
+  - setup_aggs
+  sql: |
+    select g, min(mv) as mn, max(xv) as mx from (
+      select g, min(v) as mv, max(v) as xv from t group by g
+      union all
+      select g, v, v from s
+    ) u group by g;
+  stream_plan: |-
+    StreamMaterialize { columns: [g, mn, mx], stream_key: [g], pk_columns: [g], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [t.g, min(t.v), max(t.v)] }
+      └─StreamHashAgg { group_key: [t.g], aggs: [min(t.v), max(t.v), count] }
+        └─StreamExchange { dist: HashShard(t.g) }
+          └─StreamUnion { all: true }
+            ├─StreamExchange { dist: HashShard(t.id, 0:Int32) }
+            │ └─StreamProject { exprs: [t.g, t.v, t.v, t.id, 0:Int32] }
+            │   └─StreamTableScan { table: t, columns: [t.g, t.v, t.id], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
+            └─StreamExchange { dist: HashShard(s.id, 1:Int32) }
+              └─StreamProject { exprs: [s.g, s.v, s.v, s.id, 1:Int32] }
+                └─StreamTableScan { table: s, columns: [s.g, s.v, s.id], stream_scan_type: SnapshotBackfill, stream_key: [s.id], pk: [id], dist: UpstreamHashShard(s.id) }
+- name: union of aggregations with FILTER and of an aggregation with HAVING, which stays
+  before:
+  - setup_aggs
+  sql: |
+    select g, sum(sv) as s, sum(c) as c from (
+      select g, sum(v) filter (where w > 0) as sv, count(*) as c from t group by g
+      union all
+      select g, sum(v), count(*) from s group by g having count(*) > 1
+    ) u group by g;
+  stream_plan: |-
+    StreamMaterialize { columns: [g, s, c], stream_key: [g], pk_columns: [g], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [t.g, sum($expr1), sum(1:Int64)] }
+      └─StreamHashAgg { group_key: [t.g], aggs: [sum($expr1), sum(1:Int64), count] }
+        └─StreamExchange { dist: HashShard(t.g) }
+          └─StreamUnion { all: true }
+            ├─StreamExchange { dist: HashShard(t.id, 0:Int32) }
+            │ └─StreamProject { exprs: [t.g, Case((t.w > 0:Int32), t.v::Int64, null:Int64) as $expr1, 1:Int64, t.id, 0:Int32] }
+            │   └─StreamTableScan { table: t, columns: [t.g, t.w, t.v, t.id], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
+            └─StreamExchange { dist: HashShard(s.g, 1:Int32) }
+              └─StreamProject { exprs: [s.g, sum(s.v), count, s.g, 1:Int32] }
+                └─StreamFilter { predicate: (count > 1:Int32) }
+                  └─StreamHashAgg { group_key: [s.g], aggs: [sum(s.v), count] }
+                    └─StreamExchange { dist: HashShard(s.g) }
+                      └─StreamTableScan { table: s, columns: [s.g, s.v, s.id], stream_scan_type: SnapshotBackfill, stream_key: [s.id], pk: [id], dist: UpstreamHashShard(s.id) }
+- name: kept - count over a union of aggregations
+  before:
+  - setup_aggs
+  sql: |
+    select g, count(sv) as n from (
+      select g, sum(v) as sv from t group by g
+      union all
+      select g, sum(v) as sv from s group by g
+    ) u group by g;
+  stream_plan: |-
+    StreamMaterialize { columns: [g, n], stream_key: [g], pk_columns: [g], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [t.g, count(sum(t.v))] }
+      └─StreamHashAgg { group_key: [t.g], aggs: [count(sum(t.v)), count] }
+        └─StreamExchange { dist: HashShard(t.g) }
+          └─StreamUnion { all: true }
+            ├─StreamExchange { dist: HashShard(t.g, 0:Int32) }
+            │ └─StreamProject { exprs: [t.g, sum(t.v), 0:Int32] }
+            │   └─StreamHashAgg { group_key: [t.g], aggs: [sum(t.v), count] }
+            │     └─StreamExchange { dist: HashShard(t.g) }
+            │       └─StreamTableScan { table: t, columns: [t.g, t.v, t.id], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
+            └─StreamExchange { dist: HashShard(s.g, 1:Int32) }
+              └─StreamProject { exprs: [s.g, sum(s.v), 1:Int32] }
+                └─StreamHashAgg { group_key: [s.g], aggs: [sum(s.v), count] }
+                  └─StreamExchange { dist: HashShard(s.g) }
+                    └─StreamTableScan { table: s, columns: [s.g, s.v, s.id], stream_scan_type: SnapshotBackfill, stream_key: [s.id], pk: [id], dist: UpstreamHashShard(s.id) }
 - name: kept - avg of avg
   before:
   - setup_aggs
@@ -572,7 +809,7 @@
                 └─StreamHashAgg { group_key: [t.g, t.w], aggs: [sum(t.v), count] }
                   └─StreamExchange { dist: HashShard(t.g, t.w) }
                     └─StreamTableScan { table: t, columns: [t.g, t.w, t.v, t.id], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
-- name: kept - sums of the aggregations of the branches of a union
+- name: sums of the aggregations of the branches of a union
   before:
   - setup_aggs
   sql: |
@@ -583,20 +820,16 @@
     ) u group by g;
   stream_plan: |-
     StreamMaterialize { columns: [g, s], stream_key: [g], pk_columns: [g], pk_conflict: NoCheck }
-    └─StreamProject { exprs: [t.g, sum(sum(t.v))] }
-      └─StreamHashAgg { group_key: [t.g], aggs: [sum(sum(t.v)), count] }
+    └─StreamProject { exprs: [t.g, sum($expr1)] }
+      └─StreamHashAgg { group_key: [t.g], aggs: [sum($expr1), count] }
         └─StreamExchange { dist: HashShard(t.g) }
           └─StreamUnion { all: true }
-            ├─StreamExchange { dist: HashShard(t.g, 0:Int32) }
-            │ └─StreamProject { exprs: [t.g, sum(t.v), 0:Int32] }
-            │   └─StreamHashAgg { group_key: [t.g], aggs: [sum(t.v), count] }
-            │     └─StreamExchange { dist: HashShard(t.g) }
-            │       └─StreamTableScan { table: t, columns: [t.g, t.v, t.id], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
-            └─StreamExchange { dist: HashShard(s.g, 1:Int32) }
-              └─StreamProject { exprs: [s.g, sum(s.v), 1:Int32] }
-                └─StreamHashAgg { group_key: [s.g], aggs: [sum(s.v), count] }
-                  └─StreamExchange { dist: HashShard(s.g) }
-                    └─StreamTableScan { table: s, columns: [s.g, s.v, s.id], stream_scan_type: SnapshotBackfill, stream_key: [s.id], pk: [id], dist: UpstreamHashShard(s.id) }
+            ├─StreamExchange { dist: HashShard(t.id, 0:Int32) }
+            │ └─StreamProject { exprs: [t.g, t.v::Int64 as $expr1, t.id, 0:Int32] }
+            │   └─StreamTableScan { table: t, columns: [t.g, t.v, t.id], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
+            └─StreamExchange { dist: HashShard(s.id, 1:Int32) }
+              └─StreamProject { exprs: [s.g, s.v::Int64 as $expr2, s.id, 1:Int32] }
+                └─StreamTableScan { table: s, columns: [s.g, s.v, s.id], stream_scan_type: SnapshotBackfill, stream_key: [s.id], pk: [id], dist: UpstreamHashShard(s.id) }
 - name: kept - top-1 over a DISTINCT
   before:
   - setup_aggs
