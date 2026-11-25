@@ -219,6 +219,9 @@ mod common_join_over_union_rule;
 pub use common_join_over_union_rule::*;
 mod apply_one_row_join_split_rule;
 pub use apply_one_row_join_split_rule::*;
+// Per-row evaluation of lateral set-returning functions (`streaming_unnest_lateral_functions`).
+mod lateral_table_function_rule;
+pub use lateral_table_function_rule::*;
 mod repeated_lookup_merge_rule;
 pub use repeated_lookup_merge_rule::*;
 mod unique_key_simplify_rule;
@@ -372,6 +375,8 @@ macro_rules! for_all_rules {
             , { RepeatedLookupMergeRule }
             , { CommonJoinOverUnionRule }
             , { ApplyOneRowJoinSplitRule }
+            , { LateralTableFunctionRule }
+            , { UnnestArrayOfTableFunctionRule }
             , { BushyTreeJoinOrderingRule }
             , { StreamProjectMergeRule }
             , { StreamProjectSplitRule }

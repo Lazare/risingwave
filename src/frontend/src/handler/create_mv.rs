@@ -379,6 +379,7 @@ pub(crate) fn gen_create_mv_graph(
             || config.streaming_merge_repeated_lookups()
             || config.streaming_factor_union_join()
             || config.streaming_simplify_subquery_unnesting()
+            || config.streaming_unnest_lateral_functions()
     };
     let baseline_args = prune_enabled.then(|| {
         (

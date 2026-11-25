@@ -30,7 +30,7 @@ own rules.
 | 6 | Merge of two stacked aggregations | selected, not started |
 | 7 | Join common to the branches of a `UNION ALL` joined once above the union | done (prototype, branch of idea 3) |
 | 8 | Aggregate of a constant over a group | done (prototype, branch of idea 3) |
-| 9 | Leftovers of subquery decorrelation (domain re-scan, aggregation and null-safe join back) | aggregating subqueries done (prototype, branch `proto/streaming-simplify-subquery-unnesting`); laterals without a table not started |
+| 9 | Leftovers of subquery decorrelation (domain re-scan, aggregation and null-safe join back) | aggregating subqueries done (prototype, branch `proto/streaming-simplify-subquery-unnesting`); laterals without a table done (prototype, branch `proto/plan-reduction-lateral`, see 9b) |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -271,6 +271,68 @@ as a semi join on `r.k = t.k`, and `NOT EXISTS` of the same as an anti join: the
 drops the rows of `t` without a match where the query keeps every row, the anti join keeps them
 where the query returns none (seen in streaming plans, batch not checked). The rule checks the null-rejection of a filter above the apply but not the join
 type of the apply.
+
+### 9b. Subqueries over set-returning functions of the outer row (added on 2026-11-25, done)
+
+Variable `streaming_unnest_lateral_functions`, rules `LateralTableFunctionRule` and
+`UnnestArrayOfTableFunctionRule`. A correlated subquery that reads no table, only columns of the
+outer row through set-returning functions, went the general way: the outer side read again, the
+distinct values of the correlated columns aggregated into a domain, the functions applied to the
+domain, a left join of the domain with them (an aggregation for a scalar subquery), and an
+`IS NOT DISTINCT FROM` join back. With the variable the subquery is evaluated on each outer row:
+
+- `LEFT JOIN LATERAL (SELECT f(srf(t.a)) ...) ON true`, `t LEFT JOIN srf(t.a) ON true`: a
+  `ProjectSet` over `t`. RisingWave has no outer `ProjectSet` (one that keeps the row, padded with
+  NULLs, when the functions return no row) and none is added: the functions of a `ProjectSet` are
+  zipped and the shorter ones padded with NULLs, so `generate_series(1, 1)` zipped with them gives
+  exactly the padded row when they return none. A function that fails on a row returns no row in
+  both forms, and the row is padded. A projected expression that is not NULL on the padded row
+  (a constant, `WITH ORDINALITY`) becomes `CASE WHEN <not padded> THEN .. END`.
+- `ARRAY(SELECT srf(t.a))`, `(SELECT max(x) FROM srf(t.a) x)`, `EXISTS`, `count`, `sum`,
+  `string_agg`, ...: the same `ProjectSet`, then the aggregation grouped by all the columns of `t`
+  (they include its stream key: one group per row of `t`), each call filtered on the rows that are
+  not padded, so that a row whose functions return nothing gets the value over an empty input. A
+  row is known to be padded when every function never returns NULL (`jsonb_array_elements`,
+  `regexp_matches`, `generate_series`, `jsonb_object_keys`, ...) or has a twin zipped with it
+  that returns as many rows and never NULL: `generate_subscripts(a, 1)` for `unnest(a)` of a
+  one-dimensional array, `jsonb_array_elements(j)` for `jsonb_array_elements_text(j)` (whose text
+  of a JSON null is `''` today but NULL in PostgreSQL: a kept plan does not rely on it). `sum(x)`
+  becomes `CASE WHEN count(x) > 0 THEN sum(x) END`: once the group key is reduced to the stream
+  key (`AggGroupBySimplifyRule`), an update of the array retracts the old values while the group
+  keeps rows, and a streaming `sum` then returns 0 instead of NULL.
+- `unnest(ARRAY(SELECT srf(t.a)))` (or of `COALESCE(.., '{}')`) used only as a source of rows:
+  `srf(t.a)`, no aggregation at all. A bag: the order of the array does not matter. Not when the
+  array is also selected, when the function returns arrays (`unnest` flattens them), or when the
+  row number of the `unnest` is read.
+- `CROSS JOIN LATERAL (SELECT v, sum(v) OVER (ORDER BY o) FROM unnest(t.a) WITH ORDINALITY ...)`:
+  an inner `ProjectSet` and the window partitioned by all the columns of `t`.
+
+Example: `SELECT t.id, a.x FROM t LEFT JOIN LATERAL (SELECT (regexp_matches(t.s, 'A([0-9]+)'))[1]
+AS x) a ON true` was a scan of `t`, a second scan of `t`, an aggregation (the domain), a
+`ProjectSet` and a hash join; it is one scan and one stateless `ProjectSet`. An `ARRAY(..)` per row
+was two scans, two aggregations for the domains, a `ProjectSet`, two joins and an aggregation; it
+is one scan, a `ProjectSet` and one aggregation.
+
+Kept in the general way: a condition in the subquery (`WHERE` over the function, or `ON` other
+than true), a subquery that reads a table, `LIMIT` or `ORDER BY .. LIMIT`, `DISTINCT` aggregates,
+aggregates other than `count`, `sum`, `min`, `max`, `array_agg`, `string_agg`, `jsonb_agg`,
+`jsonb_object_agg`, a window in a left join, `unnest` of a nested array where the padded row
+must be known, an outer side without a stream key, or with a column that can not be a group key
+(map, vector, variant), user-defined or other table functions. Batch plans do not change.
+
+Not done:
+
+- **`(regexp_matches(s, p))[1]` without the `g` flag as the scalar `(regexp_match(s, p))[1]`.**
+  Equivalent in PostgreSQL, where `regexp_matches` without `g` returns at most one row, but not in
+  RisingWave: its `regexp_matches` returns every match whatever the flags (a known difference with
+  PostgreSQL). The outer `ProjectSet` above keeps every match, as the original plan does.
+- The functions are evaluated on each row rather than once per distinct value: equal for
+  deterministic functions; for a `jsonb` that is equal to another but written differently
+  (`1.0` and `1`), the general way could give one row the text of the other one, the per-row
+  evaluation gives each row its own, as the batch query does.
+- A relation joined with an aggregate of a set-returning function of itself on its key
+  (`t LEFT JOIN (SELECT t.id, max(x) FROM t, srf(t.a) x GROUP BY t.id) ON ..`): the same per-row
+  aggregation once it is recognised, which needs the key of `t` and is the self-join of idea 3.
 
 ### 5. Aggregation pushed below a join onto the unique side
 
