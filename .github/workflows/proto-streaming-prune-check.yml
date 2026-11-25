@@ -5,11 +5,10 @@
 # - `planner`: regenerates the expected outputs of the planner tests and uploads the files that
 #   changed, then runs the unit tests of the frontend.
 # - `clippy`: lints the frontend.
-# - `e2e` (twice, in parallel): builds the node, runs the differential test of the pruning, then
-#   the whole streaming SLT suite, once with the defaults and once with
-#   `streaming_prune_empty_relation` and `streaming_simplify_on_unique_key` turned on for every
-#   session.
-# - `compare`: a file of the suite that only fails with the variables on is a regression.
+# - `e2e`: builds the node and runs the differential test of the pruning.
+#
+# The streaming SLT suite with and without the pruning takes hours: see
+# `proto-streaming-prune-suite.yml`.
 name: Proto Streaming Prune Check
 
 permissions:
@@ -180,13 +179,9 @@ jobs:
         run: cargo clippy --locked -p risingwave_frontend --all-targets -- -D warnings
 
   e2e:
-    name: End-to-end tests, pruning ${{ matrix.mode }}
+    name: Differential end-to-end test
     runs-on: ubuntu-24.04
-    timeout-minutes: 300
-    strategy:
-      fail-fast: false
-      matrix:
-        mode: ['off', 'on']
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v5
 
@@ -258,39 +253,6 @@ jobs:
           sqllogictest -p 4566 -d dev './e2e_test/streaming/prune_empty_relation.slt' \
             2>&1 | tee "$RUNNER_TEMP/e2e/differential.log"
 
-      - name: Turn the pruning on for every session
-        if: ${{ !cancelled() && matrix.mode == 'on' && steps.differential.outcome != 'skipped' }}
-        run: |
-          printf 'statement ok\nalter system set %s to true;\n\n' \
-            streaming_prune_empty_relation streaming_simplify_on_unique_key \
-            > "$RUNNER_TEMP/e2e/enable.slt"
-          cat "$RUNNER_TEMP/e2e/enable.slt"
-          sqllogictest -p 4566 -d dev "$RUNNER_TEMP/e2e/enable.slt"
-
-      # The progress is printed so that a stuck file is visible in the log of the job. The
-      # result is decided by the `compare` job.
-      - name: Streaming SLT suite
-        if: ${{ !cancelled() && steps.differential.outcome != 'skipped' }}
-        run: |
-          export PATH="$PWD/e2e_test/commands:$PATH"
-          log="$RUNNER_TEMP/e2e/suite.log"
-          set +e
-          timeout --signal=INT --kill-after=60 150m \
-            sqllogictest -p 4566 -d dev './e2e_test/streaming/**/*.slt' > "$log" 2>&1 &
-          pid=$!
-          while kill -0 "$pid" 2>/dev/null; do
-            sleep 120
-            echo "$(date -u +%H:%M:%S) ok=$(grep -a -c '\[OK\]' "$log") failed=$(grep -a -c '\[FAILED\]' "$log") last: $(sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -a -v '^$' | tail -1 | cut -c1-150)"
-          done
-          wait "$pid"
-          echo "exit=$?" | tee "$RUNNER_TEMP/e2e/suite-exit.txt"
-          set -e
-          sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -a '^failed to run' \
-            | sed "s/^failed to run \`\(.*\)\`.*/\1/" | sort -u > "$RUNNER_TEMP/e2e/failed.txt"
-          echo "ok=$(grep -a -c '\[OK\]' "$log") failed=$(wc -l < "$RUNNER_TEMP/e2e/failed.txt")" \
-            | tee "$RUNNER_TEMP/e2e/suite-count.txt"
-          cat "$RUNNER_TEMP/e2e/failed.txt"
-
       - name: Messages of the pruning in the node log
         if: ${{ !cancelled() }}
         run: |
@@ -302,43 +264,6 @@ jobs:
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-${{ matrix.mode }}
+          name: e2e-differential
           path: ${{ runner.temp }}/e2e
           if-no-files-found: warn
-
-  compare:
-    name: Streaming SLT suite, with and without pruning
-    runs-on: ubuntu-24.04
-    needs: e2e
-    if: ${{ !cancelled() }}
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Files that only fail with the pruning
-        run: |
-          for mode in off on; do
-            echo "== $mode: $(cat "artifacts/e2e-$mode/suite-count.txt") $(cat "artifacts/e2e-$mode/suite-exit.txt")"
-          done
-          comm -13 artifacts/e2e-off/failed.txt artifacts/e2e-on/failed.txt > regressions.txt
-          {
-            echo '## Streaming SLT suite'
-            echo "Without pruning: $(cat artifacts/e2e-off/suite-count.txt), with pruning: $(cat artifacts/e2e-on/suite-count.txt)"
-            echo '### Files that only fail with the pruning'
-            echo '```'
-            cat regressions.txt
-            echo '```'
-          } | tee -a "$GITHUB_STEP_SUMMARY"
-          # Both suites must reach their end, and as many files must pass with the pruning.
-          grep -qx 'exit=0\|exit=1' artifacts/e2e-on/suite-exit.txt
-          ok_off=$(grep -a -c '\[OK\]' artifacts/e2e-off/suite.log)
-          ok_on=$(grep -a -c '\[OK\]' artifacts/e2e-on/suite.log)
-          test "$ok_on" -ge "$ok_off"
-          if [ -s regressions.txt ]; then
-            while read -r file; do
-              sed 's/\x1b\[[0-9;]*m//g' artifacts/e2e-on/suite.log \
-                | grep -a -A25 "^failed to run \`$file\`" | cut -c1-300 | head -40
-            done < regressions.txt
-            exit 1
-          fi
