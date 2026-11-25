@@ -336,8 +336,9 @@ Not done:
   correlated value (`SELECT (SELECT count(*) FROM unnest(t.a)), EXISTS (SELECT 1 FROM unnest(t.a))
   FROM t`) are planned under a `FULL OUTER JOIN` of their results on the domain, followed by a
   filter `a IS NOT NULL OR a IS NOT NULL` that drops the NULL value of the domain: a row of `t`
-  whose `a` is NULL gets NULL instead of 0 and false (seen in streaming plans, batch not checked).
-  Each subquery alone is right. The per-row evaluation gives 0 and false.
+  whose `a` is NULL gets NULL instead of 0, false or an empty array (seen in streaming plans,
+  batch not checked). Each subquery alone is right. The per-row evaluation gives 0, false and
+  the empty array.
 - A relation joined with an aggregate of a set-returning function of itself on its key
   (`t LEFT JOIN (SELECT t.id, max(x) FROM t, srf(t.a) x GROUP BY t.id) ON ..`): the same per-row
   aggregation once it is recognised, which needs the key of `t` and is the self-join of idea 3.

@@ -117,10 +117,15 @@ create materialized view ulf_string_agg_off as select t.id, (select string_agg(k
 statement ok
 create materialized view ulf_corr_arg_off as select t.id, (select max(v + t.n) from unnest(t.arr) as v) as m from ulf_t t;
 
-# outer side without a key, with duplicates and NULLs
+# outer side without a key, with duplicates and NULLs: max
 
 statement ok
-create materialized view ulf_nokey_off as select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m, array(select unnest(u.arr)) as a from ulf_u u;
+create materialized view ulf_nokey_max_off as select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m from ulf_u u;
+
+# outer side without a key, with duplicates and NULLs: ARRAY
+
+statement ok
+create materialized view ulf_nokey_array_off as select u.k, u.arr, array(select unnest(u.arr)) as a from ulf_u u;
 
 # unnest of a COALESCE of an ARRAY of a set-returning function
 
@@ -142,10 +147,15 @@ create materialized view ulf_window_off as select t.id, x.v, x.run from ulf_t t 
 statement ok
 create materialized view ulf_errors_left_off as select t.id, e.x from ulf_t t left join jsonb_array_elements_text(t.j -> 'zs') as e(x) on true;
 
-# count and ARRAY of a function that fails on some rows
+# count of a function that fails on some rows
 
 statement ok
-create materialized view ulf_errors_agg_off as select t.id, (select count(*) from jsonb_array_elements_text(t.j -> 'zs')) as c, array(select jsonb_array_elements_text(t.j -> 'zs')) as a from ulf_t t;
+create materialized view ulf_errors_count_off as select t.id, (select count(*) from jsonb_array_elements_text(t.j -> 'zs')) as c from ulf_t t;
+
+# ARRAY of a function that fails on some rows
+
+statement ok
+create materialized view ulf_errors_array_off as select t.id, array(select jsonb_array_elements_text(t.j -> 'zs')) as a from ulf_t t;
 
 statement ok
 set streaming_unnest_lateral_functions = true;
@@ -235,10 +245,15 @@ create materialized view ulf_string_agg_on as select t.id, (select string_agg(k,
 statement ok
 create materialized view ulf_corr_arg_on as select t.id, (select max(v + t.n) from unnest(t.arr) as v) as m from ulf_t t;
 
-# outer side without a key, with duplicates and NULLs
+# outer side without a key, with duplicates and NULLs: max
 
 statement ok
-create materialized view ulf_nokey_on as select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m, array(select unnest(u.arr)) as a from ulf_u u;
+create materialized view ulf_nokey_max_on as select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m from ulf_u u;
+
+# outer side without a key, with duplicates and NULLs: ARRAY
+
+statement ok
+create materialized view ulf_nokey_array_on as select u.k, u.arr, array(select unnest(u.arr)) as a from ulf_u u;
 
 # unnest of a COALESCE of an ARRAY of a set-returning function
 
@@ -260,10 +275,15 @@ create materialized view ulf_window_on as select t.id, x.v, x.run from ulf_t t c
 statement ok
 create materialized view ulf_errors_left_on as select t.id, e.x from ulf_t t left join jsonb_array_elements_text(t.j -> 'zs') as e(x) on true;
 
-# count and ARRAY of a function that fails on some rows
+# count of a function that fails on some rows
 
 statement ok
-create materialized view ulf_errors_agg_on as select t.id, (select count(*) from jsonb_array_elements_text(t.j -> 'zs')) as c, array(select jsonb_array_elements_text(t.j -> 'zs')) as a from ulf_t t;
+create materialized view ulf_errors_count_on as select t.id, (select count(*) from jsonb_array_elements_text(t.j -> 'zs')) as c from ulf_t t;
+
+# ARRAY of a function that fails on some rows
+
+statement ok
+create materialized view ulf_errors_array_on as select t.id, array(select jsonb_array_elements_text(t.j -> 'zs')) as a from ulf_t t;
 
 # After the backfill: with and without the variable, every materialized view holds the same rows.
 
@@ -389,9 +409,17 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_nokey_on except select * from ulf_nokey_off) x),
-  (select count(*) from (select * from ulf_nokey_off except select * from ulf_nokey_on) y),
-  (select count(*) from ulf_nokey_on) - (select count(*) from ulf_nokey_off);
+  (select count(*) from (select * from ulf_nokey_max_on except select * from ulf_nokey_max_off) x),
+  (select count(*) from (select * from ulf_nokey_max_off except select * from ulf_nokey_max_on) y),
+  (select count(*) from ulf_nokey_max_on) - (select count(*) from ulf_nokey_max_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ulf_nokey_array_on except select * from ulf_nokey_array_off) x),
+  (select count(*) from (select * from ulf_nokey_array_off except select * from ulf_nokey_array_on) y),
+  (select count(*) from ulf_nokey_array_on) - (select count(*) from ulf_nokey_array_off);
 ----
 0 0 0
 
@@ -429,9 +457,17 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_errors_agg_on except select * from ulf_errors_agg_off) x),
-  (select count(*) from (select * from ulf_errors_agg_off except select * from ulf_errors_agg_on) y),
-  (select count(*) from ulf_errors_agg_on) - (select count(*) from ulf_errors_agg_off);
+  (select count(*) from (select * from ulf_errors_count_on except select * from ulf_errors_count_off) x),
+  (select count(*) from (select * from ulf_errors_count_off except select * from ulf_errors_count_on) y),
+  (select count(*) from ulf_errors_count_on) - (select count(*) from ulf_errors_count_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ulf_errors_array_on except select * from ulf_errors_array_off) x),
+  (select count(*) from (select * from ulf_errors_array_off except select * from ulf_errors_array_on) y),
+  (select count(*) from ulf_errors_array_on) - (select count(*) from ulf_errors_array_off);
 ----
 0 0 0
 
@@ -567,9 +603,17 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_nokey_on except select * from (select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m, array(select unnest(u.arr)) as a from ulf_u u) q) x),
-  (select count(*) from (select * from (select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m, array(select unnest(u.arr)) as a from ulf_u u) q except select * from ulf_nokey_on) y),
-  (select count(*) from ulf_nokey_on) - (select count(*) from (select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m, array(select unnest(u.arr)) as a from ulf_u u) q);
+  (select count(*) from (select * from ulf_nokey_max_on except select * from (select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m from ulf_u u) q) x),
+  (select count(*) from (select * from (select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m from ulf_u u) q except select * from ulf_nokey_max_on) y),
+  (select count(*) from ulf_nokey_max_on) - (select count(*) from (select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m from ulf_u u) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ulf_nokey_array_on except select * from (select u.k, u.arr, array(select unnest(u.arr)) as a from ulf_u u) q) x),
+  (select count(*) from (select * from (select u.k, u.arr, array(select unnest(u.arr)) as a from ulf_u u) q except select * from ulf_nokey_array_on) y),
+  (select count(*) from ulf_nokey_array_on) - (select count(*) from (select u.k, u.arr, array(select unnest(u.arr)) as a from ulf_u u) q);
 ----
 0 0 0
 
@@ -776,9 +820,17 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_nokey_on except select * from ulf_nokey_off) x),
-  (select count(*) from (select * from ulf_nokey_off except select * from ulf_nokey_on) y),
-  (select count(*) from ulf_nokey_on) - (select count(*) from ulf_nokey_off);
+  (select count(*) from (select * from ulf_nokey_max_on except select * from ulf_nokey_max_off) x),
+  (select count(*) from (select * from ulf_nokey_max_off except select * from ulf_nokey_max_on) y),
+  (select count(*) from ulf_nokey_max_on) - (select count(*) from ulf_nokey_max_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ulf_nokey_array_on except select * from ulf_nokey_array_off) x),
+  (select count(*) from (select * from ulf_nokey_array_off except select * from ulf_nokey_array_on) y),
+  (select count(*) from ulf_nokey_array_on) - (select count(*) from ulf_nokey_array_off);
 ----
 0 0 0
 
@@ -816,9 +868,17 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_errors_agg_on except select * from ulf_errors_agg_off) x),
-  (select count(*) from (select * from ulf_errors_agg_off except select * from ulf_errors_agg_on) y),
-  (select count(*) from ulf_errors_agg_on) - (select count(*) from ulf_errors_agg_off);
+  (select count(*) from (select * from ulf_errors_count_on except select * from ulf_errors_count_off) x),
+  (select count(*) from (select * from ulf_errors_count_off except select * from ulf_errors_count_on) y),
+  (select count(*) from ulf_errors_count_on) - (select count(*) from ulf_errors_count_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ulf_errors_array_on except select * from ulf_errors_array_off) x),
+  (select count(*) from (select * from ulf_errors_array_off except select * from ulf_errors_array_on) y),
+  (select count(*) from ulf_errors_array_on) - (select count(*) from ulf_errors_array_off);
 ----
 0 0 0
 
@@ -954,9 +1014,17 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_nokey_on except select * from (select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m, array(select unnest(u.arr)) as a from ulf_u u) q) x),
-  (select count(*) from (select * from (select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m, array(select unnest(u.arr)) as a from ulf_u u) q except select * from ulf_nokey_on) y),
-  (select count(*) from ulf_nokey_on) - (select count(*) from (select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m, array(select unnest(u.arr)) as a from ulf_u u) q);
+  (select count(*) from (select * from ulf_nokey_max_on except select * from (select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m from ulf_u u) q) x),
+  (select count(*) from (select * from (select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m from ulf_u u) q except select * from ulf_nokey_max_on) y),
+  (select count(*) from ulf_nokey_max_on) - (select count(*) from (select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m from ulf_u u) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ulf_nokey_array_on except select * from (select u.k, u.arr, array(select unnest(u.arr)) as a from ulf_u u) q) x),
+  (select count(*) from (select * from (select u.k, u.arr, array(select unnest(u.arr)) as a from ulf_u u) q except select * from ulf_nokey_array_on) y),
+  (select count(*) from ulf_nokey_array_on) - (select count(*) from (select u.k, u.arr, array(select unnest(u.arr)) as a from ulf_u u) q);
 ----
 0 0 0
 
@@ -1149,9 +1217,17 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_nokey_on except select * from ulf_nokey_off) x),
-  (select count(*) from (select * from ulf_nokey_off except select * from ulf_nokey_on) y),
-  (select count(*) from ulf_nokey_on) - (select count(*) from ulf_nokey_off);
+  (select count(*) from (select * from ulf_nokey_max_on except select * from ulf_nokey_max_off) x),
+  (select count(*) from (select * from ulf_nokey_max_off except select * from ulf_nokey_max_on) y),
+  (select count(*) from ulf_nokey_max_on) - (select count(*) from ulf_nokey_max_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ulf_nokey_array_on except select * from ulf_nokey_array_off) x),
+  (select count(*) from (select * from ulf_nokey_array_off except select * from ulf_nokey_array_on) y),
+  (select count(*) from ulf_nokey_array_on) - (select count(*) from ulf_nokey_array_off);
 ----
 0 0 0
 
@@ -1189,9 +1265,17 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_errors_agg_on except select * from ulf_errors_agg_off) x),
-  (select count(*) from (select * from ulf_errors_agg_off except select * from ulf_errors_agg_on) y),
-  (select count(*) from ulf_errors_agg_on) - (select count(*) from ulf_errors_agg_off);
+  (select count(*) from (select * from ulf_errors_count_on except select * from ulf_errors_count_off) x),
+  (select count(*) from (select * from ulf_errors_count_off except select * from ulf_errors_count_on) y),
+  (select count(*) from ulf_errors_count_on) - (select count(*) from ulf_errors_count_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ulf_errors_array_on except select * from ulf_errors_array_off) x),
+  (select count(*) from (select * from ulf_errors_array_off except select * from ulf_errors_array_on) y),
+  (select count(*) from ulf_errors_array_on) - (select count(*) from ulf_errors_array_off);
 ----
 0 0 0
 
@@ -1327,9 +1411,17 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_nokey_on except select * from (select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m, array(select unnest(u.arr)) as a from ulf_u u) q) x),
-  (select count(*) from (select * from (select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m, array(select unnest(u.arr)) as a from ulf_u u) q except select * from ulf_nokey_on) y),
-  (select count(*) from ulf_nokey_on) - (select count(*) from (select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m, array(select unnest(u.arr)) as a from ulf_u u) q);
+  (select count(*) from (select * from ulf_nokey_max_on except select * from (select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m from ulf_u u) q) x),
+  (select count(*) from (select * from (select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m from ulf_u u) q except select * from ulf_nokey_max_on) y),
+  (select count(*) from ulf_nokey_max_on) - (select count(*) from (select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m from ulf_u u) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ulf_nokey_array_on except select * from (select u.k, u.arr, array(select unnest(u.arr)) as a from ulf_u u) q) x),
+  (select count(*) from (select * from (select u.k, u.arr, array(select unnest(u.arr)) as a from ulf_u u) q except select * from ulf_nokey_array_on) y),
+  (select count(*) from ulf_nokey_array_on) - (select count(*) from (select u.k, u.arr, array(select unnest(u.arr)) as a from ulf_u u) q);
 ----
 0 0 0
 
@@ -1499,9 +1591,17 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_nokey_on except select * from ulf_nokey_off) x),
-  (select count(*) from (select * from ulf_nokey_off except select * from ulf_nokey_on) y),
-  (select count(*) from ulf_nokey_on) - (select count(*) from ulf_nokey_off);
+  (select count(*) from (select * from ulf_nokey_max_on except select * from ulf_nokey_max_off) x),
+  (select count(*) from (select * from ulf_nokey_max_off except select * from ulf_nokey_max_on) y),
+  (select count(*) from ulf_nokey_max_on) - (select count(*) from ulf_nokey_max_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ulf_nokey_array_on except select * from ulf_nokey_array_off) x),
+  (select count(*) from (select * from ulf_nokey_array_off except select * from ulf_nokey_array_on) y),
+  (select count(*) from ulf_nokey_array_on) - (select count(*) from ulf_nokey_array_off);
 ----
 0 0 0
 
@@ -1539,9 +1639,17 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_errors_agg_on except select * from ulf_errors_agg_off) x),
-  (select count(*) from (select * from ulf_errors_agg_off except select * from ulf_errors_agg_on) y),
-  (select count(*) from ulf_errors_agg_on) - (select count(*) from ulf_errors_agg_off);
+  (select count(*) from (select * from ulf_errors_count_on except select * from ulf_errors_count_off) x),
+  (select count(*) from (select * from ulf_errors_count_off except select * from ulf_errors_count_on) y),
+  (select count(*) from ulf_errors_count_on) - (select count(*) from ulf_errors_count_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ulf_errors_array_on except select * from ulf_errors_array_off) x),
+  (select count(*) from (select * from ulf_errors_array_off except select * from ulf_errors_array_on) y),
+  (select count(*) from ulf_errors_array_on) - (select count(*) from ulf_errors_array_off);
 ----
 0 0 0
 
@@ -1677,9 +1785,17 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_nokey_on except select * from (select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m, array(select unnest(u.arr)) as a from ulf_u u) q) x),
-  (select count(*) from (select * from (select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m, array(select unnest(u.arr)) as a from ulf_u u) q except select * from ulf_nokey_on) y),
-  (select count(*) from ulf_nokey_on) - (select count(*) from (select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m, array(select unnest(u.arr)) as a from ulf_u u) q);
+  (select count(*) from (select * from ulf_nokey_max_on except select * from (select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m from ulf_u u) q) x),
+  (select count(*) from (select * from (select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m from ulf_u u) q except select * from ulf_nokey_max_on) y),
+  (select count(*) from ulf_nokey_max_on) - (select count(*) from (select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m from ulf_u u) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ulf_nokey_array_on except select * from (select u.k, u.arr, array(select unnest(u.arr)) as a from ulf_u u) q) x),
+  (select count(*) from (select * from (select u.k, u.arr, array(select unnest(u.arr)) as a from ulf_u u) q except select * from ulf_nokey_array_on) y),
+  (select count(*) from ulf_nokey_array_on) - (select count(*) from (select u.k, u.arr, array(select unnest(u.arr)) as a from ulf_u u) q);
 ----
 0 0 0
 
@@ -1849,9 +1965,17 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_nokey_on except select * from ulf_nokey_off) x),
-  (select count(*) from (select * from ulf_nokey_off except select * from ulf_nokey_on) y),
-  (select count(*) from ulf_nokey_on) - (select count(*) from ulf_nokey_off);
+  (select count(*) from (select * from ulf_nokey_max_on except select * from ulf_nokey_max_off) x),
+  (select count(*) from (select * from ulf_nokey_max_off except select * from ulf_nokey_max_on) y),
+  (select count(*) from ulf_nokey_max_on) - (select count(*) from ulf_nokey_max_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ulf_nokey_array_on except select * from ulf_nokey_array_off) x),
+  (select count(*) from (select * from ulf_nokey_array_off except select * from ulf_nokey_array_on) y),
+  (select count(*) from ulf_nokey_array_on) - (select count(*) from ulf_nokey_array_off);
 ----
 0 0 0
 
@@ -1889,9 +2013,17 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_errors_agg_on except select * from ulf_errors_agg_off) x),
-  (select count(*) from (select * from ulf_errors_agg_off except select * from ulf_errors_agg_on) y),
-  (select count(*) from ulf_errors_agg_on) - (select count(*) from ulf_errors_agg_off);
+  (select count(*) from (select * from ulf_errors_count_on except select * from ulf_errors_count_off) x),
+  (select count(*) from (select * from ulf_errors_count_off except select * from ulf_errors_count_on) y),
+  (select count(*) from ulf_errors_count_on) - (select count(*) from ulf_errors_count_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ulf_errors_array_on except select * from ulf_errors_array_off) x),
+  (select count(*) from (select * from ulf_errors_array_off except select * from ulf_errors_array_on) y),
+  (select count(*) from ulf_errors_array_on) - (select count(*) from ulf_errors_array_off);
 ----
 0 0 0
 
@@ -2027,9 +2159,17 @@ select
 
 query III
 select
-  (select count(*) from (select * from ulf_nokey_on except select * from (select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m, array(select unnest(u.arr)) as a from ulf_u u) q) x),
-  (select count(*) from (select * from (select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m, array(select unnest(u.arr)) as a from ulf_u u) q except select * from ulf_nokey_on) y),
-  (select count(*) from ulf_nokey_on) - (select count(*) from (select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m, array(select unnest(u.arr)) as a from ulf_u u) q);
+  (select count(*) from (select * from ulf_nokey_max_on except select * from (select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m from ulf_u u) q) x),
+  (select count(*) from (select * from (select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m from ulf_u u) q except select * from ulf_nokey_max_on) y),
+  (select count(*) from ulf_nokey_max_on) - (select count(*) from (select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m from ulf_u u) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from ulf_nokey_array_on except select * from (select u.k, u.arr, array(select unnest(u.arr)) as a from ulf_u u) q) x),
+  (select count(*) from (select * from (select u.k, u.arr, array(select unnest(u.arr)) as a from ulf_u u) q except select * from ulf_nokey_array_on) y),
+  (select count(*) from ulf_nokey_array_on) - (select count(*) from (select u.k, u.arr, array(select unnest(u.arr)) as a from ulf_u u) q);
 ----
 0 0 0
 
@@ -2070,7 +2210,10 @@ select
 # Cleanup.
 
 statement ok
-drop materialized view ulf_errors_agg_on;
+drop materialized view ulf_errors_array_on;
+
+statement ok
+drop materialized view ulf_errors_count_on;
 
 statement ok
 drop materialized view ulf_errors_left_on;
@@ -2085,7 +2228,10 @@ statement ok
 drop materialized view ulf_unnest_array_on;
 
 statement ok
-drop materialized view ulf_nokey_on;
+drop materialized view ulf_nokey_array_on;
+
+statement ok
+drop materialized view ulf_nokey_max_on;
 
 statement ok
 drop materialized view ulf_corr_arg_on;
@@ -2139,7 +2285,10 @@ statement ok
 drop materialized view ulf_regexp_on;
 
 statement ok
-drop materialized view ulf_errors_agg_off;
+drop materialized view ulf_errors_array_off;
+
+statement ok
+drop materialized view ulf_errors_count_off;
 
 statement ok
 drop materialized view ulf_errors_left_off;
@@ -2154,7 +2303,10 @@ statement ok
 drop materialized view ulf_unnest_array_off;
 
 statement ok
-drop materialized view ulf_nokey_off;
+drop materialized view ulf_nokey_array_off;
+
+statement ok
+drop materialized view ulf_nokey_max_off;
 
 statement ok
 drop materialized view ulf_corr_arg_off;

@@ -51,9 +51,11 @@ CASES = [
      f"select t.id, (select string_agg(k, ',' order by k) from jsonb_object_keys(t.j -> 'obj') as k) as ks from {T} t"),
     ('corr_arg', 'correlated column in the aggregated expression',
      f"select t.id, (select max(v + t.n) from unnest(t.arr) as v) as m from {T} t"),
-    ('nokey', 'outer side without a key, with duplicates and NULLs',
-     f"select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m, "
-     f"array(select unnest(u.arr)) as a from {U} u"),
+    # One subquery per select list: see REFERENCE below.
+    ('nokey_max', 'outer side without a key, with duplicates and NULLs: max',
+     f"select u.k, u.arr, (select max(v) from unnest(u.arr) as v) as m from {U} u"),
+    ('nokey_array', 'outer side without a key, with duplicates and NULLs: ARRAY',
+     f"select u.k, u.arr, array(select unnest(u.arr)) as a from {U} u"),
     # unnest of an ARRAY.
     ('unnest_array', 'unnest of a COALESCE of an ARRAY of a set-returning function',
      f"select t1.id, x.v from (select id, coalesce(array(select jsonb_array_elements_text("
@@ -71,9 +73,10 @@ CASES = [
     # as the batch query fails.
     ('errors_left', 'LEFT JOIN of a function that fails on some rows',
      f"select t.id, e.x from {T} t left join jsonb_array_elements_text(t.j -> 'zs') as e(x) on true"),
-    ('errors_agg', 'count and ARRAY of a function that fails on some rows',
-     f"select t.id, (select count(*) from jsonb_array_elements_text(t.j -> 'zs')) as c, "
-     f"array(select jsonb_array_elements_text(t.j -> 'zs')) as a from {T} t"),
+    ('errors_count', 'count of a function that fails on some rows',
+     f"select t.id, (select count(*) from jsonb_array_elements_text(t.j -> 'zs')) as c from {T} t"),
+    ('errors_array', 'ARRAY of a function that fails on some rows',
+     f"select t.id, array(select jsonb_array_elements_text(t.j -> 'zs')) as a from {T} t"),
 ]
 
 # Compared with the query only: a streaming `sum` without the variable returns 0, where the query
@@ -81,7 +84,7 @@ CASES = [
 # holds rows.
 NOT_OFF = {'sum_raw', 'count_exists'}
 # Compared with each other only: the batch query fails on the rows where a function fails.
-NOT_BATCH = {'errors_left', 'errors_agg', 'count_exists'}
+NOT_BATCH = {'errors_left', 'errors_count', 'errors_array', 'count_exists'}
 # Compared with another query. Without the variable, the subqueries of one select list are planned
 # under a FULL OUTER JOIN of their results on the correlated value, followed by a filter that
 # drops the NULL value: an outer row whose array is NULL gets NULL instead of 0 and false. The
