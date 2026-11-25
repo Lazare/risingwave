@@ -20,6 +20,7 @@ on:
     branches:
       - 'proto/streaming-prune-empty-relation'
       - 'proto/streaming-merge-repeated-lookups'
+      - 'proto/streaming-simplify-subquery-unnesting'
 
 concurrency:
   group: proto-streaming-prune-check-${{ github.ref }}
@@ -245,7 +246,17 @@ jobs:
           tail -50 "$RUNNER_TEMP/e2e/node.log"
           exit 1
 
+      - name: Differential test of the unnesting of subqueries without a domain
+        if: ${{ hashFiles('e2e_test/streaming/simplify_subquery_unnesting.slt') != '' }}
+        timeout-minutes: 30
+        run: |
+          set -o pipefail
+          export PATH="$PWD/e2e_test/commands:$PATH"
+          sqllogictest -p 4566 -d dev './e2e_test/streaming/simplify_subquery_unnesting.slt' \
+            2>&1 | tee "$RUNNER_TEMP/e2e/differential-unnest.log"
+
       - name: Differential test of the join factored out of a union
+        if: ${{ !cancelled() }}
         timeout-minutes: 30
         run: |
           set -o pipefail

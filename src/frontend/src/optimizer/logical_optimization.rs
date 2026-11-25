@@ -238,6 +238,14 @@ static SIMPLE_UNNESTING: LazyLock<OptimizationStage> = LazyLock::new(|| {
     )
 });
 
+static STREAM_SIMPLE_UNNESTING_AGG: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Stream Simple Unnesting of Aggregations",
+        vec![PullUpCorrelatedPredicateAggRule::create_for_stream()],
+        ApplyOrder::BottomUp,
+    )
+});
+
 static SET_OPERATION_MERGE: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Set Operation Merge",
@@ -684,6 +692,7 @@ impl LogicalOptimizer {
     pub fn subquery_unnesting(
         mut plan: LogicalPlanRef,
         enable_share_plan: bool,
+        for_stream: bool,
         explain_trace: bool,
         ctx: &OptimizerContextRef,
     ) -> Result<LogicalPlanRef> {
@@ -693,6 +702,17 @@ impl LogicalOptimizer {
         }
         // Simple Unnesting.
         plan = plan.optimize_by_rules(&SIMPLE_UNNESTING)?;
+        if for_stream
+            && ctx
+                .session_ctx()
+                .config()
+                .streaming_simplify_subquery_unnesting()
+        {
+            // A subquery that aggregates the rows equal to columns of the outer row becomes a left
+            // join with the aggregation grouped by those columns, without the domain (the distinct
+            // values of the outer columns, read again from the outer side) of the general way.
+            plan = plan.optimize_by_rules(&STREAM_SIMPLE_UNNESTING_AGG)?;
+        }
         debug_assert!(!HasMaxOneRowApply().visit(plan.clone()));
         // Predicate push down before translate apply, because we need to calculate the domain
         // and predicate push down can reduce the size of domain.
@@ -812,7 +832,7 @@ impl LogicalOptimizer {
 
         plan = plan.optimize_by_rules(&CORRELATED_TOP_N_TO_VECTOR_SEARCH_FOR_STREAM)?;
 
-        plan = Self::subquery_unnesting(plan, enable_share_plan, explain_trace, &ctx)?;
+        plan = Self::subquery_unnesting(plan, enable_share_plan, true, explain_trace, &ctx)?;
         if has_logical_max_one_row(plan.clone()) {
             // `MaxOneRow` is currently only used for the runtime check of
             // scalar subqueries, while it's not supported in streaming mode, so
@@ -1018,7 +1038,7 @@ impl LogicalOptimizer {
 
         plan = plan.optimize_by_rules(&CORRELATED_TOP_N_TO_VECTOR_SEARCH_FOR_BATCH)?;
 
-        plan = Self::subquery_unnesting(plan, false, explain_trace, &ctx)?;
+        plan = Self::subquery_unnesting(plan, false, false, explain_trace, &ctx)?;
 
         // Filter simplification must be applied before predicate push-down
         // otherwise the filter for some nodes (e.g., `LogicalScan`)

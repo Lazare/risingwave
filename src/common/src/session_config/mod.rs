@@ -300,6 +300,13 @@ pub struct SessionConfig {
     #[parameter(default = false)]
     streaming_factor_union_join: bool,
 
+    /// In the plan of a new streaming job, turn a correlated subquery that aggregates the rows
+    /// equal to columns of the outer row (`EXISTS`, `count`, `min`, `ARRAY(...)`, ...) into a left
+    /// join with the aggregation grouped by those columns, instead of re-reading the outer side to
+    /// build the set of its distinct values. Defaults to false.
+    #[parameter(default = false)]
+    streaming_simplify_subquery_unnesting: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,
