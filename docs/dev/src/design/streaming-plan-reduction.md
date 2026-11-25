@@ -301,14 +301,27 @@ select b, y from t where p1              └─Expand(two copies of each row, fl
   only, so an expression that fails on rows its branch never sees is not evaluated on them. The
   conjuncts common to every branch and the `OR` of the others go into the single scan.
 - Merged: branches of the form `(Project | Filter)*` over a scan of the same table, or over the
-  same shared sub-plan (`Share`) of a scan, which then stays shared with its other consumers.
+  same shared sub-plan (`Share`), whatever it computes (a join, an aggregation...): the shared
+  sub-plan stays shared with its other consumers, its rows are expanded instead of its scans.
   Several groups of one union are merged separately; the other branches stay in the union.
-- Kept: a branch with a join, an aggregation or a table function above the scan, an impure
-  expression or `now()` (a temporal filter is a join with `Now` at this stage), a scan `AS OF`,
-  a table with a watermark (a column taken from different columns per branch would lose the
-  watermark that the union derived), a shared sub-plan that is not a scan.
+- Not merged: an impure expression or `now()` in a branch (a temporal filter is a join with
+  `Now` at this stage), a scan `AS OF`, a table with a watermark (a column taken from different
+  columns per branch would lose the watermark that the union derived), a shared sub-plan that
+  holds `now()`, a source or such a table.
+- Shared (`UnionScanShareRule`, same variable, applied after the merge): a table that is still
+  scanned in at least two branches, below a join, a table function, an anti join or anything
+  else, is scanned once in a new `Share`; each former scan becomes a filter and a projection of
+  it with the predicate and columns of that scan, so every branch sees the same rows. The scans
+  inside an existing shared sub-plan are left alone (already read once), and so are the scans
+  of a table that only one branch reads (a self-join inside a branch). This removes scans and
+  backfills, not joins: the share adds a fragment boundary where the scan was inlined.
 - Rows per branch: the `Expand` emits one copy per branch before the filter, a transient cost
   in the same fragment; nothing is kept in state.
+- Not done: merging branches with a join into one join (the copies of an `Expand` joined once,
+  the join gated by the branch number) or with different table functions into one `ProjectSet`:
+  exact, but the gated join keeps the copies of every branch in its state. With
+  `streaming_factor_union_join` on, the joins common to several branches are factored first and
+  the branches of the union it builds are then merged here.
 
 Not done, the "status ladder" under a top-1 per key (`row_number() OVER (PARTITION BY k ORDER BY
 priority DESC) = 1` above a union of constant-priority branches):

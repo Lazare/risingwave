@@ -376,6 +376,7 @@ macro_rules! for_all_rules {
             , { CommonJoinOverUnionRule }
             , { ApplyOneRowJoinSplitRule }
             , { UnionScanMergeRule }
+            , { UnionScanShareRule }
             , { BushyTreeJoinOrderingRule }
             , { StreamProjectMergeRule }
             , { StreamProjectSplitRule }

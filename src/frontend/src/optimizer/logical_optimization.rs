@@ -253,7 +253,9 @@ static STREAM_SIMPLE_UNNESTING_AGG: LazyLock<OptimizationStage> = LazyLock::new(
 static STREAM_MERGE_UNION_SCANS: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Merge Union Scans For Stream",
-        vec![UnionScanMergeRule::create()],
+        // In this order: the branches that only filter and project a table are merged first, the
+        // scans of a table that remain in several branches are then shared.
+        vec![UnionScanMergeRule::create(), UnionScanShareRule::create()],
         // Bottom-up: the branches of a union are reduced before the union is looked at.
         ApplyOrder::BottomUp,
     )

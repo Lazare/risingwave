@@ -7,6 +7,8 @@
     create table u (k int primary key, a int, c int);
     create table w (k int, v int, ts timestamp, watermark for ts as ts - interval '1' second) append only;
     create table h (r int primary key, k int, a int);
+    create table m (r int primary key, g int, v int);
+    create table j (r int primary key, kind varchar, f jsonb);
   expected_outputs: []
 - id: setup_off
   sql: |
@@ -170,7 +172,7 @@
   - optimized_logical_plan_for_stream
   - stream_plan
 
-- name: kept - a branch with a temporal filter, the other two are merged
+- name: a branch with a temporal filter, the other two are merged, the table is shared
   before: [setup]
   sql: |
     select k, a from t where a > 0
@@ -196,7 +198,7 @@
     select k, a from u where a > 0;
   expected_outputs:
   - optimized_logical_plan_for_stream
-- name: kept - a branch with a join
+- name: a branch with a join shares the scan of the other branch
   before: [setup]
   sql: |
     select t.k, t.a from t where t.a > 0
@@ -204,7 +206,8 @@
     select t.k, u.c from t join u on t.k = u.k;
   expected_outputs:
   - optimized_logical_plan_for_stream
-- name: kept - a branch with a table function
+  - stream_plan
+- name: a branch with a table function shares the scan of the other branch
   before: [setup]
   sql: |
     select k, unnest(array[a, b]) as v from t
@@ -212,12 +215,85 @@
     select k, a from t where a is null;
   expected_outputs:
   - optimized_logical_plan_for_stream
-- name: kept - a shared sub-plan that is not a scan
+- name: branches over a shared join
   before: [setup]
   sql: |
     with c as (select t.k, t.a, u.c from t join u on t.a = u.a)
     select k, a from c where c > 0
     union all
     select k, c from c where a > 0;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: branches over a shared aggregation
+  before: [setup]
+  sql: |
+    with c as (select a, count(*) as n from t group by a)
+    select a, n from c where n > 1
+    union all
+    select n, a from c where a > 0;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: kept - a shared sub-plan with a temporal filter
+  before: [setup]
+  sql: |
+    with c as (select k, a from t where ts > now() - interval '1 day')
+    select k, a from c where a > 0
+    union all
+    select a, k from c where k > 0;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: a plain branch and a left join branch share the scan
+  before: [setup]
+  sql: |
+    select t.k, coalesce(m.v, 0) as v from t left join m on t.k = m.g where t.x = 'a'
+    union all
+    select t.k, 1 from t where t.x = 'b';
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: two joins on different columns share the scans of both tables
+  before: [setup]
+  sql: |
+    select t.k, m.v from t join m on t.a = m.g and m.v > 0
+    union all
+    select t.k, m.v from t join m on t.b = m.g and m.v < 0;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: two table functions and a plain branch share the scan
+  before: [setup]
+  sql: |
+    select x.key as v from j cross join jsonb_each_text(j.f -> 'a') as x where kind in ('e', 'p')
+    union all
+    select x.key from j cross join jsonb_each_text(j.f -> 'b') as x where kind in ('e', 'p')
+    union all
+    select kind from j where kind = 'p' and f ? 'a';
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: an anti join in one branch shares the scan of the other branch
+  before: [setup]
+  sql: |
+    select k, 'u' as st from u
+    union all
+    select t.k, 't' from t where not exists (select 1 from u where u.k = t.k);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - a self-join inside one branch only
+  before: [setup]
+  sql: |
+    select t1.k, t2.a from t t1 join t t2 on t1.a = t2.k
+    union all
+    select k, c from u;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - the shared join is already read once, the join above it is not merged
+  before: [setup]
+  sql: |
+    with c as (select t.k, t.a, u.c from t join u on t.a = u.a)
+    select k, a, null::int as v from c where c > 0
+    union all
+    select c.k, c.a, m.v from c left join m on c.c = m.g where c.a > 0;
   expected_outputs:
   - optimized_logical_plan_for_stream
