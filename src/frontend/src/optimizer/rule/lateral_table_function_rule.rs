@@ -36,6 +36,7 @@
 //! The rewritten plans evaluate the functions on each outer row rather than once per distinct
 //! value of the correlated columns: only built-in deterministic functions are accepted.
 
+use fixedbitset::FixedBitSet;
 use risingwave_common::types::{DataType, ScalarImpl};
 use risingwave_expr::aggregate::{AggType, PbAggKind};
 use risingwave_pb::plan_common::JoinType;
@@ -636,7 +637,7 @@ impl ExprRewriter for CorrelatedRewriter {
 /// function that returns no row. `COALESCE(<array>, '{}')` is looked through.
 ///
 /// ```text
-///  LogicalProject [does not read the array]          LogicalProject
+///  [projections, filters: do not read the array]     [the same]
 ///        |                                                 |
 ///  LogicalProjectSet [.., unnest($c)]                LogicalProjectSet [.., srf(lhs)]
 ///        |                                                 |
@@ -654,9 +655,49 @@ pub struct UnnestArrayOfTableFunctionRule {}
 
 impl Rule<Logical> for UnnestArrayOfTableFunctionRule {
     fn apply(&self, plan: PlanRef) -> Option<PlanRef> {
-        let top = plan.as_logical_project()?;
-        let project_set_plan = top.input();
-        let project_set = project_set_plan.as_logical_project_set()?;
+        // The projections and filters above the `ProjectSet`, from the top.
+        let mut chain: Vec<PlanRef> = vec![];
+        let mut cur = plan.clone();
+        let project_set = loop {
+            if let Some(project_set) = cur.as_logical_project_set() {
+                break project_set.clone();
+            }
+            let next = if let Some(project) = cur.as_logical_project() {
+                project.input()
+            } else if let Some(filter) = cur.as_logical_filter() {
+                filter.input()
+            } else {
+                return None;
+            };
+            chain.push(cur);
+            cur = next;
+        };
+        if chain.is_empty() {
+            return None;
+        }
+        // The columns of the `ProjectSet` that the chain reads, all the columns of its top being
+        // read.
+        let mut reads = FixedBitSet::with_capacity(chain[0].schema().len());
+        reads.insert_range(..);
+        for node in &chain {
+            let input_len = match node.as_logical_project() {
+                Some(project) => project.input().schema().len(),
+                None => node.as_logical_filter()?.input().schema().len(),
+            };
+            let mut below = FixedBitSet::with_capacity(input_len);
+            if let Some(project) = node.as_logical_project() {
+                for k in reads.ones() {
+                    below.union_with(&project.exprs()[k].collect_input_refs(input_len));
+                }
+            } else {
+                let filter = node.as_logical_filter()?;
+                below.union_with(&reads);
+                for conjunction in &filter.predicate().conjunctions {
+                    below.union_with(&conjunction.collect_input_refs(input_len));
+                }
+            }
+            reads = below;
+        }
         let items = project_set.select_list();
         let input = project_set.input();
         let input_len = input.schema().len();
@@ -689,15 +730,8 @@ impl Rule<Logical> for UnnestArrayOfTableFunctionRule {
         let array_col = array_ref.index();
 
         // The array is read by the `unnest` only: elsewhere it is at most passed through, to a
-        // column that the projection above does not read. Neither is the row number.
-        let top_reads = top.exprs().iter().fold(
-            fixedbitset::FixedBitSet::with_capacity(1 + items.len()),
-            |mut acc, e| {
-                acc.union_with(&e.collect_input_refs(1 + items.len()));
-                acc
-            },
-        );
-        if top_reads.contains(0) {
+        // column that nothing above reads. Neither is the row number.
+        if reads.contains(0) {
             return None;
         }
         for (i, item) in items.iter().enumerate() {
@@ -705,7 +739,7 @@ impl Rule<Logical> for UnnestArrayOfTableFunctionRule {
                 continue;
             }
             let passed_through = matches!(item, ExprImpl::InputRef(r) if r.index() == array_col);
-            if !passed_through || top_reads.contains(1 + i) {
+            if !passed_through || reads.contains(1 + i) {
                 return None;
             }
         }
@@ -757,8 +791,15 @@ impl Rule<Logical> for UnnestArrayOfTableFunctionRule {
         let function = InputRefShift { offset: q_len }.rewrite_expr(function);
         let mut new_items = items.clone();
         new_items[unnest_pos] = function;
-        let new_project_set: PlanRef = LogicalProjectSet::new(new_q, new_items).into();
-        Some(LogicalProject::new(new_project_set, top.exprs().clone()).into())
+        let mut result: PlanRef = LogicalProjectSet::new(new_q, new_items).into();
+        for node in chain.iter().rev() {
+            result = if let Some(project) = node.as_logical_project() {
+                project.clone_with_input(result).into()
+            } else {
+                node.as_logical_filter()?.clone_with_input(result).into()
+            };
+        }
+        Some(result)
     }
 }
 
