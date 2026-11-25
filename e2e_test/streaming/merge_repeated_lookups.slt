@@ -256,6 +256,21 @@ create materialized view mrl_agg_above_off as select b.grp as bg, count(*) as cn
 statement ok
 create materialized view mrl_lookup_left_side_off as select a.grp as ag, x.fid as fid, x.bn as bn from mrl_d a join (select f.id as fid, f.dim_id as did, b.name as bn from mrl_f f join mrl_d b on f.dim_id = b.id) x on a.id = x.did;
 
+# two inner lookups of the same column
+
+statement ok
+create materialized view mrl_same_column_inner_off as select f.id as fid, a.name as an, b.name as bn from mrl_f f join mrl_d a on f.dim_id = a.id join mrl_d b on f.dim_id = b.id;
+
+# lookups of the same columns with an outer join in between
+
+statement ok
+create materialized view mrl_same_column_between_off as select f.id as fid, a.name as an, e.code as ec, b.name as bn, b.id as bid from mrl_f f join mrl_d a on f.dim_id = a.id left join mrl_e e on f.other_id = e.id left join mrl_d b on f.dim_id = b.id;
+
+# left lookups of the same columns with an outer join in between
+
+statement ok
+create materialized view mrl_same_column_left_off as select f.id as fid, a.name as an, a.id as aid, e.code as ec, b.name as bn, b.id as bid from mrl_f f left join mrl_d a on f.dim_id = a.id left join mrl_e e on f.other_id = e.id left join mrl_d b on f.dim_id = b.id;
+
 # left lookups in a relation whose key can be NULL
 
 statement ok
@@ -503,6 +518,21 @@ create materialized view mrl_agg_above_on as select b.grp as bg, count(*) as cnt
 
 statement ok
 create materialized view mrl_lookup_left_side_on as select a.grp as ag, x.fid as fid, x.bn as bn from mrl_d a join (select f.id as fid, f.dim_id as did, b.name as bn from mrl_f f join mrl_d b on f.dim_id = b.id) x on a.id = x.did;
+
+# two inner lookups of the same column
+
+statement ok
+create materialized view mrl_same_column_inner_on as select f.id as fid, a.name as an, b.name as bn from mrl_f f join mrl_d a on f.dim_id = a.id join mrl_d b on f.dim_id = b.id;
+
+# lookups of the same columns with an outer join in between
+
+statement ok
+create materialized view mrl_same_column_between_on as select f.id as fid, a.name as an, e.code as ec, b.name as bn, b.id as bid from mrl_f f join mrl_d a on f.dim_id = a.id left join mrl_e e on f.other_id = e.id left join mrl_d b on f.dim_id = b.id;
+
+# left lookups of the same columns with an outer join in between
+
+statement ok
+create materialized view mrl_same_column_left_on as select f.id as fid, a.name as an, a.id as aid, e.code as ec, b.name as bn, b.id as bid from mrl_f f left join mrl_d a on f.dim_id = a.id left join mrl_e e on f.other_id = e.id left join mrl_d b on f.dim_id = b.id;
 
 # left lookups in a relation whose key can be NULL
 
@@ -865,6 +895,30 @@ select
   (select count(*) from (select * from mrl_lookup_left_side_on except select * from mrl_lookup_left_side_off) x),
   (select count(*) from (select * from mrl_lookup_left_side_off except select * from mrl_lookup_left_side_on) y),
   (select count(*) from mrl_lookup_left_side_on) - (select count(*) from mrl_lookup_left_side_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_same_column_inner_on except select * from mrl_same_column_inner_off) x),
+  (select count(*) from (select * from mrl_same_column_inner_off except select * from mrl_same_column_inner_on) y),
+  (select count(*) from mrl_same_column_inner_on) - (select count(*) from mrl_same_column_inner_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_same_column_between_on except select * from mrl_same_column_between_off) x),
+  (select count(*) from (select * from mrl_same_column_between_off except select * from mrl_same_column_between_on) y),
+  (select count(*) from mrl_same_column_between_on) - (select count(*) from mrl_same_column_between_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_same_column_left_on except select * from mrl_same_column_left_off) x),
+  (select count(*) from (select * from mrl_same_column_left_off except select * from mrl_same_column_left_on) y),
+  (select count(*) from mrl_same_column_left_on) - (select count(*) from mrl_same_column_left_off);
 ----
 0 0 0
 
@@ -1334,6 +1388,30 @@ select
 
 query III
 select
+  (select count(*) from (select * from mrl_same_column_inner_on except select * from mrl_same_column_inner_off) x),
+  (select count(*) from (select * from mrl_same_column_inner_off except select * from mrl_same_column_inner_on) y),
+  (select count(*) from mrl_same_column_inner_on) - (select count(*) from mrl_same_column_inner_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_same_column_between_on except select * from mrl_same_column_between_off) x),
+  (select count(*) from (select * from mrl_same_column_between_off except select * from mrl_same_column_between_on) y),
+  (select count(*) from mrl_same_column_between_on) - (select count(*) from mrl_same_column_between_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_same_column_left_on except select * from mrl_same_column_left_off) x),
+  (select count(*) from (select * from mrl_same_column_left_off except select * from mrl_same_column_left_on) y),
+  (select count(*) from mrl_same_column_left_on) - (select count(*) from mrl_same_column_left_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from mrl_null_key_left_on except select * from mrl_null_key_left_off) x),
   (select count(*) from (select * from mrl_null_key_left_off except select * from mrl_null_key_left_on) y),
   (select count(*) from mrl_null_key_left_on) - (select count(*) from mrl_null_key_left_off);
@@ -1787,6 +1865,30 @@ select
 
 query III
 select
+  (select count(*) from (select * from mrl_same_column_inner_on except select * from mrl_same_column_inner_off) x),
+  (select count(*) from (select * from mrl_same_column_inner_off except select * from mrl_same_column_inner_on) y),
+  (select count(*) from mrl_same_column_inner_on) - (select count(*) from mrl_same_column_inner_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_same_column_between_on except select * from mrl_same_column_between_off) x),
+  (select count(*) from (select * from mrl_same_column_between_off except select * from mrl_same_column_between_on) y),
+  (select count(*) from mrl_same_column_between_on) - (select count(*) from mrl_same_column_between_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_same_column_left_on except select * from mrl_same_column_left_off) x),
+  (select count(*) from (select * from mrl_same_column_left_off except select * from mrl_same_column_left_on) y),
+  (select count(*) from mrl_same_column_left_on) - (select count(*) from mrl_same_column_left_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from mrl_null_key_left_on except select * from mrl_null_key_left_off) x),
   (select count(*) from (select * from mrl_null_key_left_off except select * from mrl_null_key_left_on) y),
   (select count(*) from mrl_null_key_left_on) - (select count(*) from mrl_null_key_left_off);
@@ -2181,6 +2283,30 @@ select
   (select count(*) from (select * from mrl_lookup_left_side_on except select * from mrl_lookup_left_side_off) x),
   (select count(*) from (select * from mrl_lookup_left_side_off except select * from mrl_lookup_left_side_on) y),
   (select count(*) from mrl_lookup_left_side_on) - (select count(*) from mrl_lookup_left_side_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_same_column_inner_on except select * from mrl_same_column_inner_off) x),
+  (select count(*) from (select * from mrl_same_column_inner_off except select * from mrl_same_column_inner_on) y),
+  (select count(*) from mrl_same_column_inner_on) - (select count(*) from mrl_same_column_inner_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_same_column_between_on except select * from mrl_same_column_between_off) x),
+  (select count(*) from (select * from mrl_same_column_between_off except select * from mrl_same_column_between_on) y),
+  (select count(*) from mrl_same_column_between_on) - (select count(*) from mrl_same_column_between_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_same_column_left_on except select * from mrl_same_column_left_off) x),
+  (select count(*) from (select * from mrl_same_column_left_off except select * from mrl_same_column_left_on) y),
+  (select count(*) from mrl_same_column_left_on) - (select count(*) from mrl_same_column_left_off);
 ----
 0 0 0
 
@@ -2586,6 +2712,30 @@ select
 
 query III
 select
+  (select count(*) from (select * from mrl_same_column_inner_on except select * from mrl_same_column_inner_off) x),
+  (select count(*) from (select * from mrl_same_column_inner_off except select * from mrl_same_column_inner_on) y),
+  (select count(*) from mrl_same_column_inner_on) - (select count(*) from mrl_same_column_inner_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_same_column_between_on except select * from mrl_same_column_between_off) x),
+  (select count(*) from (select * from mrl_same_column_between_off except select * from mrl_same_column_between_on) y),
+  (select count(*) from mrl_same_column_between_on) - (select count(*) from mrl_same_column_between_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select * from mrl_same_column_left_on except select * from mrl_same_column_left_off) x),
+  (select count(*) from (select * from mrl_same_column_left_off except select * from mrl_same_column_left_on) y),
+  (select count(*) from mrl_same_column_left_on) - (select count(*) from mrl_same_column_left_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select * from mrl_null_key_left_on except select * from mrl_null_key_left_off) x),
   (select count(*) from (select * from mrl_null_key_left_off except select * from mrl_null_key_left_on) y),
   (select count(*) from mrl_null_key_left_on) - (select count(*) from mrl_null_key_left_off);
@@ -2695,6 +2845,15 @@ drop materialized view mrl_null_key_self_on;
 
 statement ok
 drop materialized view mrl_null_key_left_on;
+
+statement ok
+drop materialized view mrl_same_column_left_on;
+
+statement ok
+drop materialized view mrl_same_column_between_on;
+
+statement ok
+drop materialized view mrl_same_column_inner_on;
 
 statement ok
 drop materialized view mrl_lookup_left_side_on;
@@ -2842,6 +3001,15 @@ drop materialized view mrl_null_key_self_off;
 
 statement ok
 drop materialized view mrl_null_key_left_off;
+
+statement ok
+drop materialized view mrl_same_column_left_off;
+
+statement ok
+drop materialized view mrl_same_column_between_off;
+
+statement ok
+drop materialized view mrl_same_column_inner_off;
 
 statement ok
 drop materialized view mrl_lookup_left_side_off;

@@ -263,6 +263,42 @@
     LogicalJoin { type: Inner, on: (g.a = p.a) AND (g.b = p.b), output: [g.id, p.v, p.w] }
     ├─LogicalScan { table: g, columns: [g.id, g.a, g.b] }
     └─LogicalScan { table: p, columns: [p.a, p.b, p.v, p.w] }
+- name: two inner lookups of the same column
+  before:
+  - setup
+  sql: |
+    select f.id, a.name, b.name as name2 from f join d a on f.dim_id = a.id join d b on f.dim_id = b.id;
+  optimized_logical_plan_for_stream: |-
+    LogicalProject { exprs: [f.id, d.name, d.name] }
+    └─LogicalJoin { type: Inner, on: (f.dim_id = d.id), output: [f.id, d.name] }
+      ├─LogicalScan { table: f, columns: [f.id, f.dim_id] }
+      └─LogicalScan { table: d, columns: [d.id, d.name] }
+- name: lookups of the same column with an outer join in between
+  before:
+  - setup
+  sql: |
+    select f.id, a.name, e.code, b.name as name2, b.id as id2
+    from f join d a on f.dim_id = a.id left join e on f.other_id = e.id left join d b on f.dim_id = b.id;
+  optimized_logical_plan_for_stream: |-
+    LogicalProject { exprs: [f.id, d.name, e.code, d.name, d.id] }
+    └─LogicalJoin { type: LeftOuter, on: (f.other_id = e.id), output: [f.id, d.name, e.code, d.id] }
+      ├─LogicalJoin { type: Inner, on: (f.dim_id = d.id), output: [f.id, f.other_id, d.name, d.id] }
+      │ ├─LogicalScan { table: f, columns: [f.id, f.dim_id, f.other_id] }
+      │ └─LogicalScan { table: d, columns: [d.id, d.name] }
+      └─LogicalScan { table: e, columns: [e.id, e.code] }
+- name: left lookups of the same columns with an outer join in between
+  before:
+  - setup
+  sql: |
+    select f.id, a.name, a.id as id1, e.code, b.name as name2, b.id as id2
+    from f left join d a on f.dim_id = a.id left join e on f.other_id = e.id left join d b on f.dim_id = b.id;
+  optimized_logical_plan_for_stream: |-
+    LogicalProject { exprs: [f.id, d.name, d.id, e.code, d.name, d.id] }
+    └─LogicalJoin { type: LeftOuter, on: (f.other_id = e.id), output: all }
+      ├─LogicalJoin { type: LeftOuter, on: (f.dim_id = d.id), output: [f.id, f.other_id, d.id, d.name] }
+      │ ├─LogicalScan { table: f, columns: [f.id, f.dim_id, f.other_id] }
+      │ └─LogicalScan { table: d, columns: [d.id, d.name] }
+      └─LogicalScan { table: e, columns: [e.id, e.code] }
 - name: kept - lookups of two different rows
   before:
   - setup

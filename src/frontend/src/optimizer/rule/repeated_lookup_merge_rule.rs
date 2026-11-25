@@ -451,7 +451,8 @@ struct Request<'a> {
 
 /// The result of [`expose`].
 struct Exposed {
-    /// The plan, with the same output columns as before, followed by the requested ones.
+    /// The plan, with the same output columns as before, followed by the requested ones that it
+    /// did not output yet.
     plan: PlanRef,
     /// The position of each requested column of the table in the output of the plan.
     positions: BTreeMap<usize, usize>,
@@ -547,15 +548,13 @@ fn expose(plan: &PlanRef, request: &Request<'_>, memo: &mut Memo) -> Option<Expo
             *index = moved(*index);
         }
         for (&column, &position) in &input.positions {
-            positions.insert(column, output.len());
-            output.push(position);
+            positions.insert(column, output_position(&mut output, position));
         }
         (input.plan, right, on, input.predicate)
     } else {
         let input = expose(&right, request, memo)?;
         for (&column, &position) in &input.positions {
-            positions.insert(column, output.len());
-            output.push(left_len + position);
+            positions.insert(column, output_position(&mut output, left_len + position));
         }
         (left, input.plan, join.on().clone(), input.predicate)
     };
@@ -564,6 +563,18 @@ fn expose(plan: &PlanRef, request: &Request<'_>, memo: &mut Memo) -> Option<Expo
         positions,
         predicate,
     })
+}
+
+/// Returns the position of an internal column of a join in its output, appending the column if
+/// the join does not output it yet: a join does not output the same column twice.
+fn output_position(output: &mut Vec<usize>, internal: usize) -> usize {
+    output
+        .iter()
+        .position(|&other| other == internal)
+        .unwrap_or_else(|| {
+            output.push(internal);
+            output.len() - 1
+        })
 }
 
 /// Rewrites a left outer join that looks a row of a table up by its key (see [`OuterLookup`]),

@@ -120,6 +120,15 @@ CASES = [
     ('lookup_left_side', 'lookup written on the left side of the join',
      f"select a.grp as ag, x.fid as fid, x.bn as bn from {D} a join "
      f"(select f.id as fid, f.dim_id as did, b.name as bn from {F} f join {D} b on f.dim_id = b.id) x on a.id = x.did"),
+    # The kept lookup already outputs the columns that the removed one reads.
+    ('same_column_inner', 'two inner lookups of the same column',
+     f"select f.id as fid, a.name as an, b.name as bn from {F} f join {D} a on f.dim_id = a.id join {D} b on f.dim_id = b.id"),
+    ('same_column_between', 'lookups of the same columns with an outer join in between',
+     f"select f.id as fid, a.name as an, e.code as ec, b.name as bn, b.id as bid from {F} f "
+     f"join {D} a on f.dim_id = a.id left join {E} e on f.other_id = e.id left join {D} b on f.dim_id = b.id"),
+    ('same_column_left', 'left lookups of the same columns with an outer join in between',
+     f"select f.id as fid, a.name as an, a.id as aid, e.code as ec, b.name as bn, b.id as bid from {F} f "
+     f"left join {D} a on f.dim_id = a.id left join {E} e on f.other_id = e.id left join {D} b on f.dim_id = b.id"),
     # A key that can be NULL.
     ('null_key_left', 'left lookups in a relation whose key can be NULL',
      f"select f.id as fid, a.cnt as ac, b.top as bt from {F} f left join {DM} a on f.amt = a.id left join {DM} b on f.amt = b.id"),
