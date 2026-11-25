@@ -5,6 +5,9 @@
     create table t (id int primary key, s varchar, c varchar, j jsonb, arr int[], arr2 int[][], n int);
     create table u (k int, arr int[]);
     create table r (id int primary key, tid int, x int);
+    create table b (k varchar primary key, v int);
+    create table w (rid int primary key, id int, j jsonb);
+    create view tv as select id, n from t where c = 'k';
 - id: setup_off
   sql: |
     create table t (id int primary key, s varchar, c varchar, j jsonb, arr int[], arr2 int[][], n int);
@@ -464,6 +467,207 @@
                     └─StreamHashAgg { group_key: [t.arr], aggs: [count] }
                       └─StreamExchange { dist: HashShard(t.arr) }
                         └─StreamTableScan { table: t, columns: [t.arr, t.id], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
+- name: off by default - table joined back on its key with an aggregate over a function of itself
+  before:
+  - setup_off
+  sql: |
+    select t.id, a.m from t left join (select t2.id, max(x) as m from t t2, jsonb_array_elements_text(t2.j) as x group by t2.id) a on t.id = a.id where t.c = 'c';
+  stream_plan: |-
+    StreamMaterialize { columns: [id, m, t.id(hidden)], stream_key: [id], pk_columns: [id], pk_conflict: NoCheck }
+    └─StreamExchange { dist: HashShard(t.id) }
+      └─StreamHashJoin { type: LeftOuter, predicate: t.id = t.id, output: [t.id, max(JsonbArrayElementsText($1)), t.id] }
+        ├─StreamExchange { dist: HashShard(t.id) }
+        │ └─StreamProject { exprs: [t.id] }
+        │   └─StreamFilter { predicate: (t.c = 'c':Varchar) }
+        │     └─StreamTableScan { table: t, columns: [t.id, t.c], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
+        └─StreamExchange { dist: HashShard(t.id) }
+          └─StreamProject { exprs: [t.id, max(JsonbArrayElementsText($1))] }
+            └─StreamHashAgg { group_key: [t.id], aggs: [max(JsonbArrayElementsText($1)), count] }
+              └─StreamProjectSet { select_list: [$0, JsonbArrayElementsText($1)] }
+                └─StreamTableScan { table: t, columns: [t.id, t.j], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
+- name: self aggregate - max over a function of the row, with a filter on the outer side
+  before:
+  - setup
+  sql: |
+    select t.id, a.m from t left join (select t2.id, max(x) as m from t t2, jsonb_array_elements_text(t2.j) as x group by t2.id) a on t.id = a.id where t.c = 'c';
+  stream_plan: |-
+    StreamMaterialize { columns: [id, m], stream_key: [id], pk_columns: [id], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [t.id, Case(((count filter($expr1) > 0:Int64) AND IsNotNull(t.id)), max(JsonbArrayElementsText($2)) filter($expr1)) as $expr2] }
+      └─StreamHashAgg { group_key: [t.id], aggs: [max(JsonbArrayElementsText($2)) filter($expr1), count filter($expr1), count] }
+        └─StreamProject { exprs: [t.id, (true:Boolean AND IsNotNull(JsonbArrayElements($2))) as $expr1, JsonbArrayElementsText($2), _rw_projected_row_id] }
+          └─StreamProjectSet { select_list: [$0, $1, JsonbArrayElementsText($2), JsonbArrayElements($2), GenerateSeries(1:Int32, 1:Int32)] }
+            └─StreamProject { exprs: [t.id, true:Boolean, t.j] }
+              └─StreamFilter { predicate: (t.c = 'c':Varchar) }
+                └─StreamTableScan { table: t, columns: [t.id, t.j, t.c], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
+- name: self aggregate - sum with a default
+  before:
+  - setup
+  sql: |
+    select t.id, coalesce(s.total, 0) as total from t left join (select t.id, sum((e ->> 'x')::bigint) as total from t cross join jsonb_array_elements(t.j) as e group by t.id) s on t.id = s.id;
+  stream_plan: |-
+    StreamMaterialize { columns: [id, total], stream_key: [id], pk_columns: [id], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [t.id, Coalesce(Case(((count filter($expr1) > 0:Int64) AND IsNotNull(t.id)), Case((count($expr2) filter($expr1) > 0:Int64), sum($expr2) filter($expr1))), 0:Decimal) as $expr3] }
+      └─StreamHashAgg { group_key: [t.id], aggs: [sum($expr2) filter($expr1), count($expr2) filter($expr1), count filter($expr1), count] }
+        └─StreamProject { exprs: [t.id, (true:Boolean AND IsNotNull(JsonbArrayElements($2))) as $expr1, JsonbAccessStr(JsonbArrayElements($2), 'x':Varchar)::Int64 as $expr2, _rw_projected_row_id] }
+          └─StreamProjectSet { select_list: [$0, $1, JsonbArrayElements($2), GenerateSeries(1:Int32, 1:Int32)] }
+            └─StreamProject { exprs: [t.id, true:Boolean, t.j] }
+              └─StreamTableScan { table: t, columns: [t.id, t.j], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
+- name: self aggregate - inner join with a child table inside, and a test of the match
+  before:
+  - setup
+  sql: |
+    select t.id, t.n, s.sx, s.id is not null as matched from t left join (select t.id, sum(r.x) as sx from t join r on t.id = r.tid group by t.id) s on t.id = s.id;
+  stream_plan: |-
+    StreamMaterialize { columns: [id, n, sx, matched], stream_key: [id], pk_columns: [id], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [t.id, internal_last_seen_value(t.n), Case(((count filter($expr1) > 0:Int64) AND IsNotNull(t.id)), Case((count(r.x) filter($expr1) > 0:Int64), sum(r.x) filter($expr1))) as $expr2, IsNotNull(Case(((count filter($expr1) > 0:Int64) AND IsNotNull(t.id)), t.id)) as $expr3] }
+      └─StreamHashAgg { group_key: [t.id], aggs: [sum(r.x) filter($expr1), count(r.x) filter($expr1), count filter($expr1), internal_last_seen_value(t.n), count] }
+        └─StreamProject { exprs: [t.id, t.n, (true:Boolean AND IsNotNull(r.tid)) as $expr1, r.x, r.id] }
+          └─StreamHashJoin { type: LeftOuter, predicate: t.id = r.tid, output: all }
+            ├─StreamExchange { dist: HashShard(t.id) }
+            │ └─StreamTableScan { table: t, columns: [t.id, t.n], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
+            └─StreamExchange { dist: HashShard(r.tid) }
+              └─StreamTableScan { table: r, columns: [r.tid, r.x, r.id], stream_scan_type: SnapshotBackfill, stream_key: [r.id], pk: [id], dist: UpstreamHashShard(r.id) }
+- name: self aggregate - lookup of another table by a left join inside
+  before:
+  - setup
+  sql: |
+    select t.id, t.n, coalesce(p.s, 0) as s from t left join (select t.id, sum(b.v) as s from t cross join jsonb_array_elements_text(t.j) as e(x) left join b on e.x = b.k group by t.id) p on t.id = p.id;
+  stream_plan: |-
+    StreamMaterialize { columns: [id, n, s], stream_key: [id], pk_columns: [id], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [t.id, internal_last_seen_value(t.n), Coalesce(Case(((count filter($expr1) > 0:Int64) AND IsNotNull(t.id)), Case((count(b.v) filter($expr1) > 0:Int64), sum(b.v) filter($expr1))), 0:Int64) as $expr2] }
+      └─StreamHashAgg { group_key: [t.id], aggs: [sum(b.v) filter($expr1), count(b.v) filter($expr1), count filter($expr1), internal_last_seen_value(t.n), count] }
+        └─StreamExchange { dist: HashShard(t.id) }
+          └─StreamProject { exprs: [t.id, t.n, (true:Boolean AND IsNotNull(JsonbArrayElements($3))) as $expr1, b.v, _rw_projected_row_id, JsonbArrayElementsText($3)] }
+            └─StreamHashJoin { type: LeftOuter, predicate: JsonbArrayElementsText($3) = b.k, output: all }
+              ├─StreamExchange { dist: HashShard(JsonbArrayElementsText($3)) }
+              │ └─StreamProjectSet { select_list: [$0, $1, $2, JsonbArrayElementsText($3), JsonbArrayElements($3), GenerateSeries(1:Int32, 1:Int32)] }
+              │   └─StreamProject { exprs: [t.id, t.n, true:Boolean, t.j] }
+              │     └─StreamTableScan { table: t, columns: [t.id, t.j, t.n], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
+              └─StreamExchange { dist: HashShard(b.k) }
+                └─StreamTableScan { table: b, columns: [b.k, b.v], stream_scan_type: SnapshotBackfill, stream_key: [b.k], pk: [k], dist: UpstreamHashShard(b.k) }
+- name: self aggregate - inner join, with a condition on the rows of the function
+  before:
+  - setup
+  sql: |
+    select t.id, s.cnt from t join (select t.id, count(*) as cnt from t, unnest(t.arr) as v where v > 1 group by t.id) s on t.id = s.id;
+  stream_plan: |-
+    StreamMaterialize { columns: [id, cnt], stream_key: [id], pk_columns: [id], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [t.id, count filter($expr1)] }
+      └─StreamFilter { predicate: (count filter($expr1) > 0:Int64) }
+        └─StreamProject { exprs: [t.id, count filter($expr1), count filter($expr1)] }
+          └─StreamHashAgg { group_key: [t.id], aggs: [count filter($expr1), count filter($expr1), count] }
+            └─StreamProject { exprs: [t.id, ((true:Boolean AND IsNotNull(GenerateSubscripts($2, 1:Int32))) AND (Unnest($2) > 1:Int32)) as $expr1, _rw_projected_row_id] }
+              └─StreamProjectSet { select_list: [$0, $1, Unnest($2), GenerateSubscripts($2, 1:Int32), GenerateSeries(1:Int32, 1:Int32)] }
+                └─StreamProject { exprs: [t.id, true:Boolean, t.arr] }
+                  └─StreamFilter { predicate: IsNotNull(t.id) }
+                    └─StreamTableScan { table: t, columns: [t.id, t.arr], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
+- name: self aggregate - a column of the row in the group key
+  before:
+  - setup
+  sql: |
+    select t.id, a.n, a.m from t left join (select t2.id, t2.n, max(v) as m from t t2, unnest(t2.arr) as v group by t2.id, t2.n) a on t.id = a.id;
+  stream_plan: |-
+    StreamMaterialize { columns: [id, n, m], stream_key: [id], pk_columns: [id], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [t.id, Case(((count filter($expr1) > 0:Int64) AND IsNotNull(t.id)), internal_last_seen_value(t.n)) as $expr2, Case(((count filter($expr1) > 0:Int64) AND IsNotNull(t.id)), max(Unnest($3)) filter($expr1)) as $expr3] }
+      └─StreamHashAgg { group_key: [t.id], aggs: [max(Unnest($3)) filter($expr1), count filter($expr1), internal_last_seen_value(t.n), count] }
+        └─StreamProject { exprs: [t.id, t.n, (true:Boolean AND IsNotNull(GenerateSubscripts($3, 1:Int32))) as $expr1, Unnest($3), _rw_projected_row_id] }
+          └─StreamProjectSet { select_list: [$0, $1, $2, Unnest($3), GenerateSubscripts($3, 1:Int32), GenerateSeries(1:Int32, 1:Int32)] }
+            └─StreamProject { exprs: [t.id, t.n, true:Boolean, t.arr] }
+              └─StreamTableScan { table: t, columns: [t.id, t.arr, t.n], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
+- name: self aggregate - the outer side is a view of the table carrying its key
+  before:
+  - setup
+  sql: |
+    select tv.id, tv.n, a.c from tv left join (select id, count(*) as c from t, unnest(arr) as v group by id) a on tv.id = a.id;
+  stream_plan: |-
+    StreamMaterialize { columns: [id, n, c], stream_key: [id], pk_columns: [id], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [t.id, internal_last_seen_value(t.n), Case(((count filter($expr1) > 0:Int64) AND IsNotNull(t.id)), count filter($expr1)) as $expr2] }
+      └─StreamHashAgg { group_key: [t.id], aggs: [count filter($expr1), count filter($expr1), internal_last_seen_value(t.n), count] }
+        └─StreamProject { exprs: [t.id, t.n, (true:Boolean AND IsNotNull(GenerateSubscripts($3, 1:Int32))) as $expr1, _rw_projected_row_id] }
+          └─StreamProjectSet { select_list: [$0, $1, $2, GenerateSubscripts($3, 1:Int32), Unnest($3), GenerateSeries(1:Int32, 1:Int32)] }
+            └─StreamProject { exprs: [t.id, t.n, true:Boolean, t.arr] }
+              └─StreamFilter { predicate: (t.c = 'k':Varchar) }
+                └─StreamTableScan { table: t, columns: [t.id, t.arr, t.n, t.c], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
+- name: kept - self aggregate grouped by a column that is not the key
+  before:
+  - setup
+  sql: |
+    select t.id, a.m from t left join (select t2.n, max(v) as m from t t2, unnest(t2.arr) as v group by t2.n) a on t.n = a.n;
+  stream_plan: |-
+    StreamMaterialize { columns: [id, m, t.n(hidden), t.n#1(hidden)], stream_key: [id, t.n], pk_columns: [id, t.n], pk_conflict: NoCheck }
+    └─StreamExchange { dist: HashShard(t.id, t.n) }
+      └─StreamHashJoin { type: LeftOuter, predicate: t.n = t.n, output: [t.id, max(Unnest($0)), t.n, t.n] }
+        ├─StreamExchange { dist: HashShard(t.n) }
+        │ └─StreamTableScan { table: t, columns: [t.id, t.n], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
+        └─StreamProject { exprs: [t.n, max(Unnest($0))] }
+          └─StreamHashAgg { group_key: [t.n], aggs: [max(Unnest($0)), count] }
+            └─StreamExchange { dist: HashShard(t.n) }
+              └─StreamProjectSet { select_list: [$1, Unnest($0), $2] }
+                └─StreamTableScan { table: t, columns: [t.arr, t.n, t.id], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
+- name: kept - self aggregate on a column that is not a proven key
+  before:
+  - setup
+  sql: |
+    select w.id, a.m from w left join (select w2.id, max(x) as m from w w2, jsonb_array_elements_text(w2.j) as x group by w2.id) a on w.id = a.id;
+  stream_plan: |-
+    StreamMaterialize { columns: [id, m, w.rid(hidden), w.id(hidden)], stream_key: [w.rid, id], pk_columns: [w.rid, id], pk_conflict: NoCheck }
+    └─StreamExchange { dist: HashShard(w.id, w.rid) }
+      └─StreamHashJoin { type: LeftOuter, predicate: w.id = w.id, output: [w.id, max(JsonbArrayElementsText($1)), w.rid, w.id] }
+        ├─StreamExchange { dist: HashShard(w.id) }
+        │ └─StreamTableScan { table: w, columns: [w.id, w.rid], stream_scan_type: SnapshotBackfill, stream_key: [w.rid], pk: [rid], dist: UpstreamHashShard(w.rid) }
+        └─StreamProject { exprs: [w.id, max(JsonbArrayElementsText($1))] }
+          └─StreamHashAgg { group_key: [w.id], aggs: [max(JsonbArrayElementsText($1)), count] }
+            └─StreamExchange { dist: HashShard(w.id) }
+              └─StreamProjectSet { select_list: [$0, JsonbArrayElementsText($1), $2] }
+                └─StreamTableScan { table: w, columns: [w.id, w.j, w.rid], stream_scan_type: SnapshotBackfill, stream_key: [w.rid], pk: [rid], dist: UpstreamHashShard(w.rid) }
+- name: kept - aggregate of another table joined on the same key
+  before:
+  - setup
+  sql: |
+    select r.id, a.m from r left join (select t.id, max(v) as m from t, unnest(t.arr) as v group by t.id) a on r.id = a.id;
+  stream_plan: |-
+    StreamMaterialize { columns: [id, m, t.id(hidden)], stream_key: [id], pk_columns: [id], pk_conflict: NoCheck }
+    └─StreamExchange { dist: HashShard(r.id) }
+      └─StreamHashJoin { type: LeftOuter, predicate: r.id = t.id, output: [r.id, max(Unnest($1)), t.id] }
+        ├─StreamExchange { dist: HashShard(r.id) }
+        │ └─StreamTableScan { table: r, columns: [r.id], stream_scan_type: SnapshotBackfill, stream_key: [r.id], pk: [id], dist: UpstreamHashShard(r.id) }
+        └─StreamExchange { dist: HashShard(t.id) }
+          └─StreamProject { exprs: [t.id, max(Unnest($1))] }
+            └─StreamHashAgg { group_key: [t.id], aggs: [max(Unnest($1)), count] }
+              └─StreamProjectSet { select_list: [$0, Unnest($1)] }
+                └─StreamTableScan { table: t, columns: [t.id, t.arr], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
+- name: kept - self aggregate grouped by the values of the function too
+  before:
+  - setup
+  sql: |
+    select t.id, a.v, a.c from t left join (select t2.id, v, count(*) as c from t t2, unnest(t2.arr) as v group by t2.id, v) a on t.id = a.id;
+  stream_plan: |-
+    StreamMaterialize { columns: [id, v, c, t.id(hidden)], stream_key: [id, v], pk_columns: [id, v], pk_conflict: NoCheck }
+    └─StreamExchange { dist: HashShard(t.id, Unnest($1)) }
+      └─StreamHashJoin { type: LeftOuter, predicate: t.id = t.id, output: [t.id, Unnest($1), count, t.id] }
+        ├─StreamExchange { dist: HashShard(t.id) }
+        │ └─StreamTableScan { table: t, columns: [t.id], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
+        └─StreamExchange { dist: HashShard(t.id) }
+          └─StreamHashAgg { group_key: [t.id, Unnest($1)], aggs: [count] }
+            └─StreamProjectSet { select_list: [$0, Unnest($1)] }
+              └─StreamTableScan { table: t, columns: [t.id, t.arr], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
+- name: kept - self aggregate with a condition on the aggregate in the join
+  before:
+  - setup
+  sql: |
+    select t.id, a.m from t left join (select t2.id, max(v) as m from t t2, unnest(t2.arr) as v group by t2.id) a on t.id = a.id and a.m > 1;
+  stream_plan: |-
+    StreamMaterialize { columns: [id, m, t.id(hidden)], stream_key: [id], pk_columns: [id], pk_conflict: NoCheck }
+    └─StreamExchange { dist: HashShard(t.id) }
+      └─StreamHashJoin { type: LeftOuter, predicate: t.id = t.id, output: [t.id, max(Unnest($1)), t.id] }
+        ├─StreamExchange { dist: HashShard(t.id) }
+        │ └─StreamTableScan { table: t, columns: [t.id], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
+        └─StreamExchange { dist: HashShard(t.id) }
+          └─StreamFilter { predicate: (max(Unnest($1)) > 1:Int32) }
+            └─StreamProject { exprs: [t.id, max(Unnest($1))] }
+              └─StreamHashAgg { group_key: [t.id], aggs: [max(Unnest($1)), count] }
+                └─StreamProjectSet { select_list: [$0, Unnest($1)] }
+                  └─StreamTableScan { table: t, columns: [t.id, t.arr], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
 - name: unchanged - inner lateral table function, already a ProjectSet without the variable
   before:
   - setup

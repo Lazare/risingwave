@@ -1,12 +1,16 @@
 # Tests for the per-row evaluation of correlated subqueries that read no table, only columns of
 # the outer row through set-returning functions (`streaming_unnest_lateral_functions`):
-# `LateralTableFunctionRule` and `UnnestArrayOfTableFunctionRule`.
+# `LateralTableFunctionRule` and `UnnestArrayOfTableFunctionRule`; and a table joined back on its
+# key with an aggregation of rows derived from itself: `SelfAggregateJoinRule`.
 - id: setup
   sql: |
     set streaming_unnest_lateral_functions = true;
     create table t (id int primary key, s varchar, c varchar, j jsonb, arr int[], arr2 int[][], n int);
     create table u (k int, arr int[]);
     create table r (id int primary key, tid int, x int);
+    create table b (k varchar primary key, v int);
+    create table w (rid int primary key, id int, j jsonb);
+    create view tv as select id, n from t where c = 'k';
   expected_outputs: []
 - id: setup_off
   sql: |
@@ -233,6 +237,99 @@
   sql: |
     select t.id, x.v, x.c
     from t left join lateral (select v, count(*) over () as c from unnest(t.arr) as v) as x on true;
+  expected_outputs:
+  - stream_plan
+
+# A table joined back on its key with an aggregation of rows derived from itself.
+
+- name: off by default - table joined back on its key with an aggregate over a function of itself
+  before: [setup_off]
+  sql: |
+    select t.id, a.m from t left join (select t2.id, max(x) as m from t t2, jsonb_array_elements_text(t2.j) as x group by t2.id) a on t.id = a.id where t.c = 'c';
+  expected_outputs:
+  - stream_plan
+
+- name: self aggregate - max over a function of the row, with a filter on the outer side
+  before: [setup]
+  sql: |
+    select t.id, a.m from t left join (select t2.id, max(x) as m from t t2, jsonb_array_elements_text(t2.j) as x group by t2.id) a on t.id = a.id where t.c = 'c';
+  expected_outputs:
+  - stream_plan
+
+- name: self aggregate - sum with a default
+  before: [setup]
+  sql: |
+    select t.id, coalesce(s.total, 0) as total from t left join (select t.id, sum((e ->> 'x')::bigint) as total from t cross join jsonb_array_elements(t.j) as e group by t.id) s on t.id = s.id;
+  expected_outputs:
+  - stream_plan
+
+- name: self aggregate - inner join with a child table inside, and a test of the match
+  before: [setup]
+  sql: |
+    select t.id, t.n, s.sx, s.id is not null as matched from t left join (select t.id, sum(r.x) as sx from t join r on t.id = r.tid group by t.id) s on t.id = s.id;
+  expected_outputs:
+  - stream_plan
+
+- name: self aggregate - lookup of another table by a left join inside
+  before: [setup]
+  sql: |
+    select t.id, t.n, coalesce(p.s, 0) as s from t left join (select t.id, sum(b.v) as s from t cross join jsonb_array_elements_text(t.j) as e(x) left join b on e.x = b.k group by t.id) p on t.id = p.id;
+  expected_outputs:
+  - stream_plan
+
+- name: self aggregate - inner join, with a condition on the rows of the function
+  before: [setup]
+  sql: |
+    select t.id, s.cnt from t join (select t.id, count(*) as cnt from t, unnest(t.arr) as v where v > 1 group by t.id) s on t.id = s.id;
+  expected_outputs:
+  - stream_plan
+
+- name: self aggregate - a column of the row in the group key
+  before: [setup]
+  sql: |
+    select t.id, a.n, a.m from t left join (select t2.id, t2.n, max(v) as m from t t2, unnest(t2.arr) as v group by t2.id, t2.n) a on t.id = a.id;
+  expected_outputs:
+  - stream_plan
+
+- name: self aggregate - the outer side is a view of the table carrying its key
+  before: [setup]
+  sql: |
+    select tv.id, tv.n, a.c from tv left join (select id, count(*) as c from t, unnest(arr) as v group by id) a on tv.id = a.id;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - self aggregate grouped by a column that is not the key
+  before: [setup]
+  sql: |
+    select t.id, a.m from t left join (select t2.n, max(v) as m from t t2, unnest(t2.arr) as v group by t2.n) a on t.n = a.n;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - self aggregate on a column that is not a proven key
+  before: [setup]
+  sql: |
+    select w.id, a.m from w left join (select w2.id, max(x) as m from w w2, jsonb_array_elements_text(w2.j) as x group by w2.id) a on w.id = a.id;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - aggregate of another table joined on the same key
+  before: [setup]
+  sql: |
+    select r.id, a.m from r left join (select t.id, max(v) as m from t, unnest(t.arr) as v group by t.id) a on r.id = a.id;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - self aggregate grouped by the values of the function too
+  before: [setup]
+  sql: |
+    select t.id, a.v, a.c from t left join (select t2.id, v, count(*) as c from t t2, unnest(t2.arr) as v group by t2.id, v) a on t.id = a.id;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - self aggregate with a condition on the aggregate in the join
+  before: [setup]
+  sql: |
+    select t.id, a.m from t left join (select t2.id, max(v) as m from t t2, unnest(t2.arr) as v group by t2.id) a on t.id = a.id and a.m > 1;
   expected_outputs:
   - stream_plan
 

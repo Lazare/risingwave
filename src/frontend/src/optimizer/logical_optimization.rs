@@ -282,6 +282,16 @@ static STREAM_UNNEST_ARRAY_OF_FUNCTION: LazyLock<OptimizationStage> = LazyLock::
     )
 });
 
+// A table joined back on its key with an aggregation of rows derived from itself
+// (`streaming_unnest_lateral_functions`), after the final column pruning.
+static STREAM_SELF_AGGREGATE_JOIN: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Stream Self Aggregate Join",
+        vec![SelfAggregateJoinRule::create()],
+        ApplyOrder::BottomUp,
+    )
+});
+
 static STREAM_UNNEST_LATERAL_FUNCTIONS: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Stream Unnest Lateral Functions",
@@ -1036,6 +1046,26 @@ impl LogicalOptimizer {
                 ctx.add_stream_prune_rule_applied(applied);
                 plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
                 plan = plan.optimize_by_rules(&STREAM_PRUNE_EMPTY_RELATION)?;
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
+            }
+        }
+
+        // A table joined back on its key with an aggregation, grouped by that key, of rows derived
+        // from itself (`streaming_unnest_lateral_functions`): the aggregation is evaluated on each
+        // row of the table, which is read once.
+        if ctx
+            .session_ctx()
+            .config()
+            .streaming_unnest_lateral_functions()
+            && !ctx.is_stream_prune_baseline()
+        {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&STREAM_SELF_AGGREGATE_JOIN)?;
+            let applied = ctx.total_rule_applied() - applied_before;
+            if applied > 0 {
+                ctx.add_stream_prune_rule_applied(applied);
+                plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
                 plan = Self::column_pruning(plan, explain_trace, &ctx);
                 plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
             }
