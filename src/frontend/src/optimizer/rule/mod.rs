@@ -215,6 +215,8 @@ mod column_facts_simplify_rule;
 pub use column_facts_simplify_rule::*;
 mod constant_row_join_rule;
 pub use constant_row_join_rule::*;
+mod common_join_over_union_rule;
+pub use common_join_over_union_rule::*;
 mod repeated_lookup_merge_rule;
 pub use repeated_lookup_merge_rule::*;
 mod unique_key_simplify_rule;
@@ -366,6 +368,7 @@ macro_rules! for_all_rules {
             , { UnusedOuterJoinEliminateRule }
             , { AggOnKeyEliminateRule }
             , { RepeatedLookupMergeRule }
+            , { CommonJoinOverUnionRule }
             , { BushyTreeJoinOrderingRule }
             , { StreamProjectMergeRule }
             , { StreamProjectSplitRule }

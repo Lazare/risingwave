@@ -516,6 +516,15 @@ static STREAM_PRUNE_EMPTY_RELATION: LazyLock<OptimizationStage> = LazyLock::new(
     )
 });
 
+static STREAM_FACTOR_UNION_JOIN: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Factor Union Join For Stream",
+        vec![CommonJoinOverUnionRule::create()],
+        // Bottom-up: the branches of a union are reduced before the union is looked at.
+        ApplyOrder::BottomUp,
+    )
+});
+
 static STREAM_MERGE_REPEATED_LOOKUPS: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Merge Repeated Lookups For Stream",
@@ -926,7 +935,6 @@ impl LogicalOptimizer {
         {
             let applied_before = ctx.total_rule_applied();
             plan = plan.optimize_by_rules(&STREAM_MERGE_REPEATED_LOOKUPS)?;
-            crate::optimizer::rule::diagnose_repeated_reads(&plan);
             let applied = ctx.total_rule_applied() - applied_before;
             if applied > 0 {
                 ctx.add_stream_prune_rule_applied(applied);
@@ -935,6 +943,25 @@ impl LogicalOptimizer {
                 plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
             }
         }
+
+        // Join once, above a union, the table that several of its branches join on the same
+        // columns. The per-branch conditions that the rule leaves around the single join are
+        // then pushed down and simplified: in a branch, the number of the branch is a constant.
+        if ctx.session_ctx().config().streaming_factor_union_join()
+            && !ctx.is_stream_prune_baseline()
+        {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&STREAM_FACTOR_UNION_JOIN)?;
+            let applied = ctx.total_rule_applied() - applied_before;
+            if applied > 0 {
+                ctx.add_stream_prune_rule_applied(applied);
+                plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+                plan = plan.optimize_by_rules(&STREAM_PRUNE_EMPTY_RELATION)?;
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
+            }
+        }
+        crate::optimizer::rule::diagnose_repeated_reads(&plan);
 
         plan = plan.optimize_by_rules(&CONSTANT_OUTPUT_REMOVE)?;
         plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;

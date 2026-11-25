@@ -28,6 +28,9 @@ own rules.
 | 3 | Elimination of a self-join on a key | in progress: repeated lookups of a table done on the branch `proto/streaming-merge-repeated-lookups`, aggregations next |
 | 5 | Aggregation pushed below a join onto the unique side | selected, not started |
 | 6 | Merge of two stacked aggregations | selected, not started |
+| 7 | Join common to the branches of a `UNION ALL` joined once above the union | done (prototype, branch of idea 3) |
+| 8 | Aggregate of a constant over a group | done (prototype, branch of idea 3) |
+| 9 | Leftovers of subquery decorrelation (domain re-scan, aggregation and null-safe join back) | selected, after 3, 7 and 8 are validated |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -184,6 +187,14 @@ input joined on their group key: one aggregation with a `FILTER` per call.
   - Not followed yet: an instance below an aggregation, top-n, union or a shared sub-plan that
     is more than a scan; a lookup written as `IS NOT DISTINCT FROM`; a key column compared with
     a constant; a key of a type outside the simple types.
+  - Since then the instance is also followed through top-n, limit and dedup, through an
+    aggregation whose group key designates its row (the other columns are read with
+    `internal_last_seen_value`), and into a shared sub-plan when it already outputs the columns
+    that the removed lookup reads. A shared sub-plan is never rewritten: its other consumers
+    would compute it twice.
+  - Still out of reach: a lookup whose removed side is itself a chain of joins that ends with
+    the scan, and a key equality that an ancestor join establishes. Both need the inner joins
+    to be looked at as one flat join with classes of equal columns.
 - **Next for the aggregations**: `Agg(group k)` over the same input with different filters,
   joined on `k` from the same column, becomes one aggregation with a `FILTER` per call and a
   `count(*) FILTER` per former aggregation to tell whether its group existed.
@@ -194,6 +205,31 @@ input joined on their group key: one aggregation with a `FILTER` per call.
 - The work is matching two sub-plans up to a column mapping, looking through shared sub-plans.
 - Seen in the fusion paper of Amazon Athena (rule "JoinOnKeys"), PostgreSQL 18
   (`remove_useless_self_joins`), Materialize (`redundant_join`).
+
+### 7. Join common to the branches of a `UNION ALL` (added on 2026-11-25, done on the branch)
+
+`(A ⋈ C) UNION ALL (B ⋈ C)` is `(A UNION ALL B) ⋈ C` for the inner, left outer, left semi and
+left anti joins: variable `streaming_factor_union_join`, rule `CommonJoinOverUnionRule`. No key is
+needed. `C` is scanned once and its join state kept once.
+
+- The branches that are merged join the same table, with the same join type, on the same
+  expressions of the table; their other inputs are unioned with the number of their branch.
+- What differs between branches moves around the single join: the rest of a join condition and
+  the filter of a scan are checked in the join condition for the rows of the branch (an outer or
+  anti join stays exact); the filter and projection above a join are applied per branch above.
+- An expression of the joined table that a branch computed below an outer join is still
+  computed below the single join, so that it is `NULL` without a match.
+- Cost to keep in mind: one join state holds the rows of every branch, and the rows of the union
+  are as wide as the widest branch.
+- Not done: a common side that is more than the scan of a table, an inner join in one branch
+  and an anti join on the same key in another (one left join split on `IS NULL`).
+
+### 8. Aggregate of a constant (added on 2026-11-25, done on the branch)
+
+`min`, `max`, `first_value` and `last_value` over a group return the argument of one of its rows,
+so a constant argument gives a constant result, also when the planner packs it with other values
+into a `ROW(...)`. Removes the filter of the pattern "keep the group if its last operation is
+the one constant operation there is". Part of `streaming_prune_empty_relation`.
 
 ### 5. Aggregation pushed below a join onto the unique side
 

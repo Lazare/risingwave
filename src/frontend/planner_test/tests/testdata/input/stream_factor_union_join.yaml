@@ -1,0 +1,179 @@
+# Tests for the join factored out of the branches of a union in streaming plans
+# (`streaming_factor_union_join`): `CommonJoinOverUnionRule`.
+- id: setup
+  sql: |
+    set streaming_factor_union_join = true;
+    create table f (id int primary key, dim_id int, other_id int, amt int, label varchar);
+    create table d (id int primary key, name varchar, grp int, active boolean);
+    create table e (id int primary key, code varchar, ref int);
+    create table g (id int primary key, a int, b int);
+    create view da as select * from d where active;
+  expected_outputs: []
+- id: setup_off
+  sql: |
+    create table f (id int primary key, dim_id int, other_id int, amt int, label varchar);
+    create table d (id int primary key, name varchar, grp int, active boolean);
+    create table e (id int primary key, code varchar, ref int);
+  expected_outputs: []
+
+- name: off by default - each branch keeps its join
+  before: [setup_off]
+  sql: |
+    select f.id, d.name from f join d on f.dim_id = d.id
+    union all
+    select e.id, d.name from e join d on e.ref = d.id;
+  expected_outputs:
+  - stream_plan
+
+- name: two branches with the same inner join
+  before: [setup]
+  sql: |
+    select f.id, d.name from f join d on f.dim_id = d.id
+    union all
+    select e.id, d.name from e join d on e.ref = d.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: left joins with different projections above
+  before: [setup]
+  sql: |
+    select f.id, f.label as txt, least(f.amt, d.grp) as n from f left join d on f.dim_id = d.id
+    union all
+    select e.id, e.code, d.grp from e left join d on e.ref = d.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: inner joins with a different filter of the joined table in each branch
+  before: [setup]
+  sql: |
+    select f.id, d.name from f join d on f.dim_id = d.id where d.active
+    union all
+    select e.id, d.name from e join d on e.ref = d.id where d.grp = 2;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: left joins with a filtered joined table in one branch only
+  before: [setup]
+  sql: |
+    select f.id, d.name from f left join da d on f.dim_id = d.id
+    union all
+    select e.id, d.name from e left join d on e.ref = d.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: left joins with a different extra condition in each branch
+  before: [setup]
+  sql: |
+    select f.id, d.name from f left join d on f.dim_id = d.id and f.amt > d.grp
+    union all
+    select e.id, d.name from e left join d on e.ref = d.id and d.name <> e.code;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: filters above the joins
+  before: [setup]
+  sql: |
+    select f.id, d.name from f left join d on f.dim_id = d.id where f.amt > 3 or d.name is null
+    union all
+    select e.id, d.name from e left join d on e.ref = d.id where e.code is not null;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: expression of the joined table computed below a left join stays NULL without a match
+  before: [setup]
+  sql: |
+    select f.id, x.label from f left join (select id, coalesce(name, 'none') as label from d) x on f.dim_id = x.id
+    union all
+    select e.id, x.label from e left join (select id, coalesce(name, 'none') as label from d) x on e.ref = x.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: semi joins
+  before: [setup]
+  sql: |
+    select f.id, f.label from f where exists (select 1 from d where d.id = f.dim_id)
+    union all
+    select e.id, e.code from e where exists (select 1 from d where d.id = e.ref);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: anti joins with a different filter of the joined table
+  before: [setup]
+  sql: |
+    select f.id, f.label from f where not exists (select 1 from d where d.id = f.dim_id and d.active)
+    union all
+    select e.id, e.code from e where not exists (select 1 from d where d.id = e.ref);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: join on a column of the joined table that is not its key
+  before: [setup]
+  sql: |
+    select f.id, d.name from f join d on f.amt = d.grp
+    union all
+    select e.id, d.name from e join d on e.ref = d.grp;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: three branches - two of them share their join
+  before: [setup]
+  sql: |
+    select f.id, d.name from f join d on f.dim_id = d.id
+    union all
+    select g.id, e.code from g join e on g.a = e.id
+    union all
+    select e.id, d.name from e join d on e.ref = d.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: three branches with the same join
+  before: [setup]
+  sql: |
+    select f.id, d.name, 'f' as src from f join d on f.dim_id = d.id
+    union all
+    select e.id, d.name, 'e' from e join d on e.ref = d.id
+    union all
+    select g.id, d.name, 'g' from g join d on g.a = d.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: joins on two columns
+  before: [setup]
+  sql: |
+    select f.id, d.active from f join d on f.dim_id = d.id and f.amt = d.grp
+    union all
+    select g.id, d.active from g join d on g.b = d.grp and g.a = d.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: the joined table is written on the left side
+  before: [setup]
+  sql: |
+    select f.id, d.name from d join f on f.dim_id = d.id
+    union all
+    select e.id, d.name from d join e on e.ref = d.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+
+# Unions that are kept.
+- name: kept - an inner join and a left join
+  before: [setup]
+  sql: |
+    select f.id, d.name from f join d on f.dim_id = d.id
+    union all
+    select e.id, d.name from e left join d on e.ref = d.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - joins on different columns of the joined table
+  before: [setup]
+  sql: |
+    select f.id, d.name from f join d on f.dim_id = d.id
+    union all
+    select e.id, d.name from e join d on e.ref = d.grp;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - joins with different tables
+  before: [setup]
+  sql: |
+    select f.id, d.name from f join d on f.dim_id = d.id
+    union all
+    select g.id, e.code from g join e on g.a = e.id;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - an aggregation above the join of a branch
+  before: [setup]
+  sql: |
+    select f.id, d.name from f join d on f.dim_id = d.id
+    union all
+    select max(e.id), d.name from e join d on e.ref = d.id group by d.name;
+  expected_outputs:
+  - optimized_logical_plan_for_stream

@@ -294,6 +294,12 @@ pub struct SessionConfig {
     #[parameter(default = false)]
     streaming_merge_repeated_lookups: bool,
 
+    /// In the plan of a new streaming job, join once, above a `UNION ALL`, the table that several
+    /// of its branches join on the same columns: the table is scanned once and its join state is
+    /// kept once. Defaults to false.
+    #[parameter(default = false)]
+    streaming_factor_union_join: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,

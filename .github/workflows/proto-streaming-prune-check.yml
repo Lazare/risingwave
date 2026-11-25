@@ -245,7 +245,17 @@ jobs:
           tail -50 "$RUNNER_TEMP/e2e/node.log"
           exit 1
 
+      - name: Differential test of the join factored out of a union
+        timeout-minutes: 30
+        run: |
+          set -o pipefail
+          export PATH="$PWD/e2e_test/commands:$PATH"
+          sqllogictest -p 4566 -d dev './e2e_test/streaming/factor_union_join.slt' \
+            2>&1 | tee "$RUNNER_TEMP/e2e/differential-union.log"
+
       - name: Differential test of the merge of repeated lookups
+        if: ${{ !cancelled() }}
+        timeout-minutes: 45
         run: |
           set -o pipefail
           export PATH="$PWD/e2e_test/commands:$PATH"
@@ -255,6 +265,7 @@ jobs:
       - name: Differential test of the pruning
         id: differential
         if: ${{ !cancelled() }}
+        timeout-minutes: 60
         run: |
           # Without `pipefail` the step would succeed whenever `tee` does.
           set -o pipefail
@@ -270,7 +281,7 @@ jobs:
           grep -a -i 'panicked' "$RUNNER_TEMP/e2e/node.log" | head -20 || true
 
       - name: Upload the logs
-        if: ${{ !cancelled() }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: e2e-differential

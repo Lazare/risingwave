@@ -525,11 +525,30 @@ impl ExprRewriter for ConstantFolder {
             .into_iter()
             .map(|expr| self.rewrite_expr(expr))
             .collect();
-        if func_type == ExprType::Case {
-            simplify_case(inputs, return_type)
-        } else {
-            FunctionCall::new_unchecked(func_type, inputs, return_type).into()
+        match func_type {
+            ExprType::Case => simplify_case(inputs, return_type),
+            ExprType::And | ExprType::Or if inputs.len() == 2 => simplify_and_or(func_type, inputs),
+            _ => FunctionCall::new_unchecked(func_type, inputs, return_type).into(),
         }
+    }
+}
+
+/// Simplifies `a AND b` or `a OR b` when an operand is the constant `TRUE` or `FALSE`:
+/// `FALSE AND b` is `FALSE` and `TRUE AND b` is `b`, whatever `b`; likewise for `OR`.
+fn simplify_and_or(func_type: ExprType, inputs: Vec<ExprImpl>) -> ExprImpl {
+    // The constant that decides the result on its own.
+    let absorbing = func_type == ExprType::Or;
+    let as_bool = |expr: &ExprImpl| match constant_value(expr) {
+        Some(Some(ScalarImpl::Bool(value))) => Some(value),
+        _ => None,
+    };
+    let [first, second]: [ExprImpl; 2] = inputs.try_into().expect("two operands");
+    match (as_bool(&first), as_bool(&second)) {
+        (Some(value), _) if value == absorbing => ExprImpl::literal_bool(absorbing),
+        (_, Some(value)) if value == absorbing => ExprImpl::literal_bool(absorbing),
+        (Some(_), _) => second,
+        (_, Some(_)) => first,
+        _ => FunctionCall::new_unchecked(func_type, vec![first, second], DataType::Boolean).into(),
     }
 }
 
