@@ -343,7 +343,31 @@ Not done:
   (`t LEFT JOIN (SELECT t.id, max(x) FROM t, srf(t.a) x GROUP BY t.id) ON ..`): the same per-row
   aggregation once it is recognised, which needs the key of `t` and is the self-join of idea 3.
 
-### 5. Aggregation pushed below a join onto the unique side
+### 9c. A table joined back with an aggregation of itself on its key (added on 2026-11-25, done)
+
+Same variable, rule `SelfAggregateJoinRule`, in a stage after the final column pruning. `T LEFT
+JOIN (SELECT T2.k, agg(..) FROM T T2, srf(T2.a) x [LEFT] JOIN U ON .. WHERE .. GROUP BY T2.k) a
+ON T.k = a.k` read `T` twice and joined it with the aggregation; also when the left side is a
+view of `T` (projections and filters) carrying its key. When `k` is the whole unique key of `T`
+(proven from the definition of the table, never assumed), the group of a row of the left side
+holds the rows derived from that same row of `T`, so:
+
+- the derived rows are computed on the rows of the left side, keeping every row of `T`: the
+  outer `ProjectSet` of 9b, a filter becomes a flag on the rows, an inner join with another
+  relation becomes a left outer join whose match is the flag (a column that its condition
+  compares for equality is not NULL), a left outer join stays;
+- the aggregation is grouped by the key, carries the columns of the left side, filters every
+  call on the flag and counts the flagged rows;
+- a row of `T` without flagged rows had no group: the right columns are NULL (left outer join) or
+  the row is dropped (inner join). Every column of the group key must be computed from the row of
+  `T` only.
+
+One read of `T`, no join, one aggregation instead of one aggregation and one join. Kept: a group
+key that is not the whole key, a column that is only unique in the data (a stream key elsewhere),
+a group key over the rows of the function, a condition on the aggregation, another table on the
+left side.
+
+
 
 `SELECT f.cust_id, c.name, sum(f.amt) FROM f LEFT JOIN c ON f.cust_id = c.id GROUP BY f.cust_id,
 c.name` becomes `(SELECT cust_id, sum(amt) FROM f GROUP BY cust_id) LEFT JOIN c ...`.
