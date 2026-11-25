@@ -31,7 +31,6 @@ use crate::expr::{
     Expr, ExprImpl, ExprRewriter, ExprType, FunctionCall, InputRef, Literal, default_rewrite_expr,
     fold_boolean_constant, try_get_bool_constant,
 };
-use crate::optimizer::PlanTreeNode;
 use crate::optimizer::plan_node::generic::GenericPlanRef;
 use crate::optimizer::plan_node::{
     LogicalFilter, LogicalJoin, LogicalProject, LogicalScan, PlanNodeId, PlanTreeNodeBinary,

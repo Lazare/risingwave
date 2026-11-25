@@ -212,14 +212,14 @@
     select * from t where v1 = 1 and v2 = 2;
   expected_outputs:
   - stream_plan
-- name: kept - contradiction under a disjunction
+- name: disjunction simplified by an equality on the same column
   before:
   - setup
   sql: |
     select * from t where (v1 = 1 or v2 = 1) and v1 = 2;
   expected_outputs:
   - stream_plan
-- name: kept - in-list with a null item and a matching equality
+- name: redundant in-list with a null item next to an equality
   before:
   - setup
   sql: |
@@ -580,7 +580,7 @@
     from t left join (select * from s where w = 1) s on t.v1 = s.k;
   expected_outputs:
   - stream_plan
-- name: kept - temporal filter on a constant column
+- name: temporal filter on a constant column
   before:
   - setup
   sql: |
@@ -624,7 +624,7 @@
     select v1, v2 from t where (v1 is null or v2 = 1) and v1 > 0;
   expected_outputs:
   - stream_plan
-- name: is null on a join key of an inner join
+- name: kept - is null on a join key, pushed below the inner join
   before:
   - setup
   sql: |

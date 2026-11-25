@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use risingwave_common::types::DataType;
+use risingwave_common::util::iter_util::ZipEqFast;
 use risingwave_pb::plan_common::JoinType;
 
 use super::never_true_predicate_rule::is_never_true;
@@ -111,7 +112,7 @@ fn constant_row(plan: &PlanRef) -> Option<Vec<ExprImpl>> {
     (row.len() == fields.len()
         && row
             .iter()
-            .zip(fields)
+            .zip_eq_fast(fields.iter())
             .all(|(expr, field)| expr.is_const() && expr.return_type() == field.data_type))
     .then(|| row.clone())
 }
