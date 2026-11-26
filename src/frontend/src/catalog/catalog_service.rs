@@ -63,6 +63,16 @@ impl CatalogReader {
         // Make this recursive so that one can get this guard in the same thread without fear.
         self.0.read_arc_recursive()
     }
+
+    /// Test only: replaces the storage statistics of the tables, see
+    /// `test_utils::set_table_row_counts_for_test`. A running frontend receives them from the
+    /// meta node through the observer and never calls this.
+    pub(crate) fn set_table_stats_for_test(
+        &self,
+        table_stats: risingwave_pb::hummock::HummockVersionStats,
+    ) {
+        self.0.write().set_table_stats(table_stats);
+    }
 }
 
 /// [`CatalogWriter`] initiate DDL operations (create table/schema/database/function/connection).

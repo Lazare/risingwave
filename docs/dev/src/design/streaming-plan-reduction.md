@@ -33,6 +33,11 @@ own rules.
 | 9 | Leftovers of subquery decorrelation (domain re-scan, aggregation and null-safe join back) | aggregating subqueries done (prototype, branch `proto/streaming-simplify-subquery-unnesting`); laterals without a table not started |
 | US | Branches of a `UNION ALL` that read the same table read it once (`Expand` per branch); scans of other branches shared (`streaming_share_union_scans`) | done (prototype, branch `proto/plan-reduction-union-scans`); dominance under a top-1 not done |
 | 10 | Sharing again, within one query, the sub-plans that became identical, or that differ by their columns or by commuting filters; aggregations of one input with different filters merged with `FILTER` | done for stateful cores (prototype, branch `proto/plan-reduction-shared-aggs`) |
+| BK | Column facts (A to G, 8), unique keys (1, 2) and repeated lookups (3) in batch queries | done (prototype, branch `proto/plan-reduction-batch-keys`, variables `batch_simplify_column_facts`, `batch_simplify_on_unique_key`, `batch_merge_repeated_lookups`) |
+| BL | Batch: duplicates found with `lag` over a window ordered by the column, counted per value instead (`batch_rewrite_lag_duplicates`) | done (prototype, branch `proto/plan-reduction-batch-lag`) |
+| B | Batch counterparts of 9, 9b, 9c, 7 and US, each behind a `batch_` variable | done (prototype, branch `proto/plan-reduction-batch-unnest`), see "Batch counterparts" |
+| SL | Status ladder: the branches of a top-1 by priority that read the same relation picked with one `CASE` | done (prototype, branch `proto/plan-reduction-union-scans`); default branch rewritten into a join not done |
+| BJ | Batch: cost-based ordering of the inner joins from the row counts of the tables (`batch_cost_based_join_ordering`) | first version (prototype, branch `proto/plan-reduction-batch-joinorder`, see "BJ" below); index lookups and column statistics not done |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -536,6 +541,13 @@ Not done:
 - A relation joined with an aggregate of a set-returning function of itself on its key
   (`t LEFT JOIN (SELECT t.id, max(x) FROM t, srf(t.a) x GROUP BY t.id) ON ..`): the same per-row
   aggregation once it is recognised, which needs the key of `t` and is the self-join of idea 3.
+- Found on the way, fixed (branch `proto/plan-reduction-batch-unnest`): the aggregation and the
+  window grouped by the stream key of the outer side trusted that key, but during the logical
+  optimization the stream key of a `UNION ALL` is the union of the keys of its branches; the
+  number of the branch is only added when the plan becomes a streaming plan. `SELECT x.id,
+  (SELECT max(v) FROM unnest(x.a) v) FROM (SELECT id, a FROM t UNION ALL SELECT id, a FROM t) x`
+  was grouped by `id` alone: one row per `id` instead of two. An outer side with a `UNION ALL`
+  that no aggregation or dedup re-keys now stays in the general way.
 
 ### 9c. A table joined back with an aggregation of itself on its key (added on 2026-11-25, done)
 
@@ -566,6 +578,38 @@ a group key over the rows of the function, a condition on the aggregation, anoth
 left side.
 
 
+### SL. Status ladder picked with one `CASE` (added on 2026-11-26, done on the branch)
+
+Variables `streaming_status_ladder_case` and `batch_status_ladder_case`, rule
+`StatusLadderCaseRule`. A status ladder keeps, per key, the row of the branch with the highest
+priority: `row_number() OVER (PARTITION BY k ORDER BY priority DESC) = 1` over a `UNION ALL` of
+branches `SELECT k, '<status>', <priority> FROM ... WHERE ...`, planned as a top-n with limit 1
+per group over the union.
+
+- The branches that filter and project the same relation (a table, or the same shared sub-plan)
+  with the same key become one branch: for each row, the literals of the first branch by
+  priority whose filter holds (`CASE WHEN f3 THEN 'c' WHEN f2 THEN 'b' ELSE 'a' END`), and the
+  rows where no filter holds dropped. Exact under the top-1: the candidates of one row all have
+  the same key, and one of lower priority than another is never kept; a `NULL` filter falls
+  through the `CASE` as it dropped the row; overlapping filters and duplicates need nothing
+  more. One row per row of the relation instead of one per branch whose filter holds, and one
+  read (the merge of union scans would read once too, but with one copy per branch).
+- When that branch is the whole union and the relation is unique on the key (the key of the
+  table, or the stream key of the shared sub-plan), each key has at most one row and the top-n
+  is removed.
+- Required: limit 1 without ties and offset, one order column, the priority; every column other
+  than the group key is a literal in each merged branch; the priority is an integer literal;
+  two merged branches with the same priority output the same literals (otherwise the top-n
+  chose between them arbitrarily, and is left alone).
+- Streaming: a branch with `now()` is a join with `Now` at this stage and stays a separate
+  branch. Batch: `now()` is a constant, so it joins the `CASE`. The stage runs before the merge
+  of union scans, so the `CASE` wins when both apply.
+- Not done: replacing the top-1 by `max(priority)` and a `CASE` from priority to status (exact,
+  but in streaming both keep every row of a group in their state, nothing saved); turning a
+  default branch read from the entity table into a left join of that table (a join replaces a
+  union branch, no operator saved).
+
+### 5. Aggregation pushed below a join onto the unique side
 
 `SELECT f.cust_id, c.name, sum(f.amt) FROM f LEFT JOIN c ON f.cust_id = c.id GROUP BY f.cust_id,
 c.name` becomes `(SELECT cust_id, sum(amt) FROM f GROUP BY cust_id) LEFT JOIN c ...`.
@@ -731,6 +775,192 @@ consumer and do not rewrite a shared sub-plan.
 - Still not done: filters on the optional side of an outer join, a filter with `now()` (it is a
   join with the `Now` source at that point and must be equal), reordering through outer joins
   other than the case above.
+
+### Batch: column facts, unique keys and repeated lookups (added on 2026-11-26)
+
+The same rules, applied to batch queries on demand, each family behind its own variable (default
+false): `batch_simplify_column_facts` (A to G: `ColumnFactsSimplifyRule`, `NeverTruePredicateRule`,
+`EmptyRelationPropagateRule`, `EmptyInputSimplifyRule`, `ConstantRowJoinRule`, including the
+aggregate of a constant of idea 8), `batch_simplify_on_unique_key` (ideas 1 and 2:
+`UnusedOuterJoinEliminateRule`, `AggOnKeyEliminateRule`) and `batch_merge_repeated_lookups` (idea 3:
+`RepeatedLookupMergeRule` with its module `flat`; not the rules of
+`streaming_merge_lookups_under_dedup`).
+
+- Where: `reduce_batch_on_keys`, called by `gen_optimized_logical_plan_for_batch` after subquery
+  unnesting and the first predicate pushdown, before join ordering, so that the joins that are
+  removed are not ordered. In the order of the streaming optimizer: column facts, then the columns
+  are pruned (an outer join is unused only once its output omits the optional side), then the
+  unique keys (up to three passes with column pruning), then the lookups (up to three passes with
+  predicate pushdown, column pruning and projection removal). The final `BATCH_PRUNE_EMPTY_RELATION`
+  stays as it is.
+- Why the rules hold in batch too: all the scans of a batch query read the same snapshot, as the
+  two sides of a streaming join read the same epoch, so two scans of a table without
+  `FOR SYSTEM_TIME AS OF` read the same rows (a scan in the past is never a lookup); keys are the
+  keys of tables and materialized views (the hidden row id for a table without primary key), as in
+  streaming; `now()` is a constant in a batch query, so the guards on temporal filters never
+  trigger; `internal_last_seen_value`, which carries the row of an instance through an
+  aggregation, has a batch implementation and a two-phase form. Batch removes shared sub-plans
+  before (`DAG_TO_TREE`), so the lookups of a shared sub-plan (a CTE or a view read twice) never
+  apply: two equal sub-plans are not proven to be equal.
+- Expressions that may fail: a batch query fails where a streaming job writes `NULL`. The rules
+  never claim that an expression that may fail is not `NULL`, and keep a constant that fails to
+  evaluate. A merged lookup computes its columns under a `CASE` on "found", which is evaluated
+  lazily; the conjuncts that it moves into a filter may be evaluated on rows that the join did not
+  match, the same freedom that predicate pushdown already takes.
+- Not handled in batch: a top-1 written with `row_number()`, which the batch optimizer keeps as a
+  window function and a filter (the streaming one turns it into a top-n); `DISTINCT ON` is a top-1
+  and is handled. Lookup joins and sort-based operators are chosen later, from the reduced plan.
+- Tests: planner `batch_plan_reduction_keys.yaml`; differential `e2e_test/batch/plan_reduction_keys`
+  (generator `plan_reduction_keys.gen.py`): every query runs through `INSERT ... SELECT` with and
+  without its variables, after each of four rounds of changes of the data.
+### BL. Batch: duplicates found with `lag` (added on 2026-11-26, done on the branch)
+
+A uniqueness check is often written by comparing each value with the previous one in sorted
+order:
+
+```sql
+with ordered as (select x, lag(x) over (partition by true order by x) as prev from t where x is not null),
+duplicates as (select * from ordered where x = prev)
+select x, count(*) + 1 as n from duplicates group by x;
+```
+
+The batch plan sorts the whole relation on one node, in one window partition that does not spill
+(`BatchOverWindow` over `BatchSort` over a singleton exchange). No batch stage rewrites it:
+`OverWindowToAggAndJoinRule` (`CONVERT_OVER_WINDOW_FOR_BATCH`) only takes windows without order,
+`SPLIT_OVER_WINDOW` and `MERGE_OVER_WINDOW` only regroup window functions. `LagDuplicatesRule`
+(`batch_rewrite_lag_duplicates`, default false, batch only) runs after the first predicate
+pushdown, which leaves `Filter(x = w)` right above the window, and before `SPLIT_OVER_WINDOW`, so
+that the unused window functions sharing the window go away with it.
+
+- Shape: `Filter(x = w AND ...)` over `OverWindow(w = first_value(x) OVER (PARTITION BY p ORDER BY
+  x ROWS BETWEEN 1 PRECEDING AND 1 PRECEDING))` (that is `lag(x)`; `1 FOLLOWING` is `lead(x)`, and
+  `lag(x, -1)`; `last_value` with the same one-row frame is the same), where the first order column
+  that is not a partition column is `x`, and above the filter only `x`, `w` and the non-constant
+  partition columns are read.
+- Exactness: within a partition, rows are ordered by `x` first, so the `k` rows of a non-NULL
+  value `v` are contiguous whatever the direction, the place of NULLs or the order of ties; `x = w`
+  holds on exactly `k - 1` of them (all but the first in the frame's direction, which meets
+  another value or the NULL of a missing row) and never on a NULL `x`. Since only `x`, `w` (equal
+  to `x` there) and partition columns are read, the result is `k - 1` copies of `(p, v, v)`: the
+  multiset of `row_number() OVER (PARTITION BY p, x) > 1`. Ties are interchangeable.
+- Rewrite: `Agg(group p', x: c = count(*))` over `Filter(x IS NOT NULL)` of the input, where `p'`
+  drops the constant partition columns (`PARTITION BY true`), then
+  `ProjectSet(generate_series(2, c))` to produce `c - 1` rows per group. The work is distributed
+  by the group key and the hash aggregation can spill. When the consumer is an aggregation whose
+  group key covers `p'` and `x` (or `w`) with only `count(*)` or the count of `x` or `w`, the
+  expansion is skipped: `Filter(c > 1)` and `c - 1` as the count (the `+ 1` of the query above then
+  gives `k`).
+- Other conjuncts of the filter that read only `p'`, `x` and `w` and are pure are conditions on
+  the group, applied to the input rows (`w` replaced by `x`).
+- Refused: another column read above (the dropped duplicate would matter: the row id, another
+  window function, a partition column that is a constant, `count(y)`); an offset other than 1;
+  `IGNORE NULLS`; another frame (`ROWS 1 PRECEDING` ends at the current row: the first row compares
+  `x` with itself); `IS NOT DISTINCT FROM` (NULLs and the missing row would count, depending on
+  where NULLs sort); any other comparison or an `OR`; `x` in the partition key; `x` or a partition
+  column of a type where equal values can differ (`decimal` `1.0 = 1.00`, whose group keeps the normalized value; floats;
+  `interval`; composite types). `lag` with a default value is not supported by the binder anyway.
+- Tests: `batch_rewrite_lag_duplicates.yaml` (planner) and the differential
+  `e2e_test/batch/rewrite_lag_duplicates.gen.py` (every query inserted into a table with and
+  without the variable, multisets compared after inserts, deletes, updates, NULLs, no duplicates
+  and an empty table).
+## Batch counterparts (added on 2026-11-26, done on the branch `proto/plan-reduction-batch-unnest`)
+
+Four batch variables, off by default, run the same rules in the batch optimizer
+(`gen_optimized_logical_plan_for_batch`). Batch plans are not frozen and see no retraction, but
+the general unnesting is just as costly: every query that holds such a subquery reads its outer
+side again for the domain.
+
+| Variable | Rules | Where |
+|----------|-------|-------|
+| `batch_simplify_subquery_unnesting` | `ApplyOneRowJoinSplitRule`, `PullUpCorrelatedPredicateAggRule::create_for_stream` (9) | subquery unnesting, after the simple unnesting |
+| `batch_unnest_lateral_functions` | `UnnestArrayOfTableFunctionRule`, `LateralTableFunctionRule::create_for_batch` (9b) | subquery unnesting, after the stage above |
+| | `SelfAggregateJoinRule::create_for_batch` (9c) | after the first predicate pushdown, before join ordering |
+| `batch_factor_union_join` | `CommonJoinOverUnionRule` (7) | after the first predicate pushdown, before join ordering |
+| `batch_merge_union_scans` | `UnionScanMergeRule::create_for_batch` (US) | after the first predicate pushdown, before join ordering |
+
+- Before join ordering: the joins of the branches of a union are still as written (join ordering
+  may reorder each branch differently), the filters are next to the scans, and the joins and
+  unions that the rewrites build are ordered with the rest. A stage that rewrote something is
+  followed by a predicate pushdown, so that join ordering finds the filters where it expects.
+- What differs from streaming:
+  - the variant of `PullUpCorrelatedPredicateAggRule` named "for stream" has nothing specific to
+    streaming: the `CASE` that gives `count` its 0 and `EXISTS` its false is exact in batch;
+  - `sum` evaluated per row (9b, 9c) is not guarded by a count: a batch `sum` over no value is
+    `NULL`; the guard only works around the streaming `sum` that returns 0 after retractions;
+  - the per-row aggregation of 9b needs a unique key of the outer side. In batch every leaf of the
+    outer side must be the scan of a table: the row id of a source read by a batch query is not
+    generated (it is `NULL`), so its stream key tells no rows apart;
+  - a table with a watermark is merged by `UnionScanMergeRule` (the watermark only matters to a
+    streaming union);
+  - no `UnionScanShareRule` and no sharing of identical sub-plans: a batch plan has no shared
+    sub-plan (`DAG_TO_TREE` runs first). Two copies of a view in two branches are matched by
+    `CommonJoinOverUnionRule` as equal sub-plans: in one batch query they read the same snapshot.
+- Costs to keep in mind, and why the variables stay off by default:
+  - the aggregation of an aggregating subquery covers the whole inner table, grouped by the
+    correlated columns, where the domain restricted it to the keys of the outer rows (possibly with
+    a lookup join on an index): worse for a query that keeps few outer rows of a large inner table;
+  - a merged scan reads the rows of every branch with the `OR` of their filters, and copies each
+    row once per branch before the filter of the branch: a branch that could use an index or a
+    range of the primary key alone may read more;
+  - a factored join joins the rows of every branch with the relation in one hash table.
+- Tests: planner cases in `batch_plan_reduction_unnest.yaml`, the differential batch test
+  `e2e_test/batch/plan_reduction_unnest.gen.py` (every query run as an `INSERT ... SELECT` with and
+  without its variable, the two results compared as multisets after each round of changes).
+### BJ. Batch: cost-based join ordering (added on 2026-11-26, first version)
+
+The batch planner orders the inner joins with a heuristic (`LeftDeepTreeJoinOrderingRule`): the
+graph of equalities is walked from its first edge, with no idea of the sizes of the tables. With
+`from d join f on f.d_id = d.id join e on f.e_id = e.id`, a large `f` becomes the build side of
+the first hash join because `d` is written first, where reading `f` once and looking up `d` and
+`e` by key would be cheaper. `batch_cost_based_join_ordering` (default false) orders them by
+estimated rows instead (`cost_based_join_ordering_rule.rs`, stages
+`BATCH_COST_BASED_JOIN_SIDES` and `BATCH_COST_BASED_JOIN_ORDERING`, run in
+`gen_optimized_logical_plan_for_batch` just before the heuristic one).
+
+- **Statistics.** The meta node sends the frontend the storage statistics of every state table
+  (`HummockVersionStats`: `total_key_count`, key and value sizes; also shown by
+  `rw_catalog.rw_table_stats`); the frontend keeps them in its catalog. The row count of a table,
+  materialized view or index is its `total_key_count`, an approximation maintained at each
+  checkpoint (one key per row). Nothing else is used: no histogram, no distinct counts.
+- **Estimates.** A scan: the rows of the table, times 0.1 per `column = constant` conjunct and
+  0.25 per other conjunct, and one row when the filter fixes a unique key (the unique keys of
+  `unique_key_simplify_rule.rs`). A filter or a projection over an estimated input: the same. An
+  aggregation: one row without group, the input rows when it groups by a key of its input, 10%
+  otherwise. Outer joins: the preserved side; semi and anti joins: half of the kept side. Any
+  bound that `CardinalityVisitor` proves (`LIMIT`, one-row aggregation, values) caps the
+  estimate. A join of a set of inputs: the product of their rows and of the selectivities of the
+  conditions between them, so that the estimate does not depend on the order. An equality on
+  columns holding a unique key of one side has the selectivity 1 over the rows of the table of
+  that side before its filters (key to foreign key: one row of the key side per row of the other
+  side, fewer if the key side is filtered); on other columns, it returns twice the larger side.
+- **Cost.** The batch hash join builds its hash table on its right side: probe rows cost 1, build
+  rows 3 (they are held in memory), output rows 1, plus the rows read by the inputs. When the
+  right side is a table scan whose key prefix (the shortest one that holds the distribution key)
+  is given by equalities with the left side, the planner makes a lookup join: it costs 2 per row
+  of the left side and the table is not scanned. The model follows what the planner does: a
+  lookup join is not optional when it is possible.
+- **Enumeration.** Dynamic programming over the connected sets of inputs (bushy trees allowed),
+  up to 10 inputs per set of inputs linked by equalities, greedy beyond (the pair of linked
+  sub-trees of fewest estimated rows, then of lowest cost). Sets of inputs that no equality links
+  are cross joined in the order of the heuristic. Only inner joins move: an outer, semi or anti
+  join is one input of the inner joins around it, and the inner joins below it are ordered on
+  their own. A two-way inner join (not merged into a multi-join, which needs three inputs) has its
+  sides swapped when that costs less.
+- **Fallback.** If an input of a multi-join has no estimate (a table without statistics, a
+  source, a table function...), the multi-join gets the heuristic order, and a two-way join is
+  kept as it is: the plan is then exactly the one without the variable.
+- **Tests.** The planner tests have no data: a test-only planner test option `table_row_counts`
+  (`test_utils::set_table_row_counts_for_test`) gives the frontend row counts by table name
+  before the query is planned (`batch_cost_based_join_ordering.yaml`: star and chain queries,
+  outer, semi and anti joins, scalar subquery, aggregation input, no statistics, partial
+  statistics, twelve inputs). The differential test `e2e_test/batch/cost_based_join_ordering.slt`
+  (generated by its `.gen.py`) runs each query with and without the variable on tables of very
+  different sizes, before and after changes, and compares the results as multisets.
+- **Not done.** Lookups into indexes are not modeled (index selection happens after the
+  ordering, on the pruned columns); no distinct counts or histograms, so a join on columns that
+  are not keys is a guess; the cross joins between unlinked sets of inputs keep the heuristic
+  order (a nested loop join caches its left side); the estimates are not shown in `EXPLAIN`
+  (only in `EXPLAIN (TRACE)`).
 
 ## Not for now: sharing between materialized views
 

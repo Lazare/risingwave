@@ -219,6 +219,12 @@ mod common_join_over_union_rule;
 pub use common_join_over_union_rule::*;
 mod apply_one_row_join_split_rule;
 pub use apply_one_row_join_split_rule::*;
+// Duplicates found with `lag` over a window ordered by the column (`batch_rewrite_lag_duplicates`).
+mod lag_duplicates_rule;
+pub use lag_duplicates_rule::*;
+// Cost-based ordering of the inner joins of batch queries (`batch_cost_based_join_ordering`).
+mod cost_based_join_ordering_rule;
+pub use cost_based_join_ordering_rule::*;
 // Rule `UnionScanMergeRule` (`streaming_merge_union_scans`).
 mod union_scan_merge_rule;
 pub use union_scan_merge_rule::*;
@@ -234,6 +240,9 @@ mod self_aggregate_join_rule;
 pub use self_aggregate_join_rule::*;
 mod widened_subplan_share;
 pub use widened_subplan_share::*;
+// Rule `StatusLadderCaseRule` (`streaming_status_ladder_case`, `batch_status_ladder_case`).
+mod status_ladder_case_rule;
+pub use status_ladder_case_rule::*;
 mod repeated_lookup_merge_rule;
 pub use repeated_lookup_merge_rule::*;
 // The default branch of a top-1 over a union, the unused joins below an operator that does not
@@ -395,6 +404,9 @@ macro_rules! for_all_rules {
             , { UnusedJoinUnderDedupRule }
             , { CommonJoinOverUnionRule }
             , { ApplyOneRowJoinSplitRule }
+            , { LagDuplicatesRule }
+            , { CostBasedJoinOrderingRule }
+            , { CostBasedJoinSidesRule }
             , { UnionScanMergeRule }
             , { StackedAggMergeRule }
             , { LateralTableFunctionRule }
@@ -402,6 +414,7 @@ macro_rules! for_all_rules {
             , { UnionScanShareRule }
             , { SelfAggregateJoinRule }
             , { StackedAggOverUnionMergeRule }
+            , { StatusLadderCaseRule }
             , { BushyTreeJoinOrderingRule }
             , { StreamProjectMergeRule }
             , { StreamProjectSplitRule }

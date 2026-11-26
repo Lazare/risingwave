@@ -39,7 +39,8 @@ use crate::optimizer::plan_node::{
 /// need any state. A constant only holds literals and pure functions; the join is left untouched
 /// if its condition refers to `now()`.
 ///
-/// The rule is only used by the streaming optimizer, on demand.
+/// The rule is only used on demand, by the streaming optimizer and by the batch one
+/// (`batch_simplify_column_facts`).
 pub struct ConstantRowJoinRule;
 
 impl Rule<Logical> for ConstantRowJoinRule {

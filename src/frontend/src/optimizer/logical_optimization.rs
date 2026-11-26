@@ -249,6 +249,139 @@ static STREAM_SIMPLE_UNNESTING_AGG: LazyLock<OptimizationStage> = LazyLock::new(
     )
 });
 
+// Batch counterparts of `STREAM_PRUNE_EMPTY_RELATION`, `STREAM_SIMPLIFY_ON_UNIQUE_KEY` and
+// `STREAM_MERGE_REPEATED_LOOKUPS`, with the same rules (`batch_simplify_column_facts`,
+// `batch_simplify_on_unique_key`, `batch_merge_repeated_lookups`), see `reduce_batch_on_keys`.
+static BATCH_SIMPLIFY_COLUMN_FACTS: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Simplify With Column Facts For Batch",
+        vec![
+            // In this order: a predicate simplified with what is known about its columns may
+            // become never true, which may empty an input of the operator above.
+            ColumnFactsSimplifyRule::create(),
+            NeverTruePredicateRule::create(),
+            EmptyRelationPropagateRule::create(),
+            EmptyInputSimplifyRule::create(),
+            ConstantRowJoinRule::create(),
+        ],
+        // Bottom-up so that an empty relation is propagated to the top in one pass.
+        ApplyOrder::BottomUp,
+    )
+});
+
+// Batch counterparts of stages of the streaming plan reduction prototype, each behind its own
+// batch variable: the same rules, or their variants for batch plans.
+// `batch_simplify_subquery_unnesting`: the variant of `PullUpCorrelatedPredicateAggRule` named
+// "for stream" has nothing specific to streaming (no retraction is involved).
+static BATCH_SIMPLE_UNNESTING_AGG: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Batch Simple Unnesting of Aggregations",
+        vec![
+            ApplyOneRowJoinSplitRule::create(),
+            PullUpCorrelatedPredicateAggRule::create_for_stream(),
+        ],
+        ApplyOrder::BottomUp,
+    )
+});
+
+static BATCH_SIMPLIFY_ON_UNIQUE_KEY: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Simplify On Unique Key For Batch",
+        vec![
+            UnusedOuterJoinEliminateRule::create(),
+            AggOnKeyEliminateRule::create(),
+        ],
+        // Bottom-up: an operator removed below may give a key to the input of an operator above.
+        ApplyOrder::BottomUp,
+    )
+});
+
+static BATCH_MERGE_REPEATED_LOOKUPS: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Merge Repeated Lookups For Batch",
+        vec![RepeatedLookupMergeRule::create()],
+        // Bottom-up: a lookup merged below is carried by the input of the lookups above.
+        ApplyOrder::BottomUp,
+    )
+});
+
+// Rules `CostBasedJoinSidesRule` and `CostBasedJoinOrderingRule` (`batch_cost_based_join_ordering`).
+static BATCH_COST_BASED_JOIN_SIDES: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Cost-Based Join Sides For Batch",
+        vec![CostBasedJoinSidesRule::create()],
+        ApplyOrder::TopDown,
+    )
+});
+
+static BATCH_COST_BASED_JOIN_ORDERING: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Cost-Based Join Ordering For Batch",
+        vec![CostBasedJoinOrderingRule::create()],
+        ApplyOrder::TopDown,
+    )
+});
+
+// Rule `LagDuplicatesRule` (`batch_rewrite_lag_duplicates`).
+static BATCH_REWRITE_LAG_DUPLICATES: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Rewrite Lag Duplicates For Batch",
+        vec![LagDuplicatesRule::create()],
+        // Top-down: an aggregation counting the duplicates is rewritten before the projection
+        // below it.
+        ApplyOrder::TopDown,
+    )
+});
+
+// `batch_unnest_lateral_functions`, see `STREAM_UNNEST_ARRAY_OF_FUNCTION`,
+// `STREAM_UNNEST_LATERAL_FUNCTIONS` and `STREAM_SELF_AGGREGATE_JOIN`.
+static BATCH_UNNEST_ARRAY_OF_FUNCTION: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Batch Unnest Array Of Lateral Function",
+        vec![UnnestArrayOfTableFunctionRule::create()],
+        ApplyOrder::TopDown,
+    )
+});
+
+static BATCH_UNNEST_LATERAL_FUNCTIONS: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Batch Unnest Lateral Functions",
+        vec![
+            ApplyOneRowJoinSplitRule::create(),
+            LateralTableFunctionRule::create_for_batch(),
+        ],
+        ApplyOrder::BottomUp,
+    )
+});
+
+static BATCH_SELF_AGGREGATE_JOIN: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Batch Self Aggregate Join",
+        vec![SelfAggregateJoinRule::create_for_batch()],
+        ApplyOrder::BottomUp,
+    )
+});
+
+// `batch_factor_union_join`: rule `CommonJoinOverUnionRule`.
+static BATCH_FACTOR_UNION_JOIN: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Factor Union Join For Batch",
+        vec![CommonJoinOverUnionRule::create()],
+        // Bottom-up: the branches of a union are reduced before the union is looked at.
+        ApplyOrder::BottomUp,
+    )
+});
+
+// `batch_merge_union_scans`: rule `UnionScanMergeRule`. Not `UnionScanShareRule`: a batch plan
+// has no shared sub-plan.
+static BATCH_MERGE_UNION_SCANS: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Merge Union Scans For Batch",
+        vec![UnionScanMergeRule::create_for_batch()],
+        ApplyOrder::BottomUp,
+    )
+});
+
 // Rule `UnionScanMergeRule` (`streaming_merge_union_scans`).
 static STREAM_MERGE_UNION_SCANS: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
@@ -310,6 +443,15 @@ static STREAM_SHARE_UNION_SCANS: LazyLock<OptimizationStage> = LazyLock::new(|| 
         "Share Union Scans For Stream",
         vec![UnionScanShareRule::create()],
         // Bottom-up: the scans of an inner union are shared before the outer union is looked at.
+        ApplyOrder::BottomUp,
+    )
+});
+
+// Rule `StatusLadderCaseRule` (`streaming_status_ladder_case`, `batch_status_ladder_case`).
+static STATUS_LADDER_CASE: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Status Ladder Case",
+        vec![StatusLadderCaseRule::create()],
         ApplyOrder::BottomUp,
     )
 });
@@ -806,6 +948,20 @@ impl LogicalOptimizer {
             plan = plan.optimize_by_rules(&STREAM_UNNEST_ARRAY_OF_FUNCTION)?;
             plan = plan.optimize_by_rules_until_fix_point(&STREAM_UNNEST_LATERAL_FUNCTIONS)?;
         }
+        // The same two stages for batch queries, each behind its own batch variable. In batch the
+        // domain of the general way is read again from the outer side for every query.
+        if !for_stream
+            && ctx
+                .session_ctx()
+                .config()
+                .batch_simplify_subquery_unnesting()
+        {
+            plan = plan.optimize_by_rules_until_fix_point(&BATCH_SIMPLE_UNNESTING_AGG)?;
+        }
+        if !for_stream && ctx.session_ctx().config().batch_unnest_lateral_functions() {
+            plan = plan.optimize_by_rules(&BATCH_UNNEST_ARRAY_OF_FUNCTION)?;
+            plan = plan.optimize_by_rules_until_fix_point(&BATCH_UNNEST_LATERAL_FUNCTIONS)?;
+        }
         debug_assert!(!HasMaxOneRowApply().visit(plan.clone()));
         // Predicate push down before translate apply, because we need to calculate the domain
         // and predicate push down can reduce the size of domain.
@@ -1120,6 +1276,23 @@ impl LogicalOptimizer {
             }
         }
 
+        // Rule `StatusLadderCaseRule`: under a status ladder, the branches that read the same
+        // relation become one branch that picks the best of them with a `CASE`. Before the merge
+        // of the union scans below, which would otherwise make one copy of each row per branch.
+        if ctx.session_ctx().config().streaming_status_ladder_case()
+            && !ctx.is_stream_prune_baseline()
+        {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&STATUS_LADDER_CASE)?;
+            let applied = ctx.total_rule_applied() - applied_before;
+            if applied > 0 {
+                ctx.add_stream_prune_rule_applied(applied);
+                plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
+            }
+        }
+
         // Rule `UnionScanMergeRule`: read once the table that several branches of a union read,
         // each with its own filter and projection. The filter that the single scan needs is then
         // pushed into it, and the columns that no branch uses are pruned.
@@ -1217,6 +1390,73 @@ impl LogicalOptimizer {
         Ok(plan)
     }
 
+    /// The simplifications of the streaming plan reduction that rely on what is known about the
+    /// columns and on unique keys, applied to a batch query on demand: `batch_simplify_column_facts`
+    /// (`ColumnFactsSimplifyRule` and the rules that remove what a never-true predicate empties),
+    /// `batch_simplify_on_unique_key` (`UnusedOuterJoinEliminateRule`, `AggOnKeyEliminateRule`)
+    /// and `batch_merge_repeated_lookups` (`RepeatedLookupMergeRule`).
+    ///
+    /// Applied after subquery unnesting and the first predicate pushdown, before join ordering, so
+    /// that the joins that they remove are not ordered. The plan is a tree: the rules never meet a
+    /// shared sub-plan. `now()` is already a constant, and a scan in the past is never a lookup.
+    fn reduce_batch_on_keys(
+        mut plan: LogicalPlanRef,
+        explain_trace: bool,
+        ctx: &OptimizerContextRef,
+    ) -> Result<LogicalPlanRef> {
+        let (column_facts, unique_key, repeated_lookups) = {
+            let config = ctx.session_ctx().config();
+            (
+                config.batch_simplify_column_facts(),
+                config.batch_simplify_on_unique_key(),
+                config.batch_merge_repeated_lookups(),
+            )
+        };
+        let mut need_column_pruning = unique_key || repeated_lookups;
+        if column_facts {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&BATCH_SIMPLIFY_COLUMN_FACTS)?;
+            // A simplified filter or projection may not use a column any more.
+            need_column_pruning |= ctx.total_rule_applied() != applied_before;
+        }
+        if !need_column_pruning {
+            return Ok(plan);
+        }
+        // An outer join is only seen as unused once the columns that nobody reads are pruned, and
+        // a lookup only widens the scan that it keeps with the columns that are read.
+        plan = Self::column_pruning(plan, explain_trace, ctx);
+
+        // An operator that is removed may leave columns unused, which may in turn make a join
+        // below unused: prune the columns and try again.
+        if unique_key {
+            for _ in 0..3 {
+                let applied_before = ctx.total_rule_applied();
+                plan = plan.optimize_by_rules(&BATCH_SIMPLIFY_ON_UNIQUE_KEY)?;
+                if ctx.total_rule_applied() == applied_before {
+                    break;
+                }
+                plan = Self::column_pruning(plan, explain_trace, ctx);
+            }
+        }
+
+        // After the simplifications above, which remove the lookups that are not used at all. A
+        // rewritten join is not looked at again in the same pass: a lookup that it still holds is
+        // merged by the next pass.
+        if repeated_lookups {
+            for _ in 0..3 {
+                let applied_before = ctx.total_rule_applied();
+                plan = plan.optimize_by_rules(&BATCH_MERGE_REPEATED_LOOKUPS)?;
+                if ctx.total_rule_applied() == applied_before {
+                    break;
+                }
+                plan = Self::predicate_pushdown(plan, explain_trace, ctx);
+                plan = Self::column_pruning(plan, explain_trace, ctx);
+                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
+            }
+        }
+        Ok(plan)
+    }
+
     pub fn gen_optimized_logical_plan_for_batch(
         mut plan: LogicalPlanRef,
     ) -> Result<LogicalPlanRef> {
@@ -1270,11 +1510,65 @@ impl LogicalOptimizer {
         let mut last_total_rule_applied_before_predicate_pushdown = ctx.total_rule_applied();
         plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
 
+        // Simplifications with column facts and unique keys, and merge of repeated lookups, on
+        // demand (`batch_simplify_column_facts`, `batch_simplify_on_unique_key`,
+        // `batch_merge_repeated_lookups`): before join ordering.
+        plan = Self::reduce_batch_on_keys(plan, explain_trace, &ctx)?;
+        // Batch counterparts of stages of the streaming plan reduction prototype, each behind its
+        // own batch variable, before join ordering: the joins of the branches of a union are
+        // still as written, and the filters are next to the scans. The filters that a rewrite
+        // leaves above are pushed down again, so that join ordering finds them where it expects.
+        // - `batch_factor_union_join`: the relation that several branches of a `UNION ALL` join
+        //   on the same columns is joined once above the union (`CommonJoinOverUnionRule`).
+        // - `batch_unnest_lateral_functions`: a table joined back on its key with an aggregation
+        //   of rows derived from itself computes the aggregation on its own rows
+        //   (`SelfAggregateJoinRule`).
+        // - `batch_merge_union_scans`: the table that several branches of a `UNION ALL` read,
+        //   each with its own filter and projection, is read once (`UnionScanMergeRule`).
+        for (enabled, stage) in [
+            (
+                ctx.session_ctx().config().batch_factor_union_join(),
+                &BATCH_FACTOR_UNION_JOIN,
+            ),
+            (
+                ctx.session_ctx().config().batch_unnest_lateral_functions(),
+                &BATCH_SELF_AGGREGATE_JOIN,
+            ),
+            (
+                ctx.session_ctx().config().batch_merge_union_scans(),
+                &BATCH_MERGE_UNION_SCANS,
+            ),
+        ] {
+            if !enabled {
+                continue;
+            }
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(stage)?;
+            if ctx.total_rule_applied() != applied_before {
+                plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
+            }
+        }
+
         if plan.ctx().session_ctx().config().enable_join_ordering() {
             // Merge inner joins and intermediate filters into multijoin
             // This rule assumes that filters have already been pushed down near to
             // their relevant joins.
             plan = plan.optimize_by_rules(&TO_MULTI_JOIN)?;
+
+            // Cost-based join ordering (`batch_cost_based_join_ordering`): order the inner joins
+            // by the estimated rows of the tables and of the intermediate results. A multi-join
+            // without estimates for all its inputs gets the left-deep heuristic order, as below,
+            // and a two-way join without estimates is kept as it is.
+            if plan
+                .ctx()
+                .session_ctx()
+                .config()
+                .batch_cost_based_join_ordering()
+            {
+                plan = plan.optimize_by_rules(&BATCH_COST_BASED_JOIN_SIDES)?;
+                plan = plan.optimize_by_rules(&BATCH_COST_BASED_JOIN_ORDERING)?;
+            }
 
             // Reorder multijoin into left-deep join tree.
             plan = plan.optimize_by_rules(&LEFT_DEEP_JOIN_ORDERING)?;
@@ -1289,6 +1583,21 @@ impl LogicalOptimizer {
 
         // Push down the calculation of inputs of join's condition.
         plan = plan.optimize_by_rules(&PUSH_CALC_OF_JOIN)?;
+
+        // Duplicates found with `lag` over a window ordered by the column
+        // (`batch_rewrite_lag_duplicates`): after predicate pushdown, which puts the filter
+        // `x = lag(x)` right above the window, and before the window functions are split
+        // (`SPLIT_OVER_WINDOW`), so that the unused functions sharing the window are dropped with
+        // it. No other batch stage rewrites such a window: `OverWindowToAggAndJoinRule` needs
+        // windows without order, and the predicate pushdown that follows pushes the new
+        // `x IS NOT NULL` into the scan.
+        if ctx.session_ctx().config().batch_rewrite_lag_duplicates() {
+            // A column pruning since the last predicate pushdown (the batch reductions on keys
+            // prune early) may have left a projection between the filter and the window: push
+            // the filter down again so that it sits right above the window.
+            plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+            plan = plan.optimize_by_rules(&BATCH_REWRITE_LAG_DUPLICATES)?;
+        }
 
         plan = plan.optimize_by_rules(&SPLIT_OVER_WINDOW)?;
         // Must push down predicates again after split over window so that OverWindow can be
@@ -1324,6 +1633,17 @@ impl LogicalOptimizer {
         // `x IS NULL AND x IN (...)` have been merged into the same filter or scan. Remove the
         // sub-plans that are proven to be empty. Only for batch queries.
         plan = plan.optimize_by_rules(&BATCH_PRUNE_EMPTY_RELATION)?;
+
+        // Rule `StatusLadderCaseRule`: under a status ladder, the branches that read the same
+        // relation become one branch that picks the best of them with a `CASE`. On demand.
+        if ctx.session_ctx().config().batch_status_ladder_case() {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&STATUS_LADDER_CASE)?;
+            if ctx.total_rule_applied() != applied_before {
+                plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+            }
+        }
 
         // Materialize Iceberg intermediate scans after predicate pushdown and column pruning.
         plan = plan.optimize_by_rules(&MATERIALIZE_ICEBERG_SCAN)?;

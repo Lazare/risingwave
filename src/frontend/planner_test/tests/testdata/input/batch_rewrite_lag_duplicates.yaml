@@ -1,0 +1,295 @@
+# Tests for `LagDuplicatesRule` (`batch_rewrite_lag_duplicates`, batch only): the duplicates of a
+# column found with `x = lag(x) OVER (.. ORDER BY x)` are counted per value, grouped by the column,
+# instead of sorting each window partition on one node.
+- id: setup
+  sql: |
+    set batch_rewrite_lag_duplicates = true;
+    create table t (id int primary key, x int, y int, p int, s varchar, d decimal, f double precision);
+  expected_outputs: []
+- id: setup_off
+  sql: |
+    create table t (id int primary key, x int, y int, p int, s varchar, d decimal, f double precision);
+  expected_outputs: []
+
+- name: off by default
+  before: [setup_off]
+  sql: |
+    with ordered as (select x, lag(x) over (partition by true order by x) as prev from t where x is not null),
+    duplicates as (select * from ordered where x = prev)
+    select x as unique_field, count(*) + 1 as n_records from duplicates group by x;
+  expected_outputs:
+  - batch_plan
+
+# Rewritten.
+
+- name: count of the duplicates per value (aggregation fused)
+  before: [setup]
+  sql: |
+    with ordered as (select x, lag(x) over (partition by true order by x) as prev from t where x is not null),
+    duplicates as (select * from ordered where x = prev)
+    select x as unique_field, count(*) + 1 as n_records from duplicates group by x;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+
+- name: the duplicate rows themselves (expanded)
+  before: [setup]
+  sql: |
+    with ordered as (select x, lag(x) over (order by x) as prev from t)
+    select * from ordered where x = prev;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+
+- name: count without group key (expanded, then counted)
+  before: [setup]
+  sql: |
+    with ordered as (select x, lag(x) over (order by x) as prev from t)
+    select count(*) from ordered where x = prev;
+  expected_outputs:
+  - batch_plan
+
+- name: lead instead of lag
+  before: [setup]
+  sql: |
+    with ordered as (select x, lead(x) over (order by x) as next from t)
+    select x, count(*) from ordered where next = x group by x;
+  expected_outputs:
+  - batch_plan
+
+- name: lag with offset -1 is lead
+  before: [setup]
+  sql: |
+    with ordered as (select x, lag(x, -1) over (order by x) as next from t)
+    select x, count(*) from ordered where x = next group by x;
+  expected_outputs:
+  - batch_plan
+
+- name: descending order, nulls first
+  before: [setup]
+  sql: |
+    with ordered as (select x, lag(x) over (order by x desc nulls first) as prev from t)
+    select x, count(*) from ordered where x = prev group by x;
+  expected_outputs:
+  - batch_plan
+
+- name: tie-breaking order column after x
+  before: [setup]
+  sql: |
+    with ordered as (select x, lag(x) over (order by x, id desc) as prev from t)
+    select x, prev from ordered where x = prev;
+  expected_outputs:
+  - batch_plan
+
+- name: first_value over the previous row
+  before: [setup]
+  sql: |
+    with ordered as (select x, first_value(x) over (order by x rows between 1 preceding and 1 preceding) as prev from t)
+    select x, count(*) from ordered where x = prev group by x;
+  expected_outputs:
+  - batch_plan
+
+- name: varchar column
+  before: [setup]
+  sql: |
+    with ordered as (select s, lag(s) over (partition by true order by s) as prev from t where s is not null),
+    duplicates as (select * from ordered where s = prev)
+    select s, count(*) + 1 as n from duplicates group by s;
+  expected_outputs:
+  - batch_plan
+
+- name: partition column, grouped by the partition column and x (fused)
+  before: [setup]
+  sql: |
+    with ordered as (select p, x, lag(x) over (partition by p order by x) as prev from t)
+    select p, x, count(*) from ordered where x = prev group by p, x;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+
+- name: partition column, ordered by it first, rows read
+  before: [setup]
+  sql: |
+    with ordered as (select p, x, lag(x) over (partition by p order by p, x) as prev from t)
+    select x, p from ordered where x = prev;
+  expected_outputs:
+  - batch_plan
+
+- name: partition column, grouped by x only (not fused, expanded)
+  before: [setup]
+  sql: |
+    with ordered as (select p, x, lag(x) over (partition by p order by x) as prev from t)
+    select x, count(*) from ordered where x = prev group by x;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+
+- name: count of the lag column and of x (fused)
+  before: [setup]
+  sql: |
+    with ordered as (select x, lag(x) over (order by x) as prev from t)
+    select prev, count(prev), count(x), count(*) from ordered where x = prev group by prev;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+
+- name: other aggregate (not fused, expanded)
+  before: [setup]
+  sql: |
+    with ordered as (select x, lag(x) over (order by x) as prev from t)
+    select x, count(*), max(prev) from ordered where x = prev group by x;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+
+- name: condition on x and the lag column applied to the input rows
+  before: [setup]
+  sql: |
+    with ordered as (select x, lag(x) over (order by x) as prev from t)
+    select x, count(*) from ordered where x = prev and prev > 5 and x <> 10 group by x;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+
+- name: another window function of the same window, not read above
+  before: [setup]
+  sql: |
+    with ordered as (select x, lag(x) over (order by x) as prev, lag(y) over (order by x) as prev_y, row_number() over (order by y) as rn from t)
+    select x, count(*) from ordered where x = prev group by x;
+  expected_outputs:
+  - batch_plan
+
+- name: expression of x read above
+  before: [setup]
+  sql: |
+    with ordered as (select x, lag(x) over (order by x) as prev from t)
+    select x + 1 as x1, prev * 2 as p2 from ordered where x = prev;
+  expected_outputs:
+  - batch_plan
+
+# Not rewritten.
+
+- name: another column of the row read above
+  before: [setup]
+  sql: |
+    with ordered as (select id, x, lag(x) over (order by x) as prev from t)
+    select id, x from ordered where x = prev;
+  expected_outputs:
+  - batch_plan
+
+- name: another column counted
+  before: [setup]
+  sql: |
+    with ordered as (select x, y, lag(x) over (order by x) as prev from t)
+    select x, count(y) from ordered where x = prev group by x;
+  expected_outputs:
+  - batch_plan
+
+- name: offset 2
+  before: [setup]
+  sql: |
+    with ordered as (select x, lag(x, 2) over (order by x) as prev from t)
+    select x, count(*) from ordered where x = prev group by x;
+  expected_outputs:
+  - batch_plan
+
+- name: frame ending at the current row
+  before: [setup]
+  sql: |
+    with ordered as (select x, first_value(x) over (order by x rows 1 preceding) as prev from t)
+    select x, count(*) from ordered where x = prev group by x;
+  expected_outputs:
+  - batch_plan
+
+- name: is not distinct from
+  before: [setup]
+  sql: |
+    with ordered as (select x, lag(x) over (order by x) as prev from t)
+    select x, count(*) from ordered where x is not distinct from prev group by x;
+  expected_outputs:
+  - batch_plan
+
+- name: other comparison
+  before: [setup]
+  sql: |
+    with ordered as (select x, lag(x) over (order by x) as prev from t)
+    select x, count(*) from ordered where x > prev group by x;
+  expected_outputs:
+  - batch_plan
+
+- name: comparison under OR
+  before: [setup]
+  sql: |
+    with ordered as (select x, lag(x) over (order by x) as prev from t)
+    select x, prev from ordered where x = prev or prev is null;
+  expected_outputs:
+  - batch_plan
+
+- name: ordered by another column
+  before: [setup]
+  sql: |
+    with ordered as (select x, lag(x) over (order by y, x) as prev from t)
+    select x, count(*) from ordered where x = prev group by x;
+  expected_outputs:
+  - batch_plan
+
+- name: lag of another column
+  before: [setup]
+  sql: |
+    with ordered as (select x, lag(y) over (order by x) as prev from t)
+    select x, count(*) from ordered where x = prev group by x;
+  expected_outputs:
+  - batch_plan
+
+- name: partitioned by x itself
+  before: [setup]
+  sql: |
+    with ordered as (select x, lag(x) over (partition by x order by x) as prev from t)
+    select x, count(*) from ordered where x = prev group by x;
+  expected_outputs:
+  - batch_plan
+
+- name: condition on another column
+  before: [setup]
+  sql: |
+    with ordered as (select x, y, lag(x) over (order by x) as prev from t)
+    select x, count(*) from ordered where x = prev and y > 0 group by x;
+  expected_outputs:
+  - batch_plan
+
+- name: another window function read above
+  before: [setup]
+  sql: |
+    with ordered as (select x, lag(x) over (order by x) as prev, row_number() over (order by x) as rn from t)
+    select x, rn from ordered where x = prev;
+  expected_outputs:
+  - batch_plan
+
+- name: decimal column (equal values may differ)
+  before: [setup]
+  sql: |
+    with ordered as (select d, lag(d) over (order by d) as prev from t)
+    select d, count(*) from ordered where d = prev group by d;
+  expected_outputs:
+  - batch_plan
+
+- name: double column (equal values may differ)
+  before: [setup]
+  sql: |
+    with ordered as (select f, lag(f) over (order by f) as prev from t)
+    select f, count(*) from ordered where f = prev group by f;
+  expected_outputs:
+  - batch_plan
+
+- name: decimal partition column
+  before: [setup]
+  sql: |
+    with ordered as (select d, x, lag(x) over (partition by d order by x) as prev from t)
+    select d, x, count(*) from ordered where x = prev group by d, x;
+  expected_outputs:
+  - batch_plan
+
+- name: streaming plan does not change
+  before: [setup]
+  sql: |
+    with ordered as (select x, lag(x) over (partition by true order by x) as prev from t where x is not null),
+    duplicates as (select * from ordered where x = prev)
+    select x as unique_field, count(*) + 1 as n_records from duplicates group by x;
+  expected_outputs:
+  - stream_plan

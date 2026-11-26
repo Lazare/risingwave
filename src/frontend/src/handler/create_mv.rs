@@ -387,6 +387,8 @@ pub(crate) fn gen_create_mv_graph(
             || config.streaming_unnest_lateral_functions()
             // Rule `UnionScanShareRule`.
             || config.streaming_share_union_scans()
+            // Rule `StatusLadderCaseRule`.
+            || config.streaming_status_ladder_case()
     };
     let baseline_args = prune_enabled.then(|| {
         (

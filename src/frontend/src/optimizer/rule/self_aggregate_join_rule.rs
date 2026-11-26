@@ -13,8 +13,9 @@
 // limitations under the License.
 
 //! A table joined back on its key with an aggregation, grouped by that key, of rows derived from
-//! itself: the aggregation evaluated per row of the table. Used for streaming plans only, behind
-//! `streaming_unnest_lateral_functions`.
+//! itself: the aggregation evaluated per row of the table. Used on demand, behind
+//! `streaming_unnest_lateral_functions` for streaming plans and `batch_unnest_lateral_functions` for
+//! batch plans.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -63,22 +64,28 @@ use crate::utils::{Condition, IndexSet};
 /// Sound because the key of `T` is a unique key of the table (proven from its definition, never
 /// assumed): the row of the left side and the group that the condition matches it with come from
 /// the same row of `T`, and every column of the group key is computed from that row only.
-pub struct SelfAggregateJoinRule {}
+///
+/// The variant for batch plans (`create_for_batch`) computes `sum` as it is: a batch `sum` over no
+/// row is NULL, where a streaming `sum` returns 0 once its non-NULL values are retracted.
+pub struct SelfAggregateJoinRule {
+    for_batch: bool,
+}
 
 impl Rule<Logical> for SelfAggregateJoinRule {
     fn apply(&self, plan: PlanRef) -> Option<PlanRef> {
         let join = plan.as_logical_join()?;
+        let guard_sum = !self.for_batch;
         match join.join_type() {
             JoinType::LeftOuter | JoinType::Inner => {
-                if let Some(result) = rewrite(join) {
+                if let Some(result) = rewrite(join, guard_sum) {
                     return Some(result);
                 }
                 if join.join_type() == JoinType::Inner {
-                    return rewrite(&swap(join, JoinType::Inner));
+                    return rewrite(&swap(join, JoinType::Inner), guard_sum);
                 }
                 None
             }
-            JoinType::RightOuter => rewrite(&swap(join, JoinType::LeftOuter)),
+            JoinType::RightOuter => rewrite(&swap(join, JoinType::LeftOuter), guard_sum),
             _ => None,
         }
     }
@@ -86,7 +93,12 @@ impl Rule<Logical> for SelfAggregateJoinRule {
 
 impl SelfAggregateJoinRule {
     pub fn create() -> BoxedRule {
-        Box::new(SelfAggregateJoinRule {})
+        Box::new(SelfAggregateJoinRule { for_batch: false })
+    }
+
+    /// The variant for batch plans, see the rule.
+    pub fn create_for_batch() -> BoxedRule {
+        Box::new(SelfAggregateJoinRule { for_batch: true })
     }
 }
 
@@ -117,7 +129,7 @@ fn swap(join: &LogicalJoin, join_type: JoinType) -> LogicalJoin {
     LogicalJoin::with_output_indices(join.right(), join.left(), join_type, on, output.collect())
 }
 
-fn rewrite(join: &LogicalJoin) -> Option<PlanRef> {
+fn rewrite(join: &LogicalJoin, guard_sum: bool) -> Option<PlanRef> {
     let (left, right, on, join_type, output_indices) = join.clone().decompose();
     if !matches!(join_type, JoinType::LeftOuter | JoinType::Inner) {
         return None;
@@ -213,6 +225,7 @@ fn rewrite(join: &LogicalJoin) -> Option<PlanRef> {
         right_exprs: right_exprs.as_ref(),
         outer: join_type == JoinType::LeftOuter,
         compared_with_equal: &compared_with_equal,
+        guard_sum,
     };
     let (new_left, extras) = attach(&left, &compared, &per_row)?;
     // The extra columns: the columns of the right side, then whether the row is matched.
@@ -276,6 +289,8 @@ struct PerRow<'a> {
     right_exprs: Option<&'a Vec<ExprImpl>>,
     outer: bool,
     compared_with_equal: &'a BTreeSet<usize>,
+    /// A `sum` is NULL when it saw no non-NULL value, see `SelfAggregateJoinRule`.
+    guard_sum: bool,
 }
 
 impl PerRow<'_> {
@@ -319,7 +334,7 @@ impl PerRow<'_> {
                 })
                 .collect();
             call.filter = Condition { conjunctions }.and(flag.clone());
-            if call.agg_type == AggType::Builtin(PbAggKind::Sum) {
+            if self.guard_sum && call.agg_type == AggType::Builtin(PbAggKind::Sum) {
                 guards.push((
                     calls.len(),
                     count_call(call.inputs.clone(), call.filter.clone()),

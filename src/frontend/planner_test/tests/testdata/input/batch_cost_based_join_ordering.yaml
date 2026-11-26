@@ -1,0 +1,278 @@
+# Cost-based ordering of the inner joins of batch queries (`batch_cost_based_join_ordering`).
+# `table_row_counts` is test only: it gives the frontend the row counts of the tables that a
+# running frontend receives from the meta node as storage statistics.
+- id: tables
+  sql: |
+    create table f (id int primary key, d1_id int, d2_id int, d3_id int, v int, w int);
+    create table d1 (id int primary key, a int, k int);
+    create table d2 (id int primary key, b int, k int);
+    create table d3 (id int primary key, c int);
+    create table g (id int primary key, x int, y int);
+    create table h (id int primary key, x int, y int);
+    create table a (x int, y int);
+    create table b (x int, y int);
+    create table c (x int, y int);
+  expected_outputs: []
+- name: star, fact table written in the middle, variable off by default (heuristic order)
+  before:
+  - tables
+  sql: |
+    select * from d1 join f on f.d1_id = d1.id join d2 on f.d2_id = d2.id;
+  table_row_counts:
+    f: 1000000
+    d1: 100
+    d2: 1000
+  expected_outputs:
+  - batch_plan
+- name: star, fact table written in the middle, cost-based (the fact table probes, lookups into the dimensions)
+  before:
+  - tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select * from d1 join f on f.d1_id = d1.id join d2 on f.d2_id = d2.id;
+  table_row_counts:
+    f: 1000000
+    d1: 100
+    d2: 1000
+  expected_outputs:
+  - batch_plan
+- name: star without statistics keeps the heuristic order
+  before:
+  - tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select * from d1 join f on f.d1_id = d1.id join d2 on f.d2_id = d2.id;
+  expected_outputs:
+  - batch_plan
+- name: star with statistics for some tables only keeps the heuristic order
+  before:
+  - tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select * from d1 join f on f.d1_id = d1.id join d2 on f.d2_id = d2.id;
+  table_row_counts:
+    f: 1000000
+  expected_outputs:
+  - batch_plan
+- name: star, lookup joins disabled (hash joins, the small tables are the build sides)
+  before:
+  - tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    set batch_enable_lookup_join = false;
+    select * from d1 join f on f.d1_id = d1.id join d2 on f.d2_id = d2.id join d3 on f.d3_id = d3.id;
+  table_row_counts:
+    f: 1000000
+    d1: 100
+    d2: 1000
+    d3: 10
+  expected_outputs:
+  - batch_plan
+- name: equality on the key of a dimension (one row)
+  before:
+  - tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select * from d1 join f on f.d1_id = d1.id join d2 on f.d2_id = d2.id where d2.id = 7;
+  table_row_counts:
+    f: 1000000
+    d1: 100
+    d2: 1000
+  expected_outputs:
+  - batch_plan
+- name: filtered small table reads the large one by key
+  before:
+  - tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select * from f join g on g.id = f.w join d1 on f.id = d1.k where d1.a = 1;
+  table_row_counts:
+    f: 1000000
+    g: 100000
+    d1: 100
+  expected_outputs:
+  - batch_plan
+- name: two-way join, heuristic (variable off)
+  before:
+  - tables
+  sql: |
+    select * from f join d1 on f.id = d1.k where d1.a = 1;
+  table_row_counts:
+    f: 1000000
+    d1: 100
+  expected_outputs:
+  - batch_plan
+- name: two-way join, cost-based (the small side reads the large one by key)
+  before:
+  - tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select * from f join d1 on f.id = d1.k where d1.a = 1;
+  table_row_counts:
+    f: 1000000
+    d1: 100
+  expected_outputs:
+  - batch_plan
+- name: two-way join on columns that are not keys, cost-based (the small side is the build side)
+  before:
+  - tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select * from a join b on a.x = b.x;
+  table_row_counts:
+    a: 10
+    b: 1000000
+  expected_outputs:
+  - batch_plan
+- name: two-way join already in the best order is kept
+  before:
+  - tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select * from b join a on a.x = b.x;
+  table_row_counts:
+    a: 10
+    b: 1000000
+  expected_outputs:
+  - batch_plan
+- name: chain of joins on columns that are not keys
+  before:
+  - tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select * from a join b on a.y = b.x join c on b.y = c.x;
+  table_row_counts:
+    a: 1000000
+    b: 1000
+    c: 10
+  expected_outputs:
+  - batch_plan
+- name: chain of joins on columns that are not keys, heuristic
+  before:
+  - tables
+  sql: |
+    select * from a join b on a.y = b.x join c on b.y = c.x;
+  table_row_counts:
+    a: 1000000
+    b: 1000
+    c: 10
+  expected_outputs:
+  - batch_plan
+- name: snowflake, a filtered table joined to a dimension
+  before:
+  - tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select * from h join d1 on d1.k = h.id join f on f.d1_id = d1.id join d2 on f.d2_id = d2.id where h.x = 3;
+  table_row_counts:
+    f: 1000000
+    d1: 10000
+    d2: 1000
+    h: 50
+  expected_outputs:
+  - batch_plan
+- name: a left join is one input of the inner joins and stays as it is
+  before:
+  - tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select * from d2 join (f left join d1 on f.d1_id = d1.id) on f.d2_id = d2.id join d3 on f.d3_id = d3.id;
+  table_row_counts:
+    f: 1000000
+    d1: 100
+    d2: 1000
+    d3: 10
+  expected_outputs:
+  - batch_plan
+- name: inner joins under a left join are ordered, the left join stays as it is
+  before:
+  - tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select * from d3 left join (d1 join f on f.d1_id = d1.id join d2 on f.d2_id = d2.id) on f.d3_id = d3.id;
+  table_row_counts:
+    f: 1000000
+    d1: 100
+    d2: 1000
+    d3: 10
+  expected_outputs:
+  - batch_plan
+- name: semi and anti joins stay above the inner joins
+  before:
+  - tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select * from d1 join f on f.d1_id = d1.id join d2 on f.d2_id = d2.id
+    where exists (select 1 from g where g.id = f.v) and not exists (select 1 from h where h.id = f.w);
+  table_row_counts:
+    f: 1000000
+    d1: 100
+    d2: 1000
+    g: 100000
+    h: 50
+  expected_outputs:
+  - batch_plan
+- name: an aggregation as an input
+  before:
+  - tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select * from (select v, count(*) as cnt from f group by v) s join d1 on d1.k = s.v join g on g.x = d1.a;
+  table_row_counts:
+    f: 1000000
+    d1: 100
+    g: 100000
+  expected_outputs:
+  - batch_plan
+- name: a scalar subquery is cross joined after the joined inputs, as in the heuristic order
+  before:
+  - tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select * from d1 join f on f.d1_id = d1.id join d2 on f.d2_id = d2.id, (select max(x) as m from g) s where f.v > s.m;
+  table_row_counts:
+    f: 1000000
+    d1: 100
+    d2: 1000
+    g: 100000
+  expected_outputs:
+  - batch_plan
+- name: an input without estimate (table function) keeps the heuristic order
+  before:
+  - tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select * from d1 join f on f.d1_id = d1.id join generate_series(1, 5) s(n) on s.n = f.v join d2 on f.d2_id = d2.id;
+  table_row_counts:
+    f: 1000000
+    d1: 100
+    d2: 1000
+  expected_outputs:
+  - batch_plan
+- name: twelve inputs (greedy ordering beyond ten)
+  before:
+  - tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select f.id, x1.a, x2.a, x3.b, x4.b, x5.c, x6.c, x7.x, x8.x, x9.x, x10.b, x11.a
+    from d1 x1
+    join f on f.d1_id = x1.id
+    join d1 x2 on f.v = x2.id
+    join d2 x3 on f.d2_id = x3.id
+    join d2 x4 on f.w = x4.id
+    join d3 x5 on f.d3_id = x5.id
+    join d3 x6 on x1.k = x6.id
+    join h x7 on x2.k = x7.id
+    join g x8 on x3.k = x8.id
+    join h x9 on x4.k = x9.id
+    join d2 x10 on x7.y = x10.id
+    join d1 x11 on x8.y = x11.id;
+  table_row_counts:
+    f: 1000000
+    d1: 100
+    d2: 1000
+    d3: 10
+    g: 100000
+    h: 50
+  expected_outputs:
+  - batch_plan

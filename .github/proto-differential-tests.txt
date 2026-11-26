@@ -1,0 +1,2 @@
+# Differential tests run by `proto-streaming-prune-check.yml`: <name> <path under e2e_test, e.g. streaming/x or batch/x> <minutes>.
+batchkeys batch/plan_reduction_keys 60

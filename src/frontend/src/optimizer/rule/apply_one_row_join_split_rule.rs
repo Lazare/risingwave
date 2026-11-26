@@ -32,8 +32,8 @@ use crate::optimizer::plan_node::{LogicalApply, PlanTreeNodeUnary};
 ///          A           B                      LHS              A
 /// ```
 ///
-/// Each apply can then be unnested alone, see `PullUpCorrelatedPredicateAggRule`. Used for
-/// streaming plans only, behind `streaming_simplify_subquery_unnesting`.
+/// Each apply can then be unnested alone, see `PullUpCorrelatedPredicateAggRule`. Used on demand,
+/// behind `streaming_simplify_subquery_unnesting` and `batch_simplify_subquery_unnesting`.
 pub struct ApplyOneRowJoinSplitRule {}
 
 impl Rule<Logical> for ApplyOneRowJoinSplitRule {

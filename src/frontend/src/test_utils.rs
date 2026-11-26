@@ -239,6 +239,52 @@ impl LocalFrontend {
     }
 }
 
+/// Test only: replaces the storage statistics of the tables with the given row counts, by name of
+/// table, materialized view or index (`schema.name`, or `name` in the `public` schema) of the
+/// session database. The planner tests use it (`table_row_counts`) to give statistics to the
+/// cost-based join ordering (`batch_cost_based_join_ordering`); a running frontend receives them
+/// from the meta node.
+pub fn set_table_row_counts_for_test(
+    session: &SessionImpl,
+    row_counts: &BTreeMap<String, u64>,
+) -> Result<()> {
+    use risingwave_pb::hummock::{HummockVersionStats, TableStats};
+
+    use crate::catalog::root_catalog::SchemaPath;
+
+    let catalog_reader = session.env().catalog_reader();
+    let mut stats = HummockVersionStats::default();
+    {
+        let catalog = catalog_reader.read_guard();
+        let database = session.database();
+        for (qualified_name, rows) in row_counts {
+            let (schema_name, name) = qualified_name
+                .split_once('.')
+                .unwrap_or((DEFAULT_SCHEMA_NAME, qualified_name.as_str()));
+            let schema_path = SchemaPath::Name(schema_name);
+            let table_id = match catalog.get_any_table_by_name(&database, schema_path, name) {
+                Ok((table, _)) => table.id,
+                Err(_) => {
+                    catalog
+                        .get_any_index_by_name(&database, schema_path, name)?
+                        .0
+                        .index_table()
+                        .id
+                }
+            };
+            stats.table_stats.insert(
+                table_id,
+                TableStats {
+                    total_key_count: i64::try_from(*rows).unwrap_or(i64::MAX),
+                    ..Default::default()
+                },
+            );
+        }
+    }
+    catalog_reader.set_table_stats_for_test(stats);
+    Ok(())
+}
+
 pub async fn get_explain_output(mut rsp: RwPgResponse) -> String {
     if rsp.stmt_type() != StatementType::EXPLAIN {
         panic!("RESPONSE INVALID: {rsp:?}");
