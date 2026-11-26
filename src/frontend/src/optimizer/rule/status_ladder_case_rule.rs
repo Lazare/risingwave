@@ -315,7 +315,7 @@ fn reduce_ladder(
             .iter()
             .map(|&index| &branches[index].as_ref().expect("a branch").0)
             .collect();
-        new_inputs[group[0]] = Some(best_of(&members, &group_key));
+        new_inputs[group[0]] = Some(best_of(&members, group_key));
         for &index in &group[1..] {
             new_inputs[index] = None;
         }

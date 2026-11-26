@@ -72,26 +72,19 @@
           └─LogicalScan { table: g, columns: [g.k] }
   batch_plan: |-
     BatchExchange { order: [], dist: Single }
-    └─BatchProject { exprs: [f.k, 'open':Varchar] }
+    └─BatchProject { exprs: [f.k, $expr1] }
       └─BatchFilter { predicate: (row_number = 1:Int32) }
-        └─BatchOverWindow { window_functions: [row_number() OVER(PARTITION BY f.k ORDER BY 1:Int32 DESC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)] }
-          └─BatchExchange { order: [f.k ASC, 1:Int32 DESC], dist: HashShard(f.k) }
-            └─BatchSort { order: [f.k ASC, 1:Int32 DESC] }
-              └─BatchUnion { all: true }
-                ├─BatchExchange { order: [], dist: Single }
-                │ └─BatchProject { exprs: [f.k, 'open':Varchar, 1:Int32] }
-                │   └─BatchScan { table: f, columns: [f.k], distribution: SomeShard }
-                ├─BatchExchange { order: [], dist: Single }
-                │ └─BatchProject { exprs: [f.k, 'paid':Varchar, 2:Int32] }
-                │   └─BatchFilter { predicate: (f.amt > 0:Int32) }
-                │     └─BatchScan { table: f, columns: [f.k, f.amt], distribution: SomeShard }
-                ├─BatchExchange { order: [], dist: Single }
-                │ └─BatchProject { exprs: [f.k, 'returned':Varchar, 3:Int32] }
-                │   └─BatchFilter { predicate: (f.st = 'back':Varchar) }
-                │     └─BatchScan { table: f, columns: [f.k, f.st], distribution: SomeShard }
-                └─BatchExchange { order: [], dist: Single }
-                  └─BatchProject { exprs: [g.k, 'blocked':Varchar, 4:Int32] }
-                    └─BatchScan { table: g, columns: [g.k], distribution: SomeShard }
+        └─BatchProject { exprs: [f.k, $expr1, row_number] }
+          └─BatchOverWindow { window_functions: [row_number() OVER(PARTITION BY f.k ORDER BY $expr2 DESC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)] }
+            └─BatchExchange { order: [f.k ASC, $expr2 DESC], dist: HashShard(f.k) }
+              └─BatchSort { order: [f.k ASC, $expr2 DESC] }
+                └─BatchUnion { all: true }
+                  ├─BatchExchange { order: [], dist: Single }
+                  │ └─BatchProject { exprs: [f.k, Case((f.st = 'back':Varchar), 'returned':Varchar, (f.amt > 0:Int32), 'paid':Varchar, 'open':Varchar) as $expr1, Case((f.st = 'back':Varchar), 3:Int32, (f.amt > 0:Int32), 2:Int32, 1:Int32) as $expr2] }
+                  │   └─BatchScan { table: f, columns: [f.k, f.st, f.amt], distribution: SomeShard }
+                  └─BatchExchange { order: [], dist: Single }
+                    └─BatchProject { exprs: [g.k, 'blocked':Varchar, 4:Int32] }
+                      └─BatchScan { table: g, columns: [g.k], distribution: SomeShard }
   stream_plan: |-
     StreamMaterialize { columns: [k, st], stream_key: [k], pk_columns: [k], pk_conflict: NoCheck }
     └─StreamProject { exprs: [f.k, $expr1] }
@@ -120,23 +113,8 @@
     └─LogicalScan { table: e, columns: [e.id, e.a, e.s] }
   batch_plan: |-
     BatchExchange { order: [], dist: Single }
-    └─BatchProject { exprs: [e.id, 'new':Varchar] }
-      └─BatchFilter { predicate: (row_number = 1:Int32) }
-        └─BatchOverWindow { window_functions: [row_number() OVER(PARTITION BY e.id ORDER BY 1:Int32 DESC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)] }
-          └─BatchExchange { order: [e.id ASC, 1:Int32 DESC], dist: HashShard(e.id) }
-            └─BatchSort { order: [e.id ASC, 1:Int32 DESC] }
-              └─BatchUnion { all: true }
-                ├─BatchExchange { order: [], dist: Single }
-                │ └─BatchProject { exprs: [e.id, 'new':Varchar, 1:Int32] }
-                │   └─BatchScan { table: e, columns: [e.id], distribution: UpstreamHashShard(e.id) }
-                ├─BatchExchange { order: [], dist: Single }
-                │ └─BatchProject { exprs: [e.id, 'active':Varchar, 2:Int32] }
-                │   └─BatchFilter { predicate: (e.a > 0:Int32) }
-                │     └─BatchScan { table: e, columns: [e.id, e.a], distribution: UpstreamHashShard(e.id) }
-                └─BatchExchange { order: [], dist: Single }
-                  └─BatchProject { exprs: [e.id, 'closed':Varchar, 3:Int32] }
-                    └─BatchFilter { predicate: (e.s = 'closed':Varchar) }
-                      └─BatchScan { table: e, columns: [e.id, e.s], distribution: UpstreamHashShard(e.id) }
+    └─BatchProject { exprs: [e.id, Case((e.s = 'closed':Varchar), 'closed':Varchar, (e.a > 0:Int32), 'active':Varchar, 'new':Varchar) as $expr1] }
+      └─BatchScan { table: e, columns: [e.id, e.a, e.s], distribution: UpstreamHashShard(e.id) }
   stream_plan: |-
     StreamMaterialize { columns: [id, st], stream_key: [id], pk_columns: [id], pk_conflict: NoCheck }
     └─StreamProject { exprs: [e.id, Case((e.s = 'closed':Varchar), 'closed':Varchar, (e.a > 0:Int32), 'active':Varchar, 'new':Varchar) as $expr1] }
