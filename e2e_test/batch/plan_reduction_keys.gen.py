@@ -216,7 +216,7 @@ def run_all(title):
     out.append(f"# {title}: both results hold the same rows, each the same number of times.\n")
     for name, _, cols, _ in CASES:
         a, b, c = f"bk_{name}_on", f"bk_{name}_off", columns(cols)
-        grouped = lambda t: f"select {c}, count(*) as n from {t} group by {c}"
+        grouped = lambda t: f"select {c}, count(*) as bk_rows from {t} group by {c}"
         query('III',
               f"select\n  (select count(*) from ({grouped(a)} except {grouped(b)}) x),\n"
               f"  (select count(*) from ({grouped(b)} except {grouped(a)}) y),\n"
