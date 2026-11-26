@@ -817,6 +817,10 @@ show the same plans with the variable on and off).
   two-phase aggregation has the fingerprint of the one-phase one. The physical join is not part
   of the fingerprint but of the operator kind beside it. Same query with other literals: same
   fingerprints; other join columns, comparisons or tables: other fingerprints (unit tests).
+  One fingerprint therefore covers every literal value: `v < 3` and `v < 13` share one record
+  (executions add up, the last actual rows are those of the last execution, the e2e test
+  asserts it). Step 2 has to decide whether a learned selectivity may depend on the literal,
+  e.g. by keeping a distribution of selectivities per fingerprint rather than a single mean.
 - **Counting** (`risingwave_batch::executor::cardinality`): the frontend sets
   `PlanNode.cardinality_feedback_id` on the counted nodes; the executor builder then wraps their
   executors in a `CountingExecutor` that adds `chunk.cardinality()` to an atomic counter per
