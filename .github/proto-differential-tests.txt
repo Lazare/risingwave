@@ -1,1 +1,3 @@
-# Differential tests run by `proto-streaming-prune-check.yml`: <name> <file> <minutes>.
+# Differential tests run by `proto-streaming-prune-check.yml`: <name> <path under e2e_test, e.g. streaming/x or batch/x> <minutes>.
+ladder streaming/status_ladder_case 60
+batchladder batch/status_ladder_case 60

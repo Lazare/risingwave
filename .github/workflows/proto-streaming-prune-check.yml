@@ -285,7 +285,7 @@ jobs:
           # Without `pipefail` the step would succeed whenever `tee` does.
           set -o pipefail
           export PATH="$PWD/e2e_test/commands:$PATH"
-          sqllogictest -p 4566 -d dev './e2e_test/streaming/${{ matrix.test.file }}.slt' \
+          sqllogictest -p 4566 -d dev './e2e_test/${{ matrix.test.file }}.slt' \
             2>&1 | tee "$RUNNER_TEMP/e2e/differential.log"
 
       - name: Panics and pruning messages in the node log
