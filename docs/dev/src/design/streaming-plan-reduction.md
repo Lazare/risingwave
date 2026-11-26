@@ -430,7 +430,12 @@ consumer and do not rewrite a shared sub-plan.
     reads `y` and `z` only and `y` matches the left side of another copy's left join: the
     conditions of the inner join never read `z`, so they hold above the left join as well;
   - a copy is reordered only when the exposed join merges with the other copy (checked before),
-    and a join chosen as the target of a reordering is not reordered itself.
+    and a join chosen as the target of a reordering is not reordered itself;
+  - safeguards, after a regression on a real view (a reordered copy joined next a table with no
+    condition to the tables already joined, a cross join that streaming can not plan): the next
+    table joined is always one that an equality connects to the tables already joined, every
+    join that the reordering builds must have an equality between its sides, and the reordered
+    copy must have the column types of the copy. Otherwise the copy is kept as it was.
 - Still not done: filters on the optional side of an outer join, a filter with `now()` (it is a
   join with the `Now` source at that point and must be equal), reordering through outer joins
   other than the case above.
