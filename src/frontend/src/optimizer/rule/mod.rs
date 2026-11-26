@@ -222,6 +222,10 @@ pub use apply_one_row_join_split_rule::*;
 // Rule `NullKeyJoinRule` (`batch_simplify_null_join_keys`, `streaming_simplify_null_join_keys`).
 mod null_key_join_rule;
 pub use null_key_join_rule::*;
+// Rules `NarrowValueAggRule` and `NarrowValuePushRule` (`batch_narrow_value_aggregates`,
+// `streaming_narrow_value_aggregates`).
+mod narrow_value_agg_rule;
+pub use narrow_value_agg_rule::*;
 // Duplicates found with `lag` over a window ordered by the column (`batch_rewrite_lag_duplicates`).
 mod lag_duplicates_rule;
 pub use lag_duplicates_rule::*;
@@ -408,6 +412,9 @@ macro_rules! for_all_rules {
             , { CommonJoinOverUnionRule }
             , { ApplyOneRowJoinSplitRule }
             , { NullKeyJoinRule }
+            , { NarrowValueAggRule }
+            , { NarrowValuePushRule }
+            , { NarrowValueProjectMergeRule }
             , { LagDuplicatesRule }
             , { CostBasedJoinOrderingRule }
             , { CostBasedJoinSidesRule }

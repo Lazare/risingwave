@@ -66,6 +66,9 @@ pub struct OptimizerContext {
     stream_prune_baseline: Cell<bool>,
     /// Number of rules applied by the pruning of the sub-plans proven empty of a streaming plan.
     stream_prune_rule_applied: Cell<usize>,
+    /// Whether `NarrowValueAggRule` or `NarrowValuePushRule` applied to the plan: the projections
+    /// that narrow a value below a join are then kept there.
+    values_narrowed: Cell<bool>,
 
     /// Last assigned plan node ID.
     last_plan_node_id: Cell<i32>,
@@ -122,6 +125,7 @@ impl OptimizerContext {
             batch_mview_candidates: RefCell::new(Vec::new()),
             stream_prune_baseline: Cell::new(false),
             stream_prune_rule_applied: Cell::new(0),
+            values_narrowed: Cell::new(false),
 
             last_plan_node_id: Cell::new(RESERVED_ID_NUM.into()),
             last_correlated_id: Cell::new(0),
@@ -149,6 +153,7 @@ impl OptimizerContext {
             batch_mview_candidates: RefCell::new(Vec::new()),
             stream_prune_baseline: Cell::new(false),
             stream_prune_rule_applied: Cell::new(0),
+            values_narrowed: Cell::new(false),
 
             last_plan_node_id: Cell::new(0),
             last_correlated_id: Cell::new(0),
@@ -229,6 +234,15 @@ impl OptimizerContext {
 
     pub fn stream_prune_rule_applied(&self) -> usize {
         self.stream_prune_rule_applied.get()
+    }
+
+    /// See `values_narrowed`.
+    pub fn set_values_narrowed(&self) {
+        self.values_narrowed.set(true);
+    }
+
+    pub fn values_narrowed(&self) -> bool {
+        self.values_narrowed.get()
     }
 
     pub fn is_explain_verbose(&self) -> bool {
