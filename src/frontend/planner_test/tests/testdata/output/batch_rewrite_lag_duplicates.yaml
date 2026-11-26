@@ -474,6 +474,21 @@
             └─BatchExchange { order: [t.f ASC], dist: Single }
               └─BatchSort { order: [t.f ASC] }
                 └─BatchScan { table: t, columns: [t.f], distribution: SomeShard }
+- name: decimal partition column
+  before:
+  - setup
+  sql: |
+    with ordered as (select d, x, lag(x) over (partition by d order by x) as prev from t)
+    select d, x, count(*) from ordered where x = prev group by d, x;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchProject { exprs: [t.d, t.x, count] }
+      └─BatchSortAgg { group_key: [t.x, t.d], aggs: [count] }
+        └─BatchFilter { predicate: (t.x = first_value) }
+          └─BatchOverWindow { window_functions: [first_value(t.x) OVER(PARTITION BY t.d ORDER BY t.x ASC ROWS BETWEEN 1 PRECEDING AND 1 PRECEDING)] }
+            └─BatchExchange { order: [t.d ASC, t.x ASC], dist: HashShard(t.d) }
+              └─BatchSort { order: [t.d ASC, t.x ASC] }
+                └─BatchScan { table: t, columns: [t.x, t.d], distribution: SomeShard }
 - name: streaming plan does not change
   before:
   - setup
