@@ -174,7 +174,7 @@
   sql: |
     select a.id, h.v from a join h on a.k = h.sid where h.v > 0
     union all
-    select a.id, h.st from h join a on h.sid = a.k where a.x = 1;
+    select a.id, h.id from h join a on h.sid = a.k where a.x = 1;
   expected_outputs:
   - stream_plan
 
