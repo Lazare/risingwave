@@ -56,6 +56,7 @@ use std::sync::Arc;
 
 use itertools::Itertools;
 use risingwave_common::types::DataType;
+use risingwave_common::util::iter_util::ZipEqFast;
 use risingwave_pb::hummock::HummockVersionStats;
 use risingwave_pb::plan_common::JoinType;
 
@@ -652,7 +653,9 @@ impl Estimator<'_> {
         if let Some(union) = plan.as_logical_union() {
             let mut widths = by_type();
             for input in union.inputs() {
-                for (width, input_width) in widths.iter_mut().zip(self.column_widths(&input)) {
+                for (width, input_width) in
+                    widths.iter_mut().zip_eq_fast(self.column_widths(&input))
+                {
                     *width = width.max(input_width);
                 }
             }
@@ -777,7 +780,7 @@ impl Estimator<'_> {
         }
         let widths = inputs
             .iter()
-            .zip_eq(&input_required)
+            .zip_eq_fast(&input_required)
             .map(|(input, required)| self.row_width(input, Some(required)))
             .collect();
 
@@ -1073,7 +1076,10 @@ fn collect_required(plan: &PlanRef, columns: BTreeSet<usize>, required: &mut Req
     entry.extend(columns);
     let columns = entry.clone();
     let inputs = plan.inputs();
-    for (input, input_columns) in inputs.iter().zip_eq(input_required_columns(plan, &columns)) {
+    for (input, input_columns) in inputs
+        .iter()
+        .zip_eq_fast(input_required_columns(plan, &columns))
+    {
         collect_required(input, input_columns, required);
     }
 }
