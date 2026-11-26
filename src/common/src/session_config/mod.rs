@@ -432,6 +432,23 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_status_ladder_case: bool,
 
+    // Late reductions of batch plans: the key reductions run again after the stages that create
+    // aggregations, and `row_number()` top-n windows become group top-n.
+    /// In a batch query, run the simplifications enabled by `batch_simplify_column_facts`,
+    /// `batch_simplify_on_unique_key` and `batch_merge_repeated_lookups` a second time, after the
+    /// window functions, `UNION` and distinct aggregates are converted (they create aggregations
+    /// that the first pass never sees), for at most two rounds. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_reduce_keys_after_conversions: bool,
+
+    /// In a batch query, turn `row_number() OVER (PARTITION BY .. ORDER BY ..) <= n` (or `= 1`)
+    /// into a top-n per group instead of sorting all the rows and numbering them. Only for a
+    /// small `n` (at most 10 rows per group), because the top-n keeps its groups in memory and
+    /// cannot spill, unlike the sort. Not when the query reads an Iceberg table that the DataFusion
+    /// engine runs. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_over_window_to_topn: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,

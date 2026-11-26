@@ -661,6 +661,24 @@ static CONVERT_OVER_WINDOW_FOR_BATCH: LazyLock<OptimizationStage> = LazyLock::ne
     )
 });
 
+// `batch_over_window_to_topn`: `CONVERT_OVER_WINDOW_FOR_BATCH` with the batch variant of
+// `OverWindowToTopNRule` (`row_number()` only, small limits per group), for the queries that
+// DataFusion does not run.
+static BATCH_CONVERT_OVER_WINDOW_TO_TOPN: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Convert Over Window To TopN For Batch",
+        vec![
+            ProjectMergeRule::create(),
+            ProjectEliminateRule::create(),
+            TrivialProjectToValuesRule::create(),
+            UnionInputValuesMergeRule::create(),
+            OverWindowToAggAndJoinRule::create(),
+            OverWindowToTopNRule::create_for_batch(),
+        ],
+        ApplyOrder::TopDown,
+    )
+});
+
 static MERGE_OVER_WINDOW: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Merge Over Window",
@@ -1400,10 +1418,21 @@ impl LogicalOptimizer {
     /// that the joins that they remove are not ordered. The plan is a tree: the rules never meet a
     /// shared sub-plan. `now()` is already a constant, and a scan in the past is never a lookup.
     fn reduce_batch_on_keys(
-        mut plan: LogicalPlanRef,
+        plan: LogicalPlanRef,
         explain_trace: bool,
         ctx: &OptimizerContextRef,
     ) -> Result<LogicalPlanRef> {
+        Ok(Self::reduce_batch_on_keys_and_report(plan, explain_trace, ctx)?.0)
+    }
+
+    /// [`Self::reduce_batch_on_keys`], also telling whether one of its simplifications applied
+    /// (`batch_reduce_keys_after_conversions` stops its rounds when none did).
+    fn reduce_batch_on_keys_and_report(
+        mut plan: LogicalPlanRef,
+        explain_trace: bool,
+        ctx: &OptimizerContextRef,
+    ) -> Result<(LogicalPlanRef, bool)> {
+        let mut reduced = false;
         let (column_facts, unique_key, repeated_lookups) = {
             let config = ctx.session_ctx().config();
             (
@@ -1417,10 +1446,12 @@ impl LogicalOptimizer {
             let applied_before = ctx.total_rule_applied();
             plan = plan.optimize_by_rules(&BATCH_SIMPLIFY_COLUMN_FACTS)?;
             // A simplified filter or projection may not use a column any more.
-            need_column_pruning |= ctx.total_rule_applied() != applied_before;
+            let applied = ctx.total_rule_applied() != applied_before;
+            need_column_pruning |= applied;
+            reduced |= applied;
         }
         if !need_column_pruning {
-            return Ok(plan);
+            return Ok((plan, reduced));
         }
         // An outer join is only seen as unused once the columns that nobody reads are pruned, and
         // a lookup only widens the scan that it keeps with the columns that are read.
@@ -1435,6 +1466,7 @@ impl LogicalOptimizer {
                 if ctx.total_rule_applied() == applied_before {
                     break;
                 }
+                reduced = true;
                 plan = Self::column_pruning(plan, explain_trace, ctx);
             }
         }
@@ -1449,12 +1481,20 @@ impl LogicalOptimizer {
                 if ctx.total_rule_applied() == applied_before {
                     break;
                 }
+                reduced = true;
                 plan = Self::predicate_pushdown(plan, explain_trace, ctx);
                 plan = Self::column_pruning(plan, explain_trace, ctx);
                 plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
             }
         }
-        Ok(plan)
+        Ok((plan, reduced))
+    }
+
+    /// Whether the plan reads an Iceberg table, which the DataFusion engine may run
+    /// (`batch_over_window_to_topn`).
+    fn reads_iceberg_table(plan: &LogicalPlanRef) -> bool {
+        plan.as_logical_iceberg_intermediate_scan().is_some()
+            || plan.inputs().iter().any(Self::reads_iceberg_table)
     }
 
     pub fn gen_optimized_logical_plan_for_batch(
@@ -1606,7 +1646,21 @@ impl LogicalOptimizer {
             last_total_rule_applied_before_predicate_pushdown = ctx.total_rule_applied();
             plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
         }
-        plan = plan.optimize_by_rules(&CONVERT_OVER_WINDOW_FOR_BATCH)?;
+        // Rule `OverWindowToTopNRule` (`batch_over_window_to_topn`): `row_number() <= n` per
+        // partition becomes a top-n per group, for small limits only (see the batch variant of
+        // the rule). Not for a query that reads an Iceberg table while the DataFusion engine is
+        // on: DataFusion cannot run a top-n per group, and the query would fall back to the batch
+        // engine.
+        let over_window_to_topn = {
+            let config = ctx.session_ctx().config();
+            config.batch_over_window_to_topn()
+                && !(config.enable_datafusion_engine() && Self::reads_iceberg_table(&plan))
+        };
+        if over_window_to_topn {
+            plan = plan.optimize_by_rules(&BATCH_CONVERT_OVER_WINDOW_TO_TOPN)?;
+        } else {
+            plan = plan.optimize_by_rules(&CONVERT_OVER_WINDOW_FOR_BATCH)?;
+        }
         plan = plan.optimize_by_rules(&MERGE_OVER_WINDOW)?;
 
         // Convert distinct aggregates.
@@ -1627,6 +1681,32 @@ impl LogicalOptimizer {
         if last_total_rule_applied_before_predicate_pushdown != ctx.total_rule_applied() {
             let _ = ctx.total_rule_applied();
             plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+        }
+
+        // Second pass of the reductions on keys (`batch_reduce_keys_after_conversions`): the lag
+        // rewrite, the window conversions (and their top-n) and the conversion of `UNION` and of
+        // distinct aggregates ran after the first pass and created aggregations and top-n that it
+        // never saw. Here every set operation is a `UNION ALL` (the others became aggregations or
+        // joins), so the column pruning of the pass cannot change what a set operation removes.
+        // A second round catches what the first one exposes (an aggregation removed leaves a left
+        // join unused, a merged lookup gives a key to the aggregation above it); the bound keeps
+        // the planning time in check.
+        if ctx
+            .session_ctx()
+            .config()
+            .batch_reduce_keys_after_conversions()
+        {
+            for _ in 0..2 {
+                let (reduced_plan, reduced) =
+                    Self::reduce_batch_on_keys_and_report(plan, explain_trace, &ctx)?;
+                plan = reduced_plan;
+                if !reduced {
+                    break;
+                }
+                plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
+            }
         }
 
         // After the final predicate pushdown, contradictory conjuncts like

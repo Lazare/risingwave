@@ -39,6 +39,8 @@ own rules.
 | SL | Status ladder: the branches of a top-1 by priority that read the same relation picked with one `CASE` | done (prototype, branch `proto/plan-reduction-union-scans`); default branch rewritten into a join not done |
 | BJ | Batch: cost-based ordering of the inner joins from the row counts of the tables (`batch_cost_based_join_ordering`) | first version (prototype, branch `proto/plan-reduction-batch-joinorder`, see "BJ" below); index lookups and column statistics not done |
 | BF | Batch: cardinality feedback, step 1: count the rows of the operators at execution and compare them with the estimates (`batch_cardinality_feedback`) | first version (prototype, branch `proto/batch-cardinality-feedback`, see "BF" below): observation only, no plan changes |
+| BP | Batch: second pass of the reductions on keys after the stages that create aggregations (`batch_reduce_keys_after_conversions`) | done (prototype, branch `proto/plan-reduction-batch-pass2`, see "BP and BT" below) |
+| BT | Batch: `row_number() <= n` per partition becomes a top-n per group, small `n` only (`batch_over_window_to_topn`) | done (prototype, branch `proto/plan-reduction-batch-pass2`, see "BP and BT" below) |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -1026,6 +1028,65 @@ show the same plans with the variable on and off).
 - **Not done.** Other operators (union, top-n, table functions, sources) are not counted; the
   records are per frontend and lost on restart; the estimates of the plan are not shown in
   `EXPLAIN`; nothing uses the records yet (step 2).
+
+### BP and BT. Batch: second pass of the reductions on keys, window top-n (added on 2026-11-26)
+
+**BP (`batch_reduce_keys_after_conversions`).** The reductions on keys of batch queries (column
+facts, unique keys, repeated lookups: "BK") run once, after the first predicate pushdown. Several
+later stages create the very operators that they remove: the lag rewrite (BL) creates
+`Agg(group x: count)`, `CONVERT_DISTINCT_AGG_FOR_BATCH` turns a `UNION` into an aggregation and
+splits the distinct aggregates, the window conversion creates aggregations and, with BT, top-n per
+group. BP runs `reduce_batch_on_keys` again after the final column pruning and predicate pushdown,
+at most two rounds, stopping when a round applied none of its rules; each round that did is
+followed by a predicate pushdown, a column pruning and the projection cleanup.
+
+```sql
+create table t (id int primary key, v int);
+with o as (select id, lag(id) over (order by id) as prev from t)
+select id, count(*) + 1 from o where id = prev group by id;
+-- after BL: Filter(count > 1) <- Agg(group id: count) <- Scan(t)
+-- BP: the aggregation is on the key of t (count = 1), `1 > 1` is never true: an empty relation
+```
+
+- Exactness: no new algebra, the rules of BK with their own conditions; only the position is new.
+  At this position every set operation is a `UNION ALL` (`INTERSECT` and `EXCEPT` became joins,
+  `UNION` an aggregation), so the column pruning of the pass cannot change what a set operation
+  removes (the early pass relies on the set operations keeping all their columns when pruned).
+  Join ordering has turned the multi-joins back into binary joins; the aggregations still have one
+  phase; `now()` is a constant and the plan is a tree.
+- The second round catches what the first exposes (a lookup merged after the aggregation above
+  it was looked at). The variable does nothing without the BK variables.
+
+**BT (`batch_over_window_to_topn`).** `row_number() OVER (PARTITION BY k ORDER BY o) <= n` stays
+`Sort` + `OverWindow` + `Filter` in batch: upstream took `OverWindowToTopNRule` out of the batch
+window conversion because DataFusion cannot run a top-n per group. BT puts back a batch variant of
+the rule in that stage: the window becomes `TopN(group k, order o, limit n)`, which also gives the
+key `k` to the rows (a left join to the latest row per key whose columns are unused goes away with
+BP).
+
+- Memory: the batch `GroupTopN` keeps a heap per group in a hash map until its input ends. It
+  cannot spill: its memory is that of an operator that cannot spill under the batch memory
+  admission (taken from the pool of the query, then from the memory of the node that no query
+  reserved, waiting or failing when there is none). The sort that it replaces can spill, and the
+  window after it holds one partition at a time. Each heap allocates room for `limit + offset`
+  rows when its group is created, even for a group of one row; with ties (`rank()`), a heap keeps
+  every row tied with the last one, without bound. So BT only rewrites `row_number()`, and only
+  when `limit + offset <= 10`: the state is then at most ten rows per group, close to a hash
+  aggregation for a top-1, and never more rows than the sort would hold. `rank()`, `dense_rank()`,
+  larger limits and lower bounds alone (`rn > 1`) keep the window.
+- DataFusion: a query that reads an Iceberg table while `enable_datafusion_engine` is on keeps the
+  window, so that it still runs in DataFusion.
+- Exactness: the streaming rule, unchanged; among rows tied on the order columns, both forms keep
+  an arbitrary one.
+
+- Tests: `batch_reduce_keys_after_conversions.yaml` and `batch_over_window_to_topn.yaml`
+  (planner: lag then key, `UNION` then key, distinct aggregates, top-1 then unused left join, the
+  count over a `UNION` without `ALL` kept, limits around 10, rank kept, off by default), and the
+  differential `e2e_test/batch/reduce_keys_after_conversions.gen.py` (every query run with every
+  variable off and with BK + BP, BT, both; multisets compared on empty tables, NULLs, duplicates,
+  ties, more than ten rows per group, after deletes and updates).
+- Not done: the union join factoring, union scan merge, status ladder and empty-relation stages
+  are not re-run in the pass.
 
 ## Not for now: sharing between materialized views
 

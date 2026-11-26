@@ -33,7 +33,9 @@ user batch_factor_union_join
 user batch_hnsw_ef_search
 user batch_merge_repeated_lookups
 user batch_merge_union_scans
+user batch_over_window_to_topn
 user batch_parallelism
+user batch_reduce_keys_after_conversions
 user batch_rewrite_lag_duplicates
 user batch_simplify_column_facts
 user batch_simplify_on_unique_key

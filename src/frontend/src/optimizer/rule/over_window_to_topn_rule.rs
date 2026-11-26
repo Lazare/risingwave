@@ -47,11 +47,34 @@ use crate::utils::Condition;
 ///
 /// Also optimizes filter arithmetic expressions in the `Project <- Filter <- OverWindow` pattern,
 /// such as simplifying `(row_number - 1) = 0` to `row_number = 1`.
-pub struct OverWindowToTopNRule;
+pub struct OverWindowToTopNRule {
+    /// For batch queries (`batch_over_window_to_topn`): only `ROW_NUMBER`, and only when at most
+    /// this many rows (`limit + offset`) are kept per group. See [`BATCH_MAX_TOP_N_ROWS_PER_GROUP`].
+    batch_max_rows_per_group: Option<u64>,
+}
+
+/// The largest `limit + offset` of a group top-n that a batch query gets in place of its window.
+///
+/// The batch group top-n keeps a heap per group in memory until its input ends, and it cannot
+/// spill, while the sort that it replaces can. Each heap allocates room for `limit + offset` rows
+/// when its group is created, even if the group holds one row, so the memory per group grows with
+/// the limit. A small limit keeps the memory per group close to that of a hash aggregation. With
+/// ties (`RANK`) a heap keeps every row tied with the last one: its size is unbounded, so `RANK`
+/// is not rewritten in batch queries.
+pub const BATCH_MAX_TOP_N_ROWS_PER_GROUP: u64 = 10;
 
 impl OverWindowToTopNRule {
     pub fn create() -> BoxedRule {
-        Box::new(OverWindowToTopNRule)
+        Box::new(OverWindowToTopNRule {
+            batch_max_rows_per_group: None,
+        })
+    }
+
+    /// The variant for batch queries: only `ROW_NUMBER` with a small limit per group.
+    pub fn create_for_batch() -> BoxedRule {
+        Box::new(OverWindowToTopNRule {
+            batch_max_rows_per_group: Some(BATCH_MAX_TOP_N_ROWS_PER_GROUP),
+        })
     }
 }
 
@@ -86,6 +109,12 @@ impl Rule<Logical> for OverWindowToTopNRule {
             // Only rank functions can be converted to TopN.
             return None;
         }
+        if self.batch_max_rows_per_group.is_some() && window_func.kind != WindowFuncKind::RowNumber
+        {
+            // Batch: the heap of a top-n with ties has no bound (see
+            // `BATCH_MAX_TOP_N_ROWS_PER_GROUP`).
+            return None;
+        }
 
         let output_len = over_window.schema().len();
         let window_func_pos = output_len - 1;
@@ -109,6 +138,13 @@ impl Rule<Logical> for OverWindowToTopNRule {
         };
 
         let (limit, offset) = handle_rank_preds(&rank_pred.conjunctions, window_func_pos)?;
+        if let Some(max_rows) = self.batch_max_rows_per_group
+            && limit.saturating_add(offset) > max_rows
+        {
+            // Batch: a large top-n per group would hold too much memory (see
+            // `BATCH_MAX_TOP_N_ROWS_PER_GROUP`).
+            return None;
+        }
 
         if offset > 0 && with_ties {
             tracing::warn!("Failed to optimize with ties and offset");
@@ -143,7 +179,9 @@ impl Rule<Logical> for OverWindowToTopNRule {
             }
         } else {
             // Ranking Output, without project
-            ctx.warn_to_user("It can be inefficient to output ranking number in Top-N, see https://docs.risingwave.com/processing/sql/top-n-by-group for more information");
+            if self.batch_max_rows_per_group.is_none() {
+                ctx.warn_to_user("It can be inefficient to output ranking number in Top-N, see https://docs.risingwave.com/processing/sql/top-n-by-group for more information");
+            }
             let over_window = over_window.clone_with_input(filter).into();
             add_rank_offset_if_needed(over_window, offset, window_func_pos, output_len)
         };
