@@ -25,7 +25,8 @@ use risingwave_pb::plan_common::JoinType;
 
 use super::lateral_table_function_rule::{PaddingTest, padding_test, per_row_agg_call, supported};
 use super::prelude::{PlanRef, *};
-use super::repeated_lookup_merge_rule::{map_input_refs, pure_scan, referred_columns};
+use super::repeated_lookup_merge_rule::{map_input_refs, referred_columns};
+use crate::catalog::table_catalog::TableType;
 use crate::expr::{
     Expr, ExprImpl, ExprType, FunctionCall, InputRef, TableFunction, TableFunctionType,
 };
@@ -122,14 +123,8 @@ fn rewrite(join: &LogicalJoin) -> Option<PlanRef> {
         return None;
     }
     let left_len = left.schema().len();
-    let pure = pure_scan(&left)?;
-    let table = pure.scan.table().clone();
-    let key: Vec<usize> = table.stream_key();
-    if key.is_empty() {
-        return None;
-    }
 
-    // The right side: an aggregation, maybe under a projection.
+    // The right side: an aggregation, maybe under a projection, of rows derived from a table.
     let (agg_plan, right_exprs) = match right.as_logical_project() {
         Some(project) => (project.input(), Some(project.exprs().clone())),
         None => (right.clone(), None),
@@ -138,8 +133,17 @@ fn rewrite(join: &LogicalJoin) -> Option<PlanRef> {
     if !agg.grouping_sets().is_empty() || !agg.agg_calls().iter().all(per_row_agg_call) {
         return None;
     }
-    let group_key: Vec<usize> = agg.group_key().indices().collect();
     let derived = agg.input();
+    let leaf = leaf_scan(&derived)?;
+    if leaf.as_of().is_some() || matches!(leaf.table().table_type(), TableType::Internal) {
+        return None;
+    }
+    let table = leaf.table().clone();
+    let key: Vec<usize> = table.stream_key();
+    if key.is_empty() {
+        return None;
+    }
+    let group_key: Vec<usize> = agg.group_key().indices().collect();
     // Each column of the group key, as an expression of the row of the table it comes from.
     let group_traces: Vec<ExprImpl> = group_key
         .iter()
@@ -156,9 +160,10 @@ fn rewrite(join: &LogicalJoin) -> Option<PlanRef> {
         key.contains(&column).then_some(column)
     };
 
-    // The condition: only equalities of a key column of the table on both sides, covering the
-    // whole key.
-    let mut covered = BTreeSet::new();
+    // The condition: only equalities between a column of the left side and a key column of the
+    // table in the group key, covering the whole key. The columns of the left side must be the
+    // key columns of a row of the same table that the left side carries, see `attach`.
+    let mut compared = vec![];
     // The key columns compared with `=`, which a NULL never matches.
     let mut compared_with_equal = BTreeSet::new();
     for conjunct in &on.conjunctions {
@@ -181,170 +186,363 @@ fn rewrite(join: &LogicalJoin) -> Option<PlanRef> {
         } else {
             return None;
         };
-        let left_column = pure.exprs[l].as_input_ref()?.index();
-        if !key.contains(&left_column) || right_key_column(r) != Some(left_column) {
-            return None;
-        }
-        covered.insert(left_column);
+        let column = right_key_column(r)?;
+        compared.push((l, column));
         if call.func_type() == ExprType::Equal {
-            compared_with_equal.insert(left_column);
+            compared_with_equal.insert(column);
         }
     }
+    let covered: BTreeSet<usize> = compared.iter().map(|&(_, c)| c).collect();
     if covered.len() != key.len() {
         return None;
     }
 
-    // The rows of the table, read once, with the columns that both sides need.
+    // The columns of the table that the derived rows need.
     let mut needed: BTreeSet<usize> = key.iter().copied().collect();
-    needed.extend(referred_columns(&pure.exprs));
-    needed.extend(referred_columns(&pure.predicate));
     needed.extend(referred_columns(&group_traces));
-    let leaf = leaf_scan(&derived)?;
-    if leaf.table().id != table.id || leaf.as_of().is_some() {
-        return None;
-    }
     needed.extend(leaf.output_col_idx().iter().copied());
     needed.extend(referred_columns(&leaf.predicate().conjunctions));
-    let needed: Vec<usize> = needed.into_iter().collect();
-    let position: HashMap<usize, usize> = needed.iter().enumerate().map(|(p, &c)| (c, p)).collect();
-    let to_rows = |expr: &ExprImpl| {
-        map_input_refs(expr, |r| {
-            InputRef::new(position[&r.index()], r.return_type()).into()
-        })
-    };
-    let scan: PlanRef = pure.scan.clone_with_output_indices(needed.clone()).into();
-    let rows: PlanRef = LogicalFilter::create(
-        scan,
-        Condition {
-            conjunctions: pure.predicate.iter().map(to_rows).collect(),
-        },
-    );
-    let rows_len = needed.len();
-    let ctx = Ctx {
-        rows: rows.clone(),
-        rows_len,
-        position: &position,
+
+    let per_row = PerRow {
         table_id: table.id,
+        key: &key,
+        needed: &needed,
+        derived: &derived,
+        agg_calls: agg.agg_calls(),
+        group_traces: &group_traces,
+        right_exprs: right_exprs.as_ref(),
+        outer: join_type == JoinType::LeftOuter,
+        compared_with_equal: &compared_with_equal,
     };
-
-    // The derived rows of each row of the table: [table columns, flag, derived columns].
-    let per_row = derive(&derived, &ctx)?;
-    let offset = rows_len + 1;
-
-    // The aggregation grouped by the key of the table.
-    let flag = Condition::with_expr(InputRef::new(rows_len, DataType::Boolean).into());
-    let mut calls = vec![];
-    let mut guards = vec![];
-    for call in agg.agg_calls() {
-        let mut call = call.clone();
-        for input in &mut call.inputs {
-            input.shift_with_offset(offset as isize);
-        }
-        for order in &mut call.order_by {
-            order.column_index += offset;
-        }
-        let conjunctions = call
-            .filter
-            .conjunctions
-            .iter()
-            .map(|e| {
-                map_input_refs(e, |r| {
-                    InputRef::new(r.index() + offset, r.return_type()).into()
-                })
-            })
-            .collect();
-        call.filter = Condition { conjunctions }.and(flag.clone());
-        if call.agg_type == AggType::Builtin(PbAggKind::Sum) {
-            guards.push((
-                calls.len(),
-                count_call(call.inputs.clone(), call.filter.clone()),
-            ));
-        }
-        calls.push(call);
+    let (new_left, extras) = attach(&left, &compared, &per_row)?;
+    // The extra columns: the columns of the right side, then whether the row is matched.
+    let right_len = right.schema().len();
+    if extras.len() != right_len + 1 {
+        return None;
     }
-    let mut group: Vec<usize> = key.iter().map(|c| position[c]).collect();
-    group.sort_unstable();
-    let key_len = group.len();
-    let calls_len = calls.len();
-    let mut call_values: Vec<ExprImpl> = calls
-        .iter()
-        .enumerate()
-        .map(|(j, call)| InputRef::new(key_len + j, call.return_type.clone()).into())
-        .collect();
-    for (g, (j, guard)) in guards.into_iter().enumerate() {
-        let count = InputRef::new(key_len + calls_len + g, DataType::Int64);
-        let return_type = call_values[j].return_type();
-        call_values[j] = case_when(
-            greater_than_zero(count),
-            call_values[j].clone(),
-            return_type,
-        );
-        calls.push(guard);
-    }
-    let matched_rows = InputRef::new(key_len + calls.len(), DataType::Int64);
-    calls.push(count_call(vec![], flag));
-    // The value of each column of the rows of the table after the aggregation.
-    let mut row_values: Vec<ExprImpl> = vec![];
-    for p in 0..rows_len {
-        let data_type = rows.schema()[p].data_type();
-        let at = match group.iter().position(|&g| g == p) {
-            Some(at) => at,
-            None => {
-                calls.push(PlanAggCall {
-                    agg_type: PbAggKind::InternalLastSeenValue.into(),
-                    return_type: data_type.clone(),
-                    inputs: vec![InputRef::new(p, data_type.clone())],
-                    distinct: false,
-                    order_by: vec![],
-                    filter: Condition::true_cond(),
-                    direct_args: vec![],
-                });
-                key_len + calls.len() - 1
-            }
-        };
-        row_values.push(InputRef::new(at, data_type).into());
-    }
-    let mut result: PlanRef = Agg::new(calls, IndexSet::from(group), per_row).into();
-    // The row of the table had a group on the right side, and the condition matches it.
-    let mut matched = vec![greater_than_zero(matched_rows)];
-    for column in &compared_with_equal {
-        let value = row_values[position[column]].clone();
-        matched.push(
-            FunctionCall::new_unchecked(ExprType::IsNotNull, vec![value], DataType::Boolean).into(),
-        );
-    }
-    let matched = and_all(matched);
+    let mut result = new_left;
     if join_type == JoinType::Inner {
-        result = LogicalFilter::create(result, Condition::with_expr(matched.clone()));
+        let matched = InputRef::new(extras[right_len], DataType::Boolean);
+        result = LogicalFilter::create(result, Condition::with_expr(matched.into()));
     }
-
-    // The columns of the join, before its output indices.
-    let of_table = |expr: &ExprImpl| -> ExprImpl {
-        map_input_refs(expr, |r| row_values[position[&r.index()]].clone())
-    };
-    let mut columns: Vec<ExprImpl> = pure.exprs.iter().map(of_table).collect();
-    let agg_values: Vec<ExprImpl> = group_traces
+    let exprs = output_indices
         .iter()
-        .map(of_table)
-        .chain(call_values)
+        .map(|&i| {
+            let at = if i < left_len {
+                i
+            } else {
+                extras[i - left_len]
+            };
+            InputRef::new(at, result.schema()[at].data_type()).into()
+        })
         .collect();
-    let right_values: Vec<ExprImpl> = match &right_exprs {
-        Some(exprs) => exprs
-            .iter()
-            .map(|e| map_input_refs(e, |r| agg_values[r.index()].clone()))
-            .collect(),
-        None => agg_values,
-    };
-    for value in right_values {
-        columns.push(if join_type == JoinType::LeftOuter {
-            let return_type = value.return_type();
-            case_when(matched.clone(), value, return_type)
-        } else {
-            value
-        });
-    }
-    let exprs = output_indices.iter().map(|&i| columns[i].clone()).collect();
     Some(LogicalProject::new(result, exprs).into())
+}
+
+/// The column of the table that each output column of the input of a share is, when the input is
+/// the scan of the table under projections that pick columns and filters: one row per row of the
+/// table that it reads.
+fn shared_table_columns(plan: &PlanRef, table_id: TableId) -> Option<Vec<Option<usize>>> {
+    if let Some(scan) = plan.as_logical_scan() {
+        if scan.table().id != table_id || scan.as_of().is_some() {
+            return None;
+        }
+        return Some(scan.output_col_idx().iter().map(|&c| Some(c)).collect());
+    }
+    if let Some(project) = plan.as_logical_project() {
+        let input = shared_table_columns(&project.input(), table_id)?;
+        return Some(
+            project
+                .exprs()
+                .iter()
+                .map(|e| e.as_input_ref().and_then(|r| input[r.index()]))
+                .collect(),
+        );
+    }
+    if let Some(filter) = plan.as_logical_filter() {
+        return shared_table_columns(&filter.input(), table_id);
+    }
+    None
+}
+
+/// What the aggregation of the right side needs to be computed on the rows of the table.
+struct PerRow<'a> {
+    table_id: TableId,
+    key: &'a [usize],
+    needed: &'a BTreeSet<usize>,
+    derived: &'a PlanRef,
+    agg_calls: &'a [PlanAggCall],
+    group_traces: &'a [ExprImpl],
+    right_exprs: Option<&'a Vec<ExprImpl>>,
+    outer: bool,
+    compared_with_equal: &'a BTreeSet<usize>,
+}
+
+impl PerRow<'_> {
+    /// The rows of the table (a scan, or a share of a scan) with the columns of the right side
+    /// and the matched flag appended: the derived rows of each row are aggregated, grouped by the
+    /// key of the table.
+    fn build(
+        &self,
+        rows: PlanRef,
+        position: &HashMap<usize, usize>,
+        original_len: usize,
+    ) -> Option<PlanRef> {
+        let rows_len = rows.schema().len();
+        let ctx = Ctx {
+            rows: rows.clone(),
+            rows_len,
+            position,
+            table_id: self.table_id,
+        };
+        let per_row = derive(self.derived, &ctx)?;
+        let offset = rows_len + 1;
+        let flag = Condition::with_expr(InputRef::new(rows_len, DataType::Boolean).into());
+        let mut calls = vec![];
+        let mut guards = vec![];
+        for call in self.agg_calls {
+            let mut call = call.clone();
+            for input in &mut call.inputs {
+                input.shift_with_offset(offset as isize);
+            }
+            for order in &mut call.order_by {
+                order.column_index += offset;
+            }
+            let conjunctions = call
+                .filter
+                .conjunctions
+                .iter()
+                .map(|e| {
+                    map_input_refs(e, |r| {
+                        InputRef::new(r.index() + offset, r.return_type()).into()
+                    })
+                })
+                .collect();
+            call.filter = Condition { conjunctions }.and(flag.clone());
+            if call.agg_type == AggType::Builtin(PbAggKind::Sum) {
+                guards.push((
+                    calls.len(),
+                    count_call(call.inputs.clone(), call.filter.clone()),
+                ));
+            }
+            calls.push(call);
+        }
+        let mut group: Vec<usize> = self.key.iter().map(|c| position[c]).collect();
+        group.sort_unstable();
+        group.dedup();
+        let key_len = group.len();
+        let calls_len = calls.len();
+        let mut call_values: Vec<ExprImpl> = calls
+            .iter()
+            .enumerate()
+            .map(|(j, call)| InputRef::new(key_len + j, call.return_type.clone()).into())
+            .collect();
+        for (g, (j, guard)) in guards.into_iter().enumerate() {
+            let count = InputRef::new(key_len + calls_len + g, DataType::Int64);
+            let return_type = call_values[j].return_type();
+            call_values[j] = case_when(
+                greater_than_zero(count),
+                call_values[j].clone(),
+                return_type,
+            );
+            calls.push(guard);
+        }
+        let matched_rows = InputRef::new(key_len + calls.len(), DataType::Int64);
+        calls.push(count_call(vec![], flag));
+        // The value of each column of the rows after the aggregation.
+        let mut row_values: Vec<ExprImpl> = vec![];
+        for p in 0..rows_len {
+            let data_type = rows.schema()[p].data_type();
+            let at = match group.iter().position(|&g| g == p) {
+                Some(at) => at,
+                None => {
+                    calls.push(PlanAggCall {
+                        agg_type: PbAggKind::InternalLastSeenValue.into(),
+                        return_type: data_type.clone(),
+                        inputs: vec![InputRef::new(p, data_type.clone())],
+                        distinct: false,
+                        order_by: vec![],
+                        filter: Condition::true_cond(),
+                        direct_args: vec![],
+                    });
+                    key_len + calls.len() - 1
+                }
+            };
+            row_values.push(InputRef::new(at, data_type).into());
+        }
+        let agg: PlanRef = Agg::new(calls, IndexSet::from(group), per_row).into();
+        // The row of the table had a group on the right side, and the condition matches it.
+        let mut matched = vec![greater_than_zero(matched_rows)];
+        for column in self.compared_with_equal {
+            let value = row_values[position[column]].clone();
+            matched.push(
+                FunctionCall::new_unchecked(ExprType::IsNotNull, vec![value], DataType::Boolean)
+                    .into(),
+            );
+        }
+        let matched = and_all(matched);
+        let of_table = |expr: &ExprImpl| -> ExprImpl {
+            map_input_refs(expr, |r| row_values[position[&r.index()]].clone())
+        };
+        let agg_values: Vec<ExprImpl> = self
+            .group_traces
+            .iter()
+            .map(of_table)
+            .chain(call_values)
+            .collect();
+        let right_values: Vec<ExprImpl> = match self.right_exprs {
+            Some(exprs) => exprs
+                .iter()
+                .map(|e| map_input_refs(e, |r| agg_values[r.index()].clone()))
+                .collect(),
+            None => agg_values,
+        };
+        // [the columns of the rows as they were, the right side, matched]
+        let mut exprs: Vec<ExprImpl> = row_values[..original_len].to_vec();
+        for value in right_values {
+            exprs.push(if self.outer {
+                let return_type = value.return_type();
+                case_when(matched.clone(), value, return_type)
+            } else {
+                value
+            });
+        }
+        exprs.push(matched);
+        Some(LogicalProject::new(agg, exprs).into())
+    }
+}
+
+/// Appends to the output of `plan` the columns of the right side computed on the row of the
+/// table whose key columns are the given output columns of `plan` (`(output column, key column
+/// of the table)`), and returns their positions.
+///
+/// The row is found down a path of projections that pass the key columns as they are, filters,
+/// and joins that keep every row of the side of the path (inner joins, the outer side of an outer
+/// join), to a scan of the table or a share of such a scan. On that path every row of `plan`
+/// carries one real row of the table, whose key columns are the given output columns: the
+/// aggregation is computed there, grouped by the key of the table, and its columns are passed up.
+/// A scan reads the columns that the derived rows need; a shared scan must already read them, as
+/// the share is not changed.
+fn attach(
+    plan: &PlanRef,
+    columns: &[(usize, usize)],
+    per_row: &PerRow<'_>,
+) -> Option<(PlanRef, Vec<usize>)> {
+    let leaf_scan_of = |scan: &LogicalScan| -> bool {
+        scan.table().id == per_row.table_id
+            && scan.as_of().is_none()
+            && columns.iter().all(|&(o, c)| scan.output_col_idx()[o] == c)
+    };
+    let appended = |new: PlanRef, original_len: usize| -> (PlanRef, Vec<usize>) {
+        let extras = (original_len..new.schema().len()).collect();
+        (new, extras)
+    };
+    if let Some(scan) = plan.as_logical_scan() {
+        if !leaf_scan_of(scan) {
+            return None;
+        }
+        let output = scan.output_col_idx();
+        let mut new_output = output.clone();
+        for &c in per_row.needed {
+            if !new_output.contains(&c) {
+                new_output.push(c);
+            }
+        }
+        let position: HashMap<usize, usize> = new_output
+            .iter()
+            .enumerate()
+            .map(|(p, &c)| (c, p))
+            .rev()
+            .collect();
+        let rows: PlanRef = scan.clone_with_output_indices(new_output).into();
+        let new = per_row.build(rows, &position, output.len())?;
+        return Some(appended(new, output.len()));
+    }
+    if let Some(share) = plan.as_logical_share() {
+        // The share is kept as it is: the table columns of its output must hold what is needed.
+        let columns_of_share = shared_table_columns(&share.input(), per_row.table_id)?;
+        if !columns.iter().all(|&(o, c)| columns_of_share[o] == Some(c)) {
+            return None;
+        }
+        let mut position = HashMap::new();
+        for &c in per_row.needed {
+            position.insert(c, columns_of_share.iter().position(|&o| o == Some(c))?);
+        }
+        let len = columns_of_share.len();
+        let new = per_row.build(plan.clone(), &position, len)?;
+        return Some(appended(new, len));
+    }
+    if let Some(project) = plan.as_logical_project() {
+        let inner_columns = columns
+            .iter()
+            .map(|&(o, c)| Some((project.exprs()[o].as_input_ref()?.index(), c)))
+            .collect::<Option<Vec<_>>>()?;
+        let (input, extras) = attach(&project.input(), &inner_columns, per_row)?;
+        let mut exprs = project.exprs().clone();
+        let original_len = exprs.len();
+        for at in extras {
+            exprs.push(InputRef::new(at, input.schema()[at].data_type()).into());
+        }
+        return Some(appended(
+            LogicalProject::new(input, exprs).into(),
+            original_len,
+        ));
+    }
+    if let Some(filter) = plan.as_logical_filter() {
+        let (input, extras) = attach(&filter.input(), columns, per_row)?;
+        return Some((
+            LogicalFilter::new(input, filter.predicate().clone()).into(),
+            extras,
+        ));
+    }
+    if let Some(join) = plan.as_logical_join() {
+        let (join_left, join_right, on, join_type, output_indices) = join.clone().decompose();
+        let join_left_len = join_left.schema().len();
+        let inner: Vec<(usize, usize)> = columns
+            .iter()
+            .map(|&(o, c)| (output_indices[o], c))
+            .collect();
+        let original_len = output_indices.len();
+        if inner.iter().all(|&(i, _)| i < join_left_len)
+            && matches!(join_type, JoinType::Inner | JoinType::LeftOuter)
+        {
+            let (new_left, extras) = attach(&join_left, &inner, per_row)?;
+            let added = new_left.schema().len() - join_left_len;
+            let moved = |i: usize| if i < join_left_len { i } else { i + added };
+            let on = Condition {
+                conjunctions: on
+                    .conjunctions
+                    .iter()
+                    .map(|e| {
+                        map_input_refs(e, |r| {
+                            InputRef::new(moved(r.index()), r.return_type()).into()
+                        })
+                    })
+                    .collect(),
+            };
+            let mut new_output: Vec<usize> = output_indices.iter().map(|&i| moved(i)).collect();
+            new_output.extend(extras);
+            let new: PlanRef =
+                LogicalJoin::with_output_indices(new_left, join_right, join_type, on, new_output)
+                    .into();
+            return Some(appended(new, original_len));
+        }
+        if inner.iter().all(|&(i, _)| i >= join_left_len)
+            && matches!(join_type, JoinType::Inner | JoinType::RightOuter)
+        {
+            let inner: Vec<(usize, usize)> =
+                inner.iter().map(|&(i, c)| (i - join_left_len, c)).collect();
+            let (new_right, extras) = attach(&join_right, &inner, per_row)?;
+            let mut new_output = output_indices;
+            new_output.extend(extras.into_iter().map(|p| join_left_len + p));
+            let new: PlanRef =
+                LogicalJoin::with_output_indices(join_left, new_right, join_type, on, new_output)
+                    .into();
+            return Some(appended(new, original_len));
+        }
+        return None;
+    }
+    None
 }
 
 struct Ctx<'a> {

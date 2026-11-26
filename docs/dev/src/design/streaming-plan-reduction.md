@@ -541,10 +541,14 @@ Not done:
 
 Same variable, rule `SelfAggregateJoinRule`, in a stage after the final column pruning. `T LEFT
 JOIN (SELECT T2.k, agg(..) FROM T T2, srf(T2.a) x [LEFT] JOIN U ON .. WHERE .. GROUP BY T2.k) a
-ON T.k = a.k` read `T` twice and joined it with the aggregation; also when the left side is a
-view of `T` (projections and filters) carrying its key. When `k` is the whole unique key of `T`
-(proven from the definition of the table, never assumed), the group of a row of the left side
-holds the rows derived from that same row of `T`, so:
+ON T.k = a.k` read `T` twice and joined it with the aggregation. The left side may be any plan
+that carries a real row of `T` whose key is the compared column: projections, filters, inner
+joins and the outer side of outer joins down to a scan of `T` or a share of a scan of `T`. When
+`k` is the whole unique key of `T` (proven from the definition of the table, never assumed), the
+group matched by a row of the left side holds the rows derived from the row of `T` it carries,
+so the aggregation is computed where the left side reads `T`, grouped by the key of `T`, and its
+columns are passed up to the join (at this stage the output of a join no longer holds the stream
+keys of its sides, so the left side itself has no key to group by):
 
 - the derived rows are computed on the rows of the left side, keeping every row of `T`: the
   outer `ProjectSet` of 9b, a filter becomes a flag on the rows, an inner join with another

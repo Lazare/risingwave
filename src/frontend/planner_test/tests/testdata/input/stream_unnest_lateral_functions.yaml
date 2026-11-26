@@ -11,6 +11,10 @@
     create table b (k varchar primary key, v int);
     create table w (rid int primary key, id int, j jsonb);
     create view tv as select id, n from t where c = 'k';
+    create table rr (rid int primary key, eid int, ref varchar);
+    create table st (pid int primary key, status varchar);
+    create table vt (pid int primary key, v int);
+    create table x (id int primary key, tid int);
   expected_outputs: []
 - id: setup_off
   sql: |
@@ -295,6 +299,57 @@
   before: [setup]
   sql: |
     select tv.id, tv.n, a.c from tv left join (select id, count(*) as c from t, unnest(arr) as v group by id) a on tv.id = a.id;
+  expected_outputs:
+  - stream_plan
+
+- name: self aggregate - the left side carries the row of the table through a lookup join
+  before: [setup]
+  sql: |
+    select e.id, e.n, l.ref, a.p, a.q
+    from (select id, n, j from t where c = 'k') e
+    left join rr l on e.id = l.eid
+    left join (
+      select t2.id, max(case when m[1] = 'P' then m[2] end) as p, max(case when m[1] = 'Q' then m[2] end) as q
+      from t t2, jsonb_array_elements_text(t2.j -> 'a' -> 'b') as w(v), regexp_matches(w.v, '^([^/]*)/(.*)$') as r(m)
+      group by t2.id
+    ) a on e.id = a.id
+    where l.ref is not null;
+  expected_outputs:
+  - stream_plan
+
+- name: self aggregate - shared table, joins on the left side, a self aggregate inside the right side
+  before: [setup]
+  sql: |
+    with tt as (select * from t)
+    select p.id, p.n, s.status, pv.v, a.items, a.last
+    from tt p
+    join st s on p.id = s.pid
+    left join vt pv on p.id = pv.pid
+    left join (
+      select i.id, jsonb_agg(i.e order by i.o) as items, max(g.mx) as last
+      from (select tt.id, x.e, x.o from tt cross join jsonb_array_elements(tt.j -> 'items') with ordinality as x(e, o)) i
+      join (
+        select tt.id, y.e ->> 'ref' as ref, max(r.x) as mx
+        from tt cross join jsonb_array_elements(tt.j -> 'refs') as y(e) left join r on (y.e ->> 'n')::int = r.id
+        group by tt.id, y.e ->> 'ref'
+      ) g on g.id = i.id and (i.e ->> 'ref') = g.ref
+      group by i.id
+    ) a on p.id = a.id
+    where s.status <> 'gone';
+  expected_outputs:
+  - stream_plan
+
+- name: kept - the row of the table is on the optional side of a left join of the left side
+  before: [setup]
+  sql: |
+    select x.id, a.m from x left join t on x.tid = t.id left join (select t2.id, max(v) as m from t t2, unnest(t2.arr) as v group by t2.id) a on t.id = a.id;
+  expected_outputs:
+  - stream_plan
+
+- name: kept - the key compared is a column of another table that looks the row up
+  before: [setup]
+  sql: |
+    select x.id, t.n, a.m from x left join t on x.tid = t.id left join (select t2.id, max(v) as m from t t2, unnest(t2.arr) as v group by t2.id) a on x.tid = a.id;
   expected_outputs:
   - stream_plan
 
