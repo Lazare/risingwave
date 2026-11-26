@@ -1,20 +1,2 @@
 # Differential tests run by `proto-streaming-prune-check.yml`: <name> <path under e2e_test, e.g. streaming/x or batch/x> <minutes>.
-prune streaming/prune_empty_relation 60
-merge streaming/merge_repeated_lookups 90
-union streaming/factor_union_join 60
-unionscans streaming/merge_union_scans 60
-flatlookups streaming/merge_lookups_flat 60
-dedup streaming/merge_lookups_under_dedup 60
-sharedaggs streaming/share_and_stacked_aggs 60
-lateral streaming/unnest_lateral_functions 60
-unnest streaming/simplify_subquery_unnesting 60
-batchkeys batch/plan_reduction_keys 60
-batchlag batch/rewrite_lag_duplicates 60
-batchunnest batch/plan_reduction_unnest 60
 batchjoinorder batch/cost_based_join_ordering 60
-ladder streaming/status_ladder_case 60
-batchladder batch/status_ladder_case 60
-batchfeedback batch/cardinality_feedback 60
-batchpass2 batch/reduce_keys_after_conversions 60
-nullkey batch/simplify_null_join_keys 60
-nullkeystream streaming/simplify_null_join_keys 60

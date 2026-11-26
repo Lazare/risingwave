@@ -78,6 +78,38 @@ impl Rule<Logical> for JoinCommuteRule {
     }
 }
 
+/// The same join with its sides swapped and the inverse join type (a left outer join becomes a
+/// right outer join...), for `CostBasedOuterJoinSidesRule` (`batch_cost_based_join_ordering`).
+/// The same rewrite as [`JoinCommuteRule`], for any join type but the as-of joins.
+pub(super) fn swap_join_sides(join: &LogicalJoin) -> LogicalJoin {
+    let (left, right, on, join_type, output_indices) = join.clone().decompose();
+    let left_len = left.schema().len();
+    let right_len = right.schema().len();
+    let new_output_indices = output_indices
+        .into_iter()
+        .map(|i| {
+            if i < left_len {
+                i + right_len
+            } else {
+                i - left_len
+            }
+        })
+        .collect_vec();
+    let mut condition_rewriter = Rewriter {
+        join_left_len: left_len,
+        join_left_offset: right_len as isize,
+        join_right_offset: -(left_len as isize),
+    };
+    let new_on = on.rewrite_expr(&mut condition_rewriter);
+    LogicalJoin::with_output_indices(
+        right,
+        left,
+        JoinCommuteRule::inverse_join_type(join_type),
+        new_on,
+        new_output_indices,
+    )
+}
+
 struct Rewriter {
     join_left_len: usize,
     join_left_offset: isize,

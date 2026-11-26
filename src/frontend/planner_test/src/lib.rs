@@ -35,7 +35,7 @@ use risingwave_frontend::optimizer::backfill_order_strategy::explain_backfill_or
 use risingwave_frontend::optimizer::plan_node::ConventionMarker;
 use risingwave_frontend::session::SessionImpl;
 use risingwave_frontend::test_utils::{
-    LocalFrontend, create_proto_file, get_explain_output, set_table_row_counts_for_test,
+    LocalFrontend, create_proto_file, get_explain_output, set_table_stats_for_test,
 };
 use risingwave_frontend::{
     Binder, Explain, FrontendOpts, OptimizerContext, OptimizerContextRef, PlanRef, Planner,
@@ -137,6 +137,8 @@ pub struct TestCase {
     /// Test only: row counts given to the frontend as the storage statistics of the tables, by
     /// table name, before the query is planned (for `batch_cost_based_join_ordering`).
     pub table_row_counts: Option<BTreeMap<String, u64>>,
+    /// Test only: with `table_row_counts`, the total size in bytes of some of these tables.
+    pub table_sizes: Option<BTreeMap<String, u64>>,
 
     /// Specify what output fields to check
     pub expected_outputs: HashSet<TestType>,
@@ -272,6 +274,8 @@ pub struct TestCaseResult {
     pub with_config_map: Option<BTreeMap<String, String>>,
     /// Test only: row counts given as the storage statistics of the tables
     pub table_row_counts: Option<BTreeMap<String, u64>>,
+    /// Test only: total sizes in bytes given as the storage statistics of the tables
+    pub table_sizes: Option<BTreeMap<String, u64>>,
 }
 
 impl TestCase {
@@ -319,6 +323,7 @@ impl TestCase {
             .clone_from(self.create_table_with_connector());
         result.with_config_map.clone_from(self.with_config_map());
         result.table_row_counts.clone_from(&self.table_row_counts);
+        result.table_sizes.clone_from(&self.table_sizes);
 
         Ok(result)
     }
@@ -423,7 +428,8 @@ impl TestCase {
                         panic!("two queries in one test case");
                     }
                     if let Some(row_counts) = &self.table_row_counts {
-                        set_table_row_counts_for_test(&session, row_counts)?;
+                        let sizes = self.table_sizes.clone().unwrap_or_default();
+                        set_table_stats_for_test(&session, row_counts, &sizes)?;
                     }
                     let explain_options = ExplainOptions {
                         verbose: true,

@@ -28,10 +28,15 @@
 //!   [`NON_KEY_JOIN_FANOUT`] times the larger side. The estimate of a set of inputs is the
 //!   product of their rows and of the selectivities of the conditions between them, whatever
 //!   the order of the joins;
-//! - the cost of a hash join counts its probe side (left), its build side (right, at a higher
-//!   price since it is held in memory) and its output; a join whose right side is a table that
-//!   the planner will read by key (a lookup join) costs a lookup per row of its left side, and
-//!   the table is not scanned.
+//! - the width of a row of each input is estimated in bytes, from the average size of a row of
+//!   the tables (`total_key_size + total_value_size` over `total_key_count`) shared out among
+//!   their columns by the weights of their types, or from the types alone ([`type_width`]), for
+//!   the columns that the plan above still reads ([`required_output_columns`]);
+//! - the cost of a hash join counts the bytes of its probe side (left), of its build side (right,
+//!   at a higher price since it is held in memory) and of its output: the build side is the side
+//!   with fewer bytes, not fewer rows. A join whose right side is a table that the planner will
+//!   read by key (a lookup join) costs a lookup per row of its left side, and the table is not
+//!   scanned.
 //!
 //! The join tree is found by dynamic programming over the connected sets of inputs up to
 //! [`MAX_DP_RELATIONS`] inputs, greedily beyond. Only the inner joins merged into a
@@ -41,20 +46,27 @@
 //!
 //! When an input has no estimate (a table without statistics, a source, a table function...),
 //! the join keeps the heuristic order: the plan is then the one of the heuristic ordering.
+//!
+//! After the column pruning, [`CostBasedOuterJoinSidesRule`] also swaps the sides of a left outer,
+//! semi or anti join into the right join of the other side, when its right side holds far more
+//! bytes than its left side (a hash join builds its right side).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 use itertools::Itertools;
+use risingwave_common::types::DataType;
 use risingwave_pb::hummock::HummockVersionStats;
 use risingwave_pb::plan_common::JoinType;
 
+use super::join_commute_rule::swap_join_sides;
 use super::prelude::{PlanRef, *};
 use super::unique_key_simplify_rule::unique_keys_of;
-use crate::expr::ExprImpl;
+use crate::expr::{Expr, ExprImpl};
 use crate::optimizer::plan_node::generic::GenericPlanRef;
 use crate::optimizer::plan_node::{
-    LogicalJoin, LogicalMultiJoin, LogicalMultiJoinBuilder, LogicalScan, PlanTreeNode,
-    PlanTreeNodeBinary, PlanTreeNodeUnary,
+    EqJoinPredicate, LogicalJoin, LogicalMultiJoin, LogicalMultiJoinBuilder, LogicalScan,
+    PlanNodeId, PlanTreeNode, PlanTreeNodeBinary, PlanTreeNodeUnary,
 };
 use crate::optimizer::plan_visitor::{CardinalityVisitor, PlanVisitor};
 use crate::utils::Condition;
@@ -72,24 +84,36 @@ pub(crate) const SEMI_JOIN_FRACTION: f64 = 0.5;
 /// Rows returned by a join on columns that are not a key of either side, per row of the larger
 /// side.
 pub(crate) const NON_KEY_JOIN_FANOUT: f64 = 2.0;
-/// Cost of a row of the left (probe) side of a hash join.
+/// Cost of a byte of the left (probe) side of a hash join.
 const PROBE_COST: f64 = 1.0;
-/// Cost of a row of the right (build) side of a hash join, held in memory.
+/// Cost of a byte of the right (build) side of a hash join, held in memory.
 const BUILD_COST: f64 = 3.0;
-/// Cost of a row of the left side of a lookup join: one read by key of the right table.
-const LOOKUP_COST: f64 = 2.0;
-/// Cost of an output row of a join.
+/// Cost of a byte of a lookup join, per row of its left side: the left row and the row read by
+/// key from the right table.
+const LOOKUP_COST: f64 = 1.0;
+/// Cost of a byte of the output of a join.
 const OUTPUT_COST: f64 = 1.0;
+/// Bytes added to the width of every row (the overhead of a row in a hash table or a chunk).
+const ROW_OVERHEAD_BYTES: f64 = 8.0;
+/// A left outer, semi or anti join becomes the right join of the other side only when its cost
+/// is at least this many times lower: the estimates are rough.
+const OUTER_SWAP_MARGIN: f64 = 2.0;
+
+/// The output columns of each plan node that the nodes above it read, by node id. A node that
+/// is not listed reads all its output columns.
+pub type RequiredColumns = HashMap<PlanNodeId, BTreeSet<usize>>;
 
 /// Orders the inputs of a `LogicalMultiJoin` by their estimated cost, or by the heuristic of
 /// `LeftDeepTreeJoinOrderingRule` when an input has no estimate.
-pub struct CostBasedJoinOrderingRule {}
+pub struct CostBasedJoinOrderingRule {
+    required: Arc<RequiredColumns>,
+}
 
 impl Rule<Logical> for CostBasedJoinOrderingRule {
     fn apply(&self, plan: PlanRef) -> Option<PlanRef> {
         let join = plan.as_logical_multi_join()?;
         let heuristic = join.heuristic_ordering().ok()?;
-        if let Some(reordered) = cost_based_join(join, &heuristic) {
+        if let Some(reordered) = cost_based_join(join, &heuristic, self.required.get(&plan.id())) {
             return Some(reordered);
         }
         // Same as `LeftDeepTreeJoinOrderingRule`.
@@ -98,15 +122,20 @@ impl Rule<Logical> for CostBasedJoinOrderingRule {
 }
 
 impl CostBasedJoinOrderingRule {
-    pub fn create() -> BoxedRule {
-        Box::new(CostBasedJoinOrderingRule {})
+    /// `required`: the output columns read by the plan above each node, see
+    /// [`required_output_columns`].
+    pub fn create(required: Arc<RequiredColumns>) -> BoxedRule {
+        Box::new(CostBasedJoinOrderingRule { required })
     }
 }
 
 /// Swaps the sides of a two-way inner join (not merged into a `LogicalMultiJoin`, which needs
 /// three inputs) when the estimated cost is lower: the smaller side becomes the build side, or
 /// the right side becomes a table read by key. Without estimates the join is kept as it is.
-pub struct CostBasedJoinSidesRule {}
+/// The sides of the join may be any plan (an aggregation, a top-n...) with an estimate.
+pub struct CostBasedJoinSidesRule {
+    required: Arc<RequiredColumns>,
+}
 
 impl Rule<Logical> for CostBasedJoinSidesRule {
     fn apply(&self, plan: PlanRef) -> Option<PlanRef> {
@@ -118,19 +147,93 @@ impl Rule<Logical> for CostBasedJoinSidesRule {
         if builder.inputs().len() != 2 {
             return None;
         }
-        cost_based_join(&builder.build(), &[0, 1])
+        cost_based_join(&builder.build(), &[0, 1], self.required.get(&plan.id()))
     }
 }
 
 impl CostBasedJoinSidesRule {
+    /// `required`: the output columns read by the plan above each node, see
+    /// [`required_output_columns`].
+    pub fn create(required: Arc<RequiredColumns>) -> BoxedRule {
+        Box::new(CostBasedJoinSidesRule { required })
+    }
+}
+
+/// Turns a left outer, semi or anti join into the right join of the other side when its right
+/// side, the build side of the hash join, holds far more bytes than its left side: the hash
+/// table is then built on the smaller side, and the larger one is streamed. Used after the
+/// column pruning, when the inputs only read the columns that are used, and after
+/// `JoinCommuteRule`, which would turn the right join back. Not applied when the join may be a
+/// lookup join (its right side is a table read by its key, or a table with an index), nor when a
+/// side has no estimate.
+pub struct CostBasedOuterJoinSidesRule {}
+
+impl Rule<Logical> for CostBasedOuterJoinSidesRule {
+    fn apply(&self, plan: PlanRef) -> Option<PlanRef> {
+        let join = plan.as_logical_join()?;
+        if !matches!(
+            join.join_type(),
+            JoinType::LeftOuter | JoinType::LeftSemi | JoinType::LeftAnti
+        ) {
+            return None;
+        }
+        let (left, right) = (join.left(), join.right());
+        let predicate =
+            EqJoinPredicate::create(left.schema().len(), right.schema().len(), join.on().clone());
+        if !predicate.has_eq() {
+            return None;
+        }
+        let ctx = plan.ctx();
+        let lookup_join_enabled = ctx.session_ctx().config().batch_enable_lookup_join();
+        if lookup_join_enabled && let Some(scan) = right.as_logical_scan() {
+            let given: BTreeSet<usize> = predicate.right_eq_indexes().into_iter().collect();
+            let by_key = scan_lookup_columns(scan).is_some_and(|key| key.is_subset(&given));
+            if by_key || !scan.table_indexes().is_empty() {
+                return None;
+            }
+        }
+        let catalog_reader = ctx.session_ctx().env().catalog_reader().read_guard();
+        let estimator = Estimator {
+            stats: catalog_reader.table_stats(),
+            lookup_join_enabled,
+        };
+        let l = estimator.input_estimate(&left)?;
+        let r = estimator.input_estimate(&right)?;
+        let l_bytes = l.rows * estimator.row_width(&left, None);
+        let r_bytes = r.rows * estimator.row_width(&right, None);
+        drop(catalog_reader);
+        let as_is = l_bytes * PROBE_COST + r_bytes * BUILD_COST;
+        let swapped = r_bytes * PROBE_COST + l_bytes * BUILD_COST;
+        if swapped * OUTER_SWAP_MARGIN >= as_is {
+            return None;
+        }
+        if ctx.is_explain_trace() {
+            ctx.trace(format!(
+                "Cost-based join sides: {:?} join with {} bytes on the left and {} on the right \
+                 becomes the right join of the other side",
+                join.join_type(),
+                l_bytes.round(),
+                r_bytes.round()
+            ));
+        }
+        Some(swap_join_sides(join).into())
+    }
+}
+
+impl CostBasedOuterJoinSidesRule {
     pub fn create() -> BoxedRule {
-        Box::new(CostBasedJoinSidesRule {})
+        Box::new(CostBasedOuterJoinSidesRule {})
     }
 }
 
 /// Builds the join tree of least estimated cost of the inputs of `join`, or returns `None` if an
 /// input has no estimate or if the tree is the left-deep tree of `heuristic`.
-fn cost_based_join(join: &LogicalMultiJoin, heuristic: &[usize]) -> Option<PlanRef> {
+/// `required` are the output columns of `join` that the plan above reads (all if `None`).
+fn cost_based_join(
+    join: &LogicalMultiJoin,
+    heuristic: &[usize],
+    required: Option<&BTreeSet<usize>>,
+) -> Option<PlanRef> {
     let ctx = join.base.ctx();
     let lookup_join_enabled = ctx.session_ctx().config().batch_enable_lookup_join();
     let catalog_reader = ctx.session_ctx().env().catalog_reader().read_guard();
@@ -138,7 +241,7 @@ fn cost_based_join(join: &LogicalMultiJoin, heuristic: &[usize]) -> Option<PlanR
         stats: catalog_reader.table_stats(),
         lookup_join_enabled,
     };
-    let graph = estimator.graph(join)?;
+    let graph = estimator.graph(join, required)?;
     drop(catalog_reader);
 
     let tree = graph.best_tree(heuristic)?;
@@ -150,8 +253,9 @@ fn cost_based_join(join: &LogicalMultiJoin, heuristic: &[usize]) -> Option<PlanR
     }
     if ctx.is_explain_trace() {
         ctx.trace(format!(
-            "Cost-based join ordering: estimated rows of the inputs {:?}, join tree {} instead of {}",
+            "Cost-based join ordering: estimated rows of the inputs {:?}, bytes per row {:?}, join tree {} instead of {}",
             graph.estimates.iter().map(|e| e.rows.round()).collect_vec(),
+            graph.widths.iter().map(|w| w.round()).collect_vec(),
             tree,
             left_deep
         ));
@@ -370,6 +474,14 @@ impl Estimator<'_> {
                 ..Estimate::of_rows(rows)
             });
         }
+        if let Some(over_window) = plan.as_logical_over_window() {
+            // The window functions add columns to every row.
+            let input = self.estimate(&over_window.input())?;
+            return Some(Estimate {
+                read: input.read,
+                ..Estimate::of_rows(input.rows)
+            });
+        }
         if let Some(dedup) = plan.as_logical_dedup() {
             let input = self.estimate(&dedup.input())?;
             return Some(Estimate {
@@ -392,7 +504,7 @@ impl Estimator<'_> {
             return self.join_estimate(plan, join);
         }
         if let Some(multi_join) = plan.as_logical_multi_join() {
-            let graph = self.graph(multi_join)?;
+            let graph = self.graph(multi_join, None)?;
             let all = (1u64 << graph.estimates.len()) - 1;
             return Some(Estimate {
                 read: graph.estimates.iter().map(|e| e.read).sum(),
@@ -412,7 +524,7 @@ impl Estimator<'_> {
                     // most.
                     side(join.left())?.rows
                 } else {
-                    let graph = self.graph(&builder.build())?;
+                    let graph = self.graph(&builder.build(), None)?;
                     graph.rows((1u64 << graph.estimates.len()) - 1)
                 }
             }
@@ -430,8 +542,163 @@ impl Estimator<'_> {
         Some(Estimate::of_rows(rows))
     }
 
-    /// The join graph of a multi-join, or `None` if an input has no estimate.
-    fn graph(&self, join: &LogicalMultiJoin) -> Option<JoinGraph> {
+    /// Bytes of a row of `plan`, for the given output columns (all if `None`).
+    fn row_width(&self, plan: &PlanRef, required: Option<&BTreeSet<usize>>) -> f64 {
+        let widths = self.column_widths(plan);
+        let bytes: f64 = match required {
+            Some(required) => required.iter().filter_map(|&c| widths.get(c)).sum(),
+            None => widths.iter().sum(),
+        };
+        bytes + ROW_OVERHEAD_BYTES
+    }
+
+    /// Bytes of each output column of `plan`. Always known: from the storage statistics of the
+    /// tables when they give sizes, from the data types otherwise.
+    fn column_widths(&self, plan: &PlanRef) -> Vec<f64> {
+        let by_type = || {
+            plan.schema()
+                .fields()
+                .iter()
+                .map(|field| type_width(&field.data_type))
+                .collect_vec()
+        };
+        if let Some(scan) = plan.as_logical_scan() {
+            return self.scan_column_widths(scan);
+        }
+        if let Some(filter) = plan.as_logical_filter() {
+            return self.column_widths(&filter.input());
+        }
+        if let Some(limit) = plan.as_logical_limit() {
+            return self.column_widths(&limit.input());
+        }
+        if let Some(top_n) = plan.as_logical_top_n() {
+            return self.column_widths(&top_n.input());
+        }
+        if let Some(dedup) = plan.as_logical_dedup() {
+            return self.column_widths(&dedup.input());
+        }
+        if let Some(over_window) = plan.as_logical_over_window() {
+            // The columns of the input, then the results of the window functions.
+            let mut widths = self.column_widths(&over_window.input());
+            let types = by_type();
+            widths.extend(
+                types
+                    .get(widths.len()..)
+                    .unwrap_or_default()
+                    .iter()
+                    .copied(),
+            );
+            return widths;
+        }
+        if let Some(share) = plan.as_logical_share() {
+            return self.column_widths(&share.input());
+        }
+        if let Some(project) = plan.as_logical_project() {
+            let input = self.column_widths(&project.input());
+            return project
+                .exprs()
+                .iter()
+                .map(|expr| match expr.as_input_ref() {
+                    Some(input_ref) => input[input_ref.index()],
+                    None => type_width(&expr.return_type()),
+                })
+                .collect();
+        }
+        if let Some(agg) = plan.as_logical_agg() {
+            if !agg.grouping_sets().is_empty() {
+                return by_type();
+            }
+            let input_plan = agg.input();
+            let input = self.column_widths(&input_plan);
+            let input_schema = input_plan.schema();
+            let mut widths = agg.group_key().indices().map(|i| input[i]).collect_vec();
+            // An aggregate that returns the type of its argument (`first_value`, `last_value`,
+            // `min`, `max`, `internal_last_seen_value`, `string_agg`...) is as wide as it.
+            widths.extend(
+                agg.agg_calls()
+                    .iter()
+                    .map(|call| match call.inputs.first() {
+                        Some(arg)
+                            if input_schema.fields()[arg.index()].data_type == call.return_type =>
+                        {
+                            input[arg.index()]
+                        }
+                        _ => type_width(&call.return_type),
+                    }),
+            );
+            return widths;
+        }
+        if let Some(join) = plan.as_logical_join() {
+            let mut internal = self.column_widths(&join.left());
+            internal.extend(self.column_widths(&join.right()));
+            return join
+                .output_indices()
+                .iter()
+                .map(|&i| internal.get(i).copied().unwrap_or(ROW_OVERHEAD_BYTES))
+                .collect();
+        }
+        if let Some(multi_join) = plan.as_logical_multi_join() {
+            let internal = multi_join
+                .inputs()
+                .iter()
+                .flat_map(|input| self.column_widths(input))
+                .collect_vec();
+            return multi_join
+                .output_indices()
+                .iter()
+                .map(|&i| internal[i])
+                .collect();
+        }
+        if let Some(union) = plan.as_logical_union() {
+            let mut widths = by_type();
+            for input in union.inputs() {
+                for (width, input_width) in widths.iter_mut().zip(self.column_widths(&input)) {
+                    *width = width.max(input_width);
+                }
+            }
+            return widths;
+        }
+        by_type()
+    }
+
+    /// Bytes of each output column of a scan: the average bytes of a row of the table in storage,
+    /// shared out among all its columns by the weights of their types; the type widths if the
+    /// statistics give no size.
+    fn scan_column_widths(&self, scan: &LogicalScan) -> Vec<f64> {
+        let table = scan.table();
+        let types = table
+            .columns
+            .iter()
+            .map(|column| type_width(column.data_type()))
+            .collect_vec();
+        let row_bytes = self
+            .stats
+            .table_stats
+            .get(&table.id.as_raw_id())
+            .filter(|stats| stats.total_key_count > 0)
+            .map(|stats| {
+                (stats.total_key_size.max(0) + stats.total_value_size.max(0)) as f64
+                    / stats.total_key_count as f64
+            })
+            .filter(|bytes| *bytes > 0.0);
+        let scale = match row_bytes {
+            Some(row_bytes) => row_bytes / types.iter().sum::<f64>().max(1.0),
+            None => 1.0,
+        };
+        scan.output_col_idx()
+            .iter()
+            .map(|&column| types[column] * scale)
+            .collect()
+    }
+
+    /// The join graph of a multi-join, or `None` if an input has no estimate. `required` are the
+    /// output columns of the multi-join that the plan above reads (all if `None`): the width of
+    /// each input counts them and the columns of the conditions.
+    fn graph(
+        &self,
+        join: &LogicalMultiJoin,
+        required: Option<&BTreeSet<usize>>,
+    ) -> Option<JoinGraph> {
         let inputs = join.inputs();
         let n = inputs.len();
         if n == 0 || n >= 64 {
@@ -491,6 +758,29 @@ impl Estimator<'_> {
             }
         }
 
+        // The columns of each input that are read: by the conditions and by the plan above.
+        let mut input_required = vec![BTreeSet::new(); n];
+        let output_indices = join.output_indices();
+        let mut internal: BTreeSet<usize> = match required {
+            Some(required) => required
+                .iter()
+                .filter_map(|&o| output_indices.get(o).copied())
+                .collect(),
+            None => output_indices.iter().copied().collect(),
+        };
+        for conjunct in &join.on().conjunctions {
+            internal.extend(conjunct.collect_input_refs(column_input.len()).ones());
+        }
+        for column in internal {
+            let (input, local) = column_input[column];
+            input_required[input].insert(local);
+        }
+        let widths = inputs
+            .iter()
+            .zip_eq(&input_required)
+            .map(|(input, required)| self.row_width(input, Some(required)))
+            .collect();
+
         let lookup_columns = inputs
             .iter()
             .map(|input| {
@@ -504,6 +794,7 @@ impl Estimator<'_> {
 
         Some(JoinGraph {
             estimates,
+            widths,
             neighbours,
             factors,
             eq_columns,
@@ -535,6 +826,8 @@ fn scan_lookup_columns(scan: &LogicalScan) -> Option<BTreeSet<usize>> {
 /// The inputs of a multi-join, the conditions between them and the estimates.
 struct JoinGraph {
     estimates: Vec<Estimate>,
+    /// Bytes of a row of each input, for the columns that are read.
+    widths: Vec<f64>,
     /// The inputs linked to each input by an equality, as a bit set.
     neighbours: Vec<u64>,
     /// The selectivity of the conditions, with the inputs they refer to as a bit set.
@@ -570,6 +863,11 @@ impl JoinGraph {
         rows.max(1.0)
     }
 
+    /// Bytes of a row of the join of a set of inputs.
+    fn width(&self, inputs: u64) -> f64 {
+        bits(inputs).map(|i| self.widths[i]).sum()
+    }
+
     fn linked(&self, left: u64, right: u64) -> bool {
         bits(left).any(|i| self.neighbours[i] & right != 0)
     }
@@ -593,22 +891,25 @@ impl JoinGraph {
     fn leaf(&self, input: usize) -> Planned {
         Planned {
             inputs: 1 << input,
-            cost: self.estimates[input].read,
+            cost: self.estimates[input].read * self.widths[input],
             rows: self.estimates[input].rows,
             tree: JoinTree::Leaf(input),
         }
     }
 
     /// The cost of joining `left` (probe side) with `right` (build side, or read by key).
+    /// In bytes: with the same width on both sides, the side choice is the one by rows.
     fn join_cost(&self, left: &Planned, right: &Planned, rows: f64) -> f64 {
+        let (left_width, right_width) = (self.width(left.inputs), self.width(right.inputs));
+        let output = rows * (left_width + right_width) * OUTPUT_COST;
         if self.is_lookup(left.inputs, right.inputs) {
-            left.cost + left.rows * LOOKUP_COST + rows * OUTPUT_COST
+            left.cost + left.rows * (left_width + right_width) * LOOKUP_COST + output
         } else {
             left.cost
                 + right.cost
-                + left.rows * PROBE_COST
-                + right.rows * BUILD_COST
-                + rows * OUTPUT_COST
+                + left.rows * left_width * PROBE_COST
+                + right.rows * right_width * BUILD_COST
+                + output
         }
     }
 
@@ -733,4 +1034,148 @@ impl JoinGraph {
         }
         planned.pop()
     }
+}
+
+/// Bytes of a value of the type, when the statistics give no size, and the weight of a column
+/// when the average size of a row of its table is shared out among its columns. Text, binary
+/// and JSON values get large defaults.
+pub(crate) fn type_width(data_type: &DataType) -> f64 {
+    match data_type {
+        DataType::Boolean => 1.0,
+        DataType::Int16 => 2.0,
+        DataType::Int32 | DataType::Float32 | DataType::Date => 4.0,
+        DataType::Int64
+        | DataType::Float64
+        | DataType::Serial
+        | DataType::Time
+        | DataType::Timestamp
+        | DataType::Timestamptz => 8.0,
+        DataType::Decimal | DataType::Interval => 16.0,
+        DataType::Int256 => 32.0,
+        DataType::Varchar => 64.0,
+        DataType::Bytea => 256.0,
+        DataType::Jsonb => 1024.0,
+        _ => 128.0,
+    }
+}
+
+/// The output columns of every node of `root` that the nodes above it read, for the width of
+/// the inputs of joins before the column pruning: the scans still read every column at that
+/// point. An estimate only: a node that is not handled here reads all the columns of its inputs.
+pub fn required_output_columns(root: &PlanRef) -> RequiredColumns {
+    let mut required = RequiredColumns::new();
+    collect_required(root, (0..root.schema().len()).collect(), &mut required);
+    required
+}
+
+fn collect_required(plan: &PlanRef, columns: BTreeSet<usize>, required: &mut RequiredColumns) {
+    let entry = required.entry(plan.id()).or_default();
+    entry.extend(columns);
+    let columns = entry.clone();
+    let inputs = plan.inputs();
+    for (input, input_columns) in inputs.iter().zip_eq(input_required_columns(plan, &columns)) {
+        collect_required(input, input_columns, required);
+    }
+}
+
+/// The input columns that the expressions refer to.
+fn expr_columns<'a>(exprs: impl Iterator<Item = &'a ExprImpl>, num: usize) -> BTreeSet<usize> {
+    exprs
+        .flat_map(|expr| expr.collect_input_refs(num).ones().collect_vec())
+        .collect()
+}
+
+/// The columns of each input of `plan` that it reads to produce the output columns `columns`.
+fn input_required_columns(plan: &PlanRef, columns: &BTreeSet<usize>) -> Vec<BTreeSet<usize>> {
+    if let Some(project) = plan.as_logical_project() {
+        let num = project.input().schema().len();
+        return vec![expr_columns(
+            columns.iter().filter_map(|&c| project.exprs().get(c)),
+            num,
+        )];
+    }
+    if let Some(filter) = plan.as_logical_filter() {
+        let num = filter.input().schema().len();
+        let mut input = expr_columns(filter.predicate().conjunctions.iter(), num);
+        input.extend(columns);
+        return vec![input];
+    }
+    if let Some(agg) = plan.as_logical_agg() {
+        let num = agg.input().schema().len();
+        let mut input: BTreeSet<usize> = agg.group_key().indices().collect();
+        for set in agg.grouping_sets() {
+            input.extend(set.indices());
+        }
+        for call in agg.agg_calls() {
+            input.extend(call.inputs.iter().map(|i| i.index()));
+            input.extend(call.order_by.iter().map(|o| o.column_index));
+            input.extend(expr_columns(call.filter.conjunctions.iter(), num));
+        }
+        return vec![input];
+    }
+    if let Some(join) = plan.as_logical_join() {
+        let left_num = join.left().schema().len();
+        let num = left_num + join.right().schema().len();
+        let mut internal = expr_columns(join.on().conjunctions.iter(), num);
+        internal.extend(columns.iter().filter_map(|&c| join.output_indices().get(c)));
+        return vec![
+            internal.iter().copied().filter(|&c| c < left_num).collect(),
+            internal
+                .iter()
+                .filter(|&&c| c >= left_num)
+                .map(|&c| c - left_num)
+                .collect(),
+        ];
+    }
+    if let Some(multi_join) = plan.as_logical_multi_join() {
+        let col_nums = multi_join.input_col_nums();
+        let num = col_nums.iter().sum();
+        let mut internal = expr_columns(multi_join.on().conjunctions.iter(), num);
+        internal.extend(
+            columns
+                .iter()
+                .filter_map(|&c| multi_join.output_indices().get(c)),
+        );
+        let mut inputs = vec![];
+        let mut offset = 0;
+        for num in col_nums {
+            inputs.push(
+                internal
+                    .range(offset..offset + num)
+                    .map(|&c| c - offset)
+                    .collect(),
+            );
+            offset += num;
+        }
+        return inputs;
+    }
+    if plan.as_logical_limit().is_some() || plan.as_logical_share().is_some() {
+        return vec![columns.clone()];
+    }
+    if let Some(top_n) = plan.as_logical_top_n() {
+        let mut input = columns.clone();
+        input.extend(top_n.group_key().iter().copied());
+        input.extend(
+            top_n
+                .topn_order()
+                .column_orders
+                .iter()
+                .map(|o| o.column_index),
+        );
+        return vec![input];
+    }
+    if let Some(dedup) = plan.as_logical_dedup() {
+        let mut input = columns.clone();
+        input.extend(dedup.dedup_cols().iter().copied());
+        return vec![input];
+    }
+    if let Some(union) = plan.as_logical_union()
+        && union.all()
+    {
+        return plan.inputs().iter().map(|_| columns.clone()).collect();
+    }
+    plan.inputs()
+        .iter()
+        .map(|input| (0..input.schema().len()).collect())
+        .collect()
 }
