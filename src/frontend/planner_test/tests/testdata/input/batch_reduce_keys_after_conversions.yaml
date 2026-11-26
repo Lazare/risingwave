@@ -1,0 +1,222 @@
+# Tests for `batch_reduce_keys_after_conversions` (batch only): the reductions on keys
+# (`batch_simplify_column_facts`, `batch_simplify_on_unique_key`, `batch_merge_repeated_lookups`)
+# run a second time, at most two rounds, after the stages that create aggregations and top-n: the
+# lag rewrite (`batch_rewrite_lag_duplicates`), the window conversions (and
+# `batch_over_window_to_topn`), and the conversion of `UNION` and of distinct aggregates.
+- id: setup_off
+  sql: |
+    set batch_simplify_column_facts = true;
+    set batch_simplify_on_unique_key = true;
+    set batch_merge_repeated_lookups = true;
+    set batch_rewrite_lag_duplicates = true;
+    create table t (id int primary key, x int, v int);
+    create table d (id int primary key, name varchar, grp int);
+    create table f (id int primary key, dim_id int, amt int, label varchar);
+    create table ev (eid int primary key, k int, status varchar, prio int);
+    create table nopk (a int, b int);
+  expected_outputs: []
+- id: setup
+  sql: |
+    set batch_simplify_column_facts = true;
+    set batch_simplify_on_unique_key = true;
+    set batch_merge_repeated_lookups = true;
+    set batch_rewrite_lag_duplicates = true;
+    set batch_reduce_keys_after_conversions = true;
+    create table t (id int primary key, x int, v int);
+    create table d (id int primary key, name varchar, grp int);
+    create table f (id int primary key, dim_id int, amt int, label varchar);
+    create table ev (eid int primary key, k int, status varchar, prio int);
+    create table nopk (a int, b int);
+  expected_outputs: []
+- id: setup_topn
+  sql: |
+    set batch_simplify_column_facts = true;
+    set batch_simplify_on_unique_key = true;
+    set batch_merge_repeated_lookups = true;
+    set batch_over_window_to_topn = true;
+    set batch_reduce_keys_after_conversions = true;
+    create table t (id int primary key, x int, v int);
+    create table ev (eid int primary key, k int, status varchar, prio int);
+  expected_outputs: []
+- id: setup_only
+  sql: |
+    set batch_rewrite_lag_duplicates = true;
+    set batch_reduce_keys_after_conversions = true;
+    create table t (id int primary key, x int, v int);
+  expected_outputs: []
+
+# Off by default: the aggregation created by the lag rewrite stays.
+- name: off by default - uniqueness check of a key written with lag
+  before: [setup_off]
+  sql: |
+    with o as (select id, lag(id) over (order by id) as prev from t)
+    select id, count(*) + 1 as n from o where id = prev group by id;
+  expected_outputs:
+  - batch_plan
+- name: off by default - left join to a union without all on its only column
+  before: [setup_off]
+  sql: |
+    select f.id, f.amt from f left join (select id from d union select dim_id from f) u on f.dim_id = u.id;
+  expected_outputs:
+  - batch_plan
+# Nothing happens without the reductions themselves.
+- name: alone - the variable without the reductions on keys changes nothing
+  before: [setup_only]
+  sql: |
+    with o as (select id, lag(id) over (order by id) as prev from t)
+    select id, count(*) + 1 as n from o where id = prev group by id;
+  expected_outputs:
+  - batch_plan
+
+# Rewritten: lag -> GROUP BY -> key.
+- name: lag - uniqueness check of a key is empty
+  before: [setup]
+  sql: |
+    with o as (select id, lag(id) over (order by id) as prev from t)
+    select id, count(*) + 1 as n from o where id = prev group by id;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+- name: lag - the duplicate rows of a key are none
+  before: [setup]
+  sql: |
+    with o as (select id, lag(id) over (order by id) as prev from t)
+    select * from o where id = prev;
+  expected_outputs:
+  - batch_plan
+- name: lag - count of the duplicates of a key, without group key, is zero
+  before: [setup]
+  sql: |
+    with o as (select id, lag(id) over (order by id) as prev from t)
+    select count(*) from o where id = prev;
+  expected_outputs:
+  - batch_plan
+# Kept: the column is not a key.
+- name: kept - lag on a column that is not a key
+  before: [setup]
+  sql: |
+    with o as (select x, lag(x) over (order by x) as prev from t)
+    select x, count(*) + 1 as n from o where x = prev group by x;
+  expected_outputs:
+  - batch_plan
+- name: kept - lag on a table without primary key
+  before: [setup]
+  sql: |
+    with o as (select a, lag(a) over (order by a) as prev from nopk)
+    select a, count(*) + 1 as n from o where a = prev group by a;
+  expected_outputs:
+  - batch_plan
+
+# Rewritten: UNION -> aggregation -> key.
+- name: union - left join to a union without all on its only column is unused
+  before: [setup]
+  sql: |
+    select f.id, f.amt from f left join (select id from d union select dim_id from f) u on f.dim_id = u.id;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+- name: union - count per value of a union without all is one
+  before: [setup]
+  sql: |
+    select id, count(*) as n from (select id from d union select dim_id from f) u group by id;
+  expected_outputs:
+  - batch_plan
+- name: union - distinct over a union without all is removed
+  before: [setup]
+  sql: |
+    select distinct id, name from (select id, name from d union select dim_id, label from f) u;
+  expected_outputs:
+  - batch_plan
+# Kept: the union removes duplicates on every column, the count needs them all.
+- name: kept - count over a union without all keeps the duplicates removal on every column
+  before: [setup]
+  sql: |
+    select count(*) from (select grp, name from d union select dim_id, label from f) u;
+  expected_outputs:
+  - batch_plan
+- name: kept - count of one column over a union without all of two columns
+  before: [setup]
+  sql: |
+    select count(grp) from (select grp, name from d union select dim_id, label from f) u;
+  expected_outputs:
+  - batch_plan
+- name: kept - left join to a union without all on one of its two columns
+  before: [setup]
+  sql: |
+    select f.id, f.amt from f left join (select id, name from d union select dim_id, label from f) u on f.dim_id = u.id;
+  expected_outputs:
+  - batch_plan
+- name: kept - left join to a union all
+  before: [setup]
+  sql: |
+    select f.id, f.amt from f left join (select id from d union all select dim_id from f) u on f.dim_id = u.id;
+  expected_outputs:
+  - batch_plan
+
+# Rewritten: distinct aggregate split into two aggregations.
+- name: distinct - distinct count of a key per group
+  before: [setup]
+  sql: |
+    select grp, count(distinct id) as n, count(*) as c from d group by grp;
+  expected_outputs:
+  - batch_plan
+- name: distinct - two distinct aggregates over a key
+  before: [setup]
+  sql: |
+    select grp, count(distinct id) as n, sum(distinct id) as s from d group by grp;
+  expected_outputs:
+  - batch_plan
+
+# Rewritten: row_number() = 1 -> top-n per group (`batch_over_window_to_topn`) -> key.
+- name: topn - left join to the latest row per key, whose columns are not read, is unused
+  before: [setup_topn]
+  sql: |
+    select t.id, t.v from t left join (
+      select k, status from (select k, status, row_number() over (partition by k order by prio desc) as rn from ev) x
+      where rn = 1) s on t.id = s.k;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+- name: topn - count per key of the latest row per key is one
+  before: [setup_topn]
+  sql: |
+    select k, count(*) as n from (select k, row_number() over (partition by k order by prio desc) as rn from ev) x
+    where rn = 1 group by k;
+  expected_outputs:
+  - batch_plan
+# Kept: two rows per key, or the columns of the right side are read.
+- name: kept - left join to the two latest rows per key
+  before: [setup_topn]
+  sql: |
+    select t.id, t.v from t left join (
+      select k, status from (select k, status, row_number() over (partition by k order by prio desc) as rn from ev) x
+      where rn <= 2) s on t.id = s.k;
+  expected_outputs:
+  - batch_plan
+- name: kept - left join to the latest row per key, its status read
+  before: [setup_topn]
+  sql: |
+    select t.id, s.status from t left join (
+      select k, status from (select k, status, row_number() over (partition by k order by prio desc) as rn from ev) x
+      where rn = 1) s on t.id = s.k;
+  expected_outputs:
+  - batch_plan
+
+# Two rounds: the aggregation removed in the first round leaves a join to a lookup that the
+# second round removes.
+- name: rounds - aggregation over a key removed, then the left join above it
+  before: [setup]
+  sql: |
+    with o as (select id, lag(id) over (order by id) as prev from t),
+    dup as (select id, count(*) as n from o where id = prev group by id)
+    select f.id, f.amt from f left join dup on f.dim_id = dup.id;
+  expected_outputs:
+  - batch_plan
+- name: rounds - union converted, its key removes a distinct, then a join
+  before: [setup]
+  sql: |
+    select f.id, u.id as uid from f
+    left join (select distinct id from (select id from d union select dim_id from f) a) u on f.dim_id = u.id
+    left join d on u.id = d.id;
+  expected_outputs:
+  - batch_plan

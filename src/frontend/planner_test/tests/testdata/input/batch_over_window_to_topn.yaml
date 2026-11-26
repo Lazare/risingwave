@@ -1,0 +1,146 @@
+# Tests for `batch_over_window_to_topn` (batch only): `OverWindowToTopNRule` turns
+# `row_number() OVER (PARTITION BY .. ORDER BY ..) <= n` into a top-n per group, instead of a sort
+# of all the rows and a window. Only `row_number()` and at most 10 rows per group (`limit + offset`):
+# the batch top-n keeps a heap per group in memory and cannot spill, unlike the sort; a heap with
+# ties (`rank()`) has no bound.
+- id: setup_off
+  sql: |
+    create table ev (eid int primary key, k int, status varchar, prio int, ts int);
+  expected_outputs: []
+- id: setup
+  sql: |
+    set batch_over_window_to_topn = true;
+    create table ev (eid int primary key, k int, status varchar, prio int, ts int);
+  expected_outputs: []
+
+- name: off by default - latest row per key
+  before: [setup_off]
+  sql: |
+    select k, status from (select k, status, row_number() over (partition by k order by prio desc) as rn from ev) x
+    where rn = 1;
+  expected_outputs:
+  - batch_plan
+
+# Rewritten.
+- name: latest row per key
+  before: [setup]
+  sql: |
+    select k, status from (select k, status, row_number() over (partition by k order by prio desc) as rn from ev) x
+    where rn = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+- name: three first rows per key, two order columns
+  before: [setup]
+  sql: |
+    select k, status, ts from (select k, status, ts, row_number() over (partition by k order by prio, ts desc) as rn from ev) x
+    where rn <= 3;
+  expected_outputs:
+  - batch_plan
+- name: strict bound
+  before: [setup]
+  sql: |
+    select k, status from (select *, row_number() over (partition by k order by prio) as rn from ev) x
+    where rn < 4;
+  expected_outputs:
+  - batch_plan
+- name: offset and limit (second and third rows)
+  before: [setup]
+  sql: |
+    select k, status from (select *, row_number() over (partition by k order by prio) as rn from ev) x
+    where rn > 1 and rn <= 3;
+  expected_outputs:
+  - batch_plan
+- name: bound of exactly 10 rows per group
+  before: [setup]
+  sql: |
+    select k, status from (select *, row_number() over (partition by k order by prio) as rn from ev) x
+    where rn <= 10;
+  expected_outputs:
+  - batch_plan
+- name: row number read above, window over the top-n
+  before: [setup]
+  sql: |
+    select k, status, rn from (select k, status, row_number() over (partition by k order by prio) as rn from ev) x
+    where rn <= 2;
+  expected_outputs:
+  - batch_plan
+- name: other condition on the rows kept
+  before: [setup]
+  sql: |
+    select k, status from (select k, status, row_number() over (partition by k order by prio) as rn from ev) x
+    where rn = 1 and status <> 'closed';
+  expected_outputs:
+  - batch_plan
+- name: no partition, a global top-n
+  before: [setup]
+  sql: |
+    select k, status from (select k, status, row_number() over (order by prio, eid) as rn from ev) x
+    where rn <= 5;
+  expected_outputs:
+  - batch_plan
+- name: partition by two columns
+  before: [setup]
+  sql: |
+    select k, status from (select k, status, row_number() over (partition by k, status order by ts desc) as rn from ev) x
+    where rn = 1;
+  expected_outputs:
+  - batch_plan
+
+# Kept.
+- name: kept - rank, whose ties make the state of a group unbounded
+  before: [setup]
+  sql: |
+    select k, status from (select k, status, rank() over (partition by k order by prio desc) as rn from ev) x
+    where rn = 1;
+  expected_outputs:
+  - batch_plan
+- name: kept - dense_rank
+  before: [setup]
+  sql: |
+    select k, status from (select k, status, dense_rank() over (partition by k order by prio desc) as rn from ev) x
+    where rn = 1;
+  expected_outputs:
+  - batch_plan
+- name: kept - more than 10 rows per group
+  before: [setup]
+  sql: |
+    select k, status from (select *, row_number() over (partition by k order by prio) as rn from ev) x
+    where rn <= 11;
+  expected_outputs:
+  - batch_plan
+- name: kept - offset and limit above 10 rows per group
+  before: [setup]
+  sql: |
+    select k, status from (select *, row_number() over (partition by k order by prio) as rn from ev) x
+    where rn > 5 and rn <= 12;
+  expected_outputs:
+  - batch_plan
+- name: kept - no upper bound
+  before: [setup]
+  sql: |
+    select k, status from (select *, row_number() over (partition by k order by prio) as rn from ev) x
+    where rn > 1;
+  expected_outputs:
+  - batch_plan
+- name: kept - row number compared with a column
+  before: [setup]
+  sql: |
+    select k, status from (select *, row_number() over (partition by k order by prio) as rn from ev) x
+    where rn <= prio;
+  expected_outputs:
+  - batch_plan
+- name: two window functions, the sum over the whole partition
+  before: [setup]
+  sql: |
+    select k, status from (select k, status, row_number() over (partition by k order by prio) as rn,
+      sum(prio) over (partition by k) as total from ev) x
+    where rn = 1 and total > 3;
+  expected_outputs:
+  - batch_plan
+- name: kept - row number without filter
+  before: [setup]
+  sql: |
+    select k, status, row_number() over (partition by k order by prio) as rn from ev;
+  expected_outputs:
+  - batch_plan
