@@ -43,7 +43,7 @@ statement ok
 create table bpu_d (id int primary key, name varchar, grp int, active boolean);
 
 statement ok
-create table bpu_e (id int primary key, code varchar, ref int);
+create table bpu_e (id int primary key, code varchar, rid int);
 
 statement ok
 create table bpu_g (id int primary key, a int, b int);
@@ -294,64 +294,64 @@ statement ok
 create table bpu_lf_self_inner_on as select t.id, s.cnt from bpu_t t join (select t.id, count(*) as cnt from bpu_t t, unnest(t.arr) as v where v > 1 group by t.id) s on t.id = s.id limit 0;
 
 statement ok
-create table bpu_uj_inner_off as select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id union all select e.id, d.name from bpu_e e join bpu_d d on e.ref = d.id limit 0;
+create table bpu_uj_inner_off as select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id union all select e.id, d.name from bpu_e e join bpu_d d on e.rid = d.id limit 0;
 
 statement ok
-create table bpu_uj_inner_on as select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id union all select e.id, d.name from bpu_e e join bpu_d d on e.ref = d.id limit 0;
+create table bpu_uj_inner_on as select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id union all select e.id, d.name from bpu_e e join bpu_d d on e.rid = d.id limit 0;
 
 statement ok
-create table bpu_uj_left_proj_off as select f.id, f.label as txt, least(f.amt, d.grp) as n from bpu_f f left join bpu_d d on f.dim_id = d.id union all select e.id, e.code, d.grp from bpu_e e left join bpu_d d on e.ref = d.id limit 0;
+create table bpu_uj_left_proj_off as select f.id, f.label as txt, least(f.amt, d.grp) as n from bpu_f f left join bpu_d d on f.dim_id = d.id union all select e.id, e.code, d.grp from bpu_e e left join bpu_d d on e.rid = d.id limit 0;
 
 statement ok
-create table bpu_uj_left_proj_on as select f.id, f.label as txt, least(f.amt, d.grp) as n from bpu_f f left join bpu_d d on f.dim_id = d.id union all select e.id, e.code, d.grp from bpu_e e left join bpu_d d on e.ref = d.id limit 0;
+create table bpu_uj_left_proj_on as select f.id, f.label as txt, least(f.amt, d.grp) as n from bpu_f f left join bpu_d d on f.dim_id = d.id union all select e.id, e.code, d.grp from bpu_e e left join bpu_d d on e.rid = d.id limit 0;
 
 statement ok
-create table bpu_uj_inner_filters_off as select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id where d.active union all select e.id, d.name from bpu_e e join bpu_d d on e.ref = d.id where d.grp = 2 limit 0;
+create table bpu_uj_inner_filters_off as select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id where d.active union all select e.id, d.name from bpu_e e join bpu_d d on e.rid = d.id where d.grp = 2 limit 0;
 
 statement ok
-create table bpu_uj_inner_filters_on as select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id where d.active union all select e.id, d.name from bpu_e e join bpu_d d on e.ref = d.id where d.grp = 2 limit 0;
+create table bpu_uj_inner_filters_on as select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id where d.active union all select e.id, d.name from bpu_e e join bpu_d d on e.rid = d.id where d.grp = 2 limit 0;
 
 statement ok
-create table bpu_uj_left_filtered_off as select f.id, d.name from bpu_f f left join (select * from bpu_d where active) d on f.dim_id = d.id union all select e.id, d.name from bpu_e e left join bpu_d d on e.ref = d.id limit 0;
+create table bpu_uj_left_filtered_off as select f.id, d.name from bpu_f f left join (select * from bpu_d where active) d on f.dim_id = d.id union all select e.id, d.name from bpu_e e left join bpu_d d on e.rid = d.id limit 0;
 
 statement ok
-create table bpu_uj_left_filtered_on as select f.id, d.name from bpu_f f left join (select * from bpu_d where active) d on f.dim_id = d.id union all select e.id, d.name from bpu_e e left join bpu_d d on e.ref = d.id limit 0;
+create table bpu_uj_left_filtered_on as select f.id, d.name from bpu_f f left join (select * from bpu_d where active) d on f.dim_id = d.id union all select e.id, d.name from bpu_e e left join bpu_d d on e.rid = d.id limit 0;
 
 statement ok
-create table bpu_uj_left_extra_off as select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id and f.amt > d.grp union all select e.id, d.name from bpu_e e left join bpu_d d on e.ref = d.id and d.name <> e.code limit 0;
+create table bpu_uj_left_extra_off as select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id and f.amt > d.grp union all select e.id, d.name from bpu_e e left join bpu_d d on e.rid = d.id and d.name <> e.code limit 0;
 
 statement ok
-create table bpu_uj_left_extra_on as select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id and f.amt > d.grp union all select e.id, d.name from bpu_e e left join bpu_d d on e.ref = d.id and d.name <> e.code limit 0;
+create table bpu_uj_left_extra_on as select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id and f.amt > d.grp union all select e.id, d.name from bpu_e e left join bpu_d d on e.rid = d.id and d.name <> e.code limit 0;
 
 statement ok
-create table bpu_uj_filters_above_off as select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id where f.amt > 3 or d.name is null union all select e.id, d.name from bpu_e e left join bpu_d d on e.ref = d.id where e.code is not null limit 0;
+create table bpu_uj_filters_above_off as select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id where f.amt > 3 or d.name is null union all select e.id, d.name from bpu_e e left join bpu_d d on e.rid = d.id where e.code is not null limit 0;
 
 statement ok
-create table bpu_uj_filters_above_on as select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id where f.amt > 3 or d.name is null union all select e.id, d.name from bpu_e e left join bpu_d d on e.ref = d.id where e.code is not null limit 0;
+create table bpu_uj_filters_above_on as select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id where f.amt > 3 or d.name is null union all select e.id, d.name from bpu_e e left join bpu_d d on e.rid = d.id where e.code is not null limit 0;
 
 statement ok
-create table bpu_uj_semi_off as select f.id, f.label from bpu_f f where exists (select 1 from bpu_d d where d.id = f.dim_id) union all select e.id, e.code from bpu_e e where exists (select 1 from bpu_d d where d.id = e.ref) limit 0;
+create table bpu_uj_semi_off as select f.id, f.label from bpu_f f where exists (select 1 from bpu_d d where d.id = f.dim_id) union all select e.id, e.code from bpu_e e where exists (select 1 from bpu_d d where d.id = e.rid) limit 0;
 
 statement ok
-create table bpu_uj_semi_on as select f.id, f.label from bpu_f f where exists (select 1 from bpu_d d where d.id = f.dim_id) union all select e.id, e.code from bpu_e e where exists (select 1 from bpu_d d where d.id = e.ref) limit 0;
+create table bpu_uj_semi_on as select f.id, f.label from bpu_f f where exists (select 1 from bpu_d d where d.id = f.dim_id) union all select e.id, e.code from bpu_e e where exists (select 1 from bpu_d d where d.id = e.rid) limit 0;
 
 statement ok
-create table bpu_uj_anti_off as select f.id, f.label from bpu_f f where not exists (select 1 from bpu_d d where d.id = f.dim_id and d.active) union all select e.id, e.code from bpu_e e where not exists (select 1 from bpu_d d where d.id = e.ref) limit 0;
+create table bpu_uj_anti_off as select f.id, f.label from bpu_f f where not exists (select 1 from bpu_d d where d.id = f.dim_id and d.active) union all select e.id, e.code from bpu_e e where not exists (select 1 from bpu_d d where d.id = e.rid) limit 0;
 
 statement ok
-create table bpu_uj_anti_on as select f.id, f.label from bpu_f f where not exists (select 1 from bpu_d d where d.id = f.dim_id and d.active) union all select e.id, e.code from bpu_e e where not exists (select 1 from bpu_d d where d.id = e.ref) limit 0;
+create table bpu_uj_anti_on as select f.id, f.label from bpu_f f where not exists (select 1 from bpu_d d where d.id = f.dim_id and d.active) union all select e.id, e.code from bpu_e e where not exists (select 1 from bpu_d d where d.id = e.rid) limit 0;
 
 statement ok
-create table bpu_uj_non_key_off as select f.id, d.name from bpu_f f join bpu_d d on f.amt = d.grp union all select e.id, d.name from bpu_e e join bpu_d d on e.ref = d.grp limit 0;
+create table bpu_uj_non_key_off as select f.id, d.name from bpu_f f join bpu_d d on f.amt = d.grp union all select e.id, d.name from bpu_e e join bpu_d d on e.rid = d.grp limit 0;
 
 statement ok
-create table bpu_uj_non_key_on as select f.id, d.name from bpu_f f join bpu_d d on f.amt = d.grp union all select e.id, d.name from bpu_e e join bpu_d d on e.ref = d.grp limit 0;
+create table bpu_uj_non_key_on as select f.id, d.name from bpu_f f join bpu_d d on f.amt = d.grp union all select e.id, d.name from bpu_e e join bpu_d d on e.rid = d.grp limit 0;
 
 statement ok
-create table bpu_uj_three_off as select f.id, d.name, 'f' as src from bpu_f f join bpu_d d on f.dim_id = d.id union all select g.id, e.code, 'g' from bpu_g g join bpu_e e on g.a = e.id union all select e.id, d.name, 'e' from bpu_e e join bpu_d d on e.ref = d.id limit 0;
+create table bpu_uj_three_off as select f.id, d.name, 'f' as src from bpu_f f join bpu_d d on f.dim_id = d.id union all select g.id, e.code, 'g' from bpu_g g join bpu_e e on g.a = e.id union all select e.id, d.name, 'e' from bpu_e e join bpu_d d on e.rid = d.id limit 0;
 
 statement ok
-create table bpu_uj_three_on as select f.id, d.name, 'f' as src from bpu_f f join bpu_d d on f.dim_id = d.id union all select g.id, e.code, 'g' from bpu_g g join bpu_e e on g.a = e.id union all select e.id, d.name, 'e' from bpu_e e join bpu_d d on e.ref = d.id limit 0;
+create table bpu_uj_three_on as select f.id, d.name, 'f' as src from bpu_f f join bpu_d d on f.dim_id = d.id union all select g.id, e.code, 'g' from bpu_g g join bpu_e e on g.a = e.id union all select e.id, d.name, 'e' from bpu_e e join bpu_d d on e.rid = d.id limit 0;
 
 statement ok
 create table bpu_uj_two_cols_off as select f.id, d.active from bpu_f f join bpu_d d on f.dim_id = d.id and f.amt = d.grp union all select g.id, d.active from bpu_g g join bpu_d d on g.b = d.grp and g.a = d.id limit 0;
@@ -360,22 +360,22 @@ statement ok
 create table bpu_uj_two_cols_on as select f.id, d.active from bpu_f f join bpu_d d on f.dim_id = d.id and f.amt = d.grp union all select g.id, d.active from bpu_g g join bpu_d d on g.b = d.grp and g.a = d.id limit 0;
 
 statement ok
-create table bpu_uj_derived_agg_off as select f.id, v.cnt, v.mx from bpu_f f left join bpu_dagg v on f.amt = v.grp union all select e.id, v.cnt, e.code from bpu_e e left join bpu_dagg v on e.ref = v.grp limit 0;
+create table bpu_uj_derived_agg_off as select f.id, v.cnt, v.mx from bpu_f f left join bpu_dagg v on f.amt = v.grp union all select e.id, v.cnt, e.code from bpu_e e left join bpu_dagg v on e.rid = v.grp limit 0;
 
 statement ok
-create table bpu_uj_derived_agg_on as select f.id, v.cnt, v.mx from bpu_f f left join bpu_dagg v on f.amt = v.grp union all select e.id, v.cnt, e.code from bpu_e e left join bpu_dagg v on e.ref = v.grp limit 0;
+create table bpu_uj_derived_agg_on as select f.id, v.cnt, v.mx from bpu_f f left join bpu_dagg v on f.amt = v.grp union all select e.id, v.cnt, e.code from bpu_e e left join bpu_dagg v on e.rid = v.grp limit 0;
 
 statement ok
-create table bpu_uj_derived_join_off as select f.id, v.name, v.a from bpu_f f join bpu_dj v on f.dim_id = v.id union all select e.id, v.name, v.a from bpu_e e join bpu_dj v on e.ref = v.id limit 0;
+create table bpu_uj_derived_join_off as select f.id, v.name, v.a from bpu_f f join bpu_dj v on f.dim_id = v.id union all select e.id, v.name, v.a from bpu_e e join bpu_dj v on e.rid = v.id limit 0;
 
 statement ok
-create table bpu_uj_derived_join_on as select f.id, v.name, v.a from bpu_f f join bpu_dj v on f.dim_id = v.id union all select e.id, v.name, v.a from bpu_e e join bpu_dj v on e.ref = v.id limit 0;
+create table bpu_uj_derived_join_on as select f.id, v.name, v.a from bpu_f f join bpu_dj v on f.dim_id = v.id union all select e.id, v.name, v.a from bpu_e e join bpu_dj v on e.rid = v.id limit 0;
 
 statement ok
-create table bpu_uj_kept_ordered_agg_off as select f.id, v.names from bpu_f f join bpu_dnames v on f.amt = v.grp union all select e.id, v.names from bpu_e e join bpu_dnames v on e.ref = v.grp limit 0;
+create table bpu_uj_kept_ordered_agg_off as select f.id, v.names from bpu_f f join bpu_dnames v on f.amt = v.grp union all select e.id, v.names from bpu_e e join bpu_dnames v on e.rid = v.grp limit 0;
 
 statement ok
-create table bpu_uj_kept_ordered_agg_on as select f.id, v.names from bpu_f f join bpu_dnames v on f.amt = v.grp union all select e.id, v.names from bpu_e e join bpu_dnames v on e.ref = v.grp limit 0;
+create table bpu_uj_kept_ordered_agg_on as select f.id, v.names from bpu_f f join bpu_dnames v on f.amt = v.grp union all select e.id, v.names from bpu_e e join bpu_dnames v on e.rid = v.grp limit 0;
 
 statement ok
 create table bpu_us_two_off as select a, x from bpu_m where a > 0 union all select b, y from bpu_m where b > 0 limit 0;
@@ -1676,13 +1676,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_inner_off select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id union all select e.id, d.name from bpu_e e join bpu_d d on e.ref = d.id;
+insert into bpu_uj_inner_off select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id union all select e.id, d.name from bpu_e e join bpu_d d on e.rid = d.id;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_inner_on select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id union all select e.id, d.name from bpu_e e join bpu_d d on e.ref = d.id;
+insert into bpu_uj_inner_on select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id union all select e.id, d.name from bpu_e e join bpu_d d on e.rid = d.id;
 
 statement ok
 set batch_factor_union_join = false;
@@ -1707,13 +1707,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_left_proj_off select f.id, f.label as txt, least(f.amt, d.grp) as n from bpu_f f left join bpu_d d on f.dim_id = d.id union all select e.id, e.code, d.grp from bpu_e e left join bpu_d d on e.ref = d.id;
+insert into bpu_uj_left_proj_off select f.id, f.label as txt, least(f.amt, d.grp) as n from bpu_f f left join bpu_d d on f.dim_id = d.id union all select e.id, e.code, d.grp from bpu_e e left join bpu_d d on e.rid = d.id;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_left_proj_on select f.id, f.label as txt, least(f.amt, d.grp) as n from bpu_f f left join bpu_d d on f.dim_id = d.id union all select e.id, e.code, d.grp from bpu_e e left join bpu_d d on e.ref = d.id;
+insert into bpu_uj_left_proj_on select f.id, f.label as txt, least(f.amt, d.grp) as n from bpu_f f left join bpu_d d on f.dim_id = d.id union all select e.id, e.code, d.grp from bpu_e e left join bpu_d d on e.rid = d.id;
 
 statement ok
 set batch_factor_union_join = false;
@@ -1738,13 +1738,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_inner_filters_off select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id where d.active union all select e.id, d.name from bpu_e e join bpu_d d on e.ref = d.id where d.grp = 2;
+insert into bpu_uj_inner_filters_off select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id where d.active union all select e.id, d.name from bpu_e e join bpu_d d on e.rid = d.id where d.grp = 2;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_inner_filters_on select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id where d.active union all select e.id, d.name from bpu_e e join bpu_d d on e.ref = d.id where d.grp = 2;
+insert into bpu_uj_inner_filters_on select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id where d.active union all select e.id, d.name from bpu_e e join bpu_d d on e.rid = d.id where d.grp = 2;
 
 statement ok
 set batch_factor_union_join = false;
@@ -1769,13 +1769,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_left_filtered_off select f.id, d.name from bpu_f f left join (select * from bpu_d where active) d on f.dim_id = d.id union all select e.id, d.name from bpu_e e left join bpu_d d on e.ref = d.id;
+insert into bpu_uj_left_filtered_off select f.id, d.name from bpu_f f left join (select * from bpu_d where active) d on f.dim_id = d.id union all select e.id, d.name from bpu_e e left join bpu_d d on e.rid = d.id;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_left_filtered_on select f.id, d.name from bpu_f f left join (select * from bpu_d where active) d on f.dim_id = d.id union all select e.id, d.name from bpu_e e left join bpu_d d on e.ref = d.id;
+insert into bpu_uj_left_filtered_on select f.id, d.name from bpu_f f left join (select * from bpu_d where active) d on f.dim_id = d.id union all select e.id, d.name from bpu_e e left join bpu_d d on e.rid = d.id;
 
 statement ok
 set batch_factor_union_join = false;
@@ -1800,13 +1800,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_left_extra_off select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id and f.amt > d.grp union all select e.id, d.name from bpu_e e left join bpu_d d on e.ref = d.id and d.name <> e.code;
+insert into bpu_uj_left_extra_off select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id and f.amt > d.grp union all select e.id, d.name from bpu_e e left join bpu_d d on e.rid = d.id and d.name <> e.code;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_left_extra_on select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id and f.amt > d.grp union all select e.id, d.name from bpu_e e left join bpu_d d on e.ref = d.id and d.name <> e.code;
+insert into bpu_uj_left_extra_on select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id and f.amt > d.grp union all select e.id, d.name from bpu_e e left join bpu_d d on e.rid = d.id and d.name <> e.code;
 
 statement ok
 set batch_factor_union_join = false;
@@ -1831,13 +1831,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_filters_above_off select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id where f.amt > 3 or d.name is null union all select e.id, d.name from bpu_e e left join bpu_d d on e.ref = d.id where e.code is not null;
+insert into bpu_uj_filters_above_off select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id where f.amt > 3 or d.name is null union all select e.id, d.name from bpu_e e left join bpu_d d on e.rid = d.id where e.code is not null;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_filters_above_on select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id where f.amt > 3 or d.name is null union all select e.id, d.name from bpu_e e left join bpu_d d on e.ref = d.id where e.code is not null;
+insert into bpu_uj_filters_above_on select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id where f.amt > 3 or d.name is null union all select e.id, d.name from bpu_e e left join bpu_d d on e.rid = d.id where e.code is not null;
 
 statement ok
 set batch_factor_union_join = false;
@@ -1862,13 +1862,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_semi_off select f.id, f.label from bpu_f f where exists (select 1 from bpu_d d where d.id = f.dim_id) union all select e.id, e.code from bpu_e e where exists (select 1 from bpu_d d where d.id = e.ref);
+insert into bpu_uj_semi_off select f.id, f.label from bpu_f f where exists (select 1 from bpu_d d where d.id = f.dim_id) union all select e.id, e.code from bpu_e e where exists (select 1 from bpu_d d where d.id = e.rid);
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_semi_on select f.id, f.label from bpu_f f where exists (select 1 from bpu_d d where d.id = f.dim_id) union all select e.id, e.code from bpu_e e where exists (select 1 from bpu_d d where d.id = e.ref);
+insert into bpu_uj_semi_on select f.id, f.label from bpu_f f where exists (select 1 from bpu_d d where d.id = f.dim_id) union all select e.id, e.code from bpu_e e where exists (select 1 from bpu_d d where d.id = e.rid);
 
 statement ok
 set batch_factor_union_join = false;
@@ -1893,13 +1893,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_anti_off select f.id, f.label from bpu_f f where not exists (select 1 from bpu_d d where d.id = f.dim_id and d.active) union all select e.id, e.code from bpu_e e where not exists (select 1 from bpu_d d where d.id = e.ref);
+insert into bpu_uj_anti_off select f.id, f.label from bpu_f f where not exists (select 1 from bpu_d d where d.id = f.dim_id and d.active) union all select e.id, e.code from bpu_e e where not exists (select 1 from bpu_d d where d.id = e.rid);
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_anti_on select f.id, f.label from bpu_f f where not exists (select 1 from bpu_d d where d.id = f.dim_id and d.active) union all select e.id, e.code from bpu_e e where not exists (select 1 from bpu_d d where d.id = e.ref);
+insert into bpu_uj_anti_on select f.id, f.label from bpu_f f where not exists (select 1 from bpu_d d where d.id = f.dim_id and d.active) union all select e.id, e.code from bpu_e e where not exists (select 1 from bpu_d d where d.id = e.rid);
 
 statement ok
 set batch_factor_union_join = false;
@@ -1924,13 +1924,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_non_key_off select f.id, d.name from bpu_f f join bpu_d d on f.amt = d.grp union all select e.id, d.name from bpu_e e join bpu_d d on e.ref = d.grp;
+insert into bpu_uj_non_key_off select f.id, d.name from bpu_f f join bpu_d d on f.amt = d.grp union all select e.id, d.name from bpu_e e join bpu_d d on e.rid = d.grp;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_non_key_on select f.id, d.name from bpu_f f join bpu_d d on f.amt = d.grp union all select e.id, d.name from bpu_e e join bpu_d d on e.ref = d.grp;
+insert into bpu_uj_non_key_on select f.id, d.name from bpu_f f join bpu_d d on f.amt = d.grp union all select e.id, d.name from bpu_e e join bpu_d d on e.rid = d.grp;
 
 statement ok
 set batch_factor_union_join = false;
@@ -1955,13 +1955,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_three_off select f.id, d.name, 'f' as src from bpu_f f join bpu_d d on f.dim_id = d.id union all select g.id, e.code, 'g' from bpu_g g join bpu_e e on g.a = e.id union all select e.id, d.name, 'e' from bpu_e e join bpu_d d on e.ref = d.id;
+insert into bpu_uj_three_off select f.id, d.name, 'f' as src from bpu_f f join bpu_d d on f.dim_id = d.id union all select g.id, e.code, 'g' from bpu_g g join bpu_e e on g.a = e.id union all select e.id, d.name, 'e' from bpu_e e join bpu_d d on e.rid = d.id;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_three_on select f.id, d.name, 'f' as src from bpu_f f join bpu_d d on f.dim_id = d.id union all select g.id, e.code, 'g' from bpu_g g join bpu_e e on g.a = e.id union all select e.id, d.name, 'e' from bpu_e e join bpu_d d on e.ref = d.id;
+insert into bpu_uj_three_on select f.id, d.name, 'f' as src from bpu_f f join bpu_d d on f.dim_id = d.id union all select g.id, e.code, 'g' from bpu_g g join bpu_e e on g.a = e.id union all select e.id, d.name, 'e' from bpu_e e join bpu_d d on e.rid = d.id;
 
 statement ok
 set batch_factor_union_join = false;
@@ -2017,13 +2017,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_derived_agg_off select f.id, v.cnt, v.mx from bpu_f f left join bpu_dagg v on f.amt = v.grp union all select e.id, v.cnt, e.code from bpu_e e left join bpu_dagg v on e.ref = v.grp;
+insert into bpu_uj_derived_agg_off select f.id, v.cnt, v.mx from bpu_f f left join bpu_dagg v on f.amt = v.grp union all select e.id, v.cnt, e.code from bpu_e e left join bpu_dagg v on e.rid = v.grp;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_derived_agg_on select f.id, v.cnt, v.mx from bpu_f f left join bpu_dagg v on f.amt = v.grp union all select e.id, v.cnt, e.code from bpu_e e left join bpu_dagg v on e.ref = v.grp;
+insert into bpu_uj_derived_agg_on select f.id, v.cnt, v.mx from bpu_f f left join bpu_dagg v on f.amt = v.grp union all select e.id, v.cnt, e.code from bpu_e e left join bpu_dagg v on e.rid = v.grp;
 
 statement ok
 set batch_factor_union_join = false;
@@ -2048,13 +2048,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_derived_join_off select f.id, v.name, v.a from bpu_f f join bpu_dj v on f.dim_id = v.id union all select e.id, v.name, v.a from bpu_e e join bpu_dj v on e.ref = v.id;
+insert into bpu_uj_derived_join_off select f.id, v.name, v.a from bpu_f f join bpu_dj v on f.dim_id = v.id union all select e.id, v.name, v.a from bpu_e e join bpu_dj v on e.rid = v.id;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_derived_join_on select f.id, v.name, v.a from bpu_f f join bpu_dj v on f.dim_id = v.id union all select e.id, v.name, v.a from bpu_e e join bpu_dj v on e.ref = v.id;
+insert into bpu_uj_derived_join_on select f.id, v.name, v.a from bpu_f f join bpu_dj v on f.dim_id = v.id union all select e.id, v.name, v.a from bpu_e e join bpu_dj v on e.rid = v.id;
 
 statement ok
 set batch_factor_union_join = false;
@@ -2079,13 +2079,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_kept_ordered_agg_off select f.id, v.names from bpu_f f join bpu_dnames v on f.amt = v.grp union all select e.id, v.names from bpu_e e join bpu_dnames v on e.ref = v.grp;
+insert into bpu_uj_kept_ordered_agg_off select f.id, v.names from bpu_f f join bpu_dnames v on f.amt = v.grp union all select e.id, v.names from bpu_e e join bpu_dnames v on e.rid = v.grp;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_kept_ordered_agg_on select f.id, v.names from bpu_f f join bpu_dnames v on f.amt = v.grp union all select e.id, v.names from bpu_e e join bpu_dnames v on e.ref = v.grp;
+insert into bpu_uj_kept_ordered_agg_on select f.id, v.names from bpu_f f join bpu_dnames v on f.amt = v.grp union all select e.id, v.names from bpu_e e join bpu_dnames v on e.rid = v.grp;
 
 statement ok
 set batch_factor_union_join = false;
@@ -3739,13 +3739,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_inner_off select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id union all select e.id, d.name from bpu_e e join bpu_d d on e.ref = d.id;
+insert into bpu_uj_inner_off select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id union all select e.id, d.name from bpu_e e join bpu_d d on e.rid = d.id;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_inner_on select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id union all select e.id, d.name from bpu_e e join bpu_d d on e.ref = d.id;
+insert into bpu_uj_inner_on select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id union all select e.id, d.name from bpu_e e join bpu_d d on e.rid = d.id;
 
 statement ok
 set batch_factor_union_join = false;
@@ -3770,13 +3770,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_left_proj_off select f.id, f.label as txt, least(f.amt, d.grp) as n from bpu_f f left join bpu_d d on f.dim_id = d.id union all select e.id, e.code, d.grp from bpu_e e left join bpu_d d on e.ref = d.id;
+insert into bpu_uj_left_proj_off select f.id, f.label as txt, least(f.amt, d.grp) as n from bpu_f f left join bpu_d d on f.dim_id = d.id union all select e.id, e.code, d.grp from bpu_e e left join bpu_d d on e.rid = d.id;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_left_proj_on select f.id, f.label as txt, least(f.amt, d.grp) as n from bpu_f f left join bpu_d d on f.dim_id = d.id union all select e.id, e.code, d.grp from bpu_e e left join bpu_d d on e.ref = d.id;
+insert into bpu_uj_left_proj_on select f.id, f.label as txt, least(f.amt, d.grp) as n from bpu_f f left join bpu_d d on f.dim_id = d.id union all select e.id, e.code, d.grp from bpu_e e left join bpu_d d on e.rid = d.id;
 
 statement ok
 set batch_factor_union_join = false;
@@ -3801,13 +3801,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_inner_filters_off select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id where d.active union all select e.id, d.name from bpu_e e join bpu_d d on e.ref = d.id where d.grp = 2;
+insert into bpu_uj_inner_filters_off select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id where d.active union all select e.id, d.name from bpu_e e join bpu_d d on e.rid = d.id where d.grp = 2;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_inner_filters_on select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id where d.active union all select e.id, d.name from bpu_e e join bpu_d d on e.ref = d.id where d.grp = 2;
+insert into bpu_uj_inner_filters_on select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id where d.active union all select e.id, d.name from bpu_e e join bpu_d d on e.rid = d.id where d.grp = 2;
 
 statement ok
 set batch_factor_union_join = false;
@@ -3832,13 +3832,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_left_filtered_off select f.id, d.name from bpu_f f left join (select * from bpu_d where active) d on f.dim_id = d.id union all select e.id, d.name from bpu_e e left join bpu_d d on e.ref = d.id;
+insert into bpu_uj_left_filtered_off select f.id, d.name from bpu_f f left join (select * from bpu_d where active) d on f.dim_id = d.id union all select e.id, d.name from bpu_e e left join bpu_d d on e.rid = d.id;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_left_filtered_on select f.id, d.name from bpu_f f left join (select * from bpu_d where active) d on f.dim_id = d.id union all select e.id, d.name from bpu_e e left join bpu_d d on e.ref = d.id;
+insert into bpu_uj_left_filtered_on select f.id, d.name from bpu_f f left join (select * from bpu_d where active) d on f.dim_id = d.id union all select e.id, d.name from bpu_e e left join bpu_d d on e.rid = d.id;
 
 statement ok
 set batch_factor_union_join = false;
@@ -3863,13 +3863,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_left_extra_off select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id and f.amt > d.grp union all select e.id, d.name from bpu_e e left join bpu_d d on e.ref = d.id and d.name <> e.code;
+insert into bpu_uj_left_extra_off select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id and f.amt > d.grp union all select e.id, d.name from bpu_e e left join bpu_d d on e.rid = d.id and d.name <> e.code;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_left_extra_on select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id and f.amt > d.grp union all select e.id, d.name from bpu_e e left join bpu_d d on e.ref = d.id and d.name <> e.code;
+insert into bpu_uj_left_extra_on select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id and f.amt > d.grp union all select e.id, d.name from bpu_e e left join bpu_d d on e.rid = d.id and d.name <> e.code;
 
 statement ok
 set batch_factor_union_join = false;
@@ -3894,13 +3894,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_filters_above_off select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id where f.amt > 3 or d.name is null union all select e.id, d.name from bpu_e e left join bpu_d d on e.ref = d.id where e.code is not null;
+insert into bpu_uj_filters_above_off select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id where f.amt > 3 or d.name is null union all select e.id, d.name from bpu_e e left join bpu_d d on e.rid = d.id where e.code is not null;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_filters_above_on select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id where f.amt > 3 or d.name is null union all select e.id, d.name from bpu_e e left join bpu_d d on e.ref = d.id where e.code is not null;
+insert into bpu_uj_filters_above_on select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id where f.amt > 3 or d.name is null union all select e.id, d.name from bpu_e e left join bpu_d d on e.rid = d.id where e.code is not null;
 
 statement ok
 set batch_factor_union_join = false;
@@ -3925,13 +3925,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_semi_off select f.id, f.label from bpu_f f where exists (select 1 from bpu_d d where d.id = f.dim_id) union all select e.id, e.code from bpu_e e where exists (select 1 from bpu_d d where d.id = e.ref);
+insert into bpu_uj_semi_off select f.id, f.label from bpu_f f where exists (select 1 from bpu_d d where d.id = f.dim_id) union all select e.id, e.code from bpu_e e where exists (select 1 from bpu_d d where d.id = e.rid);
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_semi_on select f.id, f.label from bpu_f f where exists (select 1 from bpu_d d where d.id = f.dim_id) union all select e.id, e.code from bpu_e e where exists (select 1 from bpu_d d where d.id = e.ref);
+insert into bpu_uj_semi_on select f.id, f.label from bpu_f f where exists (select 1 from bpu_d d where d.id = f.dim_id) union all select e.id, e.code from bpu_e e where exists (select 1 from bpu_d d where d.id = e.rid);
 
 statement ok
 set batch_factor_union_join = false;
@@ -3956,13 +3956,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_anti_off select f.id, f.label from bpu_f f where not exists (select 1 from bpu_d d where d.id = f.dim_id and d.active) union all select e.id, e.code from bpu_e e where not exists (select 1 from bpu_d d where d.id = e.ref);
+insert into bpu_uj_anti_off select f.id, f.label from bpu_f f where not exists (select 1 from bpu_d d where d.id = f.dim_id and d.active) union all select e.id, e.code from bpu_e e where not exists (select 1 from bpu_d d where d.id = e.rid);
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_anti_on select f.id, f.label from bpu_f f where not exists (select 1 from bpu_d d where d.id = f.dim_id and d.active) union all select e.id, e.code from bpu_e e where not exists (select 1 from bpu_d d where d.id = e.ref);
+insert into bpu_uj_anti_on select f.id, f.label from bpu_f f where not exists (select 1 from bpu_d d where d.id = f.dim_id and d.active) union all select e.id, e.code from bpu_e e where not exists (select 1 from bpu_d d where d.id = e.rid);
 
 statement ok
 set batch_factor_union_join = false;
@@ -3987,13 +3987,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_non_key_off select f.id, d.name from bpu_f f join bpu_d d on f.amt = d.grp union all select e.id, d.name from bpu_e e join bpu_d d on e.ref = d.grp;
+insert into bpu_uj_non_key_off select f.id, d.name from bpu_f f join bpu_d d on f.amt = d.grp union all select e.id, d.name from bpu_e e join bpu_d d on e.rid = d.grp;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_non_key_on select f.id, d.name from bpu_f f join bpu_d d on f.amt = d.grp union all select e.id, d.name from bpu_e e join bpu_d d on e.ref = d.grp;
+insert into bpu_uj_non_key_on select f.id, d.name from bpu_f f join bpu_d d on f.amt = d.grp union all select e.id, d.name from bpu_e e join bpu_d d on e.rid = d.grp;
 
 statement ok
 set batch_factor_union_join = false;
@@ -4018,13 +4018,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_three_off select f.id, d.name, 'f' as src from bpu_f f join bpu_d d on f.dim_id = d.id union all select g.id, e.code, 'g' from bpu_g g join bpu_e e on g.a = e.id union all select e.id, d.name, 'e' from bpu_e e join bpu_d d on e.ref = d.id;
+insert into bpu_uj_three_off select f.id, d.name, 'f' as src from bpu_f f join bpu_d d on f.dim_id = d.id union all select g.id, e.code, 'g' from bpu_g g join bpu_e e on g.a = e.id union all select e.id, d.name, 'e' from bpu_e e join bpu_d d on e.rid = d.id;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_three_on select f.id, d.name, 'f' as src from bpu_f f join bpu_d d on f.dim_id = d.id union all select g.id, e.code, 'g' from bpu_g g join bpu_e e on g.a = e.id union all select e.id, d.name, 'e' from bpu_e e join bpu_d d on e.ref = d.id;
+insert into bpu_uj_three_on select f.id, d.name, 'f' as src from bpu_f f join bpu_d d on f.dim_id = d.id union all select g.id, e.code, 'g' from bpu_g g join bpu_e e on g.a = e.id union all select e.id, d.name, 'e' from bpu_e e join bpu_d d on e.rid = d.id;
 
 statement ok
 set batch_factor_union_join = false;
@@ -4080,13 +4080,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_derived_agg_off select f.id, v.cnt, v.mx from bpu_f f left join bpu_dagg v on f.amt = v.grp union all select e.id, v.cnt, e.code from bpu_e e left join bpu_dagg v on e.ref = v.grp;
+insert into bpu_uj_derived_agg_off select f.id, v.cnt, v.mx from bpu_f f left join bpu_dagg v on f.amt = v.grp union all select e.id, v.cnt, e.code from bpu_e e left join bpu_dagg v on e.rid = v.grp;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_derived_agg_on select f.id, v.cnt, v.mx from bpu_f f left join bpu_dagg v on f.amt = v.grp union all select e.id, v.cnt, e.code from bpu_e e left join bpu_dagg v on e.ref = v.grp;
+insert into bpu_uj_derived_agg_on select f.id, v.cnt, v.mx from bpu_f f left join bpu_dagg v on f.amt = v.grp union all select e.id, v.cnt, e.code from bpu_e e left join bpu_dagg v on e.rid = v.grp;
 
 statement ok
 set batch_factor_union_join = false;
@@ -4111,13 +4111,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_derived_join_off select f.id, v.name, v.a from bpu_f f join bpu_dj v on f.dim_id = v.id union all select e.id, v.name, v.a from bpu_e e join bpu_dj v on e.ref = v.id;
+insert into bpu_uj_derived_join_off select f.id, v.name, v.a from bpu_f f join bpu_dj v on f.dim_id = v.id union all select e.id, v.name, v.a from bpu_e e join bpu_dj v on e.rid = v.id;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_derived_join_on select f.id, v.name, v.a from bpu_f f join bpu_dj v on f.dim_id = v.id union all select e.id, v.name, v.a from bpu_e e join bpu_dj v on e.ref = v.id;
+insert into bpu_uj_derived_join_on select f.id, v.name, v.a from bpu_f f join bpu_dj v on f.dim_id = v.id union all select e.id, v.name, v.a from bpu_e e join bpu_dj v on e.rid = v.id;
 
 statement ok
 set batch_factor_union_join = false;
@@ -4142,13 +4142,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_kept_ordered_agg_off select f.id, v.names from bpu_f f join bpu_dnames v on f.amt = v.grp union all select e.id, v.names from bpu_e e join bpu_dnames v on e.ref = v.grp;
+insert into bpu_uj_kept_ordered_agg_off select f.id, v.names from bpu_f f join bpu_dnames v on f.amt = v.grp union all select e.id, v.names from bpu_e e join bpu_dnames v on e.rid = v.grp;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_kept_ordered_agg_on select f.id, v.names from bpu_f f join bpu_dnames v on f.amt = v.grp union all select e.id, v.names from bpu_e e join bpu_dnames v on e.ref = v.grp;
+insert into bpu_uj_kept_ordered_agg_on select f.id, v.names from bpu_f f join bpu_dnames v on f.amt = v.grp union all select e.id, v.names from bpu_e e join bpu_dnames v on e.rid = v.grp;
 
 statement ok
 set batch_factor_union_join = false;
@@ -4538,7 +4538,7 @@ statement ok
 delete from bpu_d where id = 1;
 
 statement ok
-update bpu_e set ref = null where id = 1;
+update bpu_e set rid = null where id = 1;
 
 statement ok
 delete from bpu_m where k = 2;
@@ -5738,13 +5738,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_inner_off select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id union all select e.id, d.name from bpu_e e join bpu_d d on e.ref = d.id;
+insert into bpu_uj_inner_off select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id union all select e.id, d.name from bpu_e e join bpu_d d on e.rid = d.id;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_inner_on select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id union all select e.id, d.name from bpu_e e join bpu_d d on e.ref = d.id;
+insert into bpu_uj_inner_on select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id union all select e.id, d.name from bpu_e e join bpu_d d on e.rid = d.id;
 
 statement ok
 set batch_factor_union_join = false;
@@ -5769,13 +5769,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_left_proj_off select f.id, f.label as txt, least(f.amt, d.grp) as n from bpu_f f left join bpu_d d on f.dim_id = d.id union all select e.id, e.code, d.grp from bpu_e e left join bpu_d d on e.ref = d.id;
+insert into bpu_uj_left_proj_off select f.id, f.label as txt, least(f.amt, d.grp) as n from bpu_f f left join bpu_d d on f.dim_id = d.id union all select e.id, e.code, d.grp from bpu_e e left join bpu_d d on e.rid = d.id;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_left_proj_on select f.id, f.label as txt, least(f.amt, d.grp) as n from bpu_f f left join bpu_d d on f.dim_id = d.id union all select e.id, e.code, d.grp from bpu_e e left join bpu_d d on e.ref = d.id;
+insert into bpu_uj_left_proj_on select f.id, f.label as txt, least(f.amt, d.grp) as n from bpu_f f left join bpu_d d on f.dim_id = d.id union all select e.id, e.code, d.grp from bpu_e e left join bpu_d d on e.rid = d.id;
 
 statement ok
 set batch_factor_union_join = false;
@@ -5800,13 +5800,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_inner_filters_off select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id where d.active union all select e.id, d.name from bpu_e e join bpu_d d on e.ref = d.id where d.grp = 2;
+insert into bpu_uj_inner_filters_off select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id where d.active union all select e.id, d.name from bpu_e e join bpu_d d on e.rid = d.id where d.grp = 2;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_inner_filters_on select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id where d.active union all select e.id, d.name from bpu_e e join bpu_d d on e.ref = d.id where d.grp = 2;
+insert into bpu_uj_inner_filters_on select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id where d.active union all select e.id, d.name from bpu_e e join bpu_d d on e.rid = d.id where d.grp = 2;
 
 statement ok
 set batch_factor_union_join = false;
@@ -5831,13 +5831,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_left_filtered_off select f.id, d.name from bpu_f f left join (select * from bpu_d where active) d on f.dim_id = d.id union all select e.id, d.name from bpu_e e left join bpu_d d on e.ref = d.id;
+insert into bpu_uj_left_filtered_off select f.id, d.name from bpu_f f left join (select * from bpu_d where active) d on f.dim_id = d.id union all select e.id, d.name from bpu_e e left join bpu_d d on e.rid = d.id;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_left_filtered_on select f.id, d.name from bpu_f f left join (select * from bpu_d where active) d on f.dim_id = d.id union all select e.id, d.name from bpu_e e left join bpu_d d on e.ref = d.id;
+insert into bpu_uj_left_filtered_on select f.id, d.name from bpu_f f left join (select * from bpu_d where active) d on f.dim_id = d.id union all select e.id, d.name from bpu_e e left join bpu_d d on e.rid = d.id;
 
 statement ok
 set batch_factor_union_join = false;
@@ -5862,13 +5862,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_left_extra_off select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id and f.amt > d.grp union all select e.id, d.name from bpu_e e left join bpu_d d on e.ref = d.id and d.name <> e.code;
+insert into bpu_uj_left_extra_off select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id and f.amt > d.grp union all select e.id, d.name from bpu_e e left join bpu_d d on e.rid = d.id and d.name <> e.code;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_left_extra_on select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id and f.amt > d.grp union all select e.id, d.name from bpu_e e left join bpu_d d on e.ref = d.id and d.name <> e.code;
+insert into bpu_uj_left_extra_on select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id and f.amt > d.grp union all select e.id, d.name from bpu_e e left join bpu_d d on e.rid = d.id and d.name <> e.code;
 
 statement ok
 set batch_factor_union_join = false;
@@ -5893,13 +5893,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_filters_above_off select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id where f.amt > 3 or d.name is null union all select e.id, d.name from bpu_e e left join bpu_d d on e.ref = d.id where e.code is not null;
+insert into bpu_uj_filters_above_off select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id where f.amt > 3 or d.name is null union all select e.id, d.name from bpu_e e left join bpu_d d on e.rid = d.id where e.code is not null;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_filters_above_on select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id where f.amt > 3 or d.name is null union all select e.id, d.name from bpu_e e left join bpu_d d on e.ref = d.id where e.code is not null;
+insert into bpu_uj_filters_above_on select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id where f.amt > 3 or d.name is null union all select e.id, d.name from bpu_e e left join bpu_d d on e.rid = d.id where e.code is not null;
 
 statement ok
 set batch_factor_union_join = false;
@@ -5924,13 +5924,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_semi_off select f.id, f.label from bpu_f f where exists (select 1 from bpu_d d where d.id = f.dim_id) union all select e.id, e.code from bpu_e e where exists (select 1 from bpu_d d where d.id = e.ref);
+insert into bpu_uj_semi_off select f.id, f.label from bpu_f f where exists (select 1 from bpu_d d where d.id = f.dim_id) union all select e.id, e.code from bpu_e e where exists (select 1 from bpu_d d where d.id = e.rid);
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_semi_on select f.id, f.label from bpu_f f where exists (select 1 from bpu_d d where d.id = f.dim_id) union all select e.id, e.code from bpu_e e where exists (select 1 from bpu_d d where d.id = e.ref);
+insert into bpu_uj_semi_on select f.id, f.label from bpu_f f where exists (select 1 from bpu_d d where d.id = f.dim_id) union all select e.id, e.code from bpu_e e where exists (select 1 from bpu_d d where d.id = e.rid);
 
 statement ok
 set batch_factor_union_join = false;
@@ -5955,13 +5955,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_anti_off select f.id, f.label from bpu_f f where not exists (select 1 from bpu_d d where d.id = f.dim_id and d.active) union all select e.id, e.code from bpu_e e where not exists (select 1 from bpu_d d where d.id = e.ref);
+insert into bpu_uj_anti_off select f.id, f.label from bpu_f f where not exists (select 1 from bpu_d d where d.id = f.dim_id and d.active) union all select e.id, e.code from bpu_e e where not exists (select 1 from bpu_d d where d.id = e.rid);
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_anti_on select f.id, f.label from bpu_f f where not exists (select 1 from bpu_d d where d.id = f.dim_id and d.active) union all select e.id, e.code from bpu_e e where not exists (select 1 from bpu_d d where d.id = e.ref);
+insert into bpu_uj_anti_on select f.id, f.label from bpu_f f where not exists (select 1 from bpu_d d where d.id = f.dim_id and d.active) union all select e.id, e.code from bpu_e e where not exists (select 1 from bpu_d d where d.id = e.rid);
 
 statement ok
 set batch_factor_union_join = false;
@@ -5986,13 +5986,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_non_key_off select f.id, d.name from bpu_f f join bpu_d d on f.amt = d.grp union all select e.id, d.name from bpu_e e join bpu_d d on e.ref = d.grp;
+insert into bpu_uj_non_key_off select f.id, d.name from bpu_f f join bpu_d d on f.amt = d.grp union all select e.id, d.name from bpu_e e join bpu_d d on e.rid = d.grp;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_non_key_on select f.id, d.name from bpu_f f join bpu_d d on f.amt = d.grp union all select e.id, d.name from bpu_e e join bpu_d d on e.ref = d.grp;
+insert into bpu_uj_non_key_on select f.id, d.name from bpu_f f join bpu_d d on f.amt = d.grp union all select e.id, d.name from bpu_e e join bpu_d d on e.rid = d.grp;
 
 statement ok
 set batch_factor_union_join = false;
@@ -6017,13 +6017,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_three_off select f.id, d.name, 'f' as src from bpu_f f join bpu_d d on f.dim_id = d.id union all select g.id, e.code, 'g' from bpu_g g join bpu_e e on g.a = e.id union all select e.id, d.name, 'e' from bpu_e e join bpu_d d on e.ref = d.id;
+insert into bpu_uj_three_off select f.id, d.name, 'f' as src from bpu_f f join bpu_d d on f.dim_id = d.id union all select g.id, e.code, 'g' from bpu_g g join bpu_e e on g.a = e.id union all select e.id, d.name, 'e' from bpu_e e join bpu_d d on e.rid = d.id;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_three_on select f.id, d.name, 'f' as src from bpu_f f join bpu_d d on f.dim_id = d.id union all select g.id, e.code, 'g' from bpu_g g join bpu_e e on g.a = e.id union all select e.id, d.name, 'e' from bpu_e e join bpu_d d on e.ref = d.id;
+insert into bpu_uj_three_on select f.id, d.name, 'f' as src from bpu_f f join bpu_d d on f.dim_id = d.id union all select g.id, e.code, 'g' from bpu_g g join bpu_e e on g.a = e.id union all select e.id, d.name, 'e' from bpu_e e join bpu_d d on e.rid = d.id;
 
 statement ok
 set batch_factor_union_join = false;
@@ -6079,13 +6079,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_derived_agg_off select f.id, v.cnt, v.mx from bpu_f f left join bpu_dagg v on f.amt = v.grp union all select e.id, v.cnt, e.code from bpu_e e left join bpu_dagg v on e.ref = v.grp;
+insert into bpu_uj_derived_agg_off select f.id, v.cnt, v.mx from bpu_f f left join bpu_dagg v on f.amt = v.grp union all select e.id, v.cnt, e.code from bpu_e e left join bpu_dagg v on e.rid = v.grp;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_derived_agg_on select f.id, v.cnt, v.mx from bpu_f f left join bpu_dagg v on f.amt = v.grp union all select e.id, v.cnt, e.code from bpu_e e left join bpu_dagg v on e.ref = v.grp;
+insert into bpu_uj_derived_agg_on select f.id, v.cnt, v.mx from bpu_f f left join bpu_dagg v on f.amt = v.grp union all select e.id, v.cnt, e.code from bpu_e e left join bpu_dagg v on e.rid = v.grp;
 
 statement ok
 set batch_factor_union_join = false;
@@ -6110,13 +6110,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_derived_join_off select f.id, v.name, v.a from bpu_f f join bpu_dj v on f.dim_id = v.id union all select e.id, v.name, v.a from bpu_e e join bpu_dj v on e.ref = v.id;
+insert into bpu_uj_derived_join_off select f.id, v.name, v.a from bpu_f f join bpu_dj v on f.dim_id = v.id union all select e.id, v.name, v.a from bpu_e e join bpu_dj v on e.rid = v.id;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_derived_join_on select f.id, v.name, v.a from bpu_f f join bpu_dj v on f.dim_id = v.id union all select e.id, v.name, v.a from bpu_e e join bpu_dj v on e.ref = v.id;
+insert into bpu_uj_derived_join_on select f.id, v.name, v.a from bpu_f f join bpu_dj v on f.dim_id = v.id union all select e.id, v.name, v.a from bpu_e e join bpu_dj v on e.rid = v.id;
 
 statement ok
 set batch_factor_union_join = false;
@@ -6141,13 +6141,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_kept_ordered_agg_off select f.id, v.names from bpu_f f join bpu_dnames v on f.amt = v.grp union all select e.id, v.names from bpu_e e join bpu_dnames v on e.ref = v.grp;
+insert into bpu_uj_kept_ordered_agg_off select f.id, v.names from bpu_f f join bpu_dnames v on f.amt = v.grp union all select e.id, v.names from bpu_e e join bpu_dnames v on e.rid = v.grp;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_kept_ordered_agg_on select f.id, v.names from bpu_f f join bpu_dnames v on f.amt = v.grp union all select e.id, v.names from bpu_e e join bpu_dnames v on e.ref = v.grp;
+insert into bpu_uj_kept_ordered_agg_on select f.id, v.names from bpu_f f join bpu_dnames v on f.amt = v.grp union all select e.id, v.names from bpu_e e join bpu_dnames v on e.rid = v.grp;
 
 statement ok
 set batch_factor_union_join = false;
@@ -7704,13 +7704,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_inner_off select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id union all select e.id, d.name from bpu_e e join bpu_d d on e.ref = d.id;
+insert into bpu_uj_inner_off select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id union all select e.id, d.name from bpu_e e join bpu_d d on e.rid = d.id;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_inner_on select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id union all select e.id, d.name from bpu_e e join bpu_d d on e.ref = d.id;
+insert into bpu_uj_inner_on select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id union all select e.id, d.name from bpu_e e join bpu_d d on e.rid = d.id;
 
 statement ok
 set batch_factor_union_join = false;
@@ -7735,13 +7735,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_left_proj_off select f.id, f.label as txt, least(f.amt, d.grp) as n from bpu_f f left join bpu_d d on f.dim_id = d.id union all select e.id, e.code, d.grp from bpu_e e left join bpu_d d on e.ref = d.id;
+insert into bpu_uj_left_proj_off select f.id, f.label as txt, least(f.amt, d.grp) as n from bpu_f f left join bpu_d d on f.dim_id = d.id union all select e.id, e.code, d.grp from bpu_e e left join bpu_d d on e.rid = d.id;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_left_proj_on select f.id, f.label as txt, least(f.amt, d.grp) as n from bpu_f f left join bpu_d d on f.dim_id = d.id union all select e.id, e.code, d.grp from bpu_e e left join bpu_d d on e.ref = d.id;
+insert into bpu_uj_left_proj_on select f.id, f.label as txt, least(f.amt, d.grp) as n from bpu_f f left join bpu_d d on f.dim_id = d.id union all select e.id, e.code, d.grp from bpu_e e left join bpu_d d on e.rid = d.id;
 
 statement ok
 set batch_factor_union_join = false;
@@ -7766,13 +7766,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_inner_filters_off select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id where d.active union all select e.id, d.name from bpu_e e join bpu_d d on e.ref = d.id where d.grp = 2;
+insert into bpu_uj_inner_filters_off select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id where d.active union all select e.id, d.name from bpu_e e join bpu_d d on e.rid = d.id where d.grp = 2;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_inner_filters_on select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id where d.active union all select e.id, d.name from bpu_e e join bpu_d d on e.ref = d.id where d.grp = 2;
+insert into bpu_uj_inner_filters_on select f.id, d.name from bpu_f f join bpu_d d on f.dim_id = d.id where d.active union all select e.id, d.name from bpu_e e join bpu_d d on e.rid = d.id where d.grp = 2;
 
 statement ok
 set batch_factor_union_join = false;
@@ -7797,13 +7797,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_left_filtered_off select f.id, d.name from bpu_f f left join (select * from bpu_d where active) d on f.dim_id = d.id union all select e.id, d.name from bpu_e e left join bpu_d d on e.ref = d.id;
+insert into bpu_uj_left_filtered_off select f.id, d.name from bpu_f f left join (select * from bpu_d where active) d on f.dim_id = d.id union all select e.id, d.name from bpu_e e left join bpu_d d on e.rid = d.id;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_left_filtered_on select f.id, d.name from bpu_f f left join (select * from bpu_d where active) d on f.dim_id = d.id union all select e.id, d.name from bpu_e e left join bpu_d d on e.ref = d.id;
+insert into bpu_uj_left_filtered_on select f.id, d.name from bpu_f f left join (select * from bpu_d where active) d on f.dim_id = d.id union all select e.id, d.name from bpu_e e left join bpu_d d on e.rid = d.id;
 
 statement ok
 set batch_factor_union_join = false;
@@ -7828,13 +7828,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_left_extra_off select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id and f.amt > d.grp union all select e.id, d.name from bpu_e e left join bpu_d d on e.ref = d.id and d.name <> e.code;
+insert into bpu_uj_left_extra_off select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id and f.amt > d.grp union all select e.id, d.name from bpu_e e left join bpu_d d on e.rid = d.id and d.name <> e.code;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_left_extra_on select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id and f.amt > d.grp union all select e.id, d.name from bpu_e e left join bpu_d d on e.ref = d.id and d.name <> e.code;
+insert into bpu_uj_left_extra_on select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id and f.amt > d.grp union all select e.id, d.name from bpu_e e left join bpu_d d on e.rid = d.id and d.name <> e.code;
 
 statement ok
 set batch_factor_union_join = false;
@@ -7859,13 +7859,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_filters_above_off select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id where f.amt > 3 or d.name is null union all select e.id, d.name from bpu_e e left join bpu_d d on e.ref = d.id where e.code is not null;
+insert into bpu_uj_filters_above_off select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id where f.amt > 3 or d.name is null union all select e.id, d.name from bpu_e e left join bpu_d d on e.rid = d.id where e.code is not null;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_filters_above_on select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id where f.amt > 3 or d.name is null union all select e.id, d.name from bpu_e e left join bpu_d d on e.ref = d.id where e.code is not null;
+insert into bpu_uj_filters_above_on select f.id, d.name from bpu_f f left join bpu_d d on f.dim_id = d.id where f.amt > 3 or d.name is null union all select e.id, d.name from bpu_e e left join bpu_d d on e.rid = d.id where e.code is not null;
 
 statement ok
 set batch_factor_union_join = false;
@@ -7890,13 +7890,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_semi_off select f.id, f.label from bpu_f f where exists (select 1 from bpu_d d where d.id = f.dim_id) union all select e.id, e.code from bpu_e e where exists (select 1 from bpu_d d where d.id = e.ref);
+insert into bpu_uj_semi_off select f.id, f.label from bpu_f f where exists (select 1 from bpu_d d where d.id = f.dim_id) union all select e.id, e.code from bpu_e e where exists (select 1 from bpu_d d where d.id = e.rid);
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_semi_on select f.id, f.label from bpu_f f where exists (select 1 from bpu_d d where d.id = f.dim_id) union all select e.id, e.code from bpu_e e where exists (select 1 from bpu_d d where d.id = e.ref);
+insert into bpu_uj_semi_on select f.id, f.label from bpu_f f where exists (select 1 from bpu_d d where d.id = f.dim_id) union all select e.id, e.code from bpu_e e where exists (select 1 from bpu_d d where d.id = e.rid);
 
 statement ok
 set batch_factor_union_join = false;
@@ -7921,13 +7921,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_anti_off select f.id, f.label from bpu_f f where not exists (select 1 from bpu_d d where d.id = f.dim_id and d.active) union all select e.id, e.code from bpu_e e where not exists (select 1 from bpu_d d where d.id = e.ref);
+insert into bpu_uj_anti_off select f.id, f.label from bpu_f f where not exists (select 1 from bpu_d d where d.id = f.dim_id and d.active) union all select e.id, e.code from bpu_e e where not exists (select 1 from bpu_d d where d.id = e.rid);
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_anti_on select f.id, f.label from bpu_f f where not exists (select 1 from bpu_d d where d.id = f.dim_id and d.active) union all select e.id, e.code from bpu_e e where not exists (select 1 from bpu_d d where d.id = e.ref);
+insert into bpu_uj_anti_on select f.id, f.label from bpu_f f where not exists (select 1 from bpu_d d where d.id = f.dim_id and d.active) union all select e.id, e.code from bpu_e e where not exists (select 1 from bpu_d d where d.id = e.rid);
 
 statement ok
 set batch_factor_union_join = false;
@@ -7952,13 +7952,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_non_key_off select f.id, d.name from bpu_f f join bpu_d d on f.amt = d.grp union all select e.id, d.name from bpu_e e join bpu_d d on e.ref = d.grp;
+insert into bpu_uj_non_key_off select f.id, d.name from bpu_f f join bpu_d d on f.amt = d.grp union all select e.id, d.name from bpu_e e join bpu_d d on e.rid = d.grp;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_non_key_on select f.id, d.name from bpu_f f join bpu_d d on f.amt = d.grp union all select e.id, d.name from bpu_e e join bpu_d d on e.ref = d.grp;
+insert into bpu_uj_non_key_on select f.id, d.name from bpu_f f join bpu_d d on f.amt = d.grp union all select e.id, d.name from bpu_e e join bpu_d d on e.rid = d.grp;
 
 statement ok
 set batch_factor_union_join = false;
@@ -7983,13 +7983,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_three_off select f.id, d.name, 'f' as src from bpu_f f join bpu_d d on f.dim_id = d.id union all select g.id, e.code, 'g' from bpu_g g join bpu_e e on g.a = e.id union all select e.id, d.name, 'e' from bpu_e e join bpu_d d on e.ref = d.id;
+insert into bpu_uj_three_off select f.id, d.name, 'f' as src from bpu_f f join bpu_d d on f.dim_id = d.id union all select g.id, e.code, 'g' from bpu_g g join bpu_e e on g.a = e.id union all select e.id, d.name, 'e' from bpu_e e join bpu_d d on e.rid = d.id;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_three_on select f.id, d.name, 'f' as src from bpu_f f join bpu_d d on f.dim_id = d.id union all select g.id, e.code, 'g' from bpu_g g join bpu_e e on g.a = e.id union all select e.id, d.name, 'e' from bpu_e e join bpu_d d on e.ref = d.id;
+insert into bpu_uj_three_on select f.id, d.name, 'f' as src from bpu_f f join bpu_d d on f.dim_id = d.id union all select g.id, e.code, 'g' from bpu_g g join bpu_e e on g.a = e.id union all select e.id, d.name, 'e' from bpu_e e join bpu_d d on e.rid = d.id;
 
 statement ok
 set batch_factor_union_join = false;
@@ -8045,13 +8045,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_derived_agg_off select f.id, v.cnt, v.mx from bpu_f f left join bpu_dagg v on f.amt = v.grp union all select e.id, v.cnt, e.code from bpu_e e left join bpu_dagg v on e.ref = v.grp;
+insert into bpu_uj_derived_agg_off select f.id, v.cnt, v.mx from bpu_f f left join bpu_dagg v on f.amt = v.grp union all select e.id, v.cnt, e.code from bpu_e e left join bpu_dagg v on e.rid = v.grp;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_derived_agg_on select f.id, v.cnt, v.mx from bpu_f f left join bpu_dagg v on f.amt = v.grp union all select e.id, v.cnt, e.code from bpu_e e left join bpu_dagg v on e.ref = v.grp;
+insert into bpu_uj_derived_agg_on select f.id, v.cnt, v.mx from bpu_f f left join bpu_dagg v on f.amt = v.grp union all select e.id, v.cnt, e.code from bpu_e e left join bpu_dagg v on e.rid = v.grp;
 
 statement ok
 set batch_factor_union_join = false;
@@ -8076,13 +8076,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_derived_join_off select f.id, v.name, v.a from bpu_f f join bpu_dj v on f.dim_id = v.id union all select e.id, v.name, v.a from bpu_e e join bpu_dj v on e.ref = v.id;
+insert into bpu_uj_derived_join_off select f.id, v.name, v.a from bpu_f f join bpu_dj v on f.dim_id = v.id union all select e.id, v.name, v.a from bpu_e e join bpu_dj v on e.rid = v.id;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_derived_join_on select f.id, v.name, v.a from bpu_f f join bpu_dj v on f.dim_id = v.id union all select e.id, v.name, v.a from bpu_e e join bpu_dj v on e.ref = v.id;
+insert into bpu_uj_derived_join_on select f.id, v.name, v.a from bpu_f f join bpu_dj v on f.dim_id = v.id union all select e.id, v.name, v.a from bpu_e e join bpu_dj v on e.rid = v.id;
 
 statement ok
 set batch_factor_union_join = false;
@@ -8107,13 +8107,13 @@ statement ok
 set batch_factor_union_join = false;
 
 statement ok
-insert into bpu_uj_kept_ordered_agg_off select f.id, v.names from bpu_f f join bpu_dnames v on f.amt = v.grp union all select e.id, v.names from bpu_e e join bpu_dnames v on e.ref = v.grp;
+insert into bpu_uj_kept_ordered_agg_off select f.id, v.names from bpu_f f join bpu_dnames v on f.amt = v.grp union all select e.id, v.names from bpu_e e join bpu_dnames v on e.rid = v.grp;
 
 statement ok
 set batch_factor_union_join = true;
 
 statement ok
-insert into bpu_uj_kept_ordered_agg_on select f.id, v.names from bpu_f f join bpu_dnames v on f.amt = v.grp union all select e.id, v.names from bpu_e e join bpu_dnames v on e.ref = v.grp;
+insert into bpu_uj_kept_ordered_agg_on select f.id, v.names from bpu_f f join bpu_dnames v on f.amt = v.grp union all select e.id, v.names from bpu_e e join bpu_dnames v on e.rid = v.grp;
 
 statement ok
 set batch_factor_union_join = false;
