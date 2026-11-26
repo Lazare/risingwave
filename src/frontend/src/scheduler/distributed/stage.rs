@@ -170,6 +170,11 @@ impl StageExecution {
         let tasks = (0..query.stage(stage_id).parallelism.unwrap())
             .map(|task_id| (task_id as u64, TaskStatusHolder::new(task_id as u64)))
             .collect();
+        // Cardinality feedback: each task of the stage runs the plan of the stage once.
+        if let Some(feedback) = &query.cardinality_feedback {
+            let stage = query.stage(stage_id);
+            feedback.expect_stage(&stage.root, stage.parallelism.unwrap());
+        }
 
         Self {
             stage_id,
@@ -481,6 +486,12 @@ impl StageRunner {
             match status_res_inner {
                 Ok(status) => {
                     use risingwave_pb::task_service::task_info_response::TaskStatus as PbTaskStatus;
+                    // Cardinality feedback: the final status of a task carries its counts.
+                    if !status.cardinalities.is_empty()
+                        && let Some(feedback) = &self.query.cardinality_feedback
+                    {
+                        feedback.counters().merge(&status.cardinalities);
+                    }
                     match PbTaskStatus::try_from(status.task_status).unwrap() {
                         PbTaskStatus::Running => {
                             running_task_cnt += 1;
@@ -645,10 +656,15 @@ impl StageRunner {
         self.notify_stage_scheduled(QueryMessage::Stage(StageEvent::ScheduledRoot(result_rx)))
             .await;
 
+        let cardinality_feedback = self.query.cardinality_feedback.clone();
         let executor = ExecutorBuilder::new(
             &plan_node,
             &task_id,
-            self.ctx.to_batch_task_context(),
+            self.ctx.to_batch_task_context_with_cardinality_counters(
+                cardinality_feedback
+                    .as_ref()
+                    .map(|feedback| feedback.counters()),
+            ),
             shutdown_rx.clone(),
         );
 
@@ -682,6 +698,14 @@ impl StageRunner {
             }
             Ok(())
         }).await;
+
+        // Cardinality feedback: the root stage returned all the rows of the query.
+        if result.is_ok()
+            && !shutdown_rx0.is_cancelled()
+            && let Some(feedback) = &cardinality_feedback
+        {
+            feedback.set_succeeded();
+        }
 
         if let Err(err) = &result {
             // If we encountered error when executing root stage locally, we have to notify the result fetcher, which is
@@ -980,7 +1004,25 @@ impl StageRunner {
         }
     }
 
+    /// Converts the node and its children, marking the nodes counted by the cardinality feedback.
     fn convert_plan_node(
+        &self,
+        execution_plan_node: &ExecutionPlanNode,
+        task_id: TaskId,
+        partition: Option<PartitionInfo>,
+        identity_id: &mut u64,
+    ) -> PbPlanNode {
+        let mut node =
+            self.convert_plan_node_inner(execution_plan_node, task_id, partition, identity_id);
+        node.cardinality_feedback_id = self
+            .query
+            .cardinality_feedback
+            .as_ref()
+            .and_then(|feedback| feedback.feedback_id(execution_plan_node.plan_node_id));
+        node
+    }
+
+    fn convert_plan_node_inner(
         &self,
         execution_plan_node: &ExecutionPlanNode,
         task_id: TaskId,
@@ -1011,6 +1053,7 @@ impl StageRunner {
                     NodeBody::Exchange(exchange_node) => PbPlanNode {
                         children: vec![],
                         identity,
+                        cardinality_feedback_id: None,
                         node_body: Some(NodeBody::Exchange(ExchangeNode {
                             sources: exchange_sources,
                             sequential: exchange_node.sequential,
@@ -1020,6 +1063,7 @@ impl StageRunner {
                     NodeBody::MergeSortExchange(sort_merge_exchange_node) => PbPlanNode {
                         children: vec![],
                         identity,
+                        cardinality_feedback_id: None,
                         node_body: Some(NodeBody::MergeSortExchange(MergeSortExchangeNode {
                             exchange: Some(ExchangeNode {
                                 sources: exchange_sources,
@@ -1046,6 +1090,7 @@ impl StageRunner {
                 PbPlanNode {
                     children: vec![],
                     identity,
+                    cardinality_feedback_id: None,
                     node_body: Some(NodeBody::RowSeqScan(scan_node)),
                 }
             }
@@ -1062,6 +1107,7 @@ impl StageRunner {
                 PbPlanNode {
                     children: vec![],
                     identity,
+                    cardinality_feedback_id: None,
                     node_body: Some(NodeBody::LogRowSeqScan(scan_node)),
                 }
             }
@@ -1082,6 +1128,7 @@ impl StageRunner {
                 PbPlanNode {
                     children: vec![],
                     identity,
+                    cardinality_feedback_id: None,
                     node_body: Some(NodeBody::Source(source_node)),
                 }
             }
@@ -1102,6 +1149,7 @@ impl StageRunner {
                 PbPlanNode {
                     children: vec![],
                     identity,
+                    cardinality_feedback_id: None,
                     node_body: Some(NodeBody::IcebergScan(iceberg_scan_node)),
                 }
             }
@@ -1115,6 +1163,7 @@ impl StageRunner {
                 PbPlanNode {
                     children,
                     identity,
+                    cardinality_feedback_id: None,
                     node_body: Some(execution_plan_node.node.clone()),
                 }
             }

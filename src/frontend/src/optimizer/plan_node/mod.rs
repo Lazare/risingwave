@@ -981,6 +981,7 @@ impl dyn BatchPlanNode {
                     "".into()
                 },
                 node_body,
+                cardinality_feedback_id: None,
             })
         })
     }

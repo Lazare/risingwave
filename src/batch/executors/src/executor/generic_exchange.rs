@@ -123,14 +123,22 @@ impl CreateSource for DefaultCreateSource {
                 }
             };
 
+            // Cardinality feedback: the plan executed remotely in the local execution mode
+            // reports its counts at the end of its output.
+            let cardinality_counters = if prost_source.local_execute_plan.is_some() {
+                context.cardinality_counters()
+            } else {
+                None
+            };
             Ok(ExchangeSourceImpl::Grpc(
-                GrpcExchangeSource::create(
+                GrpcExchangeSource::create_with_cardinality_counters(
                     self.client_pool
                         .get_by_addr(peer_addr.clone())
                         .await
                         .inspect_err(|_| mask_failed_serving_worker())?,
                     task_output_id.clone(),
                     prost_source.local_execute_plan.clone(),
+                    cardinality_counters,
                 )
                 .await
                 .inspect_err(|e| {

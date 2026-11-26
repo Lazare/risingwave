@@ -45,6 +45,11 @@ impl BatchNestedLoopJoin {
         Self { base, core }
     }
 
+    /// The logical join, read by the cardinality feedback (`optimizer::cardinality_feedback`).
+    pub fn core(&self) -> &generic::Join<PlanRef> {
+        &self.core
+    }
+
     fn derive_dist(left: &Distribution, right: &Distribution) -> Distribution {
         match (left, right) {
             (Distribution::Single, Distribution::Single) => Distribution::Single,

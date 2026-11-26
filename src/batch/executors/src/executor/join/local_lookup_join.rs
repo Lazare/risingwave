@@ -130,6 +130,7 @@ impl InnerSideExecutorBuilder {
                     children: vec![],
                     identity: "SeqScan".to_owned(),
                     node_body: Some(self.create_row_seq_scan_node(id)?),
+                    cardinality_feedback_id: None,
                 }),
                 exchange_info: Some(ExchangeInfo {
                     mode: DistributionMode::Single as i32,
@@ -229,6 +230,7 @@ impl LookupExecutorBuilder for InnerSideExecutorBuilder {
             children: vec![],
             identity: "LocalLookupJoinExchangeExecutor".to_owned(),
             node_body: Some(exchange_node),
+            cardinality_feedback_id: None,
         };
 
         let task_id = self.task_id.clone();

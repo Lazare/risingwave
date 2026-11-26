@@ -258,6 +258,9 @@ pub struct Query {
     /// Query id should always be unique.
     pub query_id: QueryId,
     pub stage_graph: StageGraph,
+    /// The operators counted by the cardinality feedback (`batch_cardinality_feedback`), if any.
+    pub cardinality_feedback:
+        Option<std::sync::Arc<crate::scheduler::cardinality_feedback::QueryCardinalityFeedback>>,
 }
 
 impl Query {
@@ -1021,6 +1024,7 @@ impl BatchPlanFragmenter {
         Ok(Query {
             query_id: self.query_id,
             stage_graph: new_stage_graph,
+            cardinality_feedback: None,
         })
     }
 

@@ -39,6 +39,8 @@ pub use plan_visitor::{
 use risingwave_pb::plan_common::source_refresh_mode::RefreshMode;
 
 pub mod backfill_order_strategy;
+// Cardinality feedback of batch queries (`batch_cardinality_feedback`).
+pub mod cardinality_feedback;
 mod logical_optimization;
 mod optimizer_context;
 pub mod plan_expr_rewriter;

@@ -1,0 +1,131 @@
+# Cardinality feedback of batch queries (`batch_cardinality_feedback`): with the variable on, the
+# rows output by the scans, filters, joins and aggregations of each batch query are counted and
+# kept by the frontend in `rw_catalog.rw_batch_cardinality_feedback`, by fingerprint of sub-plan
+# and kind of operator. Each query runs in the local and in the distributed execution modes, so
+# that every record below has 2 executions (the full scan of `cf_fact`, read by 4 queries, 8).
+#
+# The records are kept in the memory of the frontend and survive the drop of the tables: the
+# numbers below hold for a frontend that did not run this test before (as in CI). The records of
+# a query are written when the query is over, which may be a moment after its last row reached
+# the client: the queries of the system view retry.
+
+statement ok
+SET RW_IMPLICIT_FLUSH TO true;
+
+statement ok
+create table cf_fact (id int primary key, dim_id int, v int);
+
+statement ok
+create table cf_dim (id int primary key, k int);
+
+# 50 dimension rows, k = id % 7.
+statement ok
+insert into cf_dim select g, g % 7 from generate_series(1, 50) g;
+
+# 2000 fact rows, 40 per dimension row, v = id % 100 (20 rows per value of v).
+statement ok
+insert into cf_fact select g, g % 50 + 1, g % 100 from generate_series(1, 2000) g;
+
+# Variable off (default): nothing is recorded. The filter keeps 20 rows.
+query I
+select count(*) from cf_fact where v = 77;
+----
+20
+
+query I
+select count(*) from rw_catalog.rw_batch_cardinality_feedback where last_actual_rows = 20;
+----
+0
+
+statement ok
+set batch_cardinality_feedback = true;
+
+# Queries of system catalogs are not observed.
+query I
+select count(*) from rw_catalog.rw_batch_cardinality_feedback where last_actual_rows = 20;
+----
+0
+
+# The same queries in both execution modes.
+
+statement ok
+set query_mode = local;
+
+include ./cardinality_feedback_queries.slt.part
+
+statement ok
+set query_mode = distributed;
+
+include ./cardinality_feedback_queries.slt.part
+
+# Scans and filters: full scans of cf_fact (2000 rows, 4 queries x 2 modes) and cf_dim (50 rows),
+# filters `v < 13` (260 rows), `d.k = 3` (7), `f.v < 3` (60) and `v >= 50` (1000).
+query TII rowsort retry 3 backoff 1s
+select operator_kind, last_actual_rows, executions
+from rw_catalog.rw_batch_cardinality_feedback
+where operator_kind in ('seq_scan', 'filter') and last_actual_rows in (2000, 50, 260, 7, 60, 1000);
+----
+filter 1000 2
+filter 260 2
+filter 60 2
+filter 7 2
+seq_scan 2000 8
+seq_scan 50 2
+
+# Joins: the hash join (lookup joins off) returns 280 rows, the lookup join 60.
+query TII rowsort retry 3 backoff 1s
+select operator_kind, last_actual_rows, executions
+from rw_catalog.rw_batch_cardinality_feedback
+where operator_kind like '%join' and last_actual_rows in (280, 60);
+----
+hash_join 280 2
+lookup_join 60 2
+
+# The aggregation returns 9 groups, in one phase or two (the second phase has the fingerprint of
+# the one-phase aggregation, the first one is recorded apart as `hash_agg_partial`).
+query TII rowsort retry 3 backoff 1s
+select operator_kind, last_actual_rows, executions
+from rw_catalog.rw_batch_cardinality_feedback
+where operator_kind = 'hash_agg' and last_actual_rows = 9;
+----
+hash_agg 9 2
+
+# Every count so far is complete; fingerprints are 16 hexadecimal digits.
+query IIII retry 3 backoff 1s
+select count(*) filter (where partial_executions > 0),
+       count(*) filter (where last_partial),
+       count(*) filter (where length(fingerprint) <> 16),
+       count(*) filter (where executions < 1)
+from rw_catalog.rw_batch_cardinality_feedback;
+----
+0 0 0 0
+
+# A limit stops the filter and the scan below it before the end of their output: their counts
+# are partial (a lower bound). The scan has the fingerprint of the full scan of cf_fact.
+statement ok
+set query_mode = distributed;
+
+query I
+select count(*) from (select * from cf_fact where v < 50 limit 5);
+----
+5
+
+query TIIT rowsort retry 3 backoff 1s
+select operator_kind, executions, partial_executions, last_partial
+from rw_catalog.rw_batch_cardinality_feedback
+where partial_executions > 0;
+----
+filter 1 1 t
+seq_scan 9 1 t
+
+statement ok
+set batch_cardinality_feedback = false;
+
+statement ok
+set query_mode = auto;
+
+statement ok
+drop table cf_fact;
+
+statement ok
+drop table cf_dim;

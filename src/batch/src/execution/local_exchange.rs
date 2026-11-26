@@ -123,6 +123,7 @@ mod tests {
             for _ in 0..3 {
                 tx.send(Ok(GetDataResponse {
                     record_batch: Some(DataChunk::default()),
+                    cardinalities: vec![],
                 }))
                 .await
                 .unwrap();

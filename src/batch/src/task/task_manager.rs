@@ -198,6 +198,7 @@ impl BatchManager {
                     task_id: Some(task_id.to_prost()),
                     task_status: TaskStatus::Ping.into(),
                     error_message: "".to_owned(),
+                    cardinalities: vec![],
                 })
                 .await
                 .is_err()
@@ -367,6 +368,7 @@ mod tests {
                 children: vec![],
                 identity: "".to_owned(),
                 node_body: Some(NodeBody::BusyLoopExecutor(true)),
+                cardinality_feedback_id: None,
             }),
             exchange_info: Some(ExchangeInfo {
                 mode: DistributionMode::Single as i32,
@@ -399,6 +401,7 @@ mod tests {
                 children: vec![],
                 identity: "".to_owned(),
                 node_body: Some(NodeBody::BusyLoopExecutor(true)),
+                cardinality_feedback_id: None,
             }),
             exchange_info: Some(ExchangeInfo {
                 mode: DistributionMode::Single as i32,

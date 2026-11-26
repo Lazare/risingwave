@@ -1,0 +1,99 @@
+# Cardinality feedback of batch queries (`batch_cardinality_feedback`): it only counts the rows of
+# the operators at execution, the plans are the same with the variable on and off. The queries
+# are the ones of `e2e_test/batch/cardinality_feedback.slt`.
+- id: tables
+  sql: |
+    create table cf_fact (id int primary key, dim_id int, v int);
+    create table cf_dim (id int primary key, k int);
+  expected_outputs: []
+- name: hash join, variable off
+  before:
+  - tables
+  sql: |
+    set batch_enable_lookup_join = false;
+    select count(*) from cf_fact f join cf_dim d on f.dim_id = d.id where d.k = 3;
+  expected_outputs:
+  - batch_plan
+  - batch_local_plan
+- name: hash join, variable on (same plans)
+  before:
+  - tables
+  sql: |
+    set batch_enable_lookup_join = false;
+    set batch_cardinality_feedback = true;
+    select count(*) from cf_fact f join cf_dim d on f.dim_id = d.id where d.k = 3;
+  expected_outputs:
+  - batch_plan
+  - batch_local_plan
+- name: lookup join, variable off
+  before:
+  - tables
+  sql: |
+    select count(*) from cf_fact f join cf_dim d on f.dim_id = d.id where f.v < 3;
+  expected_outputs:
+  - batch_plan
+  - batch_local_plan
+- name: lookup join, variable on (same plans)
+  before:
+  - tables
+  sql: |
+    set batch_cardinality_feedback = true;
+    select count(*) from cf_fact f join cf_dim d on f.dim_id = d.id where f.v < 3;
+  expected_outputs:
+  - batch_plan
+  - batch_local_plan
+- name: aggregation, variable off
+  before:
+  - tables
+  sql: |
+    select v % 9, count(*) from cf_fact where v >= 50 group by v % 9;
+  expected_outputs:
+  - batch_plan
+  - batch_local_plan
+- name: aggregation, variable on (same plans)
+  before:
+  - tables
+  sql: |
+    set batch_cardinality_feedback = true;
+    select v % 9, count(*) from cf_fact where v >= 50 group by v % 9;
+  expected_outputs:
+  - batch_plan
+  - batch_local_plan
+- name: scan with filter and limit, variable off
+  before:
+  - tables
+  sql: |
+    select * from cf_fact where v < 50 limit 5;
+  expected_outputs:
+  - batch_plan
+- name: scan with filter and limit, variable on (same plan)
+  before:
+  - tables
+  sql: |
+    set batch_cardinality_feedback = true;
+    select * from cf_fact where v < 50 limit 5;
+  expected_outputs:
+  - batch_plan
+- name: with statistics, variable on (same plans as without the variable)
+  before:
+  - tables
+  sql: |
+    set batch_cardinality_feedback = true;
+    select count(*) from cf_fact f join cf_dim d on f.dim_id = d.id where f.v < 3;
+  table_row_counts:
+    cf_fact: 2000
+    cf_dim: 50
+  expected_outputs:
+  - batch_plan
+  - batch_local_plan
+- name: with statistics, variable off
+  before:
+  - tables
+  sql: |
+    select count(*) from cf_fact f join cf_dim d on f.dim_id = d.id where f.v < 3;
+  table_row_counts:
+    cf_fact: 2000
+    cf_dim: 50
+  expected_outputs:
+  - batch_plan
+  - batch_local_plan

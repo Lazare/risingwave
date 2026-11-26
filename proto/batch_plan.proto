@@ -500,6 +500,24 @@ message PlanNode {
     bool busy_loop_executor = 101;
   }
   string identity = 24;
+  // Cardinality feedback (session variable `batch_cardinality_feedback`): when set, the executor
+  // of this node counts the rows it outputs under this id, the id of the plan node in the
+  // frontend. Unset: nothing is counted.
+  // A high number, apart from the numbers of `node_body`.
+  optional uint32 cardinality_feedback_id = 200;
+}
+
+// The rows output by the executors of one plan node (`PlanNode.cardinality_feedback_id`) in one
+// task, for the cardinality feedback of batch queries.
+message OperatorCardinality {
+  uint32 node_id = 1;
+  // Rows output, summed over the executors of the node.
+  uint64 rows = 2;
+  // Executors of the node built in the task.
+  uint32 instances = 3;
+  // Executors of the node whose output ended normally: the other ones were stopped early (by a
+  // limit above them, a failure or a cancellation) and their rows are a lower bound.
+  uint32 completed = 4;
 }
 
 // ExchangeInfo determines how to distribute results to tasks of next stage.

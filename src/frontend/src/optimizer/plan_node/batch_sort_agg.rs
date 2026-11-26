@@ -68,6 +68,12 @@ impl BatchSortAgg {
         }
     }
 
+    /// The logical aggregation, read by the cardinality feedback
+    /// (`optimizer::cardinality_feedback`).
+    pub fn core(&self) -> &generic::Agg<PlanRef> {
+        &self.core
+    }
+
     pub fn agg_calls(&self) -> &[PlanAggCall] {
         &self.core.agg_calls
     }

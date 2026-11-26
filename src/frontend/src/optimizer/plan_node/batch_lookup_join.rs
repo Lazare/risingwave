@@ -110,6 +110,12 @@ impl BatchLookupJoin {
             .expect("BatchLookupJoin should store predicate as EqJoinPredicate")
     }
 
+    /// The logical join, read by the cardinality feedback (`optimizer::cardinality_feedback`):
+    /// its right side is the scan of the table read by key, not an executed input.
+    pub fn core(&self) -> &generic::Join<PlanRef> {
+        &self.core
+    }
+
     pub fn right_table(&self) -> &TableCatalog {
         &self.right_table
     }

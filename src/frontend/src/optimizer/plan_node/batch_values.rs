@@ -48,6 +48,11 @@ impl BatchValues {
         BatchValues { base, core }
     }
 
+    /// The number of rows, read by the cardinality feedback (`optimizer::cardinality_feedback`).
+    pub fn row_count(&self) -> usize {
+        self.core.rows.len()
+    }
+
     fn row_to_protobuf(&self, row: &[ExprImpl]) -> ExprTuple {
         let cells = row.iter().map(|x| x.to_expr_proto()).collect();
         ExprTuple { cells }

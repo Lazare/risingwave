@@ -23,6 +23,7 @@ user application_name
 user auto_locality_backfill_min_size
 user backfill_rate_limit
 user background_ddl
+user batch_cardinality_feedback
 user batch_cost_based_join_ordering
 user batch_enable_distributed_dml
 user batch_enable_lookup_join
