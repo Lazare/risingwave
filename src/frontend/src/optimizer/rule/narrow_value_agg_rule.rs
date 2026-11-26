@@ -44,6 +44,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use itertools::Itertools;
 use risingwave_common::types::{DataType, ScalarImpl, StructType};
 use risingwave_common::util::iter_util::ZipEqFast;
 use risingwave_expr::aggregate::{AggType, PbAggKind};
@@ -303,20 +304,20 @@ struct Level(Vec<usize>);
 
 impl Level {
     /// `expr`, over the columns of this operator, over the columns of the aggregation instead.
-    fn to_agg(&self, expr: ExprImpl) -> ExprImpl {
+    fn over_agg(&self, expr: ExprImpl) -> ExprImpl {
         Renumber(|i| self.0[i]).rewrite_expr(expr)
     }
 
     /// `expr`, over the columns of the aggregation, over the columns of this operator instead.
     /// Every column of the aggregation that `expr` reads is one of this operator.
-    fn from_agg(&self, expr: ExprImpl) -> ExprImpl {
+    fn over_level(&self, expr: ExprImpl) -> ExprImpl {
         Renumber(|a| self.0.iter().position(|&c| c == a).unwrap()).rewrite_expr(expr)
     }
 
     /// Rewrites `expr`, over the columns of this operator, with `rewriter`, which works over the
     /// columns of the aggregation.
     fn rewrite(&self, expr: ExprImpl, rewriter: &mut ReplaceUnits) -> ExprImpl {
-        self.from_agg(rewriter.rewrite_expr(self.to_agg(expr)))
+        self.over_level(rewriter.rewrite_expr(self.over_agg(expr)))
     }
 
     fn rewrite_condition(&self, condition: &Condition, rewriter: &mut ReplaceUnits) -> Condition {
@@ -362,10 +363,8 @@ impl Rule<Logical> for NarrowValueAggRule {
         // that reads it only in the `FILTER` clauses of its calls.
         let consumer_input = if let Some(project) = plan.as_logical_project() {
             project.input()
-        } else if let Some(agg) = plan.as_logical_agg() {
-            agg.input()
         } else {
-            return None;
+            plan.as_logical_agg()?.input()
         };
         // The filters, limits and projections that only select columns between them, top first.
         let mut chain = vec![];
@@ -411,7 +410,7 @@ impl Rule<Logical> for NarrowValueAggRule {
                 project
                     .exprs()
                     .iter()
-                    .map(|e| consumer_level.to_agg(e.clone())),
+                    .map(|e| consumer_level.over_agg(e.clone())),
             );
         } else {
             let consumer = plan.as_logical_agg().unwrap();
@@ -423,7 +422,7 @@ impl Rule<Logical> for NarrowValueAggRule {
                     call.filter
                         .conjunctions
                         .iter()
-                        .map(|e| consumer_level.to_agg(e.clone())),
+                        .map(|e| consumer_level.over_agg(e.clone())),
                 );
             }
             for i in read {
@@ -437,7 +436,7 @@ impl Rule<Logical> for NarrowValueAggRule {
                         .predicate()
                         .conjunctions
                         .iter()
-                        .map(|e| level.to_agg(e.clone())),
+                        .map(|e| level.over_agg(e.clone())),
                 );
             }
         }
@@ -542,7 +541,13 @@ impl Rule<Logical> for NarrowValueAggRule {
         let mut result: PlanRef = LogicalAgg::from(core).into();
 
         let mut rewriter = ReplaceUnits(replacements);
-        for (node, level) in chain.iter().zip(&levels).rev() {
+        for (node, level) in chain
+            .iter()
+            .zip_eq_fast(levels.iter())
+            .collect_vec()
+            .into_iter()
+            .rev()
+        {
             result = if let Some(filter) = node.as_logical_filter() {
                 LogicalFilter::new(
                     result,
