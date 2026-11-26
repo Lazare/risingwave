@@ -1,0 +1,303 @@
+# Temporary workflow of the prototype branch `proto/streaming-prune-empty-relation`: the
+# prototype is compiled and tested here instead of on the development machine. To be dropped
+# before the prototype is integrated into a `fork/*` branch.
+#
+# - `planner`: regenerates the expected outputs of the planner tests and uploads the files that
+#   changed, then runs the unit tests of the frontend.
+# - `clippy`: lints the frontend.
+# - `e2e`: one job per differential test (pruning, merge of lookups, union join, unnesting), each
+#   building its own node.
+#
+# The streaming SLT suite with and without the pruning takes hours: see
+# `proto-streaming-prune-suite.yml`.
+name: Proto Streaming Prune Check
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'proto/streaming-prune-empty-relation'
+      - 'proto/streaming-merge-repeated-lookups'
+      - 'proto/streaming-simplify-subquery-unnesting'
+      - 'proto/streaming-simplify-subquery-unnesting-*'
+      - 'proto/plan-reduction-**'
+
+concurrency:
+  group: proto-streaming-prune-check-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_BUILD_JOBS: '3'
+  # Without debug info the test binaries fit the disk and the memory of a hosted runner.
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+
+jobs:
+  planner:
+    name: Planner and frontend tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Free disk space and add swap
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/share/swift
+          sudo docker image prune --all --force || true
+          sudo fallocate -l 16G /swapfile-build
+          sudo chmod 600 /swapfile-build
+          sudo mkswap /swapfile-build
+          sudo swapon /swapfile-build
+          df -h /
+          free -h
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install --no-install-recommends \
+            build-essential pkg-config make cmake lld protobuf-compiler libprotobuf-dev \
+            curl git unzip \
+            libssl-dev libsasl2-dev python3.12 python3.12-dev libblas-dev liblapack-dev libomp-dev
+
+      - name: Install Rust toolchain
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- --no-modify-path --default-toolchain none -y
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install --profile minimal
+          rustup show
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-amd64-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-registry-amd64-
+
+      - name: Install cargo-nextest
+        run: |
+          curl -L --proto '=https' --tlsv1.2 -sSf \
+            https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+          cargo binstall -y --locked cargo-nextest
+
+      # The expected outputs are regenerated instead of checked: the job uploads what changed,
+      # which is then reviewed and committed.
+      - name: Regenerate the planner test outputs
+        id: planner
+        run: |
+          UPDATE_EXPECT=1 cargo nextest run --locked --no-fail-fast --retries 0 \
+            -p risingwave_planner_test
+
+      - name: Collect the planner test outputs that changed
+        if: ${{ !cancelled() }}
+        run: |
+          out=src/frontend/planner_test/tests/testdata/output
+          mkdir -p "$RUNNER_TEMP/planner"
+          git status --short -- "$out" | tee "$RUNNER_TEMP/planner/status.txt"
+          git diff -- "$out" > "$RUNNER_TEMP/planner/tracked.diff"
+          git ls-files --modified --others --exclude-standard -- "$out" \
+            | tar -czf "$RUNNER_TEMP/planner/outputs.tar.gz" -T -
+          {
+            echo '## Planner test outputs that changed'
+            echo '```'
+            cat "$RUNNER_TEMP/planner/status.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the planner test outputs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: planner-outputs
+          path: ${{ runner.temp }}/planner
+          if-no-files-found: warn
+
+      - name: Frontend and session configuration unit tests
+        if: ${{ !cancelled() && steps.planner.outcome != 'skipped' }}
+        run: |
+          cargo nextest run --locked --no-fail-fast --lib \
+            -p risingwave_frontend -p risingwave_common
+
+  clippy:
+    name: Clippy on the frontend
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Free disk space and add swap
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/share/swift
+          sudo docker image prune --all --force || true
+          sudo fallocate -l 16G /swapfile-build
+          sudo chmod 600 /swapfile-build
+          sudo mkswap /swapfile-build
+          sudo swapon /swapfile-build
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install --no-install-recommends \
+            build-essential pkg-config make cmake lld protobuf-compiler libprotobuf-dev \
+            curl git unzip \
+            libssl-dev libsasl2-dev python3.12 python3.12-dev libblas-dev liblapack-dev libomp-dev
+
+      - name: Install Rust toolchain
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- --no-modify-path --default-toolchain none -y
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install --profile minimal
+          rustup component add clippy rustfmt
+          rustup show
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-amd64-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-registry-amd64-
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        if: ${{ !cancelled() }}
+        run: cargo clippy --locked -p risingwave_frontend --all-targets -- -D warnings
+
+  tests:
+    # The differential tests to run are listed in `.github/proto-differential-tests.txt`, one per
+    # line: `<name> <file under e2e_test/streaming without .slt> <minutes>`. A branch that works on
+    # one rule lists only its own test.
+    name: List the differential tests
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.list.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: list
+        run: |
+          python3 - >> "$GITHUB_OUTPUT" <<'PY'
+          import json
+          tests = []
+          for line in open('.github/proto-differential-tests.txt'):
+              fields = line.split()
+              if fields and not fields[0].startswith('#'):
+                  tests.append({'name': fields[0], 'file': fields[1], 'minutes': int(fields[2])})
+          print('matrix=' + json.dumps(tests))
+          PY
+
+  e2e:
+    # One job per differential test: each builds its node, so that a slow test does not push the
+    # others past the time limit of the job.
+    name: Differential test (${{ matrix.test.name }})
+    needs: tests
+    if: ${{ needs.tests.outputs.matrix != '[]' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        test: ${{ fromJSON(needs.tests.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Free disk space and add swap
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/share/swift
+          sudo docker image prune --all --force || true
+          sudo fallocate -l 16G /swapfile-build
+          sudo chmod 600 /swapfile-build
+          sudo mkswap /swapfile-build
+          sudo swapon /swapfile-build
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install --no-install-recommends \
+            build-essential pkg-config make cmake lld protobuf-compiler libprotobuf-dev \
+            curl git unzip \
+            libssl-dev libsasl2-dev python3.12 python3.12-dev libblas-dev liblapack-dev libomp-dev
+
+      - name: Install Rust toolchain
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- --no-modify-path --default-toolchain none -y
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install --profile minimal
+          rustup show
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-amd64-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-registry-amd64-
+
+      - name: Install sqllogictest
+        run: |
+          curl -L --proto '=https' --tlsv1.2 -sSf \
+            https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+          cargo binstall -y --locked sqllogictest-bin@0.29.1
+
+      - name: Build the all-in-one binary
+        run: cargo build --locked -p risingwave_cmd_all
+
+      - name: Start a single node
+        run: |
+          mkdir -p "$RUNNER_TEMP/e2e"
+          nohup ./target/debug/risingwave single_node > "$RUNNER_TEMP/e2e/node.log" 2>&1 &
+          for _ in $(seq 1 120); do
+            if (exec 3<>/dev/tcp/127.0.0.1/4566) 2>/dev/null; then echo ready; exit 0; fi
+            sleep 2
+          done
+          tail -50 "$RUNNER_TEMP/e2e/node.log"
+          exit 1
+
+      - name: Differential test
+        timeout-minutes: ${{ matrix.test.minutes }}
+        run: |
+          # Without `pipefail` the step would succeed whenever `tee` does.
+          set -o pipefail
+          export PATH="$PWD/e2e_test/commands:$PATH"
+          sqllogictest -p 4566 -d dev './e2e_test/streaming/${{ matrix.test.file }}.slt' \
+            2>&1 | tee "$RUNNER_TEMP/e2e/differential.log"
+
+      - name: Panics and pruning messages in the node log
+        if: ${{ always() }}
+        run: |
+          grep -a -i 'panicked' "$RUNNER_TEMP/e2e/node.log" | head -20 || true
+          grep -a -c 'pruned the sub-plans proven empty' "$RUNNER_TEMP/e2e/node.log" || true
+
+      - name: Upload the logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-${{ matrix.test.name }}
+          path: ${{ runner.temp }}/e2e
+          if-no-files-found: warn
