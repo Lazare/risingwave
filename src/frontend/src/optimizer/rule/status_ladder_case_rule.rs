@@ -28,7 +28,8 @@
 //! ) WHERE rn = 1
 //! ```
 //!
-//! The planner makes it a `TopN` (limit 1 per group) over the union. Under that `TopN`, the
+//! The planner makes it a `TopN` (limit 1 per group) over the union in streaming plans, and keeps
+//! the `OverWindow` and the filter on the row number in batch plans; both forms are handled. Under that `TopN`, the
 //! branches that filter and project the same relation `t` with the same key are replaced with
 //! one branch that gives, for each row of `t`, only its best row: the literals of the first
 //! branch, by priority, whose filter holds.
@@ -57,8 +58,10 @@
 //! `now()` is a join at this stage and stays a separate branch, and `batch_status_ladder_case`
 //! for batch plans, where `now()` is a constant.
 
-use risingwave_common::types::ScalarImpl;
+use fixedbitset::FixedBitSet;
+use risingwave_common::types::{DataType, ScalarImpl};
 use risingwave_common::util::iter_util::ZipEqFast;
+use risingwave_expr::window_function::WindowFuncKind;
 
 use super::prelude::{PlanRef, *};
 use super::repeated_lookup_merge_rule::{and_all, map_input_refs};
@@ -117,7 +120,9 @@ pub struct StatusLadderCaseRule;
 
 impl Rule<Logical> for StatusLadderCaseRule {
     fn apply(&self, plan: PlanRef) -> Option<PlanRef> {
-        let top_n = plan.as_logical_top_n()?;
+        let Some(top_n) = plan.as_logical_top_n() else {
+            return apply_to_row_number(&plan);
+        };
         let limit = top_n.limit_attr();
         if limit.limit() != 1 || limit.with_ties() || top_n.offset() != 0 {
             return None;
@@ -132,109 +137,196 @@ impl Rule<Logical> for StatusLadderCaseRule {
             return None;
         }
         let input = top_n.input();
-        let union = input.as_logical_union()?;
-        if !union.all() || union.source_col().is_some() {
-            return None;
-        }
-        let width = input.schema().len();
-        let inputs = input.inputs();
-
-        // The branches that only filter and project a relation, output the key and literals, and
-        // a priority that is an integer.
-        let branches: Vec<Option<(Branch, i64)>> = inputs
-            .iter()
-            .map(|input| {
-                let branch = branch_of(input)?;
-                if branch.exprs.len() != width {
-                    return None;
-                }
-                let literals_only = (0..width)
-                    .filter(|column| !group_key.contains(column))
-                    .all(|column| is_literal(&branch.exprs[column]));
-                if !literals_only {
-                    return None;
-                }
-                let priority = priority_of(&branch.exprs[priority_column])?;
-                Some((branch, priority))
-            })
-            .collect();
-
-        // The groups of branches that read the same base with the same key.
-        let key_of = |branch: &Branch| -> Vec<ExprImpl> {
-            group_key
-                .iter()
-                .map(|&column| branch.exprs[column].clone())
-                .collect()
-        };
-        let mut groups: Vec<Vec<usize>> = vec![];
-        for (index, branch) in branches.iter().enumerate() {
-            let Some((branch, _)) = branch else { continue };
-            match groups.iter_mut().find(|group| {
-                let (first, _) = branches[group[0]].as_ref().expect("a branch");
-                first.base == branch.base && key_of(first) == key_of(branch)
-            }) {
-                Some(group) => group.push(index),
-                None => groups.push(vec![index]),
-            }
-        }
-        // The members of a group in the order in which the `TopN` prefers them. Two members with
-        // the same priority must output the same row: the group is left alone otherwise.
-        let groups: Vec<Vec<usize>> = groups
-            .into_iter()
-            .filter_map(|mut group| {
-                group.sort_by_key(|&index| {
-                    let (_, priority) = branches[index].as_ref().expect("a branch");
-                    if descending {
-                        priority.saturating_neg()
-                    } else {
-                        *priority
-                    }
-                });
-                let consistent = group.windows(2).all(|pair| {
-                    let (first, first_priority) = branches[pair[0]].as_ref().expect("a branch");
-                    let (second, second_priority) = branches[pair[1]].as_ref().expect("a branch");
-                    first_priority != second_priority || first.exprs == second.exprs
-                });
-                consistent.then_some(group)
-            })
-            .collect();
-        let all_in_one = groups.len() == 1 && groups[0].len() == inputs.len();
-        // A group of one branch changes nothing, unless it is the whole union over a unique key.
-        let groups: Vec<Vec<usize>> = groups
-            .into_iter()
-            .filter(|group| group.len() >= 2)
-            .collect();
-        if groups.is_empty() {
-            return None;
-        }
-
-        let mut new_inputs: Vec<Option<PlanRef>> = inputs.iter().cloned().map(Some).collect();
-        for group in &groups {
-            let members: Vec<&Branch> = group
-                .iter()
-                .map(|&index| &branches[index].as_ref().expect("a branch").0)
-                .collect();
-            new_inputs[group[0]] = Some(best_of(&members, &group_key));
-            for &index in &group[1..] {
-                new_inputs[index] = None;
-            }
-        }
-        let mut new_inputs: Vec<PlanRef> = new_inputs.into_iter().flatten().collect();
-        if new_inputs.len() == 1 {
-            let merged = new_inputs.pop().expect("one input");
-            let first = &branches[groups[0][0]].as_ref().expect("a branch").0;
+        let (reduced, keeps_one_row) =
+            reduce_ladder(&input, &group_key, priority_column, descending)?;
+        if keeps_one_row {
             // Each key has at most one row: the `TopN` keeps it.
-            if all_in_one && is_unique_on(first, &key_of(first)) {
-                return Some(merged);
-            }
-            return Some(top_n.clone_with_input(merged).into());
+            return Some(reduced);
         }
-        Some(
-            top_n
-                .clone_with_input(LogicalUnion::new(true, new_inputs).into())
-                .into(),
-        )
+        Some(top_n.clone_with_input(reduced).into())
     }
+}
+
+/// The top-1 of a status ladder as batch plans keep it: `Filter(row_number = 1)` over an
+/// `OverWindow` with the one call `row_number() OVER (PARTITION BY .. ORDER BY ..)`.
+fn apply_to_row_number(plan: &PlanRef) -> Option<PlanRef> {
+    let filter = plan.as_logical_filter()?;
+    let over_window_plan = filter.input();
+    let over_window = over_window_plan.as_logical_over_window()?;
+    let [call] = over_window.window_functions() else {
+        return None;
+    };
+    if !matches!(call.kind, WindowFuncKind::RowNumber) {
+        return None;
+    }
+    let [order] = call.order_by.as_slice() else {
+        return None;
+    };
+    let group_key: Vec<usize> = call.partition_by.iter().map(|r| r.index()).collect();
+    let descending = order.order_type.is_descending();
+    let priority_column = order.column_index;
+    if group_key.is_empty() || group_key.contains(&priority_column) {
+        return None;
+    }
+    // The conjuncts of the filter on the row number alone must keep the first row only.
+    let input = over_window.input();
+    let row_number = input.schema().len();
+    let mut columns = FixedBitSet::with_capacity(row_number + 1);
+    columns.insert(row_number);
+    let (on_row_number, _) = filter.predicate().clone().split_disjoint(&columns);
+    if on_row_number.conjunctions.is_empty()
+        || !on_row_number.conjunctions.iter().all(keeps_first_row_only)
+    {
+        return None;
+    }
+    let (reduced, keeps_one_row) = reduce_ladder(&input, &group_key, priority_column, descending)?;
+    if keeps_one_row {
+        // Each key has at most one row, whose row number is 1.
+        let mut exprs: Vec<ExprImpl> = input
+            .schema()
+            .fields()
+            .iter()
+            .enumerate()
+            .map(|(index, field)| InputRef::new(index, field.data_type()).into())
+            .collect();
+        exprs.push(
+            ExprImpl::literal_bigint(1)
+                .cast_implicit(&call.return_type)
+                .ok()?,
+        );
+        let numbered = LogicalProject::create(reduced, exprs);
+        return Some(filter.clone_with_input(numbered).into());
+    }
+    let numbered: PlanRef = over_window.clone_with_input(reduced).into();
+    Some(filter.clone_with_input(numbered).into())
+}
+
+/// Whether a conjunct on the row number alone keeps the first row only (`= 1`, `<= 1`, `< 2`).
+fn keeps_first_row_only(conjunct: &ExprImpl) -> bool {
+    let value = |v: ExprImpl| -> Option<i64> {
+        let v = v
+            .cast_implicit(&DataType::Int64)
+            .ok()?
+            .fold_const()
+            .ok()??;
+        Some(*v.as_int64())
+    };
+    if let Some((_, v)) = conjunct.as_eq_const() {
+        return value(v) == Some(1);
+    }
+    if let Some((_, cmp, v)) = conjunct.as_comparison_const() {
+        return match cmp {
+            ExprType::LessThanOrEqual => value(v) == Some(1),
+            ExprType::LessThan => value(v) == Some(2),
+            _ => false,
+        };
+    }
+    false
+}
+
+/// Reduces the union under the top-1 of a status ladder: see the documentation of the module.
+/// Returns the new input of the top-1, and whether it holds at most one row per key, in which
+/// case it replaces the top-1.
+fn reduce_ladder(
+    input: &PlanRef,
+    group_key: &[usize],
+    priority_column: usize,
+    descending: bool,
+) -> Option<(PlanRef, bool)> {
+    let union = input.as_logical_union()?;
+    if !union.all() || union.source_col().is_some() {
+        return None;
+    }
+    let width = input.schema().len();
+    let inputs = input.inputs();
+
+    // The branches that only filter and project a relation, output the key and literals, and
+    // a priority that is an integer.
+    let branches: Vec<Option<(Branch, i64)>> = inputs
+        .iter()
+        .map(|input| {
+            let branch = branch_of(input)?;
+            if branch.exprs.len() != width {
+                return None;
+            }
+            let literals_only = (0..width)
+                .filter(|column| !group_key.contains(column))
+                .all(|column| is_literal(&branch.exprs[column]));
+            if !literals_only {
+                return None;
+            }
+            let priority = priority_of(&branch.exprs[priority_column])?;
+            Some((branch, priority))
+        })
+        .collect();
+
+    // The groups of branches that read the same base with the same key.
+    let key_of = |branch: &Branch| -> Vec<ExprImpl> {
+        group_key
+            .iter()
+            .map(|&column| branch.exprs[column].clone())
+            .collect()
+    };
+    let mut groups: Vec<Vec<usize>> = vec![];
+    for (index, branch) in branches.iter().enumerate() {
+        let Some((branch, _)) = branch else { continue };
+        match groups.iter_mut().find(|group| {
+            let (first, _) = branches[group[0]].as_ref().expect("a branch");
+            first.base == branch.base && key_of(first) == key_of(branch)
+        }) {
+            Some(group) => group.push(index),
+            None => groups.push(vec![index]),
+        }
+    }
+    // The members of a group in the order in which the `TopN` prefers them. Two members with
+    // the same priority must output the same row: the group is left alone otherwise.
+    let groups: Vec<Vec<usize>> = groups
+        .into_iter()
+        .filter_map(|mut group| {
+            group.sort_by_key(|&index| {
+                let (_, priority) = branches[index].as_ref().expect("a branch");
+                if descending {
+                    priority.saturating_neg()
+                } else {
+                    *priority
+                }
+            });
+            let consistent = group.windows(2).all(|pair| {
+                let (first, first_priority) = branches[pair[0]].as_ref().expect("a branch");
+                let (second, second_priority) = branches[pair[1]].as_ref().expect("a branch");
+                first_priority != second_priority || first.exprs == second.exprs
+            });
+            consistent.then_some(group)
+        })
+        .collect();
+    let all_in_one = groups.len() == 1 && groups[0].len() == inputs.len();
+    // A group of one branch changes nothing, unless it is the whole union over a unique key.
+    let groups: Vec<Vec<usize>> = groups
+        .into_iter()
+        .filter(|group| group.len() >= 2)
+        .collect();
+    if groups.is_empty() {
+        return None;
+    }
+
+    let mut new_inputs: Vec<Option<PlanRef>> = inputs.iter().cloned().map(Some).collect();
+    for group in &groups {
+        let members: Vec<&Branch> = group
+            .iter()
+            .map(|&index| &branches[index].as_ref().expect("a branch").0)
+            .collect();
+        new_inputs[group[0]] = Some(best_of(&members, &group_key));
+        for &index in &group[1..] {
+            new_inputs[index] = None;
+        }
+    }
+    let mut new_inputs: Vec<PlanRef> = new_inputs.into_iter().flatten().collect();
+    if new_inputs.len() == 1 {
+        let merged = new_inputs.pop().expect("one input");
+        let first = &branches[groups[0][0]].as_ref().expect("a branch").0;
+        return Some((merged, all_in_one && is_unique_on(first, &key_of(first))));
+    }
+    Some((LogicalUnion::new(true, new_inputs).into(), false))
 }
 
 impl StatusLadderCaseRule {
