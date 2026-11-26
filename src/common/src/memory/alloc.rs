@@ -87,6 +87,7 @@ impl<A: Allocator + Clone> Clone for MonitoredAlloc<A> {
 
 #[cfg(test)]
 mod tests {
+    use prometheus::core::Atomic;
     use risingwave_common_metrics::TrAdderAtomic;
 
     use super::*;

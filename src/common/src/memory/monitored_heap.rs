@@ -22,6 +22,8 @@ use crate::memory::{MemoryContext, MonitoredGlobalAlloc};
 pub struct MemMonitoredHeap<T> {
     inner: BinaryHeap<T>,
     mem_ctx: MemoryContext,
+    /// The estimated heap size of the items in the heap, counted in `mem_ctx`.
+    items_heap_size: usize,
 }
 
 impl<T: Ord + EstimateSize> MemMonitoredHeap<T> {
@@ -29,18 +31,24 @@ impl<T: Ord + EstimateSize> MemMonitoredHeap<T> {
         Self {
             inner: BinaryHeap::new(),
             mem_ctx,
+            items_heap_size: 0,
         }
     }
 
     pub fn with_capacity(capacity: usize, mem_ctx: MemoryContext) -> Self {
         let inner = BinaryHeap::with_capacity(capacity);
         mem_ctx.force_add((capacity * size_of::<T>()) as i64);
-        Self { inner, mem_ctx }
+        Self {
+            inner,
+            mem_ctx,
+            items_heap_size: 0,
+        }
     }
 
     pub fn push(&mut self, item: T) {
         let prev_cap = self.inner.capacity();
         let item_heap = item.estimated_heap_size();
+        self.items_heap_size += item_heap;
         self.inner.push(item);
         let new_cap = self.inner.capacity();
         self.mem_ctx
@@ -51,6 +59,7 @@ impl<T: Ord + EstimateSize> MemMonitoredHeap<T> {
         let prev_cap = self.inner.capacity();
         let item = self.inner.pop();
         let item_heap = item.as_ref().map(|i| i.estimated_heap_size()).unwrap_or(0);
+        self.items_heap_size -= item_heap;
         let new_cap = self.inner.capacity();
         self.mem_ctx
             .force_add(-(((prev_cap - new_cap) * size_of::<T>() + item_heap) as i64));
@@ -83,15 +92,20 @@ impl<T: Ord + EstimateSize> MemMonitoredHeap<T> {
         self.inner.peek()
     }
 
-    pub fn into_sorted_vec(self) -> Vec<T, MonitoredGlobalAlloc> {
-        let old_cap = self.inner.capacity();
+    /// The items, sorted. Only the buffer of the returned vector is counted in the memory
+    /// context: the heap memory of the items is no longer counted.
+    pub fn into_sorted_vec(mut self) -> Vec<T, MonitoredGlobalAlloc> {
+        let inner = std::mem::take(&mut self.inner);
+        let old_cap = inner.capacity();
         let alloc = MonitoredGlobalAlloc::with_memory_context(self.mem_ctx.clone());
-        let vec = self.inner.into_iter_sorted();
+        let vec = inner.into_iter_sorted();
 
         let mut ret = Vec::with_capacity_in(vec.len(), alloc);
         ret.extend(vec);
 
-        self.mem_ctx.force_add(-((old_cap * size_of::<T>()) as i64));
+        self.mem_ctx
+            .force_add(-((old_cap * size_of::<T>() + self.items_heap_size) as i64));
+        self.items_heap_size = 0;
         ret
     }
 
@@ -115,9 +129,18 @@ where
         }
 
         let new_cap = self.inner.capacity();
+        self.items_heap_size += items_heap_size;
 
         let diff = (new_cap - old_cap) * size_of::<T>() + items_heap_size;
         self.mem_ctx.force_add(diff as i64);
+    }
+}
+
+impl<T> Drop for MemMonitoredHeap<T> {
+    fn drop(&mut self) {
+        // What the heap still holds is given back, like the allocations of a monitored vector.
+        self.mem_ctx
+            .force_add(-((self.inner.capacity() * size_of::<T>() + self.items_heap_size) as i64));
     }
 }
 
@@ -160,6 +183,19 @@ mod tests {
         assert_eq!(heap.capacity(), 3);
         assert_eq!(24, gauge.get());
         drop(heap.into_sorted_vec());
+        assert_eq!(0, gauge.get());
+    }
+
+    #[test]
+    fn test_heap_dropped_gives_back_its_items() {
+        let gauge = LabelGuardedIntGauge::test_int_gauge::<4>();
+        let mem_ctx = MemoryContext::root(gauge.clone(), u64::MAX);
+
+        let mut heap = MemMonitoredHeap::<Vec<u64>>::with_capacity(4, mem_ctx);
+        heap.push(vec![1, 2, 3]);
+        heap.push(Vec::with_capacity(10));
+        assert!(gauge.get() >= (4 * std::mem::size_of::<Vec<u64>>() + 13 * 8) as i64);
+        drop(heap);
         assert_eq!(0, gauge.get());
     }
 
