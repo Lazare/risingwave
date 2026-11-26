@@ -42,6 +42,7 @@ own rules.
 | BF | Batch: cardinality feedback, step 1: count the rows of the operators at execution and compare them with the estimates (`batch_cardinality_feedback`) | first version (prototype, branch `proto/batch-cardinality-feedback`, see "BF" below): observation only, no plan changes |
 | BP | Batch: second pass of the reductions on keys after the stages that create aggregations (`batch_reduce_keys_after_conversions`) | done (prototype, branch `proto/plan-reduction-batch-pass2`, see "BP and BT" below) |
 | BT | Batch: `row_number() <= n` per partition becomes a top-n per group, small `n` only (`batch_over_window_to_topn`) | done (prototype, branch `proto/plan-reduction-batch-pass2`, see "BP and BT" below) |
+| BU | Batch: `UNION ALL` run in parallel tasks instead of one (`batch_distributed_union`) | done (prototype, branch `proto/plan-reduction-batch-union-dist`, see "BU" below) |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -1152,6 +1153,88 @@ BP).
   ties, more than ten rows per group, after deletes and updates).
 - Not done: the union join factoring, union scan merge, status ladder and empty-relation stages
   are not re-run in the pass.
+
+### BU. Batch: distributed `UNION ALL` (added on 2026-11-26, done on the branch)
+
+`BatchUnion::to_distributed` gathered every input into one task (`RequiredDist::single()` on
+each input, with a TODO about a round-robin distribution). Everything above the union then ran in
+that task, or was hashed again from it: a hash aggregation or a join over a union read all the
+rows of all the branches through one task, twice over the network.
+
+```sql
+create table a (id int primary key, k int, v int);
+create table c (k int, v int);
+select k, count(*) from (select k, v from a union all select k, v from c) u group by k;
+-- before: HashAgg <- Exchange(Hash k) <- Union <- [Exchange(Single) <- Scan(a), Exchange(Single) <- Scan(c)]
+-- BU:     HashAgg <- Union <- [Exchange(Hash k) <- Scan(a), Exchange(Hash k) <- Scan(c)]
+```
+
+**Why upstream forced `Single`.** Two reasons, both still true:
+
+- There is no round-robin exchange (`Distribution::SomeShard` becomes `DistributionMode::Single`
+  in `to_prost`, `RequiredDist::AnyShard` is `todo!()` in `to_dist`). An input can only reach the
+  tasks of a parallel stage by a hash, a consistent hash or a broadcast.
+- The stage fragmenter assumes one table scan (or source, or lookup join) per stage: it reads the
+  first scan it finds to decide the tasks of the stage and the vnodes of each task, and gives the
+  same vnodes to every other scan of the stage. Two branches that scan different tables, kept in
+  the stage of the union without an exchange, would scan the second table with the vnode mapping
+  of the first (wrong when the vnode counts differ, and against the fragmenter's assumption in any
+  case); a branch distributed as `Single` (values, a global aggregation) would run once per task
+  and duplicate its rows. So "each input kept where it is, no exchange" is not safe in general.
+
+**What BU does (variable `batch_distributed_union`, default false).** Each input is planned
+exactly as before (`to_distributed`); only the exchange above it changes. All inputs are brought to
+one distribution `target`, the same for all, and the union is then distributed as `target` in the
+stage of its parent:
+
+- the parent requires `HashShard(k)` (second side of a hash join) or `UpstreamHashShard(k, t)` (a
+  lookup join): `target` is that distribution, the exchange the parent would have put above the
+  union;
+- the parent requires a shard by key (hash aggregation, `DISTINCT`, first side of a hash join,
+  partitioned window, group top-n): the `HashShard` an input already has if it satisfies the
+  requirement, otherwise the hash of the required key, as the parent would have done;
+- no requirement (a count, a top-n, a limit or a sort above, which then run in two phases, the
+  sort merged by the exchange above it): the `HashShard` an input already has, otherwise the hash
+  of all the columns of the union;
+- a required single distribution (root, sort, nested loop join, insert), a broadcast, inputs that
+  are all single (values, global aggregations), or a union without columns: the single union, as
+  before.
+
+An input already distributed as `target` stays in the stage of the union, without exchange, only
+when the part of its plan in that stage (down to its exchanges) holds only operators that
+transform the rows of their own task (projection, filter, hash or sort aggregation, hash join,
+union, project set, expand, hop window, window, group top-n) and nothing distributed as `Single`:
+no scan, source or lookup join that would decide the tasks of the stage. Every other input gets an
+exchange to `target`, which puts its plan in a stage of its own. Projections and filters (and
+insert, max-one-row and group top-n, which used to convert their input before checking it) pass
+the required distribution down to a union below them, through the column mapping of the
+projection; without the variable, or without a union below, they convert their input as before.
+
+- Exactness: a `UNION ALL` concatenates its inputs and its order is unspecified. Each input is
+  computed once, by its own plan; each of its rows goes through exactly one exchange partition to
+  exactly one task of the union, which emits it once: the union of the tasks is the same multiset.
+  `HashShard(k)` is the same function in every input (same column types at the same positions, the
+  same hash, the parallelism of the stage of the union as the partition count), so the rows with
+  equal `k` from every branch meet in the same task, which is all the operator above relies on.
+  A union tag (a constant column per branch) is hashed like any other column. `UNION` without
+  `ALL` is a hash aggregation over a `UNION ALL`, handled as such. Local execution (`to_local`)
+  does not change.
+- Cost: with a requirement, the union replaces the gather into one task plus the hash exchange
+  above it by one hash exchange per input; the operator above runs in parallel on its input
+  partition. Without a requirement, the rows are hashed on all their columns instead of gathered:
+  the same volume crosses the network, but into all the tasks; an operator above that only needs
+  a single task (a plain `SELECT` of the union, an insert) keeps the single union. A
+  `count(*)` whose union column pruning left without columns keeps it too (nothing to hash), but
+  its inputs then send rows without data.
+- Tests: `batch_distributed_union.yaml` (planner: union under a hash aggregation, a join of two
+  unions, a lookup join, a window, a count, a top-n and a limit; inputs that are scans,
+  aggregations already hashed on the key, joins and values; a tag column; `UNION`; forced
+  two-phase aggregation; single unions kept; off by default), and the differential
+  `e2e_test/batch/distributed_union.gen.py` (29 queries run with the variable off and on, in local
+  and distributed query mode, multisets compared on empty tables, NULLs, duplicate rows, always
+  empty branches, after updates and deletes, and with a single branch left).
+- Not done: a round-robin exchange, which would let a union with no requirement keep its inputs
+  in their stages without hashing; a partial aggregation pushed into each branch.
 
 ## Not for now: sharing between materialized views
 

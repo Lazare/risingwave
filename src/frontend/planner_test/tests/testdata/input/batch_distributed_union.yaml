@@ -177,7 +177,8 @@
     select k, v from a union all select k, v from c;
   expected_outputs:
   - batch_plan
-- name: plain union with a projection and an order
+# A sort above (no required distribution): hashed on all the columns, sorted in each task.
+- name: order by over a union (sorted in parallel, merged by the exchange)
   before: [setup]
   sql: |
     select k + 1 as k1 from (select k from a union all select k from c) u order by k1;

@@ -86,7 +86,7 @@ impl ToDistributedBatch for BatchFilter {
     ) -> Result<PlanRef> {
         // `batch_distributed_union`: pass the required distribution down to a union, which can
         // then bring each of its inputs to it. Any other plan is converted as before.
-        let ret = if passes_required_dist_to_union(&self.input()) {
+        let ret: PlanRef = if passes_required_dist_to_union(&self.input()) {
             let input_required = required_dist.clone();
             let new_input = self
                 .input()
