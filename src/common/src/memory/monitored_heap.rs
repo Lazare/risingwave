@@ -34,7 +34,7 @@ impl<T: Ord + EstimateSize> MemMonitoredHeap<T> {
 
     pub fn with_capacity(capacity: usize, mem_ctx: MemoryContext) -> Self {
         let inner = BinaryHeap::with_capacity(capacity);
-        mem_ctx.add((capacity * size_of::<T>()) as i64);
+        mem_ctx.force_add((capacity * size_of::<T>()) as i64);
         Self { inner, mem_ctx }
     }
 
@@ -44,7 +44,7 @@ impl<T: Ord + EstimateSize> MemMonitoredHeap<T> {
         self.inner.push(item);
         let new_cap = self.inner.capacity();
         self.mem_ctx
-            .add(((new_cap - prev_cap) * size_of::<T>() + item_heap) as i64);
+            .force_add(((new_cap - prev_cap) * size_of::<T>() + item_heap) as i64);
     }
 
     pub fn pop(&mut self) -> Option<T> {
@@ -53,9 +53,22 @@ impl<T: Ord + EstimateSize> MemMonitoredHeap<T> {
         let item_heap = item.as_ref().map(|i| i.estimated_heap_size()).unwrap_or(0);
         let new_cap = self.inner.capacity();
         self.mem_ctx
-            .add(-(((prev_cap - new_cap) * size_of::<T>() + item_heap) as i64));
+            .force_add(-(((prev_cap - new_cap) * size_of::<T>() + item_heap) as i64));
 
         item
+    }
+
+    /// Reserves room for exactly `additional` more items, counted in the memory context.
+    pub fn reserve_exact(&mut self, additional: usize) {
+        let prev_cap = self.inner.capacity();
+        self.inner.reserve_exact(additional);
+        let new_cap = self.inner.capacity();
+        self.mem_ctx
+            .force_add(((new_cap - prev_cap) * size_of::<T>()) as i64);
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.inner.capacity()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -78,7 +91,7 @@ impl<T: Ord + EstimateSize> MemMonitoredHeap<T> {
         let mut ret = Vec::with_capacity_in(vec.len(), alloc);
         ret.extend(vec);
 
-        self.mem_ctx.add(-((old_cap * size_of::<T>()) as i64));
+        self.mem_ctx.force_add(-((old_cap * size_of::<T>()) as i64));
         ret
     }
 
@@ -104,7 +117,7 @@ where
         let new_cap = self.inner.capacity();
 
         let diff = (new_cap - old_cap) * size_of::<T>() + items_heap_size;
-        self.mem_ctx.add(diff as i64);
+        self.mem_ctx.force_add(diff as i64);
     }
 }
 
@@ -130,6 +143,24 @@ mod tests {
         assert_eq!(heap.inner.capacity() as i64, gauge.get());
 
         assert!(!heap.is_empty());
+    }
+
+    #[test]
+    fn test_heap_reserve_exact() {
+        let gauge = LabelGuardedIntGauge::test_int_gauge::<4>();
+        let mem_ctx = MemoryContext::root(gauge.clone(), u64::MAX);
+
+        let mut heap = MemMonitoredHeap::<u64>::new_with(mem_ctx);
+        heap.reserve_exact(3);
+        assert_eq!(heap.capacity(), 3);
+        assert_eq!(24, gauge.get());
+        heap.push(1);
+        heap.push(2);
+        heap.push(3);
+        assert_eq!(heap.capacity(), 3);
+        assert_eq!(24, gauge.get());
+        drop(heap.into_sorted_vec());
+        assert_eq!(0, gauge.get());
     }
 
     #[test]

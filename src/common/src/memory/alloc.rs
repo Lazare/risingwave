@@ -46,14 +46,16 @@ unsafe impl<A: Allocator> Allocator for MonitoredAlloc<A> {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         let ret = self.alloc.allocate(layout)?;
         // We don't throw an AllocError if the memory context is out of memory, otherwise the whole process will crash.
-        self.ctx.add(layout.size() as i64);
+        // The memory is allocated anyway: count it even beyond the limit of the context, or its
+        // deallocation would be subtracted without having been added.
+        self.ctx.force_add(layout.size() as i64);
         Ok(ret)
     }
 
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
         unsafe {
             self.alloc.deallocate(ptr, layout);
-            self.ctx.add(-(layout.size() as i64));
+            self.ctx.force_add(-(layout.size() as i64));
         }
     }
 }
@@ -62,14 +64,14 @@ unsafe impl<A: Allocator> AllocatorApi2 for MonitoredAlloc<A> {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocErrorApi2> {
         let ret = self.alloc.allocate(layout).map_err(|_| AllocErrorApi2)?;
         // Keep memory accounting behavior consistent with the std::alloc::Allocator path.
-        self.ctx.add(layout.size() as i64);
+        self.ctx.force_add(layout.size() as i64);
         Ok(ret)
     }
 
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
         unsafe {
             self.alloc.deallocate(ptr, layout);
-            self.ctx.add(-(layout.size() as i64));
+            self.ctx.force_add(-(layout.size() as i64));
         }
     }
 }
@@ -80,5 +82,32 @@ impl<A: Allocator + Clone> Clone for MonitoredAlloc<A> {
             ctx: self.ctx.clone(),
             alloc: self.alloc.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use risingwave_common_metrics::TrAdderAtomic;
+
+    use super::*;
+
+    /// An allocation beyond the limit of the context is made anyway: it must be counted, or its
+    /// deallocation would make the context count less than what it holds.
+    #[test]
+    fn test_allocation_beyond_the_limit_is_counted() {
+        let root = MemoryContext::root(TrAdderAtomic::new(0), 1024);
+        let ctx = MemoryContext::new(Some(root.clone()), TrAdderAtomic::new(0));
+        let small: Vec<u64, _> = Vec::with_capacity_in(16, ctx.global_allocator());
+        assert_eq!(ctx.get_bytes_used(), 128);
+        let large: Vec<u64, _> = Vec::with_capacity_in(1024, ctx.global_allocator());
+        assert_eq!(ctx.get_bytes_used(), 128 + 8192);
+        assert_eq!(root.get_bytes_used(), 128 + 8192);
+        // The context is over its limit: nothing else is granted.
+        assert!(!ctx.add(1));
+        drop(large);
+        assert_eq!(root.get_bytes_used(), 128);
+        drop(small);
+        assert_eq!(ctx.get_bytes_used(), 0);
+        assert_eq!(root.get_bytes_used(), 0);
     }
 }

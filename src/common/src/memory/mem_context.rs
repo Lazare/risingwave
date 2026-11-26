@@ -14,6 +14,7 @@
 
 use std::ops::Deref;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use prometheus::core::Atomic;
 use risingwave_common_metrics::TrAdderAtomic;
@@ -63,7 +64,8 @@ impl MemCounter for LabelGuardedIntGauge {
 struct MemoryContextInner {
     counter: Box<dyn MemCounter>,
     parent: Option<MemoryContext>,
-    mem_limit: u64,
+    /// See [`MemoryContext::set_mem_limit`].
+    mem_limit: AtomicU64,
     /// See [`MemoryContext::new_with_reservation`].
     reservation: Option<Reservation>,
 }
@@ -104,7 +106,7 @@ impl MemoryContext {
             inner: Some(Arc::new(MemoryContextInner {
                 counter: c,
                 parent,
-                mem_limit,
+                mem_limit: AtomicU64::new(mem_limit),
                 reservation: None,
             })),
         }
@@ -125,7 +127,7 @@ impl MemoryContext {
             inner: Some(Arc::new(MemoryContextInner {
                 counter: Box::new(counter),
                 parent: Some(shared),
-                mem_limit: u64::MAX,
+                mem_limit: AtomicU64::new(u64::MAX),
                 reservation: Some(Reservation {
                     bytes: reserved.min(i64::MAX as u64) as i64,
                     charged_to: reserved_in,
@@ -148,13 +150,18 @@ impl MemoryContext {
     }
 
     /// Add `bytes` memory usage. Pass negative value to decrease memory usage.
-    /// Returns `false` if the memory usage exceeds the limit.
+    /// Returns `false` if the memory usage exceeds the limit. Releasing memory always succeeds,
+    /// even when the context uses more than its limit, which happens after the limit was lowered
+    /// with [`set_mem_limit`](Self::set_mem_limit).
     pub fn add(&self, bytes: i64) -> bool {
         if let Some(inner) = &self.inner {
             if let Some(reservation) = &inner.reservation {
                 return Self::add_with_reservation(inner, reservation, bytes);
             }
-            if (inner.counter.get_bytes_used() + bytes) as u64 > inner.mem_limit {
+            if bytes > 0
+                && (inner.counter.get_bytes_used() + bytes) as u64
+                    > inner.mem_limit.load(Ordering::Relaxed)
+            {
                 inner.counter.on_limit_exceeded();
                 return false;
             }
@@ -169,6 +176,30 @@ impl MemoryContext {
             }
         }
         true
+    }
+
+    /// Counts `bytes` whatever the limits: for memory that is already allocated, such as the
+    /// allocations of a [`MonitoredGlobalAlloc`], which cannot be refused. The context and its
+    /// parents may then use more than their limits, so that the next [`add`](Self::add) is
+    /// refused until enough is released.
+    pub fn force_add(&self, bytes: i64) {
+        let Some(inner) = &self.inner else {
+            return;
+        };
+        if let Some(reservation) = &inner.reservation {
+            let used = inner.counter.get_bytes_used();
+            let (reserved_before, shared_before) = reservation.split(used);
+            let (reserved_after, shared_after) = reservation.split(used + bytes);
+            if let Some(shared) = &inner.parent {
+                shared.force_add(shared_after - shared_before);
+            }
+            reservation
+                .charged_to
+                .force_add(reserved_after - reserved_before);
+        } else if let Some(parent) = &inner.parent {
+            parent.force_add(bytes);
+        }
+        inner.counter.add(bytes);
     }
 
     fn add_with_reservation(
@@ -229,9 +260,19 @@ impl MemoryContext {
 
     pub fn mem_limit(&self) -> u64 {
         if let Some(inner) = &self.inner {
-            inner.mem_limit
+            inner.mem_limit.load(Ordering::Relaxed)
         } else {
             u64::MAX
+        }
+    }
+
+    /// Changes the limit of the context while it is in use. A limit lower than what the context
+    /// uses refuses any growth until enough memory is released, and never takes back what was
+    /// already granted. No effect on a context created with a reservation, whose limit is the one
+    /// of its shared parent.
+    pub fn set_mem_limit(&self, mem_limit: u64) {
+        if let Some(inner) = &self.inner {
+            inner.mem_limit.store(mem_limit, Ordering::Relaxed);
         }
     }
 
@@ -239,7 +280,7 @@ impl MemoryContext {
     /// Returns `false` if the memory usage exceeds the limit.
     pub fn check_memory_usage(&self) -> bool {
         if let Some(inner) = &self.inner {
-            if inner.counter.get_bytes_used() as u64 > inner.mem_limit {
+            if inner.counter.get_bytes_used() as u64 > inner.mem_limit.load(Ordering::Relaxed) {
                 return false;
             }
             if let Some(parent) = &inner.parent {
@@ -268,5 +309,87 @@ impl Drop for MemoryContextInner {
         } else if let Some(p) = &self.parent {
             p.add(-used);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lowered_limit_refuses_growth_but_not_release() {
+        let root = MemoryContext::root(TrAdderAtomic::new(0), u64::MAX);
+        let gate =
+            MemoryContext::new_with_mem_limit(Some(root.clone()), TrAdderAtomic::new(0), 100);
+        let child = MemoryContext::new(Some(gate.clone()), TrAdderAtomic::new(0));
+        assert!(child.add(80));
+
+        // Below what is already used: nothing more is granted, nothing is taken back.
+        gate.set_mem_limit(50);
+        assert_eq!(gate.mem_limit(), 50);
+        assert!(!child.add(1));
+        assert_eq!(gate.get_bytes_used(), 80);
+        // Releasing always succeeds, even above the limit.
+        assert!(child.add(-20));
+        assert_eq!(gate.get_bytes_used(), 60);
+        assert!(!child.add(1));
+        assert!(child.add(-20));
+        assert!(child.add(10));
+        assert!(!child.add(1));
+
+        // Back to a higher limit: growth is granted again.
+        gate.set_mem_limit(100);
+        assert!(child.add(40));
+        assert_eq!(root.get_bytes_used(), 90);
+        drop(child);
+        assert_eq!(root.get_bytes_used(), 0);
+    }
+
+    #[test]
+    fn test_force_add_counts_beyond_the_limits() {
+        let root = MemoryContext::root(TrAdderAtomic::new(0), 100);
+        let op = MemoryContext::new_with_reservation(
+            root.clone(),
+            root.clone(),
+            30,
+            TrAdderAtomic::new(0),
+        );
+        let other = MemoryContext::new(Some(root.clone()), TrAdderAtomic::new(0));
+        assert!(op.add(50));
+        op.force_add(80);
+        assert_eq!(op.get_bytes_used(), 130);
+        assert_eq!(root.get_bytes_used(), 130);
+        // Nothing more is granted to anyone until enough is released.
+        assert!(!other.add(1));
+        assert!(!op.add(1));
+        op.force_add(-80);
+        assert_eq!(root.get_bytes_used(), 50);
+        assert!(other.add(50));
+        drop((op, other));
+        assert_eq!(root.get_bytes_used(), 0);
+    }
+
+    #[test]
+    fn test_lowered_limit_applies_to_reserved_contexts_beyond_their_reservation() {
+        let root = MemoryContext::root(TrAdderAtomic::new(0), u64::MAX);
+        let gate =
+            MemoryContext::new_with_mem_limit(Some(root.clone()), TrAdderAtomic::new(0), 100);
+        let op = MemoryContext::new_with_reservation(
+            gate.clone(),
+            root.clone(),
+            30,
+            TrAdderAtomic::new(0),
+        );
+        assert!(op.add(70));
+        assert_eq!(gate.get_bytes_used(), 40);
+
+        gate.set_mem_limit(0);
+        // The reserved part is still there, beyond it nothing is granted.
+        assert!(!op.add(1));
+        assert!(op.add(-50));
+        assert_eq!(gate.get_bytes_used(), 0);
+        assert!(op.add(10));
+        assert!(!op.add(1));
+        assert_eq!(root.get_bytes_used(), 30);
     }
 }
