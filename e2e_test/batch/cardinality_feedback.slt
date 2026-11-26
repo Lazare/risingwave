@@ -59,15 +59,16 @@ set query_mode = distributed;
 include ./cardinality_feedback_queries.slt.part
 
 # Scans and filters: full scans of cf_fact (2000 rows, 4 queries x 2 modes) and cf_dim (50 rows),
-# filters `v < 13` (260 rows), `d.k = 3` (7), `f.v < 3` (60) and `v >= 50` (1000).
+# filters `d.k = 3` (7 rows) and `v >= 50` (1000). The filters `v < 13` (260 rows) and `f.v < 3`
+# (60 rows) differ only by their constant: they share one fingerprint, with 4 executions, and the
+# record keeps the rows of the last one (`f.v < 3`, 60 rows).
 query TII rowsort retry 3 backoff 1s
 select operator_kind, last_actual_rows, executions
 from rw_catalog.rw_batch_cardinality_feedback
 where operator_kind in ('seq_scan', 'filter') and last_actual_rows in (2000, 50, 260, 7, 60, 1000);
 ----
 filter 1000 2
-filter 260 2
-filter 60 2
+filter 60 4
 filter 7 2
 seq_scan 2000 8
 seq_scan 50 2
@@ -317,7 +318,8 @@ BatchLimit { limit: 5, offset: 0 }
       └─BatchScan { table: cf_fact, columns: [cf_fact.id, cf_fact.dim_id, cf_fact.v], distribution: UpstreamHashShard(cf_fact.id) }
 
 # A limit stops the filter and the scan below it before the end of their output: their counts
-# are partial (a lower bound). The scan has the fingerprint of the full scan of cf_fact.
+# are partial (a lower bound). The scan has the fingerprint of the full scan of cf_fact, the
+# filter `v < 50` the one of `v < 13` and `f.v < 3` (fifth execution).
 statement ok
 set query_mode = distributed;
 
@@ -331,7 +333,7 @@ select operator_kind, executions, partial_executions, last_partial
 from rw_catalog.rw_batch_cardinality_feedback
 where partial_executions > 0;
 ----
-filter 1 1 t
+filter 5 1 t
 seq_scan 9 1 t
 
 statement ok
