@@ -129,47 +129,47 @@ CASES = [
     # `batch_factor_union_join`.
     (UNION, 'inner', 'two branches with the same inner join', ['id', 'name'],
      f"select f.id, d.name from {F} f join {D} d on f.dim_id = d.id "
-     f"union all select e.id, d.name from {E} e join {D} d on e.ref = d.id"),
+     f"union all select e.id, d.name from {E} e join {D} d on e.rid = d.id"),
     (UNION, 'left_proj', 'left joins with different projections above', ['id', 'txt', 'n'],
      f"select f.id, f.label as txt, least(f.amt, d.grp) as n from {F} f left join {D} d on f.dim_id = d.id "
-     f"union all select e.id, e.code, d.grp from {E} e left join {D} d on e.ref = d.id"),
+     f"union all select e.id, e.code, d.grp from {E} e left join {D} d on e.rid = d.id"),
     (UNION, 'inner_filters', 'inner joins with a different filter of the joined table in each branch', ['id', 'name'],
      f"select f.id, d.name from {F} f join {D} d on f.dim_id = d.id where d.active "
-     f"union all select e.id, d.name from {E} e join {D} d on e.ref = d.id where d.grp = 2"),
+     f"union all select e.id, d.name from {E} e join {D} d on e.rid = d.id where d.grp = 2"),
     (UNION, 'left_filtered', 'left joins with a filtered joined table in one branch only', ['id', 'name'],
      f"select f.id, d.name from {F} f left join (select * from {D} where active) d on f.dim_id = d.id "
-     f"union all select e.id, d.name from {E} e left join {D} d on e.ref = d.id"),
+     f"union all select e.id, d.name from {E} e left join {D} d on e.rid = d.id"),
     (UNION, 'left_extra', 'left joins with a different extra condition in each branch', ['id', 'name'],
      f"select f.id, d.name from {F} f left join {D} d on f.dim_id = d.id and f.amt > d.grp "
-     f"union all select e.id, d.name from {E} e left join {D} d on e.ref = d.id and d.name <> e.code"),
+     f"union all select e.id, d.name from {E} e left join {D} d on e.rid = d.id and d.name <> e.code"),
     (UNION, 'filters_above', 'filters above the joins', ['id', 'name'],
      f"select f.id, d.name from {F} f left join {D} d on f.dim_id = d.id where f.amt > 3 or d.name is null "
-     f"union all select e.id, d.name from {E} e left join {D} d on e.ref = d.id where e.code is not null"),
+     f"union all select e.id, d.name from {E} e left join {D} d on e.rid = d.id where e.code is not null"),
     (UNION, 'semi', 'semi joins', ['id', 'label'],
      f"select f.id, f.label from {F} f where exists (select 1 from {D} d where d.id = f.dim_id) "
-     f"union all select e.id, e.code from {E} e where exists (select 1 from {D} d where d.id = e.ref)"),
+     f"union all select e.id, e.code from {E} e where exists (select 1 from {D} d where d.id = e.rid)"),
     (UNION, 'anti', 'anti joins with a different filter of the joined table', ['id', 'label'],
      f"select f.id, f.label from {F} f where not exists (select 1 from {D} d where d.id = f.dim_id and d.active) "
-     f"union all select e.id, e.code from {E} e where not exists (select 1 from {D} d where d.id = e.ref)"),
+     f"union all select e.id, e.code from {E} e where not exists (select 1 from {D} d where d.id = e.rid)"),
     (UNION, 'non_key', 'join on a column of the joined table that is not its key', ['id', 'name'],
      f"select f.id, d.name from {F} f join {D} d on f.amt = d.grp "
-     f"union all select e.id, d.name from {E} e join {D} d on e.ref = d.grp"),
+     f"union all select e.id, d.name from {E} e join {D} d on e.rid = d.grp"),
     (UNION, 'three', 'three branches, two of them share their join', ['id', 'name', 'src'],
      f"select f.id, d.name, 'f' as src from {F} f join {D} d on f.dim_id = d.id "
      f"union all select g.id, e.code, 'g' from {G} g join {E} e on g.a = e.id "
-     f"union all select e.id, d.name, 'e' from {E} e join {D} d on e.ref = d.id"),
+     f"union all select e.id, d.name, 'e' from {E} e join {D} d on e.rid = d.id"),
     (UNION, 'two_cols', 'joins on two columns', ['id', 'active'],
      f"select f.id, d.active from {F} f join {D} d on f.dim_id = d.id and f.amt = d.grp "
      f"union all select g.id, d.active from {G} g join {D} d on g.b = d.grp and g.a = d.id"),
     (UNION, 'derived_agg', 'derived side: an aggregating view, left joins', ['id', 'cnt', 'mx'],
      f"select f.id, v.cnt, v.mx from {F} f left join {DAGG} v on f.amt = v.grp "
-     f"union all select e.id, v.cnt, e.code from {E} e left join {DAGG} v on e.ref = v.grp"),
+     f"union all select e.id, v.cnt, e.code from {E} e left join {DAGG} v on e.rid = v.grp"),
     (UNION, 'derived_join', 'derived side: a view with a join, inner joins', ['id', 'name', 'a'],
      f"select f.id, v.name, v.a from {F} f join {DJ} v on f.dim_id = v.id "
-     f"union all select e.id, v.name, v.a from {E} e join {DJ} v on e.ref = v.id"),
+     f"union all select e.id, v.name, v.a from {E} e join {DJ} v on e.rid = v.id"),
     (UNION, 'kept_ordered_agg', 'kept: an aggregate that depends on the order of the rows', ['id', 'names'],
      f"select f.id, v.names from {F} f join {DNAMES} v on f.amt = v.grp "
-     f"union all select e.id, v.names from {E} e join {DNAMES} v on e.ref = v.grp"),
+     f"union all select e.id, v.names from {E} e join {DNAMES} v on e.rid = v.grp"),
 
     # `batch_merge_union_scans`.
     (SCANS, 'two', 'two branches with a different filter and projection', ['a', 'x'],
@@ -254,7 +254,7 @@ stmt(f"create table {U} (k int, v int, arr int[])")
 stmt(f"create table {T} (id int primary key, s varchar, c varchar, j jsonb, arr int[], n int)")
 stmt(f"create table {F} (id int primary key, dim_id int, other_id int, amt int, label varchar)")
 stmt(f"create table {D} (id int primary key, name varchar, grp int, active boolean)")
-stmt(f"create table {E} (id int primary key, code varchar, ref int)")
+stmt(f"create table {E} (id int primary key, code varchar, rid int)")
 stmt(f"create table {G} (id int primary key, a int, b int)")
 stmt(f"create view {DAGG} as select grp, count(*) as cnt, max(name) as mx from {D} group by grp")
 stmt(f"create view {DJ} as select d.id, d.name, d.grp, g.a from {D} d join {G} g on d.grp = g.b")
@@ -336,7 +336,7 @@ stmt(f"delete from {T} where id = 1")
 stmt(f"update {T} set arr = null where id = 4")
 stmt(f"delete from {F} where id = 3")
 stmt(f"delete from {D} where id = 1")
-stmt(f"update {E} set ref = null where id = 1")
+stmt(f"update {E} set rid = null where id = 1")
 stmt(f"delete from {M} where k = 2")
 stmt(f"update {M} set flag = null where k = 4")
 run_all("Third round")
