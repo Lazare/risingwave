@@ -240,9 +240,10 @@ impl LocalFrontend {
 }
 
 /// Test only: replaces the storage statistics of the tables with the given row counts, by name of
-/// table, materialized view or index in the `public` schema of the session database. The planner
-/// tests use it (`table_row_counts`) to give statistics to the cost-based join ordering
-/// (`batch_cost_based_join_ordering`); a running frontend receives them from the meta node.
+/// table, materialized view or index (`schema.name`, or `name` in the `public` schema) of the
+/// session database. The planner tests use it (`table_row_counts`) to give statistics to the
+/// cost-based join ordering (`batch_cost_based_join_ordering`); a running frontend receives them
+/// from the meta node.
 pub fn set_table_row_counts_for_test(
     session: &SessionImpl,
     row_counts: &BTreeMap<String, u64>,
@@ -256,15 +257,18 @@ pub fn set_table_row_counts_for_test(
     {
         let catalog = catalog_reader.read_guard();
         let database = session.database();
-        let schema_path = SchemaPath::Name(DEFAULT_SCHEMA_NAME);
-        for (name, rows) in row_counts {
+        for (qualified_name, rows) in row_counts {
+            let (schema_name, name) = qualified_name
+                .split_once('.')
+                .unwrap_or((DEFAULT_SCHEMA_NAME, qualified_name.as_str()));
+            let schema_path = SchemaPath::Name(schema_name);
             let table_id = match catalog.get_any_table_by_name(&database, schema_path, name) {
                 Ok((table, _)) => table.id,
                 Err(_) => {
                     catalog
                         .get_any_index_by_name(&database, schema_path, name)?
                         .0
-                        .index_table
+                        .index_table()
                         .id
                 }
             };
