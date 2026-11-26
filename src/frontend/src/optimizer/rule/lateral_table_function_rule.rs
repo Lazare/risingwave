@@ -165,6 +165,9 @@ impl Rule<Logical> for LateralTableFunctionRule {
         let stream_key: Vec<usize> = match shape {
             Shape::Plain => vec![],
             Shape::Agg | Shape::Window => {
+                if !has_unique_key(&left) {
+                    return None;
+                }
                 let mut key = left.stream_key()?.to_vec();
                 key.sort_unstable();
                 key.dedup();
@@ -290,6 +293,26 @@ impl LateralTableFunctionRule {
     pub fn create() -> BoxedRule {
         Box::new(LateralTableFunctionRule {})
     }
+}
+
+/// Whether the stream key of a logical plan is a unique key of its rows, so that a group or a
+/// partition keyed by it holds the rows of one row of the plan.
+///
+/// Not under a `UNION ALL`: during the logical optimization its stream key is the union of the
+/// keys of its inputs, two branches may hold rows with the same key, and the number of the branch
+/// that tells them apart is only added when the plan is converted to a streaming plan. An
+/// aggregation or a dedup is keyed by its group key whatever its input.
+fn has_unique_key(plan: &PlanRef) -> bool {
+    if plan.as_logical_union().is_some() {
+        return false;
+    }
+    if let Some(agg) = plan.as_logical_agg() {
+        return agg.grouping_sets().is_empty();
+    }
+    if plan.as_logical_dedup().is_some() {
+        return true;
+    }
+    plan.inputs().iter().all(has_unique_key)
 }
 
 /// The aggregation of a subquery evaluated per row: grouped by the stream key of the outer side,
