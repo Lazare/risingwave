@@ -1,1 +1,2 @@
 # Differential tests run by `proto-streaming-prune-check.yml`: <name> <file> <minutes>.
+dedup merge_lookups_under_dedup 90
