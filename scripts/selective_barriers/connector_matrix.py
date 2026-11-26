@@ -49,6 +49,7 @@ import sys
 import tempfile
 import time
 import traceback
+import urllib.error
 import urllib.request
 
 LOG_DIR = ".risingwave/log"
@@ -697,14 +698,30 @@ def after_version():
     return version[:60]
 
 
+def while_recovering(action, timeout=180):
+    """Run `action`, again while the restarted cluster still refuses it because it recovers its
+    streaming jobs: DML and webhook rows are refused until every table has its writer again, even
+    after `rw_recovery_status()` says RUNNING. Any other error is raised at once."""
+    deadline = time.time() + timeout
+    while True:
+        try:
+            return action()
+        except Exception as e:  # noqa: BLE001
+            transient = "not permitted during cluster recovery" in str(e) or (
+                isinstance(e, urllib.error.HTTPError) and e.code in (500, 503))
+            if not transient or time.time() > deadline:
+                raise
+            time.sleep(2)
+
+
 def after_tables():
     expect_growth("table with connector", "select c from m_dgt_mv",
-                  lambda: rw("insert into m_dgt values (-100, 1)"))
+                  lambda: while_recovering(lambda: rw("insert into m_dgt values (-100, 1)")))
     expect_growth("file source table", "select count(*) from m_fs_tab",
-                  lambda: rw("insert into m_fs_tab values (9000, 'after')"))
+                  lambda: while_recovering(lambda: rw("insert into m_fs_tab values (9000, 'after')")))
     expect_growth("join next to sinks", "select c from m_bh_mv",
-                  lambda: (rw("insert into m_bh values (9000, 1)"),
-                           rw("insert into m_bh2 values (9000, 1)")))
+                  lambda: (while_recovering(lambda: rw("insert into m_bh values (9000, 1)")),
+                           while_recovering(lambda: rw("insert into m_bh2 values (9000, 1)"))))
 
 
 def after_webhook():
@@ -713,7 +730,7 @@ def after_webhook():
             f"http://127.0.0.1:{ARGS.webhook_port}/webhook/dev/public/m_wh",
             data=json.dumps({"v": 1}).encode(), headers={"Content-Type": "application/json"})
         urllib.request.urlopen(req, timeout=60).close()
-    expect_growth("webhook", "select c from m_wh_mv", post)
+    expect_growth("webhook", "select c from m_wh_mv", lambda: while_recovering(post))
 
 
 def after_kafka():

@@ -128,6 +128,19 @@ step_after_upgrade() {
   fi
   version=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
   echo "restarted on the existing data, expecting version $version"
+  # The cluster recovers its streaming jobs after a restart, and refuses DML and webhook rows
+  # until then: wait for the end of the recovery before checking the objects.
+  local status="" waited=0
+  until [[ "$status" == "RUNNING" ]]; do
+    if ((waited >= 600)); then
+      echo "FAILED: the cluster is not running ${waited}s after the restart (status: ${status:-unreachable})"
+      return 1
+    fi
+    sleep 2
+    waited=$((waited + 2))
+    status=$(psql -h localhost -p $PORT -d dev -U root -X -q -At -c "select rw_recovery_status()" 2>/dev/null)
+  done
+  echo "the cluster is running ${waited}s after the restart"
   matrix_args
   timeout 1500 python3 -I -u scripts/selective_barriers/connector_matrix.py "${MATRIX_ARGS[@]}" \
     --after-restart --expect-version "$version" 2>&1 | tee "$OUT/after-upgrade-$profile.log" | cut -c1-1200
