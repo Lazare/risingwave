@@ -953,8 +953,13 @@ fn flatten(plan: &PlanRef) -> Region {
 
 /// Builds the inner joins of `tree` over the leaves of `region`. Each conjunct of `pending` is
 /// placed at the lowest node that has all the leaves it reads, and removed from `pending`.
-/// Returns the plan and the column of the concatenation that each of its columns is.
-fn build(region: &Region, tree: &JoinTree, pending: &mut Vec<ExprImpl>) -> (PlanRef, Vec<usize>) {
+/// Returns the plan and the column of the concatenation that each of its columns is, or `None`
+/// when a join would have no equality between its sides (streaming can not plan it).
+fn build(
+    region: &Region,
+    tree: &JoinTree,
+    pending: &mut Vec<ExprImpl>,
+) -> Option<(PlanRef, Vec<usize>)> {
     let offsets = region.offsets();
     let (plan, columns, leaves) = match tree {
         JoinTree::Leaf(leaf) => {
@@ -963,28 +968,68 @@ fn build(region: &Region, tree: &JoinTree, pending: &mut Vec<ExprImpl>) -> (Plan
             (region.leaves[*leaf].clone(), columns, vec![*leaf])
         }
         JoinTree::Join(left, right) => {
-            let (left_plan, left_columns) = build(region, left, pending);
-            let (right_plan, right_columns) = build(region, right, pending);
+            let (left_plan, left_columns) = build(region, left, pending)?;
+            let (right_plan, right_columns) = build(region, right, pending)?;
             let columns = left_columns
                 .iter()
                 .chain(&right_columns)
                 .copied()
                 .collect_vec();
             let on = take_placed(region, pending, &columns);
+            if !has_equi_key(&on, left_columns.len()) {
+                return None;
+            }
             let plan: PlanRef = LogicalJoin::new(left_plan, right_plan, JoinType::Inner, on).into();
             (plan, columns, vec![])
         }
     };
     if leaves.is_empty() {
-        return (plan, columns);
+        return Some((plan, columns));
     }
     // Conjuncts on one leaf only: a filter above it.
     let on = take_placed(region, pending, &columns);
     if on.always_true() {
-        (plan, columns)
+        Some((plan, columns))
     } else {
-        (LogicalFilter::create(plan, on), columns)
+        Some((LogicalFilter::create(plan, on), columns))
     }
+}
+
+/// Whether a join condition has an equality between a column of each side, which a streaming
+/// hash join needs (otherwise only a nested-loop join, which streaming does not support).
+fn has_equi_key(on: &Condition, left_len: usize) -> bool {
+    on.conjunctions.iter().any(|conjunct| {
+        let pair = conjunct
+            .as_eq_cond()
+            .or_else(|| conjunct.as_is_not_distinct_from_cond());
+        pair.is_some_and(|(x, y)| (x.index() < left_len) != (y.index() < left_len))
+    })
+}
+
+/// Whether a pending conjunct is an equality between one of `columns` and one of `leaf_columns`
+/// (columns of the concatenation).
+fn connects(
+    region: &Region,
+    pending: &[ExprImpl],
+    columns: &[usize],
+    leaf_columns: &[usize],
+) -> bool {
+    let all = columns.iter().chain(leaf_columns).copied().collect_vec();
+    let width = region.width();
+    pending.iter().any(|conjunct| {
+        let placeable = conjunct
+            .collect_input_refs(width)
+            .ones()
+            .all(|column| all.contains(&column));
+        let pair = conjunct
+            .as_eq_cond()
+            .or_else(|| conjunct.as_is_not_distinct_from_cond());
+        placeable
+            && pair.is_some_and(|(x, y)| {
+                (columns.contains(&x.index()) && leaf_columns.contains(&y.index()))
+                    || (columns.contains(&y.index()) && leaf_columns.contains(&x.index()))
+            })
+    })
 }
 
 /// Removes from `pending` the conjuncts that only read `columns` (columns of the concatenation),
@@ -1023,24 +1068,38 @@ fn match_leaves(target: &Region, region: &Region) -> Option<Vec<usize>> {
 }
 
 /// Joins the other leaves of `region` above `plan` (whose columns are `columns`, possibly with
-/// columns outside of the concatenation marked `usize::MAX`), with the pending conjuncts.
+/// columns outside of the concatenation marked `usize::MAX`), with the pending conjuncts. The next
+/// leaf is always one that an equality connects to the columns already joined; `None` when no
+/// remaining leaf is connected.
 fn join_rest(
     region: &Region,
     mut plan: PlanRef,
     mut columns: Vec<usize>,
     matched: &[usize],
     pending: &mut Vec<ExprImpl>,
-) -> (PlanRef, Vec<usize>) {
-    for leaf in 0..region.leaves.len() {
-        if matched.contains(&leaf) {
-            continue;
-        }
-        let (leaf_plan, leaf_columns) = build(region, &JoinTree::Leaf(leaf), pending);
+) -> Option<(PlanRef, Vec<usize>)> {
+    let offsets = region.offsets();
+    let mut remaining = (0..region.leaves.len())
+        .filter(|leaf| !matched.contains(leaf))
+        .collect_vec();
+    while !remaining.is_empty() {
+        let leaf_columns_of = |leaf: usize| {
+            (offsets[leaf]..offsets[leaf] + region.leaves[leaf].schema().len()).collect_vec()
+        };
+        let position = remaining
+            .iter()
+            .position(|&leaf| connects(region, pending, &columns, &leaf_columns_of(leaf)))?;
+        let leaf = remaining.remove(position);
+        let (leaf_plan, leaf_columns) = build(region, &JoinTree::Leaf(leaf), pending)?;
+        let left_len = columns.len();
         columns.extend(leaf_columns);
         let on = take_placed(region, pending, &columns);
+        if !has_equi_key(&on, left_len) {
+            return None;
+        }
         plan = LogicalJoin::new(plan, leaf_plan, JoinType::Inner, on).into();
     }
-    (plan, columns)
+    Some((plan, columns))
 }
 
 /// `copy` reordered so that it contains a join of the shape of `target` that merges with it, and
@@ -1069,10 +1128,10 @@ fn expose_inner(target: &PlanRef, copy: &PlanRef) -> Option<(PlanRef, PlanRef)> 
     }
     let matched = match_leaves(&target_region, &region)?;
     let mut pending = region.conjuncts.clone();
-    let (exposed, columns) = build(&region, &target_region.tree.mapped(&matched), &mut pending);
+    let (exposed, columns) = build(&region, &target_region.tree.mapped(&matched), &mut pending)?;
     merge(&[target.clone(), exposed.clone()])?;
-    let (plan, columns) = join_rest(&region, exposed.clone(), columns, &matched, &mut pending);
-    let plan = finish(plan, &columns, &region.outputs, pending)?;
+    let (plan, columns) = join_rest(&region, exposed.clone(), columns, &matched, &mut pending)?;
+    let plan = finish(copy, plan, &columns, &region.outputs, pending)?;
     Some((plan, exposed))
 }
 
@@ -1090,7 +1149,7 @@ fn expose_left(target: &PlanRef, copy: &PlanRef) -> Option<(PlanRef, PlanRef)> {
     let matched = match_leaves(&target_left, &region)?;
     let mut pending = region.conjuncts.clone();
     let (left_plan, left_columns) =
-        build(&region, &target_left.tree.mapped(&matched), &mut pending);
+        build(&region, &target_left.tree.mapped(&matched), &mut pending)?;
 
     // The condition of the left join, over the columns of the new left side and of `z`.
     let copy_left_len = copy_join.left().schema().len();
@@ -1116,15 +1175,13 @@ fn expose_left(target: &PlanRef, copy: &PlanRef) -> Option<(PlanRef, PlanRef)> {
         let mut map = ColIndexMapping::new(to_new.clone(), left_len + right_len);
         conjuncts.push(map.rewrite_expr(conjunct.clone()));
     }
-    let exposed: PlanRef = LogicalJoin::new(
-        left_plan,
-        right,
-        JoinType::LeftOuter,
-        Condition {
-            conjunctions: conjuncts,
-        },
-    )
-    .into();
+    let on = Condition {
+        conjunctions: conjuncts,
+    };
+    if !has_equi_key(&on, left_len) {
+        return None;
+    }
+    let exposed: PlanRef = LogicalJoin::new(left_plan, right, JoinType::LeftOuter, on).into();
     merge(&[target.clone(), exposed.clone()])?;
     // The columns of `z` are outside of the concatenation of the leaves of the region.
     let columns = left_columns
@@ -1132,7 +1189,7 @@ fn expose_left(target: &PlanRef, copy: &PlanRef) -> Option<(PlanRef, PlanRef)> {
         .copied()
         .chain((0..right_len).map(|column| usize::MAX - column))
         .collect_vec();
-    let (plan, columns) = join_rest(&region, exposed.clone(), columns, &matched, &mut pending);
+    let (plan, columns) = join_rest(&region, exposed.clone(), columns, &matched, &mut pending)?;
     // The output of the copy: its left columns in the concatenation, then the columns of `z`.
     let outputs = copy_join
         .output_indices()
@@ -1145,12 +1202,14 @@ fn expose_left(target: &PlanRef, copy: &PlanRef) -> Option<(PlanRef, PlanRef)> {
             }
         })
         .collect_vec();
-    let plan = finish(plan, &columns, &outputs, pending)?;
+    let plan = finish(copy, plan, &columns, &outputs, pending)?;
     Some((plan, exposed))
 }
 
-/// Checks that every conjunct was placed, and projects the output columns of the copy.
+/// Checks that every conjunct was placed, and projects the output columns of the copy. `None`
+/// unless the result has exactly the column types of the copy.
 fn finish(
+    copy: &PlanRef,
     plan: PlanRef,
     columns: &[usize],
     outputs: &[usize],
@@ -1163,7 +1222,8 @@ fn finish(
         .iter()
         .map(|output| columns.iter().position(|c| c == output))
         .collect::<Option<Vec<_>>>()?;
-    Some(LogicalProject::with_out_col_idx(plan, positions.into_iter()).into())
+    let result: PlanRef = LogicalProject::with_out_col_idx(plan, positions.into_iter()).into();
+    result.schema().type_eq(copy.schema()).then_some(result)
 }
 
 /// Reorders the joins of copies so that they contain a join that another copy computes (see

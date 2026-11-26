@@ -16,6 +16,12 @@
     create table x2 (id int primary key, k int, s varchar);
     create table x3 (k int primary key, r int);
     create table jj (mid int primary key, pid int);
+    create table o1 (id int primary key, c1 int);
+    create table o2 (eid int primary key);
+    create table o3 (id int primary key, fk int, val varchar);
+    create table o4 (id int primary key, fk int, link int, ok boolean, amt int);
+    create table o5 (id int primary key, fk int, amt int);
+    create view o3m as select fk, max(val) as val from o3 group by fk;
 - id: setup_share_off
   sql: |
     create table a (id int primary key, k int, x int);
@@ -521,6 +527,60 @@
             │       └─StreamTableScan { table: r, columns: [r.id, r.code], stream_scan_type: SnapshotBackfill, stream_key: [r.id], pk: [id], dist: UpstreamHashShard(r.id) }
             └─StreamExchange { dist: HashShard(jj.mid) }
               └─StreamTableScan { table: jj, columns: [jj.mid], stream_scan_type: SnapshotBackfill, stream_key: [jj.mid], pk: [mid], dist: UpstreamHashShard(jj.mid) }
+- name: a reordered copy joins next only a table that an equality connects to the joined ones
+  before:
+  - setup_share
+  sql: |
+    select r.id, c.val from o1 x join o2 y on x.id = y.eid
+      join (o3m c join (o4 r1 join o4 r on r1.link = r.id and r1.ok) on c.fk = r.fk)
+      on x.id = r.fk and y.eid = c.fk
+    union all
+    select e.id, c.val from o5 e join o1 x on e.fk = x.id
+      join (o2 y join o3m c on y.eid = c.fk) on x.id = y.eid;
+  stream_plan: |-
+    StreamMaterialize { columns: [id, val, o2.eid(hidden), o4.id(hidden), o3.fk(hidden), o4.id#1(hidden), o4.fk(hidden), $src(hidden)], stream_key: [o2.eid, o4.id, o3.fk, o4.id#1, o4.fk, $src], pk_columns: [o2.eid, o4.id, o3.fk, o4.id#1, o4.fk, $src], pk_conflict: NoCheck }
+    └─StreamUnion { all: true }
+      ├─StreamExchange { dist: HashShard(o2.eid, o4.id, o3.fk, o4.id, o4.fk, 0:Int32) }
+      │ └─StreamProject { exprs: [o4.id, max(o3.val), o2.eid, o4.id, o3.fk, o4.id, o4.fk, 0:Int32] }
+      │   └─StreamHashJoin { type: Inner, predicate: o2.eid = o1.id AND o3.fk = o1.id AND o4.fk = o1.id, output: [o4.id, max(o3.val), o2.eid, o3.fk, o4.id, o4.fk, o1.id] }
+      │     ├─StreamExchange { dist: HashShard(o2.eid, o3.fk, o4.fk) }
+      │     │ └─StreamHashJoin { type: Inner, predicate: o4.id = o4.link, output: [o2.eid, o3.fk, max(o3.val), o4.id, o4.fk, o4.id] }
+      │     │   ├─StreamExchange { dist: HashShard(o4.id) }
+      │     │   │ └─StreamHashJoin { type: Inner, predicate: o3.fk = o4.fk AND o2.eid = o4.fk, output: all }
+      │     │   │   ├─StreamFilter { predicate: IsNotNull(o3.fk) }
+      │     │   │   │ └─StreamShare { id: 6 }
+      │     │   │   │   └─StreamHashJoin { type: Inner, predicate: o2.eid = o3.fk, output: all }
+      │     │   │   │     ├─StreamExchange { dist: HashShard(o2.eid) }
+      │     │   │   │     │ └─StreamTableScan { table: o2, columns: [o2.eid], stream_scan_type: SnapshotBackfill, stream_key: [o2.eid], pk: [eid], dist: UpstreamHashShard(o2.eid) }
+      │     │   │   │     └─StreamProject { exprs: [o3.fk, max(o3.val)] }
+      │     │   │   │       └─StreamHashAgg { group_key: [o3.fk], aggs: [max(o3.val), count] }
+      │     │   │   │         └─StreamExchange { dist: HashShard(o3.fk) }
+      │     │   │   │           └─StreamTableScan { table: o3, columns: [o3.fk, o3.val, o3.id], stream_scan_type: SnapshotBackfill, stream_key: [o3.id], pk: [id], dist: UpstreamHashShard(o3.id) }
+      │     │   │   └─StreamExchange { dist: HashShard(o4.fk) }
+      │     │   │     └─StreamFilter { predicate: IsNotNull(o4.fk) }
+      │     │   │       └─StreamTableScan { table: o4, columns: [o4.id, o4.fk], stream_scan_type: SnapshotBackfill, stream_key: [o4.id], pk: [id], dist: UpstreamHashShard(o4.id) }
+      │     │   └─StreamExchange { dist: HashShard(o4.link) }
+      │     │     └─StreamProject { exprs: [o4.link, o4.id] }
+      │     │       └─StreamFilter { predicate: o4.ok }
+      │     │         └─StreamTableScan { table: o4, columns: [o4.link, o4.id, o4.ok], stream_scan_type: SnapshotBackfill, stream_key: [o4.id], pk: [id], dist: UpstreamHashShard(o4.id) }
+      │     └─StreamExchange { dist: HashShard(o1.id, o1.id, o1.id) }
+      │       └─StreamTableScan { table: o1, columns: [o1.id], stream_scan_type: SnapshotBackfill, stream_key: [o1.id], pk: [id], dist: UpstreamHashShard(o1.id) }
+      └─StreamExchange { dist: HashShard(o5.id, o5.fk, o1.id, null:Int32, null:Int32, 1:Int32) }
+        └─StreamProject { exprs: [o5.id, max(o3.val), o5.id, o5.fk, o1.id, null:Int32, null:Int32, 1:Int32] }
+          └─StreamHashJoin { type: Inner, predicate: o1.id = o2.eid AND o5.fk = o2.eid AND o1.id = o3.fk, output: [o5.id, max(o3.val), o5.fk, o1.id, o2.eid] }
+            ├─StreamHashJoin { type: Inner, predicate: o5.fk = o1.id, output: all }
+            │ ├─StreamExchange { dist: HashShard(o5.fk) }
+            │ │ └─StreamTableScan { table: o5, columns: [o5.id, o5.fk], stream_scan_type: SnapshotBackfill, stream_key: [o5.id], pk: [id], dist: UpstreamHashShard(o5.id) }
+            │ └─StreamExchange { dist: HashShard(o1.id) }
+            │   └─StreamTableScan { table: o1, columns: [o1.id], stream_scan_type: SnapshotBackfill, stream_key: [o1.id], pk: [id], dist: UpstreamHashShard(o1.id) }
+            └─StreamShare { id: 6 }
+              └─StreamHashJoin { type: Inner, predicate: o2.eid = o3.fk, output: all }
+                ├─StreamExchange { dist: HashShard(o2.eid) }
+                │ └─StreamTableScan { table: o2, columns: [o2.eid], stream_scan_type: SnapshotBackfill, stream_key: [o2.eid], pk: [eid], dist: UpstreamHashShard(o2.eid) }
+                └─StreamProject { exprs: [o3.fk, max(o3.val)] }
+                  └─StreamHashAgg { group_key: [o3.fk], aggs: [max(o3.val), count] }
+                    └─StreamExchange { dist: HashShard(o3.fk) }
+                      └─StreamTableScan { table: o3, columns: [o3.fk, o3.val, o3.id], stream_scan_type: SnapshotBackfill, stream_key: [o3.id], pk: [id], dist: UpstreamHashShard(o3.id) }
 - name: kept - the condition of the left join reads the other side of the inner join
   before:
   - setup_share
