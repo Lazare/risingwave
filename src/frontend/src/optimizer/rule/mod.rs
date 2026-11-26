@@ -219,6 +219,9 @@ mod common_join_over_union_rule;
 pub use common_join_over_union_rule::*;
 mod apply_one_row_join_split_rule;
 pub use apply_one_row_join_split_rule::*;
+// Duplicates found with `lag` over a window ordered by the column (`batch_rewrite_lag_duplicates`).
+mod lag_duplicates_rule;
+pub use lag_duplicates_rule::*;
 // Rule `UnionScanMergeRule` (`streaming_merge_union_scans`).
 mod union_scan_merge_rule;
 pub use union_scan_merge_rule::*;
@@ -395,6 +398,7 @@ macro_rules! for_all_rules {
             , { UnusedJoinUnderDedupRule }
             , { CommonJoinOverUnionRule }
             , { ApplyOneRowJoinSplitRule }
+            , { LagDuplicatesRule }
             , { UnionScanMergeRule }
             , { StackedAggMergeRule }
             , { LateralTableFunctionRule }

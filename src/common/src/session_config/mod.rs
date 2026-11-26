@@ -313,6 +313,13 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     streaming_simplify_subquery_unnesting: bool,
 
+    /// In a batch query, find the duplicates of a column compared with its `lag` over a window
+    /// ordered by it (`x = lag(x) OVER (ORDER BY x)`) by counting the rows of each value, grouped
+    /// and distributed by the column, instead of sorting each window partition on one node. Only
+    /// when nothing else of the rows is read. Defaults to false.
+    #[parameter(default = false)]
+    batch_rewrite_lag_duplicates: bool,
+
     /// In the plan of a new streaming job, read once the table that several branches of a
     /// `UNION ALL` read, each with its own filter and projection: one scan, one copy of each row
     /// per branch, and the filter and projection of each branch applied to its copies. Defaults to
