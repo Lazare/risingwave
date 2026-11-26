@@ -116,9 +116,7 @@ fn is_mergeable_share_content(plan: &PlanRef, visited: &mut HashSet<PlanNodeId>)
 
 /// Describes a branch of the union, if it has the form of a [`Branch`]. A table with a watermark
 /// is only a concern of streaming plans (`for_batch`: a batch plan has no watermark).
-fn branch_of(plan: &PlanRef, for_batch: bool) -> Option<Branch> {
-/// Describes a branch of the union, if it has the form of a [`Branch`].
-pub(super) fn branch_of(plan: &PlanRef) -> Option<Branch> {
+pub(super) fn branch_of(plan: &PlanRef, for_batch: bool) -> Option<Branch> {
     // The projection and the filters above the base, over the output of the node reached.
     let mut exprs: Option<Vec<ExprImpl>> = None;
     let mut filter: Vec<ExprImpl> = vec![];

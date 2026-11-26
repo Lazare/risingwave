@@ -245,7 +245,7 @@ fn reduce_ladder(
     let branches: Vec<Option<(Branch, i64)>> = inputs
         .iter()
         .map(|input| {
-            let branch = branch_of(input)?;
+            let branch = branch_of(input, false)?;
             if branch.exprs.len() != width {
                 return None;
             }

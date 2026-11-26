@@ -265,6 +265,10 @@ static BATCH_SIMPLIFY_COLUMN_FACTS: LazyLock<OptimizationStage> = LazyLock::new(
             ConstantRowJoinRule::create(),
         ],
         // Bottom-up so that an empty relation is propagated to the top in one pass.
+        ApplyOrder::BottomUp,
+    )
+});
+
 // Batch counterparts of stages of the streaming plan reduction prototype, each behind its own
 // batch variable: the same rules, or their variants for batch plans.
 // `batch_simplify_subquery_unnesting`: the variant of `PullUpCorrelatedPredicateAggRule` named
@@ -298,6 +302,9 @@ static BATCH_MERGE_REPEATED_LOOKUPS: LazyLock<OptimizationStage> = LazyLock::new
         vec![RepeatedLookupMergeRule::create()],
         // Bottom-up: a lookup merged below is carried by the input of the lookups above.
         ApplyOrder::BottomUp,
+    )
+});
+
 // Rule `LagDuplicatesRule` (`batch_rewrite_lag_duplicates`).
 static BATCH_REWRITE_LAG_DUPLICATES: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
@@ -305,6 +312,10 @@ static BATCH_REWRITE_LAG_DUPLICATES: LazyLock<OptimizationStage> = LazyLock::new
         vec![LagDuplicatesRule::create()],
         // Top-down: an aggregation counting the duplicates is rewritten before the projection
         // below it.
+        ApplyOrder::TopDown,
+    )
+});
+
 // `batch_unnest_lateral_functions`, see `STREAM_UNNEST_ARRAY_OF_FUNCTION`,
 // `STREAM_UNNEST_LATERAL_FUNCTIONS` and `STREAM_SELF_AGGREGATE_JOIN`.
 static BATCH_UNNEST_ARRAY_OF_FUNCTION: LazyLock<OptimizationStage> = LazyLock::new(|| {
@@ -1239,6 +1250,15 @@ impl LogicalOptimizer {
         {
             let applied_before = ctx.total_rule_applied();
             plan = plan.optimize_by_rules(&STREAM_SELF_AGGREGATE_JOIN)?;
+            let applied = ctx.total_rule_applied() - applied_before;
+            if applied > 0 {
+                ctx.add_stream_prune_rule_applied(applied);
+                plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
+            }
+        }
+
         // Rule `StatusLadderCaseRule`: under a status ladder, the branches that read the same
         // relation become one branch that picks the best of them with a `CASE`. Before the merge
         // of the union scans below, which would otherwise make one copy of each row per branch.
