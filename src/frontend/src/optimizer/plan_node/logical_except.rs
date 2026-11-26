@@ -24,8 +24,8 @@ use crate::error::Result;
 use crate::optimizer::plan_node::expr_visitable::ExprVisitable;
 use crate::optimizer::plan_node::generic::GenericPlanRef;
 use crate::optimizer::plan_node::{
-    ColumnPruningContext, PlanTreeNode, PredicatePushdownContext, RewriteStreamContext,
-    ToStreamContext, generic,
+    ColumnPruningContext, LogicalProject, PlanTreeNode, PredicatePushdownContext,
+    RewriteStreamContext, ToStreamContext, generic,
 };
 use crate::utils::{ColIndexMapping, Condition};
 
@@ -68,12 +68,20 @@ impl_distill_by_unit!(LogicalExcept, core, "LogicalExcept");
 
 impl ColPrunable for LogicalExcept {
     fn prune_col(&self, required_cols: &[usize], ctx: &mut ColumnPruningContext) -> PlanRef {
+        // The rows of the two sides are matched on every column, with or without `ALL`: the columns
+        // that the parent does not read still decide which rows are removed, so none is pruned below
+        // it (this matters when the columns are pruned before the set operation becomes a join).
+        let all_cols = (0..self.schema().len()).collect_vec();
         let new_inputs = self
             .inputs()
             .iter()
-            .map(|input| input.prune_col(required_cols, ctx))
+            .map(|input| input.prune_col(&all_cols, ctx))
             .collect_vec();
-        self.clone_with_inputs(&new_inputs)
+        let set_op = self.clone_with_inputs(&new_inputs);
+        if required_cols == all_cols.as_slice() {
+            return set_op;
+        }
+        LogicalProject::with_out_col_idx(set_op, required_cols.iter().copied()).into()
     }
 }
 
