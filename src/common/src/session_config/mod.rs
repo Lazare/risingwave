@@ -313,6 +313,71 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     streaming_simplify_subquery_unnesting: bool,
 
+    // Batch counterparts of `streaming_prune_empty_relation`, `streaming_simplify_on_unique_key`
+    // and `streaming_merge_repeated_lookups` (rules `ColumnFactsSimplifyRule`,
+    // `UnusedOuterJoinEliminateRule`, `AggOnKeyEliminateRule` and `RepeatedLookupMergeRule`).
+    /// In the plan of a batch query, simplify the predicates and projections with what is known
+    /// about the columns (constants, columns that are never `NULL`, `NOT NULL` constraints of
+    /// tables), and remove the sub-plans whose predicates can never be true. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_simplify_column_facts: bool,
+
+    /// In the plan of a batch query, remove the operators that the unique keys of their inputs
+    /// make useless: an outer join whose optional side is not used and is unique on the join
+    /// columns, an aggregation, `DISTINCT`, `DISTINCT ON` or dedup whose groups hold exactly one
+    /// row. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_simplify_on_unique_key: bool,
+
+    /// In the plan of a batch query, remove a join that looks up, by its key, a row of a table that
+    /// the other side of the join already carries: several joins of the same table on its key from
+    /// the same columns become one. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_merge_repeated_lookups: bool,
+
+    /// In a batch query, find the duplicates of a column compared with its `lag` over a window
+    /// ordered by it (`x = lag(x) OVER (ORDER BY x)`) by counting the rows of each value, grouped
+    /// and distributed by the column, instead of sorting each window partition on one node. Only
+    /// when nothing else of the rows is read. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_rewrite_lag_duplicates: bool,
+
+    // Batch counterparts of `streaming_simplify_subquery_unnesting`,
+    // `streaming_unnest_lateral_functions`, `streaming_factor_union_join` and
+    // `streaming_merge_union_scans` (the same rules, in the batch optimizer).
+    /// In a batch query, turn a correlated subquery that aggregates the rows equal to columns of
+    /// the outer row (`EXISTS`, `count`, `min`, `ARRAY(...)`, ...) into a left join with the
+    /// aggregation grouped by those columns, instead of re-reading the outer side to build the
+    /// set of its distinct values. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_simplify_subquery_unnesting: bool,
+
+    /// In a batch query, evaluate on each outer row a correlated subquery that reads no table,
+    /// only columns of the outer row through set-returning functions, instead of re-reading the
+    /// outer side to build the set of its distinct values; and compute on each row of a table an
+    /// aggregation of rows derived from it that the table is joined back with on its key.
+    /// Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_unnest_lateral_functions: bool,
+
+    /// In a batch query, join once, above a `UNION ALL`, the relation that several of its branches
+    /// join on the same columns: the relation is read once. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_factor_union_join: bool,
+
+    /// In a batch query, read once the table that several branches of a `UNION ALL` read, each
+    /// with its own filter and projection: one scan, one copy of each row per branch, and the
+    /// filter and projection of each branch applied to its copies. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_merge_union_scans: bool,
+
+    /// Order the inner joins of a batch query by the estimated number of rows of the tables (from
+    /// the storage statistics) and of the intermediate results, instead of the heuristic order. A
+    /// join whose inputs are not all covered by statistics keeps the heuristic order. Defaults to
+    /// false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_cost_based_join_ordering: bool,
+
     /// In the plan of a new streaming job, read once the table that several branches of a
     /// `UNION ALL` read, each with its own filter and projection: one scan, one copy of each row
     /// per branch, and the filter and projection of each branch applied to its copies. Defaults to
@@ -346,6 +411,18 @@ pub struct SessionConfig {
     /// one more fragment per shared scan. Defaults to false.
     #[parameter(default = false, flags = "SESSION_INIT")]
     streaming_share_union_scans: bool,
+
+    /// In the plan of a new streaming job, under a "status ladder" (`row_number() OVER (PARTITION
+    /// BY key ORDER BY priority) = 1` over a `UNION ALL` of branches that output the key and
+    /// literals), replace the branches that filter and project the same relation with one branch
+    /// that picks the best of them with a `CASE`, and remove the top-n when nothing else is left
+    /// and the relation is unique on the key. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    streaming_status_ladder_case: bool,
+
+    /// The same as `streaming_status_ladder_case`, for batch queries. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_status_ladder_case: bool,
 
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
