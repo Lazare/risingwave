@@ -153,7 +153,7 @@ query('III', "select c1, c2, c3 from rld_part_fused_on order by c1 nulls first, 
 
 out.append("# Many rows, many duplicates in several partitions.\n")
 stmt(f"insert into {T} select 100 + i, i % 3, i % 17, i % 11, 'v' || (i % 13) from generate_series(1, 300) i")
-stmt(f"insert into {T} select 500 + i, null, case when i % 4 = 0 then null else i % 5 end, i, null "
+stmt(f"insert into {T} select 500 + i, null::int, case when i % 4 = 0 then null else i % 5 end, i, null::varchar "
      f"from generate_series(1, 40) i")
 run_all("After the inserts")
 

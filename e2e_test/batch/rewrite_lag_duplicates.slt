@@ -674,7 +674,7 @@ statement ok
 insert into rld_t select 100 + i, i % 3, i % 17, i % 11, 'v' || (i % 13) from generate_series(1, 300) i;
 
 statement ok
-insert into rld_t select 500 + i, null, case when i % 4 = 0 then null else i % 5 end, i, null from generate_series(1, 40) i;
+insert into rld_t select 500 + i, null::int, case when i % 4 = 0 then null else i % 5 end, i, null::varchar from generate_series(1, 40) i;
 
 # After the inserts: every query with and without the variable.
 
