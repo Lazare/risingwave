@@ -167,8 +167,10 @@ impl BusyLoopExecutor {
     #[try_stream(ok = DataChunk, error = BatchError)]
     async fn do_execute(self) {
         // infinite loop to generate data
-        while self.forever {
-            yield DataChunk::new_dummy(1);
+        if self.forever {
+            loop {
+                yield DataChunk::new_dummy(1);
+            }
         }
     }
 }
