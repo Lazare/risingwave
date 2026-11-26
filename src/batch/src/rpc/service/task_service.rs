@@ -80,6 +80,7 @@ impl TaskService for BatchServiceImpl {
             tracing_context,
             expr_context,
             spillable_operator_instances,
+            spill_on_memory_wait,
         } = request.into_inner();
         let task_id = task_id.expect("no task id found");
 
@@ -96,6 +97,7 @@ impl TaskService for BatchServiceImpl {
                     self.env.clone(),
                     &task_id.query_id,
                     spillable_operator_instances,
+                    spill_on_memory_wait,
                     cardinality_counters,
                 ),
                 state_reporter,
@@ -133,10 +135,13 @@ impl TaskService for BatchServiceImpl {
         let AdmitQueryRequest {
             query_id,
             spillable_operator_instances,
+            spill_on_memory_wait,
         } = request.into_inner();
-        let query_memory = self
-            .mgr
-            .query_memory(&query_id, spillable_operator_instances);
+        let query_memory = self.mgr.query_memory(
+            &query_id,
+            spillable_operator_instances,
+            spill_on_memory_wait,
+        );
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         self.mgr.runtime().spawn(async move {
             let start = std::time::Instant::now();
@@ -307,6 +312,7 @@ impl BatchServiceImpl {
             env.clone(),
             &task_id.query_id,
             0,
+            false,
             cardinality_counters.clone(),
         );
         trace!(

@@ -118,13 +118,20 @@ impl BatchManager {
     }
 
     /// The memory of the given query on this node, shared by all its tasks.
+    /// `spill_on_memory_wait`: `batch_spill_on_memory_wait` of the query.
     pub fn query_memory(
         &self,
         query_id: &str,
         spillable_operator_instances: u32,
+        spill_on_memory_wait: bool,
     ) -> Arc<QueryMemory> {
-        self.query_memories
-            .get_or_create(query_id, spillable_operator_instances)
+        let query_memory = self
+            .query_memories
+            .get_or_create(query_id, spillable_operator_instances);
+        if spill_on_memory_wait {
+            query_memory.enable_spill_on_memory_wait();
+        }
+        query_memory
     }
 
     pub async fn fire_task(

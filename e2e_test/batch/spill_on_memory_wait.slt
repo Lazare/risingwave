@@ -1,0 +1,91 @@
+# `batch_spill_on_memory_wait` is sent with the tasks and the admission of distributed batch
+# queries: the results must not change, with or without it. The memory waits themselves are
+# covered by the unit tests of `query_memory.rs`.
+
+statement ok
+SET RW_IMPLICIT_FLUSH TO true;
+
+statement ok
+SET QUERY_MODE TO distributed;
+
+statement ok
+CREATE TABLE t1 (id INT PRIMARY KEY, g INT, v JSONB);
+
+statement ok
+CREATE TABLE t2 (id INT PRIMARY KEY, w INT);
+
+statement ok
+INSERT INTO t1 SELECT i, i % 100, jsonb_build_object('k', i, 'pad', repeat('x', 50)) FROM generate_series(1, 20000) i;
+
+statement ok
+INSERT INTO t2 SELECT i, i * 2 FROM generate_series(1, 20000) i;
+
+query T
+SHOW batch_spill_on_memory_wait;
+----
+false
+
+statement ok
+SET batch_over_window_to_topn = true;
+
+# Each query runs without, then with the variable.
+
+query II
+SELECT count(*), sum(id) FROM (SELECT id, row_number() OVER (PARTITION BY g ORDER BY id DESC) rn FROM t1) WHERE rn <= 3;
+----
+300 5955150
+
+query II
+SELECT count(*), sum(t2.w) FROM t1 JOIN t2 ON t1.id = t2.id WHERE t1.g = 7;
+----
+200 3982800
+
+query II
+SELECT count(*), sum((v->>'k')::INT) FROM (SELECT g, last_value(v ORDER BY id) v FROM t1 GROUP BY g);
+----
+100 1995050
+
+query I
+SELECT count(*) FROM (SELECT id FROM t1 WHERE g < 10 UNION ALL SELECT id FROM t2 WHERE id <= 500);
+----
+2500
+
+statement ok
+SET batch_spill_on_memory_wait = true;
+
+query T
+SHOW batch_spill_on_memory_wait;
+----
+true
+
+query II
+SELECT count(*), sum(id) FROM (SELECT id, row_number() OVER (PARTITION BY g ORDER BY id DESC) rn FROM t1) WHERE rn <= 3;
+----
+300 5955150
+
+query II
+SELECT count(*), sum(t2.w) FROM t1 JOIN t2 ON t1.id = t2.id WHERE t1.g = 7;
+----
+200 3982800
+
+query II
+SELECT count(*), sum((v->>'k')::INT) FROM (SELECT g, last_value(v ORDER BY id) v FROM t1 GROUP BY g);
+----
+100 1995050
+
+query I
+SELECT count(*) FROM (SELECT id FROM t1 WHERE g < 10 UNION ALL SELECT id FROM t2 WHERE id <= 500);
+----
+2500
+
+statement ok
+SET batch_spill_on_memory_wait = false;
+
+statement ok
+SET batch_over_window_to_topn = false;
+
+statement ok
+DROP TABLE t1;
+
+statement ok
+DROP TABLE t2;

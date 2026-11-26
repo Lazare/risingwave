@@ -460,6 +460,16 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_simplify_null_join_keys: bool,
 
+    // Revocable memory of batch queries (`query_memory.rs`).
+    /// In a distributed batch query, an operator that cannot spill to disk (top-n per group,
+    /// lookup join, nested loop join...) and must wait for memory asks the spillable operators of
+    /// the same query (hash aggregation, hash join, sort) to spill: they stop growing beyond the
+    /// memory reserved for each of them, so the next of them that needs more writes its state to
+    /// disk and gives back its memory, which the waiting operator takes. Without it, the operator
+    /// only waits for other queries to release memory, and fails when none can. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_spill_on_memory_wait: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,

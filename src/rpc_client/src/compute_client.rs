@@ -171,6 +171,7 @@ impl ComputeClient {
         plan: PlanFragment,
         expr_context: ExprContext,
         spillable_operator_instances: u32,
+        spill_on_memory_wait: bool,
     ) -> Result<Streaming<TaskInfoResponse>> {
         Ok(self
             .task_client
@@ -181,6 +182,7 @@ impl ComputeClient {
                 tracing_context: TracingContext::from_current_span().to_protobuf(),
                 expr_context: Some(expr_context),
                 spillable_operator_instances,
+                spill_on_memory_wait,
             })
             .await
             .map_err(RpcError::from_compute_status)?
@@ -204,6 +206,7 @@ impl ComputeClient {
         &self,
         query_id: String,
         spillable_operator_instances: u32,
+        spill_on_memory_wait: bool,
     ) -> Result<Streaming<AdmitQueryResponse>> {
         Ok(self
             .task_client
@@ -211,6 +214,7 @@ impl ComputeClient {
             .admit_query(AdmitQueryRequest {
                 query_id,
                 spillable_operator_instances,
+                spill_on_memory_wait,
             })
             .await
             .map_err(RpcError::from_compute_status)?

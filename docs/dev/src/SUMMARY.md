@@ -52,6 +52,7 @@
 - [Meta Service](./design/meta-service.md)
 - [Data Model and Encoding](./design/data-model-and-encoding.md)
 - [Batch Local Execution Mode](./design/batch-local-execution-mode.md)
+- [Batch Memory Safety](./design/batch-memory-safety.md)
 - [Consistent Hash](./design/consistent-hash.md)
 - [Keys](./design/keys.md)
 <!--

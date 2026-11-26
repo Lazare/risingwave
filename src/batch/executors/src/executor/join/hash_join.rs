@@ -209,7 +209,7 @@ async fn take_unsplittable_memory(
     match tokio::time::timeout(MEMORY_WAIT_TIMEOUT, overflow.settle()).await {
         Ok(Ok(())) => Ok(true),
         // No query can release the memory that these rows need.
-        Ok(Err(BatchError::NoMemoryLeft(_))) => Err(too_large()),
+        Ok(Err(BatchError::NoMemoryLeft(..))) => Err(too_large()),
         Ok(Err(e)) => Err(e),
         // Other queries kept the memory of the node for too long.
         Err(_) => Err(too_large()),

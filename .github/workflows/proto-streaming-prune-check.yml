@@ -128,7 +128,8 @@ jobs:
         if: ${{ !cancelled() && steps.planner.outcome != 'skipped' }}
         run: |
           cargo nextest run --locked --no-fail-fast --lib \
-            -p risingwave_frontend -p risingwave_common -p risingwave_batch
+            -p risingwave_frontend -p risingwave_common -p risingwave_batch \
+            -p risingwave_batch_executors
 
   clippy:
     name: Clippy on the frontend
