@@ -377,6 +377,7 @@ pub(crate) fn gen_create_mv_graph(
         config.streaming_prune_empty_relation()
             || config.streaming_simplify_on_unique_key()
             || config.streaming_merge_repeated_lookups()
+            || config.streaming_merge_lookups_under_dedup()
             || config.streaming_factor_union_join()
             || config.streaming_simplify_subquery_unnesting()
             // Rule `UnionScanMergeRule`.

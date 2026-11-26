@@ -610,6 +610,19 @@ static STREAM_MERGE_REPEATED_LOOKUPS: LazyLock<OptimizationStage> = LazyLock::ne
     )
 });
 
+// The default branch of a top-1 over a union, the unused joins below an operator that does not
+// see duplicates (`streaming_merge_lookups_under_dedup`).
+static STREAM_TOP_ONE_DEFAULT_BRANCH: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Remove Default Branch Of Top One For Stream",
+        vec![
+            TopOneDefaultBranchRule::create(),
+            UnusedJoinUnderDedupRule::create(),
+        ],
+        ApplyOrder::BottomUp,
+    )
+});
+
 static STREAM_SIMPLIFY_ON_UNIQUE_KEY: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Simplify On Unique Key For Stream",
@@ -1042,6 +1055,26 @@ impl LogicalOptimizer {
                 if applied == 0 {
                     break;
                 }
+                ctx.add_stream_prune_rule_applied(applied);
+                plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
+            }
+        }
+
+        // Remove the default branch of a top-1 per key over a union (a status computed from
+        // candidate rows), when the other side of the join that reads it carries the row of the
+        // default branch. On demand only.
+        if ctx
+            .session_ctx()
+            .config()
+            .streaming_merge_lookups_under_dedup()
+            && !ctx.is_stream_prune_baseline()
+        {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&STREAM_TOP_ONE_DEFAULT_BRANCH)?;
+            let applied = ctx.total_rule_applied() - applied_before;
+            if applied > 0 {
                 ctx.add_stream_prune_rule_applied(applied);
                 plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
                 plan = Self::column_pruning(plan, explain_trace, &ctx);
