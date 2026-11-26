@@ -427,10 +427,8 @@ fn two_phase_partial(total: &Agg<BatchPlanRef>) -> Option<(PlanNodeId, Agg<Batch
         agg.core().clone()
     } else if let Some(agg) = below.as_batch_sort_agg() {
         agg.core().clone()
-    } else if let Some(agg) = below.as_batch_simple_agg() {
-        agg.core.clone()
     } else {
-        return None;
+        below.as_batch_simple_agg()?.core.clone()
     };
     let group_len = partial.group_key.len();
     let is_two_phase = total.group_key.to_vec() == (0..group_len).collect_vec()

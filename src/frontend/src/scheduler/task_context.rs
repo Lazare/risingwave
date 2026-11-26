@@ -45,11 +45,9 @@ pub struct FrontendBatchTaskContext {
 }
 
 impl FrontendBatchTaskContext {
-    pub fn create(session: Arc<SessionImpl>) -> Arc<dyn BatchTaskContext> {
-        Self::create_with_cardinality_counters(session, None)
-    }
-
-    pub fn create_with_cardinality_counters(
+    /// The context of a query executed by the frontend, with the counters of its cardinality
+    /// feedback if it is observed.
+    pub fn create(
         session: Arc<SessionImpl>,
         cardinality_counters: Option<Arc<CardinalityCounters>>,
     ) -> Arc<dyn BatchTaskContext> {

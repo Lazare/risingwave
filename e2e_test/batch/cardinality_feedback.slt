@@ -100,6 +100,222 @@ from rw_catalog.rw_batch_cardinality_feedback;
 ----
 0 0 0 0
 
+# The plans are the same with the variable on and off: the expected plans are the ones of the
+# planner test `batch_cardinality_feedback.yaml` (verbose explain), for both values of the
+# variable and both execution modes.
+
+statement ok
+set query_mode = local;
+
+statement ok
+set batch_enable_lookup_join = false;
+
+statement ok
+set batch_cardinality_feedback = false;
+
+query T
+explain (verbose) select count(*) from cf_fact f join cf_dim d on f.dim_id = d.id where d.k = 3;
+----
+BatchSimpleAgg { aggs: [count] }
+└─BatchHashJoin { type: Inner, predicate: cf_fact.dim_id = cf_dim.id, output: [] }
+  ├─BatchExchange { order: [], dist: Single }
+  │ └─BatchScan { table: cf_fact, columns: [cf_fact.dim_id], distribution: SomeShard }
+  └─BatchExchange { order: [], dist: Single }
+    └─BatchProject { exprs: [cf_dim.id] }
+      └─BatchFilter { predicate: (cf_dim.k = 3:Int32) }
+        └─BatchScan { table: cf_dim, columns: [cf_dim.id, cf_dim.k], distribution: UpstreamHashShard(cf_dim.id) }
+
+statement ok
+set batch_cardinality_feedback = true;
+
+query T
+explain (verbose) select count(*) from cf_fact f join cf_dim d on f.dim_id = d.id where d.k = 3;
+----
+BatchSimpleAgg { aggs: [count] }
+└─BatchHashJoin { type: Inner, predicate: cf_fact.dim_id = cf_dim.id, output: [] }
+  ├─BatchExchange { order: [], dist: Single }
+  │ └─BatchScan { table: cf_fact, columns: [cf_fact.dim_id], distribution: SomeShard }
+  └─BatchExchange { order: [], dist: Single }
+    └─BatchProject { exprs: [cf_dim.id] }
+      └─BatchFilter { predicate: (cf_dim.k = 3:Int32) }
+        └─BatchScan { table: cf_dim, columns: [cf_dim.id, cf_dim.k], distribution: UpstreamHashShard(cf_dim.id) }
+
+statement ok
+set batch_enable_lookup_join = true;
+
+statement ok
+set batch_cardinality_feedback = false;
+
+query T
+explain (verbose) select count(*) from cf_fact f join cf_dim d on f.dim_id = d.id where f.v < 3;
+----
+BatchSimpleAgg { aggs: [count] }
+└─BatchLookupJoin { type: Inner, predicate: cf_fact.dim_id = cf_dim.id, output: [], lookup table: cf_dim }
+  └─BatchExchange { order: [], dist: Single }
+    └─BatchProject { exprs: [cf_fact.dim_id] }
+      └─BatchFilter { predicate: (cf_fact.v < 3:Int32) }
+        └─BatchScan { table: cf_fact, columns: [cf_fact.dim_id, cf_fact.v], distribution: SomeShard }
+
+statement ok
+set batch_cardinality_feedback = true;
+
+query T
+explain (verbose) select count(*) from cf_fact f join cf_dim d on f.dim_id = d.id where f.v < 3;
+----
+BatchSimpleAgg { aggs: [count] }
+└─BatchLookupJoin { type: Inner, predicate: cf_fact.dim_id = cf_dim.id, output: [], lookup table: cf_dim }
+  └─BatchExchange { order: [], dist: Single }
+    └─BatchProject { exprs: [cf_fact.dim_id] }
+      └─BatchFilter { predicate: (cf_fact.v < 3:Int32) }
+        └─BatchScan { table: cf_fact, columns: [cf_fact.dim_id, cf_fact.v], distribution: SomeShard }
+
+statement ok
+set batch_cardinality_feedback = false;
+
+query T
+explain (verbose) select v % 9, count(*) from cf_fact where v >= 50 group by v % 9;
+----
+BatchHashAgg { group_key: [$expr1], aggs: [count] }
+└─BatchExchange { order: [], dist: Single }
+  └─BatchProject { exprs: [(cf_fact.v % 9:Int32) as $expr1] }
+    └─BatchFilter { predicate: (cf_fact.v >= 50:Int32) }
+      └─BatchScan { table: cf_fact, columns: [cf_fact.v], distribution: SomeShard }
+
+statement ok
+set batch_cardinality_feedback = true;
+
+query T
+explain (verbose) select v % 9, count(*) from cf_fact where v >= 50 group by v % 9;
+----
+BatchHashAgg { group_key: [$expr1], aggs: [count] }
+└─BatchExchange { order: [], dist: Single }
+  └─BatchProject { exprs: [(cf_fact.v % 9:Int32) as $expr1] }
+    └─BatchFilter { predicate: (cf_fact.v >= 50:Int32) }
+      └─BatchScan { table: cf_fact, columns: [cf_fact.v], distribution: SomeShard }
+
+statement ok
+set query_mode = distributed;
+
+statement ok
+set batch_enable_lookup_join = false;
+
+statement ok
+set batch_cardinality_feedback = false;
+
+query T
+explain (verbose) select count(*) from cf_fact f join cf_dim d on f.dim_id = d.id where d.k = 3;
+----
+BatchSimpleAgg { aggs: [sum0(count)] }
+└─BatchExchange { order: [], dist: Single }
+  └─BatchSimpleAgg { aggs: [count] }
+    └─BatchHashJoin { type: Inner, predicate: cf_fact.dim_id = cf_dim.id, output: [] }
+      ├─BatchExchange { order: [], dist: HashShard(cf_fact.dim_id) }
+      │ └─BatchScan { table: cf_fact, columns: [cf_fact.dim_id], distribution: SomeShard }
+      └─BatchExchange { order: [], dist: HashShard(cf_dim.id) }
+        └─BatchProject { exprs: [cf_dim.id] }
+          └─BatchFilter { predicate: (cf_dim.k = 3:Int32) }
+            └─BatchScan { table: cf_dim, columns: [cf_dim.id, cf_dim.k], distribution: UpstreamHashShard(cf_dim.id) }
+
+statement ok
+set batch_cardinality_feedback = true;
+
+query T
+explain (verbose) select count(*) from cf_fact f join cf_dim d on f.dim_id = d.id where d.k = 3;
+----
+BatchSimpleAgg { aggs: [sum0(count)] }
+└─BatchExchange { order: [], dist: Single }
+  └─BatchSimpleAgg { aggs: [count] }
+    └─BatchHashJoin { type: Inner, predicate: cf_fact.dim_id = cf_dim.id, output: [] }
+      ├─BatchExchange { order: [], dist: HashShard(cf_fact.dim_id) }
+      │ └─BatchScan { table: cf_fact, columns: [cf_fact.dim_id], distribution: SomeShard }
+      └─BatchExchange { order: [], dist: HashShard(cf_dim.id) }
+        └─BatchProject { exprs: [cf_dim.id] }
+          └─BatchFilter { predicate: (cf_dim.k = 3:Int32) }
+            └─BatchScan { table: cf_dim, columns: [cf_dim.id, cf_dim.k], distribution: UpstreamHashShard(cf_dim.id) }
+
+statement ok
+set batch_enable_lookup_join = true;
+
+statement ok
+set batch_cardinality_feedback = false;
+
+query T
+explain (verbose) select count(*) from cf_fact f join cf_dim d on f.dim_id = d.id where f.v < 3;
+----
+BatchSimpleAgg { aggs: [sum0(count)] }
+└─BatchExchange { order: [], dist: Single }
+  └─BatchSimpleAgg { aggs: [count] }
+    └─BatchLookupJoin { type: Inner, predicate: cf_fact.dim_id = cf_dim.id, output: [], lookup table: cf_dim }
+      └─BatchExchange { order: [], dist: UpstreamHashShard(cf_fact.dim_id) }
+        └─BatchProject { exprs: [cf_fact.dim_id] }
+          └─BatchFilter { predicate: (cf_fact.v < 3:Int32) }
+            └─BatchScan { table: cf_fact, columns: [cf_fact.dim_id, cf_fact.v], distribution: SomeShard }
+
+statement ok
+set batch_cardinality_feedback = true;
+
+query T
+explain (verbose) select count(*) from cf_fact f join cf_dim d on f.dim_id = d.id where f.v < 3;
+----
+BatchSimpleAgg { aggs: [sum0(count)] }
+└─BatchExchange { order: [], dist: Single }
+  └─BatchSimpleAgg { aggs: [count] }
+    └─BatchLookupJoin { type: Inner, predicate: cf_fact.dim_id = cf_dim.id, output: [], lookup table: cf_dim }
+      └─BatchExchange { order: [], dist: UpstreamHashShard(cf_fact.dim_id) }
+        └─BatchProject { exprs: [cf_fact.dim_id] }
+          └─BatchFilter { predicate: (cf_fact.v < 3:Int32) }
+            └─BatchScan { table: cf_fact, columns: [cf_fact.dim_id, cf_fact.v], distribution: SomeShard }
+
+statement ok
+set batch_cardinality_feedback = false;
+
+query T
+explain (verbose) select v % 9, count(*) from cf_fact where v >= 50 group by v % 9;
+----
+BatchExchange { order: [], dist: Single }
+└─BatchHashAgg { group_key: [$expr1], aggs: [count] }
+  └─BatchExchange { order: [], dist: HashShard($expr1) }
+    └─BatchProject { exprs: [(cf_fact.v % 9:Int32) as $expr1] }
+      └─BatchFilter { predicate: (cf_fact.v >= 50:Int32) }
+        └─BatchScan { table: cf_fact, columns: [cf_fact.v], distribution: SomeShard }
+
+statement ok
+set batch_cardinality_feedback = true;
+
+query T
+explain (verbose) select v % 9, count(*) from cf_fact where v >= 50 group by v % 9;
+----
+BatchExchange { order: [], dist: Single }
+└─BatchHashAgg { group_key: [$expr1], aggs: [count] }
+  └─BatchExchange { order: [], dist: HashShard($expr1) }
+    └─BatchProject { exprs: [(cf_fact.v % 9:Int32) as $expr1] }
+      └─BatchFilter { predicate: (cf_fact.v >= 50:Int32) }
+        └─BatchScan { table: cf_fact, columns: [cf_fact.v], distribution: SomeShard }
+
+statement ok
+set batch_cardinality_feedback = false;
+
+query T
+explain (verbose) select * from cf_fact where v < 50 limit 5;
+----
+BatchLimit { limit: 5, offset: 0 }
+└─BatchExchange { order: [], dist: Single, sequential: true }
+  └─BatchLimit { limit: 5, offset: 0 }
+    └─BatchFilter { predicate: (cf_fact.v < 50:Int32) }
+      └─BatchScan { table: cf_fact, columns: [cf_fact.id, cf_fact.dim_id, cf_fact.v], distribution: UpstreamHashShard(cf_fact.id) }
+
+statement ok
+set batch_cardinality_feedback = true;
+
+query T
+explain (verbose) select * from cf_fact where v < 50 limit 5;
+----
+BatchLimit { limit: 5, offset: 0 }
+└─BatchExchange { order: [], dist: Single, sequential: true }
+  └─BatchLimit { limit: 5, offset: 0 }
+    └─BatchFilter { predicate: (cf_fact.v < 50:Int32) }
+      └─BatchScan { table: cf_fact, columns: [cf_fact.id, cf_fact.dim_id, cf_fact.v], distribution: UpstreamHashShard(cf_fact.id) }
+
 # A limit stops the filter and the scan below it before the end of their output: their counts
 # are partial (a lower bound). The scan has the fingerprint of the full scan of cf_fact.
 statement ok

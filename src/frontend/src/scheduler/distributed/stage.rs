@@ -660,7 +660,7 @@ impl StageRunner {
         let executor = ExecutorBuilder::new(
             &plan_node,
             &task_id,
-            self.ctx.to_batch_task_context_with_cardinality_counters(
+            self.ctx.to_batch_task_context(
                 cardinality_feedback
                     .as_ref()
                     .map(|feedback| feedback.counters()),

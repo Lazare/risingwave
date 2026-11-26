@@ -179,7 +179,7 @@ mod tests {
         ));
         let mut stream = executor.execute();
         while let Some(chunk) = stream.next().await {
-            chunk.unwrap();
+            let _chunk = chunk.unwrap();
         }
         drop(stream);
         // The row marked `D` is not visible.
@@ -202,7 +202,7 @@ mod tests {
             counters.register(1),
         ));
         let mut stream = executor.execute();
-        stream.next().await.unwrap().unwrap();
+        let _first = stream.next().await.unwrap().unwrap();
         // The consumer stops after the first chunk, as a limit above would.
         drop(stream);
         assert_eq!(

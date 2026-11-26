@@ -97,7 +97,7 @@ impl LocalQueryExecution {
         );
         // Cardinality feedback: kept until the end of the execution, when it is recorded.
         let cardinality_feedback = self.query.cardinality_feedback.clone();
-        let context = FrontendBatchTaskContext::create_with_cardinality_counters(
+        let context = FrontendBatchTaskContext::create(
             self.session.clone(),
             cardinality_feedback
                 .as_ref()

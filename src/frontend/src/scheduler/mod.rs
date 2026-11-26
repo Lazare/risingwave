@@ -70,18 +70,12 @@ impl ExecutionContext {
         self.timeout
     }
 
-    pub fn to_batch_task_context(&self) -> Arc<dyn BatchTaskContext> {
-        FrontendBatchTaskContext::create(self.session.clone())
-    }
-
-    /// Same as [`Self::to_batch_task_context`], with the counters of the cardinality feedback.
-    pub fn to_batch_task_context_with_cardinality_counters(
+    /// The context of the root stage, with the counters of the cardinality feedback of the
+    /// query if it is observed.
+    pub fn to_batch_task_context(
         &self,
         cardinality_counters: Option<Arc<CardinalityCounters>>,
     ) -> Arc<dyn BatchTaskContext> {
-        FrontendBatchTaskContext::create_with_cardinality_counters(
-            self.session.clone(),
-            cardinality_counters,
-        )
+        FrontendBatchTaskContext::create(self.session.clone(), cardinality_counters)
     }
 }
