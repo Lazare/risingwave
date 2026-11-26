@@ -395,6 +395,36 @@ impl LogicalMultiJoin {
         output
     }
 
+    /// Completes a join tree of the inputs built by the cost-based join ordering
+    /// (`batch_cost_based_join_ordering`), which may be bushy: `joined` joins all the inputs
+    /// without any condition, and its columns are those of the inputs in the order of
+    /// `join_ordering`. As in [`Self::as_reordered_left_deep_join`], the columns are put back in
+    /// the order of the inputs, then the condition of the multi-join is applied as a filter above
+    /// (later pushed down into the joins) and its output columns are projected.
+    pub(crate) fn finish_reordered_join(
+        &self,
+        joined: PlanRef,
+        join_ordering: &[usize],
+    ) -> PlanRef {
+        assert_eq!(join_ordering.len(), self.inputs.len());
+        let total_col_num = self.inner2output.source_size();
+        let mut reorder_mapping = vec![None; total_col_num];
+        join_ordering
+            .iter()
+            .cloned()
+            .flat_map(|input_idx| {
+                (0..self.inputs[input_idx].schema().len())
+                    .map(move |col_idx| self.inner_i2o_mappings[input_idx].map(col_idx))
+            })
+            .enumerate()
+            .for_each(|(tar, src)| reorder_mapping[src] = Some(tar));
+        let mut output =
+            LogicalProject::with_out_col_idx(joined, reorder_mapping.iter().map(|i| i.unwrap()))
+                .into();
+        output = LogicalFilter::create(output, self.on.clone());
+        LogicalProject::with_out_col_idx(output, self.output_indices.iter().cloned()).into()
+    }
+
     #[expect(clippy::doc_overindented_list_items)]
     /// Our heuristic join reordering algorithm will try to perform a left-deep join.
     /// It will try to do the following:

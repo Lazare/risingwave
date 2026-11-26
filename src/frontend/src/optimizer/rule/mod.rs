@@ -222,6 +222,9 @@ pub use apply_one_row_join_split_rule::*;
 // Duplicates found with `lag` over a window ordered by the column (`batch_rewrite_lag_duplicates`).
 mod lag_duplicates_rule;
 pub use lag_duplicates_rule::*;
+// Cost-based ordering of the inner joins of batch queries (`batch_cost_based_join_ordering`).
+mod cost_based_join_ordering_rule;
+pub use cost_based_join_ordering_rule::*;
 // Rule `UnionScanMergeRule` (`streaming_merge_union_scans`).
 mod union_scan_merge_rule;
 pub use union_scan_merge_rule::*;
@@ -402,6 +405,8 @@ macro_rules! for_all_rules {
             , { CommonJoinOverUnionRule }
             , { ApplyOneRowJoinSplitRule }
             , { LagDuplicatesRule }
+            , { CostBasedJoinOrderingRule }
+            , { CostBasedJoinSidesRule }
             , { UnionScanMergeRule }
             , { StackedAggMergeRule }
             , { LateralTableFunctionRule }

@@ -305,6 +305,23 @@ static BATCH_MERGE_REPEATED_LOOKUPS: LazyLock<OptimizationStage> = LazyLock::new
     )
 });
 
+// Rules `CostBasedJoinSidesRule` and `CostBasedJoinOrderingRule` (`batch_cost_based_join_ordering`).
+static BATCH_COST_BASED_JOIN_SIDES: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Cost-Based Join Sides For Batch",
+        vec![CostBasedJoinSidesRule::create()],
+        ApplyOrder::TopDown,
+    )
+});
+
+static BATCH_COST_BASED_JOIN_ORDERING: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Cost-Based Join Ordering For Batch",
+        vec![CostBasedJoinOrderingRule::create()],
+        ApplyOrder::TopDown,
+    )
+});
+
 // Rule `LagDuplicatesRule` (`batch_rewrite_lag_duplicates`).
 static BATCH_REWRITE_LAG_DUPLICATES: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
@@ -1538,6 +1555,20 @@ impl LogicalOptimizer {
             // This rule assumes that filters have already been pushed down near to
             // their relevant joins.
             plan = plan.optimize_by_rules(&TO_MULTI_JOIN)?;
+
+            // Cost-based join ordering (`batch_cost_based_join_ordering`): order the inner joins
+            // by the estimated rows of the tables and of the intermediate results. A multi-join
+            // without estimates for all its inputs gets the left-deep heuristic order, as below,
+            // and a two-way join without estimates is kept as it is.
+            if plan
+                .ctx()
+                .session_ctx()
+                .config()
+                .batch_cost_based_join_ordering()
+            {
+                plan = plan.optimize_by_rules(&BATCH_COST_BASED_JOIN_SIDES)?;
+                plan = plan.optimize_by_rules(&BATCH_COST_BASED_JOIN_ORDERING)?;
+            }
 
             // Reorder multijoin into left-deep join tree.
             plan = plan.optimize_by_rules(&LEFT_DEEP_JOIN_ORDERING)?;

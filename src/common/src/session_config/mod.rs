@@ -371,6 +371,13 @@ pub struct SessionConfig {
     #[parameter(default = false)]
     batch_merge_union_scans: bool,
 
+    /// Order the inner joins of a batch query by the estimated number of rows of the tables (from
+    /// the storage statistics) and of the intermediate results, instead of the heuristic order. A
+    /// join whose inputs are not all covered by statistics keeps the heuristic order. Defaults to
+    /// false.
+    #[parameter(default = false)]
+    batch_cost_based_join_ordering: bool,
+
     /// In the plan of a new streaming job, read once the table that several branches of a
     /// `UNION ALL` read, each with its own filter and projection: one scan, one copy of each row
     /// per branch, and the filter and projection of each branch applied to its copies. Defaults to

@@ -37,6 +37,7 @@ own rules.
 | BL | Batch: duplicates found with `lag` over a window ordered by the column, counted per value instead (`batch_rewrite_lag_duplicates`) | done (prototype, branch `proto/plan-reduction-batch-lag`) |
 | B | Batch counterparts of 9, 9b, 9c, 7 and US, each behind a `batch_` variable | done (prototype, branch `proto/plan-reduction-batch-unnest`), see "Batch counterparts" |
 | SL | Status ladder: the branches of a top-1 by priority that read the same relation picked with one `CASE` | done (prototype, branch `proto/plan-reduction-union-scans`); default branch rewritten into a join not done |
+| BJ | Batch: cost-based ordering of the inner joins from the row counts of the tables (`batch_cost_based_join_ordering`) | first version (prototype, branch `proto/plan-reduction-batch-joinorder`, see "BJ" below); index lookups and column statistics not done |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -905,6 +906,61 @@ side again for the domain.
 - Tests: planner cases in `batch_plan_reduction_unnest.yaml`, the differential batch test
   `e2e_test/batch/plan_reduction_unnest.gen.py` (every query run as an `INSERT ... SELECT` with and
   without its variable, the two results compared as multisets after each round of changes).
+### BJ. Batch: cost-based join ordering (added on 2026-11-26, first version)
+
+The batch planner orders the inner joins with a heuristic (`LeftDeepTreeJoinOrderingRule`): the
+graph of equalities is walked from its first edge, with no idea of the sizes of the tables. With
+`from d join f on f.d_id = d.id join e on f.e_id = e.id`, a large `f` becomes the build side of
+the first hash join because `d` is written first, where reading `f` once and looking up `d` and
+`e` by key would be cheaper. `batch_cost_based_join_ordering` (default false) orders them by
+estimated rows instead (`cost_based_join_ordering_rule.rs`, stages
+`BATCH_COST_BASED_JOIN_SIDES` and `BATCH_COST_BASED_JOIN_ORDERING`, run in
+`gen_optimized_logical_plan_for_batch` just before the heuristic one).
+
+- **Statistics.** The meta node sends the frontend the storage statistics of every state table
+  (`HummockVersionStats`: `total_key_count`, key and value sizes; also shown by
+  `rw_catalog.rw_table_stats`); the frontend keeps them in its catalog. The row count of a table,
+  materialized view or index is its `total_key_count`, an approximation maintained at each
+  checkpoint (one key per row). Nothing else is used: no histogram, no distinct counts.
+- **Estimates.** A scan: the rows of the table, times 0.1 per `column = constant` conjunct and
+  0.25 per other conjunct, and one row when the filter fixes a unique key (the unique keys of
+  `unique_key_simplify_rule.rs`). A filter or a projection over an estimated input: the same. An
+  aggregation: one row without group, the input rows when it groups by a key of its input, 10%
+  otherwise. Outer joins: the preserved side; semi and anti joins: half of the kept side. Any
+  bound that `CardinalityVisitor` proves (`LIMIT`, one-row aggregation, values) caps the
+  estimate. A join of a set of inputs: the product of their rows and of the selectivities of the
+  conditions between them, so that the estimate does not depend on the order. An equality on
+  columns holding a unique key of one side has the selectivity 1 over the rows of the table of
+  that side before its filters (key to foreign key: one row of the key side per row of the other
+  side, fewer if the key side is filtered); on other columns, it returns twice the larger side.
+- **Cost.** The batch hash join builds its hash table on its right side: probe rows cost 1, build
+  rows 3 (they are held in memory), output rows 1, plus the rows read by the inputs. When the
+  right side is a table scan whose key prefix (the shortest one that holds the distribution key)
+  is given by equalities with the left side, the planner makes a lookup join: it costs 2 per row
+  of the left side and the table is not scanned. The model follows what the planner does: a
+  lookup join is not optional when it is possible.
+- **Enumeration.** Dynamic programming over the connected sets of inputs (bushy trees allowed),
+  up to 10 inputs per set of inputs linked by equalities, greedy beyond (the pair of linked
+  sub-trees of fewest estimated rows, then of lowest cost). Sets of inputs that no equality links
+  are cross joined in the order of the heuristic. Only inner joins move: an outer, semi or anti
+  join is one input of the inner joins around it, and the inner joins below it are ordered on
+  their own. A two-way inner join (not merged into a multi-join, which needs three inputs) has its
+  sides swapped when that costs less.
+- **Fallback.** If an input of a multi-join has no estimate (a table without statistics, a
+  source, a table function...), the multi-join gets the heuristic order, and a two-way join is
+  kept as it is: the plan is then exactly the one without the variable.
+- **Tests.** The planner tests have no data: a test-only planner test option `table_row_counts`
+  (`test_utils::set_table_row_counts_for_test`) gives the frontend row counts by table name
+  before the query is planned (`batch_cost_based_join_ordering.yaml`: star and chain queries,
+  outer, semi and anti joins, scalar subquery, aggregation input, no statistics, partial
+  statistics, twelve inputs). The differential test `e2e_test/batch/cost_based_join_ordering.slt`
+  (generated by its `.gen.py`) runs each query with and without the variable on tables of very
+  different sizes, before and after changes, and compares the results as multisets.
+- **Not done.** Lookups into indexes are not modeled (index selection happens after the
+  ordering, on the pruned columns); no distinct counts or histograms, so a join on columns that
+  are not keys is a guess; the cross joins between unlinked sets of inputs keep the heuristic
+  order (a nested loop join caches its left side); the estimates are not shown in `EXPLAIN`
+  (only in `EXPLAIN (TRACE)`).
 
 ## Not for now: sharing between materialized views
 
