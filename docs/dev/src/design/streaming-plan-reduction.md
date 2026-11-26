@@ -776,8 +776,8 @@ that the unused window functions sharing the window go away with it.
   window function, a partition column that is a constant, `count(y)`); an offset other than 1;
   `IGNORE NULLS`; another frame (`ROWS 1 PRECEDING` ends at the current row: the first row compares
   `x` with itself); `IS NOT DISTINCT FROM` (NULLs and the missing row would count, depending on
-  where NULLs sort); any other comparison or an `OR`; `x` in the partition key; a type where equal
-  values can differ (`decimal` `1.0 = 1.00`, whose group keeps the normalized value; floats;
+  where NULLs sort); any other comparison or an `OR`; `x` in the partition key; `x` or a partition
+  column of a type where equal values can differ (`decimal` `1.0 = 1.00`, whose group keeps the normalized value; floats;
   `interval`; composite types). `lag` with a default value is not supported by the binder anyway.
 - Tests: `batch_rewrite_lag_duplicates.yaml` (planner) and the differential
   `e2e_test/batch/rewrite_lag_duplicates.gen.py` (every query inserted into a table with and

@@ -277,6 +277,14 @@
   expected_outputs:
   - batch_plan
 
+- name: decimal partition column
+  before: [setup]
+  sql: |
+    with ordered as (select d, x, lag(x) over (partition by d order by x) as prev from t)
+    select d, x, count(*) from ordered where x = prev group by d, x;
+  expected_outputs:
+  - batch_plan
+
 - name: streaming plan does not change
   before: [setup]
   sql: |

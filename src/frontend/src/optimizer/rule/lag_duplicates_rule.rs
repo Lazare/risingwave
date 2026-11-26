@@ -80,9 +80,9 @@ use crate::utils::IndexSet;
 ///   would count;
 /// - another conjunct in the filter, unless it reads only the partition columns, `x` and `w` and
 ///   is pure: it is then a condition on the group, applied to the input rows;
-/// - a type where distinct values can be equal (`decimal`, floats, `interval`, composite types): the
-///   rows read above would hold the value of another duplicate; only the types listed in
-///   [`supported_type`].
+/// - `x` or a partition column of a type where distinct values can be equal (`decimal`, floats,
+///   `interval`, composite types): the rows read above would hold the value of another row of the
+///   group; only the types listed in [`supported_type`].
 pub struct LagDuplicatesRule;
 
 impl LagDuplicatesRule {
@@ -272,7 +272,7 @@ impl Duplicates {
             && one_row_frames.contains(&function.frame)
             && function.args.len() == 1
             && function.args[0].index() == column;
-        if !value_of_row || !supported_type(&input.schema()[column].data_type()) {
+        if !value_of_row {
             return None;
         }
 
@@ -294,6 +294,14 @@ impl Duplicates {
             .collect();
         group.push(column);
         group.sort_unstable();
+        // The values of the group key are those of the rows (partition columns included, they may
+        // be read above).
+        if !group
+            .iter()
+            .all(|&g| supported_type(&input.schema()[g].data_type()))
+        {
+            return None;
+        }
 
         let mut found = Self {
             input,
