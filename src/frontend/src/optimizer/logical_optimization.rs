@@ -752,6 +752,35 @@ static STREAM_PRUNE_EMPTY_RELATION: LazyLock<OptimizationStage> = LazyLock::new(
     )
 });
 
+// Rule `NullKeyJoinRule` (`streaming_simplify_null_join_keys`, `batch_simplify_null_join_keys`):
+// a join that compares with `=` a column known to be `NULL` matches nothing. The join, or its
+// optional side, becomes an empty relation, which is then propagated up.
+static STREAM_SIMPLIFY_NULL_JOIN_KEYS: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Simplify Null Join Keys For Stream",
+        vec![
+            NullKeyJoinRule::create_for_stream(),
+            EmptyRelationPropagateRule::create(),
+            EmptyInputSimplifyRule::create(),
+        ],
+        // Bottom-up so that an empty relation is propagated to the top in one pass.
+        ApplyOrder::BottomUp,
+    )
+});
+
+static BATCH_SIMPLIFY_NULL_JOIN_KEYS: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Simplify Null Join Keys For Batch",
+        vec![
+            NullKeyJoinRule::create_for_batch(),
+            EmptyRelationPropagateRule::create(),
+            EmptyInputSimplifyRule::create(),
+        ],
+        // Bottom-up so that an empty relation is propagated to the top in one pass.
+        ApplyOrder::BottomUp,
+    )
+});
+
 static STREAM_FACTOR_UNION_JOIN: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Factor Union Join For Stream",
@@ -1189,6 +1218,26 @@ impl LogicalOptimizer {
             }
         }
 
+        // Rule `NullKeyJoinRule` (`streaming_simplify_null_join_keys`): after the final predicate
+        // pushdown, a filter `c IS NULL` on the output of a join is next to the scan of the side
+        // that `c` comes from, and a join that compares `c` with `=` matches nothing. On demand
+        // only, as above.
+        if ctx
+            .session_ctx()
+            .config()
+            .streaming_simplify_null_join_keys()
+            && !ctx.is_stream_prune_baseline()
+        {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&STREAM_SIMPLIFY_NULL_JOIN_KEYS)?;
+            let applied = ctx.total_rule_applied() - applied_before;
+            ctx.add_stream_prune_rule_applied(applied);
+            if applied > 0 {
+                // The removed sub-plans may have been the only readers of some columns.
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+            }
+        }
+
         // Remove the operators that the unique keys of their inputs make useless: an outer join
         // that is not used and can not multiply rows, an aggregation whose groups hold one row.
         // On demand only, as above. An operator that is removed may leave columns unused, which
@@ -1442,6 +1491,13 @@ impl LogicalOptimizer {
             )
         };
         let mut need_column_pruning = unique_key || repeated_lookups;
+        // Rule `NullKeyJoinRule` (`batch_simplify_null_join_keys`): a join that compares with
+        // `=` a column that a filter pushed below it requires to be `NULL` matches nothing.
+        if ctx.session_ctx().config().batch_simplify_null_join_keys() {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&BATCH_SIMPLIFY_NULL_JOIN_KEYS)?;
+            need_column_pruning |= ctx.total_rule_applied() != applied_before;
+        }
         if column_facts {
             let applied_before = ctx.total_rule_applied();
             plan = plan.optimize_by_rules(&BATCH_SIMPLIFY_COLUMN_FACTS)?;

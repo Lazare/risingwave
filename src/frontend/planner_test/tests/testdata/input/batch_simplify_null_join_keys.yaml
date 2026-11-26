@@ -1,0 +1,185 @@
+# Tests for `batch_simplify_null_join_keys` (`NullKeyJoinRule`): a join whose condition compares
+# with `=` a column known to be `NULL` in every row of one of its inputs matches nothing.
+- id: setup_off
+  sql: |
+    create table a (id int primary key, bk int, x int);
+    create table b (id int primary key, k int, label varchar);
+  expected_outputs: []
+- id: setup
+  sql: |
+    set batch_simplify_null_join_keys = true;
+    create table a (id int primary key, bk int, x int);
+    create table b (id int primary key, k int, label varchar);
+    create table c (id int primary key, kb bigint, v int);
+    create table e (p int primary key, u int, w int);
+    create view v as select a.id, a.x, b.k as b_k, b.label from a join b on a.bk = b.k;
+  expected_outputs: []
+
+# The variable is off by default: nothing changes.
+- name: off by default - inner join on a key known to be null is kept
+  before: [setup_off]
+  sql: |
+    select a.id, b.label from a join b on a.bk = b.k where b.k is null;
+  expected_outputs:
+  - batch_plan
+
+# Rewritten.
+
+- name: inner join - the key of the right side is null
+  before: [setup]
+  sql: |
+    select a.id, b.label from a join b on a.bk = b.k where b.k is null;
+  expected_outputs:
+  - batch_plan
+- name: inner join - the key of the left side is null
+  before: [setup]
+  sql: |
+    select a.id, b.label from a join b on a.bk = b.k where a.bk is null;
+  expected_outputs:
+  - batch_plan
+- name: inner join in a view, filtered on the joined column
+  before: [setup]
+  sql: |
+    select * from v where b_k is null;
+  expected_outputs:
+  - batch_plan
+- name: inner join - the null key is read through a cast
+  before: [setup]
+  sql: |
+    select a.id, c.v from a join c on a.bk = c.kb where a.bk is null;
+  expected_outputs:
+  - batch_plan
+- name: inner join - a null literal of a projection
+  before: [setup]
+  sql: |
+    select a.id, s.label from a join (select null::int as k, label from b) s on a.bk = s.k;
+  expected_outputs:
+  - batch_plan
+- name: count over an inner join that matches nothing
+  before: [setup]
+  sql: |
+    select count(*) as n from a join b on a.bk = b.k where b.k is null;
+  expected_outputs:
+  - batch_plan
+- name: left join - the key of the right side is null
+  before: [setup]
+  sql: |
+    select a.id, a.x, b.label from a left join (select * from b where k is null) b on a.bk = b.k;
+  expected_outputs:
+  - batch_plan
+- name: left join - an extra conjunct does not matter
+  before: [setup]
+  sql: |
+    select a.id, b.label from a left join (select * from b where k is null) b
+      on a.bk = b.k and a.x > b.id;
+  expected_outputs:
+  - batch_plan
+- name: right join - the key of the left side is null
+  before: [setup]
+  sql: |
+    select a.x, b.id, b.label from (select * from a where bk is null) a right join b on a.bk = b.k;
+  expected_outputs:
+  - batch_plan
+- name: semi join - the key of the right side is null
+  before: [setup]
+  sql: |
+    select a.id from a where a.bk in (select k from b where k is null);
+  expected_outputs:
+  - batch_plan
+- name: semi join - the key of the left side is null
+  before: [setup]
+  sql: |
+    select a.id from a where a.bk is null and exists (select 1 from b where b.k = a.bk);
+  expected_outputs:
+  - batch_plan
+- name: anti join - the key of the right side is null, every left row is kept
+  before: [setup]
+  sql: |
+    select a.id from a where not exists (select 1 from b where b.k = a.bk and b.k is null);
+  expected_outputs:
+  - batch_plan
+- name: scan predicate mapped through the output columns of the scan
+  before: [setup]
+  sql: |
+    select a.id, s.label from a join (select label, k from b where k is null) s on a.bk = s.k;
+  expected_outputs:
+  - batch_plan
+- name: only the join on the null key is removed
+  before: [setup]
+  sql: |
+    select a.id, b.label, c.v
+    from a left join (select * from b where k is null) b on a.bk = b.k
+    join c on a.id = c.id;
+  expected_outputs:
+  - batch_plan
+
+# Kept.
+
+- name: kept - is not distinct from matches nulls
+  before: [setup]
+  sql: |
+    select a.id, b.label from a join b on a.bk is not distinct from b.k where b.k is null;
+  expected_outputs:
+  - batch_plan
+- name: kept - full join
+  before: [setup]
+  sql: |
+    select a.id, b.label from a full join (select * from b where k is null) b on a.bk = b.k;
+  expected_outputs:
+  - batch_plan
+- name: kept - the null column is not in the condition
+  before: [setup]
+  sql: |
+    select a.id, b.label from a join b on a.bk = b.k where b.label is null;
+  expected_outputs:
+  - batch_plan
+- name: kept - the null column of the scan predicate is not output (mapping of the scan columns)
+  before: [setup]
+  sql: |
+    select a.id, e.p from a join e on a.bk = e.w where e.u is null;
+  expected_outputs:
+  - batch_plan
+- name: kept - the null column of the scan predicate is not output, single output column
+  before: [setup]
+  sql: |
+    select a.id from a join e on a.bk = e.w where e.u is null;
+  expected_outputs:
+  - batch_plan
+- name: kept - is null above a left join on its optional side (anti join pattern)
+  before: [setup]
+  sql: |
+    select a.id from a left join b on a.bk = b.k where b.k is null;
+  expected_outputs:
+  - batch_plan
+- name: kept - left join, the null key is on the preserved side
+  before: [setup]
+  sql: |
+    select a.id, b.label from (select * from a where bk is null) a left join b on a.bk = b.k;
+  expected_outputs:
+  - batch_plan
+- name: kept - the key is inside an expression other than a cast
+  before: [setup]
+  sql: |
+    select a.id, b.label from a join b on coalesce(a.bk, 0) = b.k where a.bk is null;
+  expected_outputs:
+  - batch_plan
+- name: kept - comparison other than equality
+  before: [setup]
+  sql: |
+    select a.id, b.label from a join b on a.id = b.id and a.bk < b.k where b.k is null;
+  expected_outputs:
+  - batch_plan
+- name: not in over a subquery of null keys - planned as an anti join on `=`, rewritten like one
+  before: [setup]
+  sql: |
+    select a.id from a where a.bk not in (select k from b where k is null);
+  expected_outputs:
+  - batch_plan
+- name: off by default - not in over a subquery of null keys
+  before: [setup_off]
+  sql: |
+    select a.id from a where a.bk not in (select k from b where k is null);
+  expected_outputs:
+  - batch_plan
+  - logical_plan
+  - optimized_logical_plan_for_batch

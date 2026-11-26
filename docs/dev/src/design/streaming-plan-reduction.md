@@ -37,6 +37,7 @@ own rules.
 | BL | Batch: duplicates found with `lag` over a window ordered by the column, counted per value instead (`batch_rewrite_lag_duplicates`) | done (prototype, branch `proto/plan-reduction-batch-lag`) |
 | B | Batch counterparts of 9, 9b, 9c, 7 and US, each behind a `batch_` variable | done (prototype, branch `proto/plan-reduction-batch-unnest`), see "Batch counterparts" |
 | SL | Status ladder: the branches of a top-1 by priority that read the same relation picked with one `CASE` | done (prototype, branch `proto/plan-reduction-union-scans`); default branch rewritten into a join not done |
+| NK | Join on a column known to be `NULL` matches nothing (`batch_simplify_null_join_keys`, `streaming_simplify_null_join_keys`) | done (prototype, branch `proto/plan-reduction-nullkey`), see "NK" below |
 | BJ | Batch: cost-based ordering of the inner joins from the row counts of the tables (`batch_cost_based_join_ordering`) | first version (prototype, branch `proto/plan-reduction-batch-joinorder`, see "BJ" below); index lookups and column statistics not done |
 | BF | Batch: cardinality feedback, step 1: count the rows of the operators at execution and compare them with the estimates (`batch_cardinality_feedback`) | first version (prototype, branch `proto/batch-cardinality-feedback`, see "BF" below): observation only, no plan changes |
 | BP | Batch: second pass of the reductions on keys after the stages that create aggregations (`batch_reduce_keys_after_conversions`) | done (prototype, branch `proto/plan-reduction-batch-pass2`, see "BP and BT" below) |
@@ -611,6 +612,58 @@ per group over the union.
   but in streaming both keep every row of a group in their state, nothing saved); turning a
   default branch read from the entity table into a left join of that table (a join replaces a
   union branch, no operator saved).
+
+### NK. Join on a column known to be `NULL` (added on 2026-11-26, done on the branch)
+
+Variables `batch_simplify_null_join_keys` and `streaming_simplify_null_join_keys`, rule
+`NullKeyJoinRule`. Lifts the limit of A "`IS NULL` on the key of an inner join is not simplified
+when the filter was already pushed below the join". A filter `c IS NULL` on the output of a join
+is moved by predicate pushdown next to the scan of the side that `c` comes from (and derived for
+the other column of `c = b`); the join then compares a column that is `NULL` in every row of one
+of its inputs:
+
+```text
+SELECT * FROM v WHERE b_id IS NULL      -- v: a JOIN b ON a.b_ref = b.id
+
+Join(Inner, a.b_ref = b.id)              Values([])
+├─Scan(a)                          =>
+└─Filter(b.id IS NULL)
+  └─Scan(b)
+```
+
+- Columns `NULL` in every row of a node: a `c IS NULL` conjunct of a filter or of a scan
+  predicate (the predicate of a scan refers to the columns of the table, mapped to the output
+  columns of the scan), followed up through filters, shares and projections of input references
+  or of casts of them (streaming computes the cast of a join key in a projection below the join);
+  a `NULL` literal of a projection. Nothing is derived through joins, aggregations or unions.
+- A conjunct `l = r` of the join condition whose operand is such a column, or a cast of it, on a
+  side whose rows must match to be useful: either side of an inner or semi join (the join becomes
+  empty), the right side of a left outer or left anti join (the right side becomes empty, the
+  left rows are padded or all kept), the left side of the right joins. The join is rewritten as
+  A rewrites a never-true condition, then B and C remove what is above it (an aggregation without
+  `GROUP BY` becomes its constant row).
+- Valid: `NULL = x` is `NULL` for every `x` and every type, so no pair of rows satisfies the
+  condition, whatever its other conjuncts, duplicates or empty inputs. The facts are properties
+  of the rows a filter or a scan can output: they hold for every row ever produced, under
+  retractions, so they are valid for a plan frozen when a streaming job is created.
+- Not rewritten: `IS NOT DISTINCT FROM` (matches `NULL`s), `FULL OUTER JOIN`, as-of joins, an
+  operand that is another expression (`coalesce(c, 0) = x` can match), a `NULL` column of the
+  preserved side of an outer join (the rewrite would be valid, but removes nothing), and a filter
+  `s.k IS NULL` above a left join on its optional side (the anti-join pattern: the filter stays
+  above the join and is not read).
+- Streaming and watermarks: the rule leaves the join untouched if a sub-plan it would remove holds
+  a scan of a table with a watermark, a source or `now()`. Without this, an inner join with a
+  temporal join's left side carrying the watermark of `EMIT ON WINDOW CLOSE` would become an
+  empty `VALUES` without a watermark, and the job could no longer be planned. A left join whose
+  optional side is removed keeps the watermarks of its preserved side.
+- Stages: `STREAM_SIMPLIFY_NULL_JOIN_KEYS` right after `STREAM_PRUNE_EMPTY_RELATION`, and
+  `BATCH_SIMPLIFY_NULL_JOIN_KEYS` at the start of `reduce_batch_on_keys` (after the first
+  predicate pushdown, before join ordering), each with `EmptyRelationPropagateRule` and
+  `EmptyInputSimplifyRule`, then column pruning if anything changed.
+- Tests: planner tests `batch_simplify_null_join_keys.yaml`, `stream_simplify_null_join_keys.yaml`;
+  differential tests `e2e_test/batch/simplify_null_join_keys` and
+  `e2e_test/streaming/simplify_null_join_keys` (NULL keys on both sides, duplicates, empty tables,
+  updates of keys to and from `NULL`, deletes).
 
 ### 5. Aggregation pushed below a join onto the unique side
 

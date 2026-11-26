@@ -449,6 +449,17 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_over_window_to_topn: bool,
 
+    // Rule `NullKeyJoinRule`.
+    /// In the plan of a new streaming job, remove the join whose condition compares with `=` a
+    /// column that a filter below requires to be `NULL` (`c IS NULL`): no row can match. The
+    /// join, or its optional side, becomes an empty relation. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    streaming_simplify_null_join_keys: bool,
+
+    /// The same as `streaming_simplify_null_join_keys`, for batch queries. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_simplify_null_join_keys: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,
