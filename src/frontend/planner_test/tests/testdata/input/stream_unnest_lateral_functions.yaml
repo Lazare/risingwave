@@ -401,3 +401,11 @@
     select t.id, array(select jsonb_array_elements_text(t.j -> 'xs')) as xs from t;
   expected_outputs:
   - batch_plan
+
+- name: kept - the outer side is a union whose branches may hold rows with the same key
+  before: [setup]
+  sql: |
+    select x.id, (select max(v) from unnest(x.arr) v) as m
+    from (select id, arr from t union all select id, arr from t) x;
+  expected_outputs:
+  - stream_plan

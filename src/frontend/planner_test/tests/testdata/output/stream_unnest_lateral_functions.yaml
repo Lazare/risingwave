@@ -826,3 +826,55 @@
                 └─BatchHashAgg { group_key: [t.j], aggs: [] }
                   └─BatchExchange { order: [], dist: HashShard(t.j) }
                     └─BatchScan { table: t, columns: [t.j], distribution: SomeShard }
+- name: kept - the outer side is a union whose branches may hold rows with the same key
+  before:
+  - setup
+  sql: |
+    select x.id, (select max(v) from unnest(x.arr) v) as m
+    from (select id, arr from t union all select id, arr from t) x;
+  stream_plan: |-
+    StreamMaterialize { columns: [id, m, $src(hidden), t.arr(hidden), t.arr#1(hidden)], stream_key: [id, $src, t.arr], pk_columns: [id, $src, t.arr], pk_conflict: NoCheck }
+    └─StreamExchange { dist: HashShard(t.id, $src, t.arr) }
+      └─StreamHashJoin { type: LeftOuter, predicate: t.arr IS NOT DISTINCT FROM t.arr, output: [t.id, max(Unnest($0)), $src, t.arr, t.arr] }
+        ├─StreamExchange { dist: HashShard(t.arr) }
+        │ └─StreamShare { id: 7 }
+        │   └─StreamUnion { all: true }
+        │     ├─StreamExchange { dist: HashShard(t.id, 0:Int32) }
+        │     │ └─StreamProject { exprs: [t.id, t.arr, 0:Int32] }
+        │     │   └─StreamShare { id: 1 }
+        │     │     └─StreamTableScan { table: t, columns: [t.id, t.arr], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
+        │     └─StreamExchange { dist: HashShard(t.id, 1:Int32) }
+        │       └─StreamProject { exprs: [t.id, t.arr, 1:Int32] }
+        │         └─StreamShare { id: 1 }
+        │           └─StreamTableScan { table: t, columns: [t.id, t.arr], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
+        └─StreamProject { exprs: [t.arr, max(Unnest($0))] }
+          └─StreamHashAgg { group_key: [t.arr], aggs: [max(Unnest($0)), count] }
+            └─StreamHashJoin { type: LeftOuter, predicate: t.arr IS NOT DISTINCT FROM t.arr, output: [t.arr, Unnest($0), t.arr, _rw_projected_row_id] }
+              ├─StreamProject { exprs: [t.arr], noop_update_hint: true }
+              │ └─StreamHashAgg { group_key: [t.arr], aggs: [count] }
+              │   └─StreamExchange { dist: HashShard(t.arr) }
+              │     └─StreamShare { id: 7 }
+              │       └─StreamUnion { all: true }
+              │         ├─StreamExchange { dist: HashShard(t.id, 0:Int32) }
+              │         │ └─StreamProject { exprs: [t.id, t.arr, 0:Int32] }
+              │         │   └─StreamShare { id: 1 }
+              │         │     └─StreamTableScan { table: t, columns: [t.id, t.arr], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
+              │         └─StreamExchange { dist: HashShard(t.id, 1:Int32) }
+              │           └─StreamProject { exprs: [t.id, t.arr, 1:Int32] }
+              │             └─StreamShare { id: 1 }
+              │               └─StreamTableScan { table: t, columns: [t.id, t.arr], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
+              └─StreamProject { exprs: [t.arr, Unnest($0), _rw_projected_row_id] }
+                └─StreamProjectSet { select_list: [$0, Unnest($0)] }
+                  └─StreamProject { exprs: [t.arr], noop_update_hint: true }
+                    └─StreamHashAgg { group_key: [t.arr], aggs: [count] }
+                      └─StreamExchange { dist: HashShard(t.arr) }
+                        └─StreamShare { id: 7 }
+                          └─StreamUnion { all: true }
+                            ├─StreamExchange { dist: HashShard(t.id, 0:Int32) }
+                            │ └─StreamProject { exprs: [t.id, t.arr, 0:Int32] }
+                            │   └─StreamShare { id: 1 }
+                            │     └─StreamTableScan { table: t, columns: [t.id, t.arr], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
+                            └─StreamExchange { dist: HashShard(t.id, 1:Int32) }
+                              └─StreamProject { exprs: [t.id, t.arr, 1:Int32] }
+                                └─StreamShare { id: 1 }
+                                  └─StreamTableScan { table: t, columns: [t.id, t.arr], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
