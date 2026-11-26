@@ -441,4 +441,48 @@ mod tests {
             .abort("Abort Test".to_owned());
         assert!(manager.wait_until_task_aborted(&task_id).await.is_ok());
     }
+
+    #[tokio::test]
+    async fn test_cancel_task_blocked_on_a_full_output() {
+        let manager = Arc::new(BatchManager::new(
+            BatchConfig::default(),
+            BatchManagerMetrics::for_test(),
+            u64::MAX,
+            None,
+        ));
+        // An executor that produces chunks forever, and no consumer for its output.
+        let plan = PlanFragment {
+            root: Some(PlanNode {
+                children: vec![],
+                identity: "".to_owned(),
+                node_body: Some(NodeBody::BusyLoopExecutor(true)),
+            }),
+            exchange_info: Some(ExchangeInfo {
+                mode: DistributionMode::Single as i32,
+                distribution: None,
+            }),
+        };
+        let pb_task_id = PbTaskId {
+            query_id: "blocked".to_owned(),
+            stage_id: 0,
+            task_id: 0,
+        };
+        manager.fire_task_for_test(&pb_task_id, plan).await.unwrap();
+        let task_id = TaskId::from(&pb_task_id);
+        let task = manager.tasks.lock().get(&task_id).unwrap().clone();
+        // The output channel fills up: the task now waits to send.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(task.check_if_running().is_ok());
+
+        // Once cancelled, the task ends instead of waiting forever for a consumer, so that the
+        // memory reservation of its query and everything it holds are given back.
+        manager.cancel_task(&pb_task_id);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while task.check_if_running().is_ok() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the cancelled task still runs");
+    }
 }
