@@ -485,4 +485,48 @@ mod tests {
         .await
         .expect("the cancelled task still runs");
     }
+
+    #[tokio::test]
+    async fn test_output_taken_after_the_task_ended() {
+        let manager = Arc::new(BatchManager::new(
+            BatchConfig::default(),
+            BatchManagerMetrics::for_test(),
+            u64::MAX,
+            None,
+        ));
+        // An executor that produces nothing and ends at once.
+        let plan = PlanFragment {
+            root: Some(PlanNode {
+                children: vec![],
+                identity: "".to_owned(),
+                node_body: Some(NodeBody::BusyLoopExecutor(false)),
+            }),
+            exchange_info: Some(ExchangeInfo {
+                mode: DistributionMode::Single as i32,
+                distribution: None,
+            }),
+        };
+        let pb_task_id = PbTaskId {
+            query_id: "ended".to_owned(),
+            stage_id: 0,
+            task_id: 0,
+        };
+        manager.fire_task_for_test(&pb_task_id, plan).await.unwrap();
+        let task_id = TaskId::from(&pb_task_id);
+        let task = manager.tasks.lock().get(&task_id).unwrap().clone();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while task.check_if_running().is_ok() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the task does not end");
+
+        // The consumer comes after the end of the task: the output is still there.
+        let output_id = PbTaskOutputId {
+            task_id: Some(pb_task_id),
+            output_id: 0,
+        };
+        assert!(manager.take_output(&output_id).is_ok());
+    }
 }

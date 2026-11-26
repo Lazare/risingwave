@@ -462,7 +462,9 @@ impl BatchTaskExecution {
         }
         // Spawn task for real execution.
         let fut = async move {
-            let _release = scopeguard::guard(releaser, |task| task.release_resources());
+            // At the end of the execution, only the memory reservation is given back: the outputs
+            // stay until their consumers take them, which may be after the task has ended.
+            let _release = scopeguard::guard(releaser, |task| task.release_admission());
             trace!("Executing plan [{:?}]", task_id);
             let sender = sender;
             let mut state_tx_1 = state_tx.clone();
@@ -698,11 +700,17 @@ impl BatchTaskExecution {
         self.release_resources();
     }
 
-    /// Gives back the memory reservation of the query, and drops the outputs that no consumer
-    /// took: a send to one of them, which would wait forever, then fails and the execution ends.
-    fn release_resources(&self) {
+    /// Gives back the memory reservation of the query.
+    fn release_admission(&self) {
         let admission = self.admission.lock().take();
         drop(admission);
+    }
+
+    /// On cancellation: gives back the memory reservation of the query, and drops the outputs
+    /// that no consumer took: a send to one of them, which would wait forever, then fails and the
+    /// execution ends. Never at the normal end of a task: a consumer may take its output later.
+    fn release_resources(&self) {
+        self.release_admission();
         let receivers: Vec<_> = self.receivers.lock().iter_mut().map(Option::take).collect();
         drop(receivers);
     }
