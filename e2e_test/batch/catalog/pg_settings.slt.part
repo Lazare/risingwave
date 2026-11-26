@@ -36,6 +36,7 @@ user batch_merge_union_scans
 user batch_parallelism
 user batch_rewrite_lag_duplicates
 user batch_simplify_column_facts
+user batch_simplify_null_join_keys
 user batch_simplify_on_unique_key
 user batch_simplify_subquery_unnesting
 user batch_status_ladder_case
@@ -112,6 +113,7 @@ user streaming_separate_consecutive_join
 user streaming_separate_sink
 user streaming_share_identical_subplans
 user streaming_share_union_scans
+user streaming_simplify_null_join_keys
 user streaming_simplify_on_unique_key
 user streaming_simplify_subquery_unnesting
 user streaming_status_ladder_case

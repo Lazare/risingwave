@@ -389,6 +389,8 @@ pub(crate) fn gen_create_mv_graph(
             || config.streaming_share_union_scans()
             // Rule `StatusLadderCaseRule`.
             || config.streaming_status_ladder_case()
+            // Rule `NullKeyJoinRule`.
+            || config.streaming_simplify_null_join_keys()
     };
     let baseline_args = prune_enabled.then(|| {
         (
