@@ -313,6 +313,28 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     streaming_simplify_subquery_unnesting: bool,
 
+    // Batch counterparts of `streaming_prune_empty_relation`, `streaming_simplify_on_unique_key`
+    // and `streaming_merge_repeated_lookups` (rules `ColumnFactsSimplifyRule`,
+    // `UnusedOuterJoinEliminateRule`, `AggOnKeyEliminateRule` and `RepeatedLookupMergeRule`).
+    /// In the plan of a batch query, simplify the predicates and projections with what is known
+    /// about the columns (constants, columns that are never `NULL`, `NOT NULL` constraints of
+    /// tables), and remove the sub-plans whose predicates can never be true. Defaults to false.
+    #[parameter(default = false)]
+    batch_simplify_column_facts: bool,
+
+    /// In the plan of a batch query, remove the operators that the unique keys of their inputs
+    /// make useless: an outer join whose optional side is not used and is unique on the join
+    /// columns, an aggregation, `DISTINCT`, `DISTINCT ON` or dedup whose groups hold exactly one
+    /// row. Defaults to false.
+    #[parameter(default = false)]
+    batch_simplify_on_unique_key: bool,
+
+    /// In the plan of a batch query, remove a join that looks up, by its key, a row of a table that
+    /// the other side of the join already carries: several joins of the same table on its key from
+    /// the same columns become one. Defaults to false.
+    #[parameter(default = false)]
+    batch_merge_repeated_lookups: bool,
+
     /// In the plan of a new streaming job, read once the table that several branches of a
     /// `UNION ALL` read, each with its own filter and projection: one scan, one copy of each row
     /// per branch, and the filter and projection of each branch applied to its copies. Defaults to

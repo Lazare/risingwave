@@ -744,7 +744,8 @@ fn drop_redundant_bounds(conjuncts: &[ExprImpl]) -> Option<Vec<ExprImpl>> {
 /// - `Project`: the same replacements inside the expressions. An expression that is just a
 ///   column is kept, so that the keys and the watermarks of the plan still see a column.
 ///
-/// The rule is only used by the streaming optimizer, on demand.
+/// The rule is only used on demand, by the streaming optimizer and by the batch one
+/// (`batch_simplify_column_facts`).
 ///
 /// [`NeverTruePredicateRule`]: super::NeverTruePredicateRule
 pub struct ColumnFactsSimplifyRule;

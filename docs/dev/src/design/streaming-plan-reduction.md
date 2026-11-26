@@ -33,6 +33,7 @@ own rules.
 | 9 | Leftovers of subquery decorrelation (domain re-scan, aggregation and null-safe join back) | aggregating subqueries done (prototype, branch `proto/streaming-simplify-subquery-unnesting`); laterals without a table not started |
 | US | Branches of a `UNION ALL` that read the same table read it once (`Expand` per branch); scans of other branches shared (`streaming_share_union_scans`) | done (prototype, branch `proto/plan-reduction-union-scans`); dominance under a top-1 not done |
 | 10 | Sharing again, within one query, the sub-plans that became identical, or that differ by their columns or by commuting filters; aggregations of one input with different filters merged with `FILTER` | done for stateful cores (prototype, branch `proto/plan-reduction-shared-aggs`) |
+| BK | Column facts (A to G, 8), unique keys (1, 2) and repeated lookups (3) in batch queries | done (prototype, branch `proto/plan-reduction-batch-keys`, variables `batch_simplify_column_facts`, `batch_simplify_on_unique_key`, `batch_merge_repeated_lookups`) |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -731,6 +732,44 @@ consumer and do not rewrite a shared sub-plan.
 - Still not done: filters on the optional side of an outer join, a filter with `now()` (it is a
   join with the `Now` source at that point and must be equal), reordering through outer joins
   other than the case above.
+
+### Batch: column facts, unique keys and repeated lookups (added on 2026-11-26)
+
+The same rules, applied to batch queries on demand, each family behind its own variable (default
+false): `batch_simplify_column_facts` (A to G: `ColumnFactsSimplifyRule`, `NeverTruePredicateRule`,
+`EmptyRelationPropagateRule`, `EmptyInputSimplifyRule`, `ConstantRowJoinRule`, including the
+aggregate of a constant of idea 8), `batch_simplify_on_unique_key` (ideas 1 and 2:
+`UnusedOuterJoinEliminateRule`, `AggOnKeyEliminateRule`) and `batch_merge_repeated_lookups` (idea 3:
+`RepeatedLookupMergeRule` with its module `flat`; not the rules of
+`streaming_merge_lookups_under_dedup`).
+
+- Where: `reduce_batch_on_keys`, called by `gen_optimized_logical_plan_for_batch` after subquery
+  unnesting and the first predicate pushdown, before join ordering, so that the joins that are
+  removed are not ordered. In the order of the streaming optimizer: column facts, then the columns
+  are pruned (an outer join is unused only once its output omits the optional side), then the
+  unique keys (up to three passes with column pruning), then the lookups (up to three passes with
+  predicate pushdown, column pruning and projection removal). The final `BATCH_PRUNE_EMPTY_RELATION`
+  stays as it is.
+- Why the rules hold in batch too: all the scans of a batch query read the same snapshot, as the
+  two sides of a streaming join read the same epoch, so two scans of a table without
+  `FOR SYSTEM_TIME AS OF` read the same rows (a scan in the past is never a lookup); keys are the
+  keys of tables and materialized views (the hidden row id for a table without primary key), as in
+  streaming; `now()` is a constant in a batch query, so the guards on temporal filters never
+  trigger; `internal_last_seen_value`, which carries the row of an instance through an
+  aggregation, has a batch implementation and a two-phase form. Batch removes shared sub-plans
+  before (`DAG_TO_TREE`), so the lookups of a shared sub-plan (a CTE or a view read twice) never
+  apply: two equal sub-plans are not proven to be equal.
+- Expressions that may fail: a batch query fails where a streaming job writes `NULL`. The rules
+  never claim that an expression that may fail is not `NULL`, and keep a constant that fails to
+  evaluate. A merged lookup computes its columns under a `CASE` on "found", which is evaluated
+  lazily; the conjuncts that it moves into a filter may be evaluated on rows that the join did not
+  match, the same freedom that predicate pushdown already takes.
+- Not handled in batch: a top-1 written with `row_number()`, which the batch optimizer keeps as a
+  window function and a filter (the streaming one turns it into a top-n); `DISTINCT ON` is a top-1
+  and is handled. Lookup joins and sort-based operators are chosen later, from the reduced plan.
+- Tests: planner `batch_plan_reduction_keys.yaml`; differential `e2e_test/batch/plan_reduction_keys`
+  (generator `plan_reduction_keys.gen.py`): every query runs through `INSERT ... SELECT` with and
+  without its variables, after each of four rounds of changes of the data.
 
 ## Not for now: sharing between materialized views
 

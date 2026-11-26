@@ -1,0 +1,539 @@
+# Tests for the simplifications of the streaming plan reduction applied to batch queries:
+# `batch_simplify_column_facts` (`ColumnFactsSimplifyRule`, `NeverTruePredicateRule`,
+# `EmptyInputSimplifyRule`, `ConstantRowJoinRule`), `batch_simplify_on_unique_key`
+# (`UnusedOuterJoinEliminateRule`, `AggOnKeyEliminateRule`) and `batch_merge_repeated_lookups`
+# (`RepeatedLookupMergeRule`).
+- id: setup_off
+  sql: |
+    create table f (id int primary key, dim_id int, other_id int, amt int, label varchar, price decimal);
+    create table d (id int primary key, name varchar, grp int, active boolean);
+  expected_outputs: []
+- id: setup_facts
+  sql: |
+    set batch_simplify_column_facts = true;
+    create table f (id int primary key, dim_id int, other_id int, amt int, label varchar, price decimal);
+    create table d (id int primary key, name varchar, grp int, active boolean);
+    create table nn (id int primary key, k int not null, v int);
+  expected_outputs: []
+- id: setup_keys
+  sql: |
+    set batch_simplify_on_unique_key = true;
+    create table f (id int primary key, dim_id int, other_id int, amt int, label varchar, price decimal);
+    create table d (id int primary key, name varchar, grp int, active boolean);
+    create table e (id int primary key, code varchar);
+    create table nopk (a int, b int);
+  expected_outputs: []
+- id: setup_lookups
+  sql: |
+    set batch_merge_repeated_lookups = true;
+    create table f (id int primary key, dim_id int, other_id int, amt int, label varchar, price decimal);
+    create table d (id int primary key, name varchar, grp int, active boolean);
+    create table e (id int primary key, code varchar);
+    create table p (a int, b int, v int, w int, primary key (a, b));
+    create table g (id int primary key, a int, b int);
+    create table s (sid int primary key, id int, ts int);
+    create table h (rid int primary key, id int, x int);
+    create table nopk (id int, name varchar);
+    create view v1 as select f.id, f.dim_id, f.amt, d.name from f left join d on f.dim_id = d.id;
+    create view v2 as select v1.*, d.grp from v1 left join d on v1.dim_id = d.id;
+    create view da as select * from d where active;
+    create view sd as select s.sid, s.id, s.ts, d.name, d.active from s join d on s.id = d.id;
+  expected_outputs: []
+- id: setup_all
+  sql: |
+    set batch_simplify_column_facts = true;
+    set batch_simplify_on_unique_key = true;
+    set batch_merge_repeated_lookups = true;
+    create table f (id int primary key, dim_id int, other_id int, amt int, label varchar, price decimal);
+    create table d (id int primary key, name varchar, grp int, active boolean);
+    create table e (id int primary key, code varchar);
+    create view v1 as select f.id, f.dim_id, f.amt, d.name from f left join d on f.dim_id = d.id;
+    create view v2 as select v1.*, d.grp from v1 left join d on v1.dim_id = d.id;
+  expected_outputs: []
+
+# The variables are off by default: nothing changes.
+- name: off by default - contradicting equalities are kept
+  before: [setup_off]
+  sql: |
+    select id, amt from f where amt = 1 and amt = 2;
+  expected_outputs:
+  - batch_plan
+- name: off by default - unused left join is kept
+  before: [setup_off]
+  sql: |
+    select f.id, f.amt from f left join d on f.dim_id = d.id;
+  expected_outputs:
+  - batch_plan
+- name: off by default - aggregation on a key is kept
+  before: [setup_off]
+  sql: |
+    select id, sum(amt) as total from f group by id;
+  expected_outputs:
+  - batch_plan
+- name: off by default - the two lookups are kept
+  before: [setup_off]
+  sql: |
+    select f.id, a.name, b.grp from f left join d a on f.dim_id = a.id left join d b on f.dim_id = b.id;
+  expected_outputs:
+  - batch_plan
+- name: streaming plans do not change with the batch variables
+  before: [setup_all]
+  sql: |
+    select f.id, a.name, b.grp from f left join d a on f.dim_id = a.id left join d b on f.dim_id = b.id
+    left join e on f.other_id = e.id where f.amt = 1 and f.amt = 1;
+  expected_outputs:
+  - stream_plan
+
+# Column facts (`batch_simplify_column_facts`).
+- name: contradicting equalities on a column
+  before: [setup_facts]
+  sql: |
+    select id, amt from f where amt = 1 and amt = 2;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+- name: contradicting bounds on a column
+  before: [setup_facts]
+  sql: |
+    select id from f where amt > 5 and amt < 3;
+  expected_outputs:
+  - batch_plan
+- name: IS NULL on a column declared NOT NULL
+  before: [setup_facts]
+  sql: |
+    select id from nn where k is null;
+  expected_outputs:
+  - batch_plan
+- name: tests of a column declared NOT NULL in the select list
+  before: [setup_facts]
+  sql: |
+    select id, k is null as kn, coalesce(k, -1) as k2, v is null as vn from nn;
+  expected_outputs:
+  - batch_plan
+- name: CASE on a column fixed by the filter
+  before: [setup_facts]
+  sql: |
+    select id, case when amt = 1 then 'one' when amt = 2 then 'two' else 'other' end as c from f where amt = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+- name: aggregate of a constant over a group
+  before: [setup_facts]
+  sql: |
+    select dim_id, c from (select dim_id, max(label) as m, count(*) as c from f where label = 'x' group by dim_id) t where m = 'x';
+  expected_outputs:
+  - batch_plan
+- name: aggregation without group key over an empty input is its constant row
+  before: [setup_facts]
+  sql: |
+    select count(*) as c, sum(amt) as s from f where amt = 1 and amt = 2;
+  expected_outputs:
+  - batch_plan
+- name: left join whose condition is never true keeps the left rows
+  before: [setup_facts]
+  sql: |
+    select f.id, d.name from f left join d on f.dim_id = d.id and d.grp = 1 and d.grp = 2;
+  expected_outputs:
+  - batch_plan
+- name: inner join with one row of constants
+  before: [setup_facts]
+  sql: |
+    select f.id, v.x, v.y from f join (values (1, 'a')) v(x, y) on f.amt = v.x;
+  expected_outputs:
+  - batch_plan
+- name: redundant bounds
+  before: [setup_facts]
+  sql: |
+    select id, amt from f where amt > 1 and amt > 3 and amt <= 10 and amt < 20;
+  expected_outputs:
+  - batch_plan
+- name: branch of a union whose constant column the filter excludes
+  before: [setup_facts]
+  sql: |
+    select k, v from (select 'a' as k, id as v from f union all select 'b' as k, id as v from d) u where k = 'a';
+  expected_outputs:
+  - batch_plan
+- name: kept - IS NULL above the optional side of a left join
+  before: [setup_facts]
+  sql: |
+    select f.id from f left join d on f.dim_id = d.id where d.id is null;
+  expected_outputs:
+  - batch_plan
+- name: kept - open interval of an integer column
+  before: [setup_facts]
+  sql: |
+    select id from f where amt > 1 and amt < 2;
+  expected_outputs:
+  - batch_plan
+- name: kept - contradicting equalities on a decimal column
+  before: [setup_facts]
+  sql: |
+    select id from f where price = 1 and price = 2;
+  expected_outputs:
+  - batch_plan
+
+# Unique keys (`batch_simplify_on_unique_key`).
+- name: unused left join on the primary key of the right side
+  before: [setup_keys]
+  sql: |
+    select f.id, f.amt from f left join d on f.dim_id = d.id;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+- name: unused left join with an extra condition
+  before: [setup_keys]
+  sql: |
+    select f.id, f.amt from f left join d on f.dim_id = d.id and d.grp > 1 and f.amt > 0;
+  expected_outputs:
+  - batch_plan
+- name: unused right join
+  before: [setup_keys]
+  sql: |
+    select f.id, f.amt from d right join f on f.dim_id = d.id;
+  expected_outputs:
+  - batch_plan
+- name: unused left join whose right key is bound by a constant
+  before: [setup_keys]
+  sql: |
+    select f.id, f.amt from f left join d on d.id = 7 and f.amt > d.grp;
+  expected_outputs:
+  - batch_plan
+- name: two left joins - only the unused one is removed
+  before: [setup_keys]
+  sql: |
+    select f.id, e.code from f left join d on f.dim_id = d.id left join e on f.amt = e.id;
+  expected_outputs:
+  - batch_plan
+- name: unused left join on an aggregated right side
+  before: [setup_keys]
+  sql: |
+    select f.id, f.amt from f left join (select grp, count(*) as cnt from d group by grp) g on f.dim_id = g.grp;
+  expected_outputs:
+  - batch_plan
+- name: unused left join on a DISTINCT ON right side
+  before: [setup_keys]
+  sql: |
+    select f.id, f.amt from f left join (select distinct on (grp) grp, name from d order by grp, id) x on f.dim_id = x.grp;
+  expected_outputs:
+  - batch_plan
+- name: unused left joins in a view with more columns than its consumer needs
+  before: [setup_keys]
+  sql: |
+    create view wide as select f.id, f.amt, d.name, d.grp, e.code from f
+      left join d on f.dim_id = d.id left join e on f.amt = e.id;
+    select id, amt from wide where amt > 3;
+  expected_outputs:
+  - batch_plan
+- name: aggregation on the primary key
+  before: [setup_keys]
+  sql: |
+    select id, sum(amt) as total, count(*) as cnt, count(dim_id) as cnt_dim, min(label) as first_label,
+      max(amt) as max_amt, sum(price) as total_price
+    from f group by id;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+- name: aggregation with filters on the primary key
+  before: [setup_keys]
+  sql: |
+    select id, count(*) filter (where amt > 5) as cnt, sum(amt) filter (where dim_id is not null) as total
+    from f group by id;
+  expected_outputs:
+  - batch_plan
+- name: average on the primary key
+  before: [setup_keys]
+  sql: |
+    select id, avg(amt) as average from f group by id;
+  expected_outputs:
+  - batch_plan
+- name: distinct on columns that contain the primary key
+  before: [setup_keys]
+  sql: |
+    select distinct id, amt from f;
+  expected_outputs:
+  - batch_plan
+- name: DISTINCT ON the primary key
+  before: [setup_keys]
+  sql: |
+    select distinct on (id) id, amt from f order by id, amt;
+  expected_outputs:
+  - batch_plan
+- name: aggregation above a left join with a unique right side
+  before: [setup_keys]
+  sql: |
+    select f.id, d.name, sum(f.amt) as total from f left join d on f.dim_id = d.id group by f.id, d.name;
+  expected_outputs:
+  - batch_plan
+- name: kept - left join whose right side is used in a filter above
+  before: [setup_keys]
+  sql: |
+    select f.id, f.amt from f left join d on f.dim_id = d.id where d.id is null;
+  expected_outputs:
+  - batch_plan
+- name: kept - unused left join on a column that is not a key
+  before: [setup_keys]
+  sql: |
+    select f.id, f.amt from f left join d on f.dim_id = d.grp;
+  expected_outputs:
+  - batch_plan
+- name: kept - unused left join on a table without primary key
+  before: [setup_keys]
+  sql: |
+    select f.id, f.amt from f left join nopk on f.dim_id = nopk.a;
+  expected_outputs:
+  - batch_plan
+- name: kept - unused inner join
+  before: [setup_keys]
+  sql: |
+    select f.id, f.amt from f join d on f.dim_id = d.id;
+  expected_outputs:
+  - batch_plan
+- name: kept - unused full join
+  before: [setup_keys]
+  sql: |
+    select f.id, f.amt from f full join d on f.dim_id = d.id;
+  expected_outputs:
+  - batch_plan
+- name: kept - aggregation on a column that is not a key
+  before: [setup_keys]
+  sql: |
+    select dim_id, sum(amt) as total from f group by dim_id;
+  expected_outputs:
+  - batch_plan
+- name: kept - aggregation without group key
+  before: [setup_keys]
+  sql: |
+    select sum(amt) as total, count(*) as cnt from (select * from f where id = 1) x;
+  expected_outputs:
+  - batch_plan
+- name: kept - aggregation on the primary key with an aggregate without a one-row form
+  before: [setup_keys]
+  sql: |
+    select id, array_agg(amt) as amounts from f group by id;
+  expected_outputs:
+  - batch_plan
+- name: kept - aggregation on the key of a union
+  before: [setup_keys]
+  sql: |
+    select id, count(*) as cnt from (select id from d union all select id from e) u group by id;
+  expected_outputs:
+  - batch_plan
+- name: kept - ranking per primary key, which batch keeps as a window
+  before: [setup_keys]
+  sql: |
+    select id, amt from (select *, row_number() over (partition by id order by amt) as rn from f) x where rn = 1;
+  expected_outputs:
+  - batch_plan
+
+# Repeated lookups (`batch_merge_repeated_lookups`).
+- name: two left lookups of the same row
+  before: [setup_lookups]
+  sql: |
+    select f.id, a.name, b.grp from f left join d a on f.dim_id = a.id left join d b on f.dim_id = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+- name: three left lookups through a stack of views
+  before: [setup_lookups]
+  sql: |
+    select v2.id, v2.name, v2.grp, d.active from v2 left join d on v2.dim_id = d.id;
+  expected_outputs:
+  - batch_plan
+- name: two left lookups with different filters - the scan reads the rows of both
+  before: [setup_lookups]
+  sql: |
+    select f.id, a.name, b.grp
+    from f
+    left join (select * from d where grp = 1) a on f.dim_id = a.id
+    left join (select * from d where grp = 2) b on f.dim_id = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+- name: left lookup with a filter after an unfiltered one
+  before: [setup_lookups]
+  sql: |
+    select f.id, a.name, b.grp from f left join d a on f.dim_id = a.id left join da b on f.dim_id = b.id;
+  expected_outputs:
+  - batch_plan
+- name: left lookup with an extra condition
+  before: [setup_lookups]
+  sql: |
+    select f.id, a.name, b.grp from f left join d a on f.dim_id = a.id left join d b on f.dim_id = b.id and f.amt > b.grp;
+  expected_outputs:
+  - batch_plan
+- name: left lookup of computed columns
+  before: [setup_lookups]
+  sql: |
+    select f.id, a.name, b.label2, b.one
+    from f left join d a on f.dim_id = a.id
+    left join (select id, coalesce(name, 'none') as label2, 1 as one from d) b on f.dim_id = b.id;
+  expected_outputs:
+  - batch_plan
+- name: left lookup on a composite key
+  before: [setup_lookups]
+  sql: |
+    select g.id, x.v, y.w from g left join p x on g.a = x.a and g.b = x.b left join p y on g.a = y.a and g.b = y.b;
+  expected_outputs:
+  - batch_plan
+- name: two inner lookups of the same row
+  before: [setup_lookups]
+  sql: |
+    select f.id, a.name, b.grp from f join d a on f.dim_id = a.id join d b on f.dim_id = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+- name: inner lookup with a filter after an unfiltered one
+  before: [setup_lookups]
+  sql: |
+    select f.id, a.name, b.grp from f join d a on f.dim_id = a.id join da b on f.dim_id = b.id;
+  expected_outputs:
+  - batch_plan
+- name: left lookup after an inner one
+  before: [setup_lookups]
+  sql: |
+    select f.id, a.name, b.grp from f join d a on f.dim_id = a.id left join d b on f.dim_id = b.id;
+  expected_outputs:
+  - batch_plan
+- name: inner lookup after a left one
+  before: [setup_lookups]
+  sql: |
+    select f.id, a.name, b.grp from f left join d a on f.dim_id = a.id join d b on f.dim_id = b.id;
+  expected_outputs:
+  - batch_plan
+- name: self join of a table on its key
+  before: [setup_lookups]
+  sql: |
+    select a.id, a.name, b.grp from d a join d b on a.id = b.id;
+  expected_outputs:
+  - batch_plan
+- name: lookup through another table in between
+  before: [setup_lookups]
+  sql: |
+    select f.id, a.name, e.code, b.grp
+    from f join d a on f.dim_id = a.id join e on f.other_id = e.id join d b on f.dim_id = b.id;
+  expected_outputs:
+  - batch_plan
+- name: exists on the same table with a filter
+  before: [setup_lookups]
+  sql: |
+    select a.id, a.name from d a where exists (select 1 from da b where b.id = a.id);
+  expected_outputs:
+  - batch_plan
+- name: not exists on the same table with a filter
+  before: [setup_lookups]
+  sql: |
+    select a.id, a.name from d a where not exists (select 1 from da b where b.id = a.id);
+  expected_outputs:
+  - batch_plan
+- name: not exists on a table that a left lookup already reads
+  before: [setup_lookups]
+  sql: |
+    select f.id, a.name from f left join d a on f.dim_id = a.id
+    where not exists (select 1 from da b where b.id = f.dim_id);
+  expected_outputs:
+  - batch_plan
+- name: lookup of a row that an aggregation grouped by its key already read
+  before: [setup_lookups]
+  sql: |
+    select t.dim_id, t.total, b.grp
+    from (select f.dim_id, sum(f.amt) as total from f join d a on f.dim_id = a.id group by f.dim_id) t
+    left join d b on t.dim_id = b.id;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+- name: lookup above a DISTINCT ON
+  before: [setup_lookups]
+  sql: |
+    select x.other_id, x.name, b.grp
+    from (select distinct on (f.other_id) f.other_id, f.dim_id, a.name from f join d a on f.dim_id = a.id order by f.other_id, f.id) x
+    left join d b on x.dim_id = b.id;
+  expected_outputs:
+  - batch_plan
+- name: nested inner lookup - the equality comes from the join above
+  before: [setup_lookups]
+  sql: |
+    select f.id, d.grp, x.ts, x.name from f join d on f.dim_id = d.id join sd x on d.id = x.id;
+  expected_outputs:
+  - batch_plan
+- name: left join of a chain that looks up the row of the left side
+  before: [setup_lookups]
+  sql: |
+    select f.id, d.name, r.v, r.a from f join d on f.dim_id = d.id left join (
+      select d2.id, case when d2.active then 0 else coalesce(g.a, d2.grp) end as v, g.a
+      from d d2 join s on d2.id = s.id left join g on d2.id = g.id
+    ) r on d.id = r.id;
+  expected_outputs:
+  - batch_plan
+- name: not exists on a chain that looks up the row of the left side
+  before: [setup_lookups]
+  sql: |
+    select f.id from f join d on f.dim_id = d.id
+    where d.grp < 10 and not exists (
+      select 1 from s join d d2 on s.id = d2.id and d2.active left join e on s.id = e.id where s.id = f.dim_id
+    );
+  expected_outputs:
+  - batch_plan
+- name: exists on a column that is not a key, carried by the left side
+  before: [setup_lookups]
+  sql: |
+    select f.id, h.x from f join h on f.dim_id = h.id where exists (select 1 from h h2 where h2.id = f.dim_id);
+  expected_outputs:
+  - batch_plan
+- name: kept - lookups of two different rows
+  before: [setup_lookups]
+  sql: |
+    select f.id, a.name, b.grp from f left join d a on f.dim_id = a.id left join d b on f.other_id = b.id;
+  expected_outputs:
+  - batch_plan
+- name: kept - lookup on a column that is not the key
+  before: [setup_lookups]
+  sql: |
+    select f.id, a.name, b.grp from f left join d a on f.dim_id = a.grp left join d b on f.dim_id = b.grp;
+  expected_outputs:
+  - batch_plan
+- name: kept - lookup on a part of a composite key
+  before: [setup_lookups]
+  sql: |
+    select g.id, x.v, y.w from g left join p x on g.a = x.a and g.b = x.b left join p y on g.a = y.a;
+  expected_outputs:
+  - batch_plan
+- name: kept - first left lookup has an extra condition
+  before: [setup_lookups]
+  sql: |
+    select f.id, a.name, b.grp from f left join d a on f.dim_id = a.id and f.amt > a.grp left join d b on f.dim_id = b.id;
+  expected_outputs:
+  - batch_plan
+- name: kept - table without primary key
+  before: [setup_lookups]
+  sql: |
+    select f.id, a.name, b.name as name2 from f left join nopk a on f.dim_id = a.id left join nopk b on f.dim_id = b.id;
+  expected_outputs:
+  - batch_plan
+- name: kept - full outer join
+  before: [setup_lookups]
+  sql: |
+    select f.id, a.name, b.grp from f left join d a on f.dim_id = a.id full join d b on f.dim_id = b.id;
+  expected_outputs:
+  - batch_plan
+- name: kept - two reads of an aggregation of a CTE, which batch does not share
+  before: [setup_lookups]
+  sql: |
+    with q as (select grp, count(*) as c, max(name) as m from d group by grp)
+    select f.id, q1.c, q2.m from f join q q1 on f.other_id = q1.grp join q q2 on f.other_id = q2.grp;
+  expected_outputs:
+  - batch_plan
+
+# All three together.
+- name: all - lookups of a stack of views, unused ones removed, the rest merged
+  before: [setup_all]
+  sql: |
+    select v2.id, v2.grp from v2 left join e on v2.dim_id = e.id where v2.amt > 0 and v2.amt > 2;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+- name: all - aggregation on the key of a merged lookup
+  before: [setup_all]
+  sql: |
+    select id, max(name) as n, sum(grp) as g from v2 group by id;
+  expected_outputs:
+  - batch_plan
