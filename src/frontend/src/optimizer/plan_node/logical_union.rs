@@ -372,19 +372,30 @@ mod tests {
         let values1 = LogicalValues::new(vec![], Schema { fields }, ctx);
 
         let values2 = values1.clone();
-
-        let union: PlanRef = LogicalUnion::new(false, vec![values1.into(), values2.into()]).into();
-
-        // Perform the prune
         let required_cols = vec![1, 2];
+
+        // `UNION ALL`: the inputs are pruned to the required columns.
+        let union: PlanRef =
+            LogicalUnion::new(true, vec![values1.clone().into(), values2.clone().into()]).into();
         let plan = union.prune_col(
             &required_cols,
             &mut ColumnPruningContext::new(union.clone()),
         );
-
-        // Check the result
         let union = plan.as_logical_union().unwrap();
         assert_eq!(union.base.schema().len(), 2);
+
+        // `UNION`: every column decides which rows are duplicates, so the union keeps them all
+        // and a projection above it outputs the required ones.
+        let union: PlanRef = LogicalUnion::new(false, vec![values1.into(), values2.into()]).into();
+        let plan = union.prune_col(
+            &required_cols,
+            &mut ColumnPruningContext::new(union.clone()),
+        );
+        assert_eq!(plan.schema().len(), 2);
+        let project = plan.as_logical_project().unwrap();
+        let union = project.input();
+        let union = union.as_logical_union().unwrap();
+        assert_eq!(union.base.schema().len(), 3);
     }
 
     #[tokio::test]
