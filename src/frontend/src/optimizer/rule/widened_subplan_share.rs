@@ -55,7 +55,7 @@ use risingwave_common::util::iter_util::ZipEqFast;
 use risingwave_pb::plan_common::JoinType;
 
 use super::prelude::PlanRef;
-use crate::expr::{ExprImpl, ExprRewriter, InputRef};
+use crate::expr::{Expr, ExprImpl, ExprRewriter, ExprType, FunctionCall, InputRef};
 use crate::optimizer::plan_node::generic::{Agg, GenericPlanRef, PlanAggCall};
 use crate::optimizer::plan_node::{
     LogicalFilter, LogicalJoin, LogicalProject, LogicalShare, PlanNodeId, PlanTreeNodeBinary,
@@ -302,7 +302,33 @@ fn mapping(map: &[usize], target_size: usize) -> ColIndexMapping {
 }
 
 fn rewrite(expr: &ExprImpl, map: &[usize], target_size: usize) -> ExprImpl {
-    mapping(map, target_size).rewrite_expr(expr.clone())
+    canonical(mapping(map, target_size).rewrite_expr(expr.clone()))
+}
+
+/// The same conjunct with the operands of a symmetric comparison in a fixed order, so that
+/// `a = b` and `b = a` compare equal.
+fn canonical(expr: ExprImpl) -> ExprImpl {
+    if let ExprImpl::FunctionCall(call) = &expr {
+        let symmetric = matches!(
+            call.func_type(),
+            ExprType::Equal
+                | ExprType::NotEqual
+                | ExprType::IsDistinctFrom
+                | ExprType::IsNotDistinctFrom
+        );
+        if symmetric
+            && call.inputs().len() == 2
+            && format!("{:?}", call.inputs()[0]) > format!("{:?}", call.inputs()[1])
+        {
+            return FunctionCall::new_unchecked(
+                call.func_type(),
+                vec![call.inputs()[1].clone(), call.inputs()[0].clone()],
+                call.return_type(),
+            )
+            .into();
+        }
+    }
+    expr
 }
 
 fn merge(copies: &[PlanRef]) -> Option<Merged> {
@@ -468,7 +494,14 @@ fn merge_scans(copies: &[PlanRef]) -> Option<Merged> {
     let table_len = first.table().columns.len();
     let conjuncts = scans
         .iter()
-        .map(|scan| scan.predicate().conjunctions.clone())
+        .map(|scan| {
+            scan.predicate()
+                .conjunctions
+                .iter()
+                .cloned()
+                .map(canonical)
+                .collect_vec()
+        })
         .collect_vec();
     // The conjuncts are on the columns of the table.
     let (common, table_residuals) = split_common(&conjuncts, vec![vec![]; scans.len()])?;
@@ -712,8 +745,8 @@ fn merge_aggs(copies: &[PlanRef]) -> Option<Merged> {
                 let count: ExprImpl =
                     InputRef::new(group_columns.len() + call, calls[call].return_type.clone())
                         .into();
-                let positive = crate::expr::FunctionCall::new(
-                    crate::expr::ExprType::GreaterThan,
+                let positive = FunctionCall::new(
+                    ExprType::GreaterThan,
                     vec![count, ExprImpl::literal_bigint(0)],
                 )
                 .ok()?;

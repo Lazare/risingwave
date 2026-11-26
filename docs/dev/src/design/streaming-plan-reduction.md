@@ -418,9 +418,22 @@ consumer and do not rewrite a shared sub-plan.
   merged aggregation on the same key still join it twice (idea 3 removes such repeated lookups of
   a table, not of a shared sub-plan).
   Cost: a lifted filter no longer reduces the state of the join or aggregation of the core.
-- Still not done: copies whose joins are in a different order (join reordering made them differ),
-  filters on the optional side of an outer join, a filter with `now()` (it is a join with the
-  `Now` source at that point and must be equal).
+- Third round, join order:
+  - the sides of an inner join commute: the shape of an inner join sorts the shapes of its sides,
+    and a copy whose sides are swapped with respect to the first copy is swapped back (same
+    output columns) before the alignment;
+  - a copy whose inner joins contain the leaves of the inner joins of another copy is reordered:
+    the matched leaves are joined first, in the tree of the other copy, then the other leaves.
+    Every conjunct of the inner joins and of the filters between them is placed at the lowest join
+    that has all its columns, which is exact for inner joins;
+  - `(x JOIN y) LEFT JOIN z` becomes `x JOIN (y LEFT JOIN z)` when the condition of the left join
+    reads `y` and `z` only and `y` matches the left side of another copy's left join: the
+    conditions of the inner join never read `z`, so they hold above the left join as well;
+  - a copy is reordered only when the exposed join merges with the other copy (checked before),
+    and a join chosen as the target of a reordering is not reordered itself.
+- Still not done: filters on the optional side of an outer join, a filter with `now()` (it is a
+  join with the `Now` source at that point and must be equal), reordering through outer joins
+  other than the case above.
 
 ## Not for now: sharing between materialized views
 
