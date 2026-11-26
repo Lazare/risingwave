@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod cardinality;
 mod fast_insert;
 mod managed;
 pub mod test_utils;
@@ -21,6 +22,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use async_recursion::async_recursion;
+pub use cardinality::*;
 pub use fast_insert::*;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
@@ -188,7 +190,17 @@ impl ExecutorBuilder<'_> {
             })?
             .builder;
 
-        let real_executor = builder(self, inputs).await?;
+        let mut real_executor = builder(self, inputs).await?;
+
+        // Cardinality feedback: count the rows output by the marked nodes.
+        if let Some(node_id) = self.plan_node.cardinality_feedback_id
+            && let Some(counters) = self.context.cardinality_counters()
+        {
+            real_executor = Box::new(CountingExecutor::new(
+                real_executor,
+                counters.register(node_id),
+            ));
+        }
 
         Ok(Box::new(ManagedExecutor::new(
             real_executor,

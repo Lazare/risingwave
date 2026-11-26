@@ -27,6 +27,7 @@ use risingwave_rpc_client::ComputeClientPoolRef;
 use risingwave_storage::StateStoreImpl;
 
 use crate::error::Result;
+use crate::executor::CardinalityCounters;
 use crate::monitor::{BatchMetrics, BatchMetricsInner, BatchSpillMetrics};
 use crate::task::query_memory::{ExecutorMemory, QueryMemory};
 use crate::task::{BatchEnvironment, TaskOutput, TaskOutputId};
@@ -89,6 +90,12 @@ pub trait BatchTaskContext: Send + Sync + 'static {
 
     /// Get metrics reader for reading channel delta stats and other metrics.
     fn metrics_reader(&self) -> Arc<dyn MetricsReader>;
+
+    /// The counters of the cardinality feedback (`batch_cardinality_feedback`), when the plan
+    /// has nodes whose output rows are counted.
+    fn cardinality_counters(&self) -> Option<Arc<CardinalityCounters>> {
+        None
+    }
 }
 
 /// Batch task context on compute node.
@@ -102,6 +109,8 @@ pub struct ComputeNodeContext {
 
     /// The memory of the query that the task belongs to. `None` in tests.
     query_memory: Option<Arc<QueryMemory>>,
+
+    cardinality_counters: Option<Arc<CardinalityCounters>>,
 }
 
 impl BatchTaskContext for ComputeNodeContext {
@@ -182,6 +191,10 @@ impl BatchTaskContext for ComputeNodeContext {
     fn metrics_reader(&self) -> Arc<dyn MetricsReader> {
         unimplemented!("metrics_reader not supported in compute node context")
     }
+
+    fn cardinality_counters(&self) -> Option<Arc<CardinalityCounters>> {
+        self.cardinality_counters.clone()
+    }
 }
 
 impl ComputeNodeContext {
@@ -191,15 +204,19 @@ impl ComputeNodeContext {
             batch_metrics: BatchMetricsInner::for_test(),
             mem_context: MemoryContext::none(),
             query_memory: None,
+            cardinality_counters: None,
         })
     }
 
     /// Creates the context of a task of the given query, which runs
     /// `spillable_operator_instances` spillable operators in total (0 if unknown).
+    /// `cardinality_counters`: the counters of the plan nodes counted by the cardinality feedback,
+    /// see [`CardinalityCounters::for_plan`].
     pub fn create(
         env: BatchEnvironment,
         query_id: &str,
         spillable_operator_instances: u32,
+        cardinality_counters: Option<Arc<CardinalityCounters>>,
     ) -> Arc<dyn BatchTaskContext> {
         let query_memory = env
             .task_manager()
@@ -215,6 +232,7 @@ impl ComputeNodeContext {
             batch_metrics,
             mem_context,
             query_memory: Some(query_memory),
+            cardinality_counters,
         })
     }
 }

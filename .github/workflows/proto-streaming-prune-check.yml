@@ -24,6 +24,7 @@ on:
       - 'proto/streaming-simplify-subquery-unnesting'
       - 'proto/streaming-simplify-subquery-unnesting-*'
       - 'proto/plan-reduction-**'
+      - 'proto/batch-cardinality-feedback'
 
 concurrency:
   group: proto-streaming-prune-check-${{ github.ref }}
@@ -127,7 +128,7 @@ jobs:
         if: ${{ !cancelled() && steps.planner.outcome != 'skipped' }}
         run: |
           cargo nextest run --locked --no-fail-fast --lib \
-            -p risingwave_frontend -p risingwave_common
+            -p risingwave_frontend -p risingwave_common -p risingwave_batch
 
   clippy:
     name: Clippy on the frontend
@@ -181,7 +182,9 @@ jobs:
 
       - name: Clippy
         if: ${{ !cancelled() }}
-        run: cargo clippy --locked -p risingwave_frontend --all-targets -- -D warnings
+        run: |
+          cargo clippy --locked -p risingwave_frontend -p risingwave_batch \
+            -p risingwave_batch_executors --all-targets -- -D warnings
 
   tests:
     # The differential tests to run are listed in `.github/proto-differential-tests.txt`, one per

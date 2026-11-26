@@ -95,7 +95,14 @@ impl LocalQueryExecution {
             query_id = %self.query.query_id,
             "Starting to run query"
         );
-        let context = FrontendBatchTaskContext::create(self.session.clone());
+        // Cardinality feedback: kept until the end of the execution, when it is recorded.
+        let cardinality_feedback = self.query.cardinality_feedback.clone();
+        let context = FrontendBatchTaskContext::create(
+            self.session.clone(),
+            cardinality_feedback
+                .as_ref()
+                .map(|feedback| feedback.counters()),
+        );
         let task_id = TaskId {
             query_id: self.query.query_id.id.clone(),
             stage_id: 0,
@@ -115,6 +122,9 @@ impl LocalQueryExecution {
         #[for_await]
         for chunk in executor.execute() {
             yield chunk?;
+        }
+        if let Some(feedback) = &cardinality_feedback {
+            feedback.set_succeeded();
         }
     }
 
@@ -248,6 +258,10 @@ impl LocalQueryExecution {
             }
         };
 
+        if let Some(feedback) = &self.query.cardinality_feedback {
+            feedback.expect_stage(&root_stage.root, 1);
+        }
+
         Ok(PlanFragment {
             root: Some(plan_node_prost),
             // Intentionally leave this as `None` as this is the last stage for the frontend
@@ -257,7 +271,29 @@ impl LocalQueryExecution {
         })
     }
 
+    /// Converts the node and its children, marking the nodes counted by the cardinality feedback.
     fn convert_plan_node<'a>(
+        &'a self,
+        execution_plan_node: &ExecutionPlanNode,
+        second_stages: &mut Option<HashMap<StageId, &'a QueryStage>>,
+        partition: Option<PartitionInfo>,
+        next_executor_id: Arc<AtomicU32>,
+    ) -> SchedulerResult<PbPlanNode> {
+        let mut node = self.convert_plan_node_inner(
+            execution_plan_node,
+            second_stages,
+            partition,
+            next_executor_id,
+        )?;
+        node.cardinality_feedback_id = self
+            .query
+            .cardinality_feedback
+            .as_ref()
+            .and_then(|feedback| feedback.feedback_id(execution_plan_node.plan_node_id));
+        Ok(node)
+    }
+
+    fn convert_plan_node_inner<'a>(
         &'a self,
         execution_plan_node: &ExecutionPlanNode,
         second_stages: &mut Option<HashMap<StageId, &'a QueryStage>>,
@@ -466,12 +502,17 @@ impl LocalQueryExecution {
                         .collect();
                 }
 
+                if let Some(feedback) = &self.query.cardinality_feedback {
+                    feedback.expect_stage(&second_stage.root, sources.len() as u32);
+                }
+
                 Ok(PbPlanNode {
                     // Since all the rest plan is embedded into the exchange node,
                     // there is no children any more.
                     children: vec![],
                     identity,
                     node_body: Some(node_body),
+                    cardinality_feedback_id: None,
                 })
             }
             BatchPlanNodeType::BatchSeqScan => {
@@ -494,6 +535,7 @@ impl LocalQueryExecution {
                     children: vec![],
                     identity,
                     node_body: Some(node_body),
+                    cardinality_feedback_id: None,
                 })
             }
             BatchPlanNodeType::BatchLogSeqScan => {
@@ -514,6 +556,7 @@ impl LocalQueryExecution {
                     children: vec![],
                     identity,
                     node_body: Some(node_body),
+                    cardinality_feedback_id: None,
                 })
             }
             BatchPlanNodeType::BatchFileScan => {
@@ -534,6 +577,7 @@ impl LocalQueryExecution {
                     children: vec![],
                     identity,
                     node_body: Some(node_body),
+                    cardinality_feedback_id: None,
                 })
             }
             BatchPlanNodeType::BatchSource | BatchPlanNodeType::BatchKafkaScan => {
@@ -557,6 +601,7 @@ impl LocalQueryExecution {
                     children: vec![],
                     identity,
                     node_body: Some(node_body),
+                    cardinality_feedback_id: None,
                 })
             }
             BatchPlanNodeType::BatchIcebergScan => {
@@ -580,6 +625,7 @@ impl LocalQueryExecution {
                     children: vec![],
                     identity,
                     node_body: Some(node_body),
+                    cardinality_feedback_id: None,
                 })
             }
             BatchPlanNodeType::BatchLookupJoin => {
@@ -614,6 +660,7 @@ impl LocalQueryExecution {
                     children: vec![left_child],
                     identity,
                     node_body: Some(node_body),
+                    cardinality_feedback_id: None,
                 })
             }
             _ => {
@@ -634,6 +681,7 @@ impl LocalQueryExecution {
                     children,
                     identity,
                     node_body: Some(execution_plan_node.node.clone()),
+                    cardinality_feedback_id: None,
                 })
             }
         }

@@ -1,0 +1,39 @@
+# Queries of `cardinality_feedback.slt`, run once per execution mode.
+
+# Scan with filter (260 rows), simple aggregation.
+query I
+select count(*) from cf_fact where v < 13;
+----
+260
+
+# Hash join: filter `d.k = 3` (7 rows), join (280 rows).
+statement ok
+set batch_enable_lookup_join = false;
+
+query I
+select count(*) from cf_fact f join cf_dim d on f.dim_id = d.id where d.k = 3;
+----
+280
+
+statement ok
+set batch_enable_lookup_join = true;
+
+# Lookup join into cf_dim by its key: filter `f.v < 3` (60 rows), join (60 rows).
+query I
+select count(*) from cf_fact f join cf_dim d on f.dim_id = d.id where f.v < 3;
+----
+60
+
+# Hash aggregation: filter `v >= 50` (1000 rows), 9 groups.
+query II rowsort
+select v % 9, count(*) from cf_fact where v >= 50 group by v % 9;
+----
+0 120
+1 100
+2 100
+3 100
+4 100
+5 120
+6 120
+7 120
+8 120

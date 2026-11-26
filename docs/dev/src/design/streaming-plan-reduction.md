@@ -38,6 +38,7 @@ own rules.
 | B | Batch counterparts of 9, 9b, 9c, 7 and US, each behind a `batch_` variable | done (prototype, branch `proto/plan-reduction-batch-unnest`), see "Batch counterparts" |
 | SL | Status ladder: the branches of a top-1 by priority that read the same relation picked with one `CASE` | done (prototype, branch `proto/plan-reduction-union-scans`); default branch rewritten into a join not done |
 | BJ | Batch: cost-based ordering of the inner joins from the row counts of the tables (`batch_cost_based_join_ordering`) | first version (prototype, branch `proto/plan-reduction-batch-joinorder`, see "BJ" below); index lookups and column statistics not done |
+| BF | Batch: cardinality feedback, step 1: count the rows of the operators at execution and compare them with the estimates (`batch_cardinality_feedback`) | first version (prototype, branch `proto/batch-cardinality-feedback`, see "BF" below): observation only, no plan changes |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -961,6 +962,70 @@ estimated rows instead (`cost_based_join_ordering_rule.rs`, stages
   are not keys is a guess; the cross joins between unlinked sets of inputs keep the heuristic
   order (a nested loop join caches its left side); the estimates are not shown in `EXPLAIN`
   (only in `EXPLAIN (TRACE)`).
+
+### BF. Batch: cardinality feedback, step 1 (added on 2026-11-26, observation only)
+
+The estimates of BJ are guesses (fixed selectivities, no distinct counts). The later steps will
+replace them by selectivities measured on earlier executions of the same sub-plans. Step 1 only
+measures: with `batch_cardinality_feedback` (default false, `SESSION_INIT`), each batch query
+counts the rows output by its scans, filters, joins and aggregations, and the frontend keeps how
+they compare with the estimates. No plan changes (planner tests `batch_cardinality_feedback.yaml`
+show the same plans with the variable on and off).
+
+- **Operators and estimates** (`optimizer/cardinality_feedback.rs`, run on the final batch plan
+  in `gen_batch_plan_fragmenter`): `seq_scan` (after its scan ranges), `filter`, `hash_join`,
+  `lookup_join`, `nested_loop_join`, `hash_agg`, `sort_agg`, `simple_agg`, and the first phase of a
+  two-phase aggregation as `*_partial` (no estimate: its rows depend on the parallelism). The
+  estimates apply the model of BJ (same constants and join selectivity, shared with
+  `cost_based_join_ordering_rule.rs`) to the batch operators; without statistics, no estimate
+  (null), never a made-up number. Queries that read system catalogs are not observed.
+- **Fingerprint.** A 64-bit FNV-1a hash of a canonical text of the sub-plan below the operator.
+  Columns are identified by the table and column id they come from (or by the fingerprint of the
+  expression or aggregation that computes them), not by their position; every constant (literal,
+  parameter, constant sub-expression) becomes a placeholder of its type, the list of an `IN` of
+  constants one placeholder whatever its length, and a scan range its shape (key columns fixed,
+  kinds of bounds); conjuncts and the operands of commutative operators are sorted, the inputs of
+  inner and full joins too, and right joins are written as left ones; projections, exchanges and
+  sorts are transparent; an aggregation is its input and its group key (not its calls), and a
+  two-phase aggregation has the fingerprint of the one-phase one. The physical join is not part
+  of the fingerprint but of the operator kind beside it. Same query with other literals: same
+  fingerprints; other join columns, comparisons or tables: other fingerprints (unit tests).
+  One fingerprint therefore covers every literal value: `v < 3` and `v < 13` share one record
+  (executions add up, the last actual rows are those of the last execution, the e2e test
+  asserts it). Step 2 has to decide whether a learned selectivity may depend on the literal,
+  e.g. by keeping a distribution of selectivities per fingerprint rather than a single mean.
+- **Counting** (`risingwave_batch::executor::cardinality`): the frontend sets
+  `PlanNode.cardinality_feedback_id` on the counted nodes; the executor builder then wraps their
+  executors in a `CountingExecutor` that adds `chunk.cardinality()` to an atomic counter per
+  chunk, and notes whether the output reached its end. Without the variable no node is marked,
+  no executor is wrapped, and the task status and exchange messages are unchanged.
+- **Where the counts flow.** Executors run by the frontend (local execution, root stage of the
+  distributed execution) count into the counters of the query. A distributed task sends its
+  counts with its final task status (`TaskInfoResponse.cardinalities`), which the stage runner
+  adds to the counters of the query, summing the tasks of a stage per plan node. A plan that the
+  local execution sends to a compute node (`Execute`) sends its counts after its last chunk
+  (`GetDataResponse` without chunk), which the exchange of the frontend adds in the same way.
+- **Partial counts.** The counts are recorded when the query is over (the last reference to its
+  `QueryCardinalityFeedback` is dropped, so after every report that can arrive). A count is
+  partial (a lower bound) when the query did not return all its rows (failure, cancellation,
+  timeout), when an executor was stopped before the end of its output (a limit above it), or when
+  fewer executors reported than the frontend started (a task that never reported).
+- **Exposure.** In the memory of each frontend, at most 10 000 records (constant
+  `CARDINALITY_FEEDBACK_CAPACITY`; the least recently seen tenth is evicted when full), by
+  fingerprint and operator kind: system view `rw_catalog.rw_batch_cardinality_feedback`
+  (fingerprint in hex, operator kind, estimated rows of the last execution, last actual rows and
+  whether it is partial, executions, partial executions, mean of `log10(actual / estimated)` over
+  the complete executions with an estimate, last seen). Counts and hashes only, no values or
+  literals. A rate-limited `WARN` log (10 per minute) reports a complete count more than 100 times
+  and more than 100 000 rows away from its estimate, with the fingerprint, the kind and the two
+  numbers.
+- **Tests.** Unit tests: counting per chunk and early stop (`risingwave_batch`), sums over the
+  tasks of a stage, partial counts, bounded store, fingerprint normalisation and estimates
+  (frontend). End to end: `e2e_test/batch/cardinality_feedback.slt` (scan with filter, hash join,
+  lookup join, aggregation, each in local and distributed mode; variable off; limit).
+- **Not done.** Other operators (union, top-n, table functions, sources) are not counted; the
+  records are per frontend and lost on restart; the estimates of the plan are not shown in
+  `EXPLAIN`; nothing uses the records yet (step 2).
 
 ## Not for now: sharing between materialized views
 

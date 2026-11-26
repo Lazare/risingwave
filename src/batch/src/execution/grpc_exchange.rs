@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::fmt::{Debug, Formatter};
+use std::sync::Arc;
 
 use await_tree::InstrumentAwait;
 use futures::StreamExt;
@@ -27,6 +28,7 @@ use tonic::Streaming;
 
 use crate::error::Result;
 use crate::exchange_source::ExchangeSource;
+use crate::executor::CardinalityCounters;
 use crate::task::TaskId;
 
 /// Use grpc client as the source.
@@ -36,6 +38,10 @@ pub struct GrpcExchangeSource {
     task_output_id: TaskOutputId,
 
     take_data_span: await_tree::Span,
+
+    /// Cardinality feedback: where to add the rows counted by the plan executed remotely in the
+    /// local execution mode, sent after its last chunk.
+    cardinality_counters: Option<Arc<CardinalityCounters>>,
 }
 
 impl GrpcExchangeSource {
@@ -43,6 +49,18 @@ impl GrpcExchangeSource {
         client: ComputeClient,
         task_output_id: TaskOutputId,
         local_execute_plan: Option<LocalExecutePlan>,
+    ) -> Result<Self> {
+        Self::create_with_cardinality_counters(client, task_output_id, local_execute_plan, None)
+            .await
+    }
+
+    /// Same as [`Self::create`], adding to `cardinality_counters` the rows counted by the plan of
+    /// `local_execute_plan`.
+    pub async fn create_with_cardinality_counters(
+        client: ComputeClient,
+        task_output_id: TaskOutputId,
+        local_execute_plan: Option<LocalExecutePlan>,
+        cardinality_counters: Option<Arc<CardinalityCounters>>,
     ) -> Result<Self> {
         let task_id = task_output_id.get_task_id()?.clone();
         let take_data_span = await_tree::span!(
@@ -71,6 +89,7 @@ impl GrpcExchangeSource {
             stream,
             task_output_id,
             take_data_span,
+            cardinality_counters,
         };
         Ok(source)
     }
@@ -86,18 +105,28 @@ impl Debug for GrpcExchangeSource {
 
 impl ExchangeSource for GrpcExchangeSource {
     async fn take_data(&mut self) -> Result<Option<DataChunk>> {
-        let res = match self
-            .stream
-            .next()
-            .instrument_await(self.take_data_span.clone())
-            .await
-        {
-            None => {
-                return Ok(None);
+        let task_data = loop {
+            let res = match self
+                .stream
+                .next()
+                .instrument_await(self.take_data_span.clone())
+                .await
+            {
+                None => {
+                    return Ok(None);
+                }
+                Some(r) => r,
+            };
+            let task_data = res.map_err(RpcError::from_batch_status)?;
+            if task_data.record_batch.is_none() && !task_data.cardinalities.is_empty() {
+                // Cardinality feedback after the last chunk.
+                if let Some(counters) = &self.cardinality_counters {
+                    counters.merge(&task_data.cardinalities);
+                }
+                continue;
             }
-            Some(r) => r,
+            break task_data;
         };
-        let task_data = res.map_err(RpcError::from_batch_status)?;
         let data = DataChunk::from_protobuf(task_data.get_record_batch()?)?.compact_vis();
         trace!(
             "Receiver taskOutput = {:?}, data = {:?}",

@@ -180,6 +180,7 @@ impl TaskOutput {
                     let pb = chunk.to_protobuf().await;
                     let resp = GetDataResponse {
                         record_batch: Some(pb),
+                        cardinalities: vec![],
                     };
                     writer.write(Ok(resp)).await?;
                 }
@@ -522,11 +523,24 @@ impl BatchTaskExecution {
         self.change_state(task_status);
         // Notify frontend the task status.
         if let Some(reporter) = state_tx {
+            // Cardinality feedback: the final status carries the rows counted by the task.
+            let cardinalities = match task_status {
+                TaskStatus::Finished
+                | TaskStatus::Failed
+                | TaskStatus::Aborted
+                | TaskStatus::Cancelled => self
+                    .context
+                    .cardinality_counters()
+                    .map(|counters| counters.to_protobuf())
+                    .unwrap_or_default(),
+                _ => vec![],
+            };
             reporter
                 .send(TaskInfoResponse {
                     task_id: Some(self.task_id.to_prost()),
                     task_status: task_status.into(),
                     error_message: err_str.unwrap_or("".to_owned()),
+                    cardinalities,
                 })
                 .await
         } else {

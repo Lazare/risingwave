@@ -93,6 +93,11 @@ impl BatchHashJoin {
     }
 
     /// Get a reference to the batch hash join's eq join predicate.
+    /// The logical join, read by the cardinality feedback (`optimizer::cardinality_feedback`).
+    pub fn core(&self) -> &generic::Join<PlanRef> {
+        &self.core
+    }
+
     pub fn eq_join_predicate(&self) -> &EqJoinPredicate {
         self.core
             .on

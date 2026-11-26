@@ -378,6 +378,14 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_cost_based_join_ordering: bool,
 
+    /// Cardinality feedback of batch queries: count the rows output by the scans, filters, joins
+    /// and aggregations of each batch query, and keep, in the memory of the frontend, how they
+    /// compare with the estimates of the planner, by fingerprint of the sub-plan (system view
+    /// `rw_catalog.rw_batch_cardinality_feedback`). It only observes: the plans do not change.
+    /// Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_cardinality_feedback: bool,
+
     /// In the plan of a new streaming job, read once the table that several branches of a
     /// `UNION ALL` read, each with its own filter and projection: one scan, one copy of each row
     /// per branch, and the filter and projection of each branch applied to its copies. Defaults to

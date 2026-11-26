@@ -44,6 +44,7 @@ use crate::optimizer::{
 };
 use crate::planner::Planner;
 use crate::scheduler::batch_limits::batch_limits;
+use crate::scheduler::cardinality_feedback::{QueryCardinalityFeedback, plan_cardinality_feedback};
 use crate::scheduler::plan_fragmenter::{Query, move_stateful_operators_out_of_root_stage};
 use crate::scheduler::{
     BatchPlanFragmenter, DistributedQueryStream, ExecutionContext, ExecutionContextRef,
@@ -448,6 +449,8 @@ pub struct BatchPlanFragmenterResult {
     pub(crate) query_mode: QueryMode,
     pub(crate) schema: Schema,
     pub(crate) stmt_type: StatementType,
+    /// The operators counted by the cardinality feedback (`batch_cardinality_feedback`).
+    pub(crate) cardinality_feedback: Option<Arc<QueryCardinalityFeedback>>,
 }
 
 pub fn gen_batch_plan_fragmenter(
@@ -467,6 +470,8 @@ pub fn gen_batch_plan_fragmenter(
         plan.explain_to_string(),
         query_mode
     );
+    // Cardinality feedback: read the final plan before the fragmenter takes it.
+    let cardinality_feedback = plan_cardinality_feedback(session, &plan);
     let worker_node_manager_reader = WorkerNodeSelector::new(
         session.env().worker_node_manager_ref(),
         session.is_barrier_read(),
@@ -500,6 +505,7 @@ pub fn gen_batch_plan_fragmenter(
         query_mode,
         schema,
         stmt_type,
+        cardinality_feedback,
     })
 }
 
@@ -513,7 +519,7 @@ pub async fn create_stream(
         query_mode,
         schema,
         stmt_type,
-        ..
+        cardinality_feedback,
     } = plan_fragmenter_result;
 
     let mut can_timeout_cancel = true;
@@ -531,7 +537,8 @@ pub async fn create_stream(
         _ => {}
     }
 
-    let query = plan_fragmenter.generate_complete_query().await?;
+    let mut query = plan_fragmenter.generate_complete_query().await?;
+    query.cardinality_feedback = cardinality_feedback;
     tracing::trace!("Generated query after plan fragmenter: {:?}", &query);
 
     let pg_descs = schema

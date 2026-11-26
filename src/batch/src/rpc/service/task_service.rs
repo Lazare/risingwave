@@ -37,7 +37,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use crate::error::BatchError;
-use crate::executor::{FastInsertExecutor, inject_optional_row_id_column};
+use crate::executor::{CardinalityCounters, FastInsertExecutor, inject_optional_row_id_column};
 use crate::rpc::service::exchange::GrpcExchangeWriter;
 use crate::task::{
     BatchEnvironment, BatchManager, BatchTaskExecution, ComputeNodeContext, StateReporter,
@@ -85,15 +85,18 @@ impl TaskService for BatchServiceImpl {
 
         let (state_tx, state_rx) = tokio::sync::mpsc::channel(TASK_STATUS_BUFFER_SIZE);
         let state_reporter = StateReporter::new_with_dist_sender(state_tx);
+        let plan = plan.expect("no plan found");
+        let cardinality_counters = CardinalityCounters::for_plan(plan.root.as_ref());
         let res = self
             .mgr
             .fire_task(
                 &task_id,
-                plan.expect("no plan found").clone(),
+                plan,
                 ComputeNodeContext::create(
                     self.env.clone(),
                     &task_id.query_id,
                     spillable_operator_instances,
+                    cardinality_counters,
                 ),
                 state_reporter,
                 TracingContext::from_protobuf(&tracing_context),
@@ -299,7 +302,13 @@ impl BatchServiceImpl {
 
         // The local execution mode does not tell how many spillable operators the query runs:
         // only the limit of the query applies.
-        let context = ComputeNodeContext::create(env.clone(), &task_id.query_id, 0);
+        let cardinality_counters = CardinalityCounters::for_plan(plan.root.as_ref());
+        let context = ComputeNodeContext::create(
+            env.clone(),
+            &task_id.query_id,
+            0,
+            cardinality_counters.clone(),
+        );
         trace!(
             "local execute request: plan:{:?} with task id:{:?}",
             plan, task_id
@@ -343,7 +352,17 @@ impl BatchServiceImpl {
         // Always spawn a task and do not block current function.
         mgr.runtime().spawn(async move {
             match output.take_data(&mut writer).await {
-                Ok(_) => Ok(()),
+                // Cardinality feedback: after the last chunk, the rows counted by the task.
+                Ok(_) => match cardinality_counters {
+                    Some(counters) => {
+                        tx.send(Ok(GetDataResponse {
+                            record_batch: None,
+                            cardinalities: counters.to_protobuf(),
+                        }))
+                        .await
+                    }
+                    None => Ok(()),
+                },
                 Err(e) => tx.send(Err(e.into())).await,
             }
         });

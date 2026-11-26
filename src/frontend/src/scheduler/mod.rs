@@ -18,12 +18,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::Stream;
+use risingwave_batch::executor::CardinalityCounters;
 use risingwave_batch::task::BatchTaskContext;
 use risingwave_common::array::DataChunk;
 
 use crate::error::Result;
 use crate::session::SessionImpl;
 
+// Cardinality feedback of batch queries (`batch_cardinality_feedback`).
+pub mod cardinality_feedback;
 mod distributed;
 pub use distributed::*;
 pub mod batch_limits;
@@ -68,7 +71,12 @@ impl ExecutionContext {
         self.timeout
     }
 
-    pub fn to_batch_task_context(&self) -> Arc<dyn BatchTaskContext> {
-        FrontendBatchTaskContext::create(self.session.clone())
+    /// The context of the root stage, with the counters of the cardinality feedback of the
+    /// query if it is observed.
+    pub fn to_batch_task_context(
+        &self,
+        cardinality_counters: Option<Arc<CardinalityCounters>>,
+    ) -> Arc<dyn BatchTaskContext> {
+        FrontendBatchTaskContext::create(self.session.clone(), cardinality_counters)
     }
 }

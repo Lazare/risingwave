@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use prometheus::core::Atomic;
 use risingwave_batch::error::Result;
+use risingwave_batch::executor::CardinalityCounters;
 use risingwave_batch::monitor::BatchMetrics;
 use risingwave_batch::task::{BatchTaskContext, TaskOutput, TaskOutputId};
 use risingwave_batch::worker_manager::worker_node_manager::WorkerNodeManagerRef;
@@ -38,15 +39,24 @@ pub struct FrontendBatchTaskContext {
     session: Arc<SessionImpl>,
 
     mem_context: MemoryContext,
+
+    /// The counters of the cardinality feedback of the query, if it is observed.
+    cardinality_counters: Option<Arc<CardinalityCounters>>,
 }
 
 impl FrontendBatchTaskContext {
-    pub fn create(session: Arc<SessionImpl>) -> Arc<dyn BatchTaskContext> {
+    /// The context of a query executed by the frontend, with the counters of its cardinality
+    /// feedback if it is observed.
+    pub fn create(
+        session: Arc<SessionImpl>,
+        cardinality_counters: Option<Arc<CardinalityCounters>>,
+    ) -> Arc<dyn BatchTaskContext> {
         let mem_context =
             MemoryContext::new(Some(session.env().mem_context()), TrAdderAtomic::new(0));
         Arc::new(Self {
             session,
             mem_context,
+            cardinality_counters,
         })
     }
 }
@@ -116,5 +126,9 @@ impl BatchTaskContext for FrontendBatchTaskContext {
             self.session.env().prometheus_client().cloned(),
             self.session.env().prometheus_selector().to_owned(),
         ))
+    }
+
+    fn cardinality_counters(&self) -> Option<Arc<CardinalityCounters>> {
+        self.cardinality_counters.clone()
     }
 }

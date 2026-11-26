@@ -62,16 +62,16 @@ use crate::utils::Condition;
 /// Inputs ordered by dynamic programming over their connected subsets; greedy beyond.
 const MAX_DP_RELATIONS: usize = 10;
 /// Fraction of the rows kept by a `column = constant` conjunct.
-const EQ_CONST_SELECTIVITY: f64 = 0.1;
+pub(crate) const EQ_CONST_SELECTIVITY: f64 = 0.1;
 /// Fraction of the rows kept by any other conjunct.
-const FILTER_SELECTIVITY: f64 = 0.25;
+pub(crate) const FILTER_SELECTIVITY: f64 = 0.25;
 /// Fraction of the input rows that a grouped aggregation returns, unless it groups by a key.
-const AGG_GROUP_FRACTION: f64 = 0.1;
+pub(crate) const AGG_GROUP_FRACTION: f64 = 0.1;
 /// Fraction of the rows of the kept side that a semi or anti join returns.
-const SEMI_JOIN_FRACTION: f64 = 0.5;
+pub(crate) const SEMI_JOIN_FRACTION: f64 = 0.5;
 /// Rows returned by a join on columns that are not a key of either side, per row of the larger
 /// side.
-const NON_KEY_JOIN_FANOUT: f64 = 2.0;
+pub(crate) const NON_KEY_JOIN_FANOUT: f64 = 2.0;
 /// Cost of a row of the left (probe) side of a hash join.
 const PROBE_COST: f64 = 1.0;
 /// Cost of a row of the right (build) side of a hash join, held in memory.
@@ -247,11 +247,29 @@ impl Estimate {
     }
 }
 
-fn conjunct_selectivity(expr: &ExprImpl) -> f64 {
+/// The fraction of the rows that a conjunct of a filter keeps. Shared with the cardinality
+/// feedback of batch queries (`optimizer::cardinality_feedback`).
+pub(crate) fn conjunct_selectivity(expr: &ExprImpl) -> f64 {
     if expr.as_eq_const().is_some() {
         EQ_CONST_SELECTIVITY
     } else {
         FILTER_SELECTIVITY
+    }
+}
+
+/// The selectivity of the equalities between two inputs, each given as (whether the equalities
+/// cover a unique key of the input, its estimated rows, the rows of the table it reads before its
+/// filters). A key to foreign key join keeps one row of the key side per row of the other side;
+/// a join on other columns returns [`NON_KEY_JOIN_FANOUT`] times the larger side. Shared with the
+/// cardinality feedback of batch queries (`optimizer::cardinality_feedback`).
+pub(crate) fn equi_join_selectivity(a: (bool, f64, f64), b: (bool, f64, f64)) -> f64 {
+    let (a_key, a_rows, a_domain) = a;
+    let (b_key, b_rows, b_domain) = b;
+    match (a_key, b_key) {
+        (true, true) => 1.0 / a_domain.max(b_domain),
+        (true, false) => 1.0 / a_domain,
+        (false, true) => 1.0 / b_domain,
+        (false, false) => (NON_KEY_JOIN_FANOUT / a_rows.min(b_rows)).min(1.0),
     }
 }
 
@@ -462,12 +480,8 @@ impl Estimator<'_> {
             let a_key = has_key_within(&keys[a], &columns[0]);
             let b_key = has_key_within(&keys[b], &columns[1]);
             let (ea, eb) = (estimates[a], estimates[b]);
-            let selectivity = match (a_key, b_key) {
-                (true, true) => 1.0 / ea.domain.max(eb.domain),
-                (true, false) => 1.0 / ea.domain,
-                (false, true) => 1.0 / eb.domain,
-                (false, false) => (NON_KEY_JOIN_FANOUT / ea.rows.min(eb.rows)).min(1.0),
-            };
+            let selectivity =
+                equi_join_selectivity((a_key, ea.rows, ea.domain), (b_key, eb.rows, eb.domain));
             factors.push(((1 << a) | (1 << b), selectivity));
         }
         for conjunct in &others.conjunctions {
