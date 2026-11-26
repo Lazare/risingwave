@@ -537,3 +537,21 @@
     select id, max(name) as n, sum(grp) as g from v2 group by id;
   expected_outputs:
   - batch_plan
+- name: keys - count over a union without all keeps the duplicates removal on every column
+  before: [setup_keys]
+  sql: |
+    select count(*) from (select id, name from d where grp is null union select id, label from f where amt is null) x;
+  expected_outputs:
+  - batch_plan
+- name: keys - count over an except keeps every column of both sides
+  before: [setup_keys]
+  sql: |
+    select count(*) from (select id, name from d except select id, label from f) x;
+  expected_outputs:
+  - batch_plan
+- name: keys - one column of an intersect keeps every column of both sides
+  before: [setup_keys]
+  sql: |
+    select id from (select id, name from d intersect select id, label from f) x;
+  expected_outputs:
+  - batch_plan
