@@ -631,7 +631,8 @@ Join(Inner, a.b_ref = b.id)              Values([])
 
 - Columns `NULL` in every row of a node: a `c IS NULL` conjunct of a filter or of a scan
   predicate (the predicate of a scan refers to the columns of the table, mapped to the output
-  columns of the scan), followed up through filters, shares and projections of input references;
+  columns of the scan), followed up through filters, shares and projections of input references
+  or of casts of them (streaming computes the cast of a join key in a projection below the join);
   a `NULL` literal of a projection. Nothing is derived through joins, aggregations or unions.
 - A conjunct `l = r` of the join condition whose operand is such a column, or a cast of it, on a
   side whose rows must match to be useful: either side of an inner or semi join (the join becomes

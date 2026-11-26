@@ -169,9 +169,17 @@
     select a.id, b.label from a join b on a.id = b.id and a.bk < b.k where b.k is null;
   expected_outputs:
   - batch_plan
-- name: not in over a subquery of null keys (its condition is not a plain equality)
+- name: not in over a subquery of null keys - planned as an anti join on `=`, rewritten like one
   before: [setup]
   sql: |
     select a.id from a where a.bk not in (select k from b where k is null);
   expected_outputs:
   - batch_plan
+- name: off by default - not in over a subquery of null keys
+  before: [setup_off]
+  sql: |
+    select a.id from a where a.bk not in (select k from b where k is null);
+  expected_outputs:
+  - batch_plan
+  - logical_plan
+  - optimized_logical_plan_for_batch

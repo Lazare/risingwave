@@ -51,10 +51,11 @@ use crate::utils::Condition;
 ///
 /// A column is known to be `NULL` in every row of a plan node (see [`always_null_columns`]) only
 /// from a `c IS NULL` conjunct of a filter or of a scan predicate, followed up through filters,
-/// shares and projections of input references, or from a `NULL` literal of a projection. These
-/// are properties of the rows that a node can output, so they hold for every row ever produced,
-/// under retractions too. Only `=` is recognized, not `IS NOT DISTINCT FROM`, which matches
-/// `NULL`s. An operand of `=` is the column itself or a cast of it (a cast of `NULL` is `NULL`).
+/// shares and projections of input references (or casts of them), or from a `NULL` literal of a
+/// projection. These are properties of the rows that a node can output, so they hold for every
+/// row ever produced, under retractions too. Only `=` is recognized, not `IS NOT DISTINCT FROM`,
+/// which matches `NULL`s. An operand of `=` is the column itself or a cast of it (a cast of `NULL`
+/// is `NULL`).
 ///
 /// For a streaming job (`create_for_stream`), the rule leaves the join untouched if a sub-plan
 /// that it would remove may carry a watermark (a scan of a table with a watermark, a source,
@@ -168,7 +169,8 @@ fn is_null_conjuncts(condition: &Condition) -> impl Iterator<Item = usize> + '_ 
 /// - `Filter`: the columns of its input, and those of its `c IS NULL` conjuncts.
 /// - `Scan`: the columns of the `c IS NULL` conjuncts of its predicate. The predicate refers to
 ///   the columns of the table, which are mapped to the output columns of the scan.
-/// - `Project`: the input references to such columns of its input, and the `NULL` literals.
+/// - `Project`: the input references to such columns of its input or casts of them, and the
+///   `NULL` literals.
 /// - `Share`: the columns of its input.
 fn always_null_columns(plan: &PlanRef) -> BTreeSet<usize> {
     if let Some(filter) = plan.as_logical_filter() {
@@ -193,9 +195,8 @@ fn always_null_columns(plan: &PlanRef) -> BTreeSet<usize> {
             .iter()
             .enumerate()
             .filter(|(_, expr)| match expr {
-                ExprImpl::InputRef(input_ref) => input.contains(&input_ref.index()),
                 ExprImpl::Literal(literal) => literal.get_data().is_none(),
-                _ => false,
+                _ => column_of(expr).is_some_and(|index| input.contains(&index)),
             })
             .map(|(index, _)| index)
             .collect();

@@ -407,6 +407,7 @@ macro_rules! for_all_rules {
             , { UnusedJoinUnderDedupRule }
             , { CommonJoinOverUnionRule }
             , { ApplyOneRowJoinSplitRule }
+            , { NullKeyJoinRule }
             , { LagDuplicatesRule }
             , { CostBasedJoinOrderingRule }
             , { CostBasedJoinSidesRule }
