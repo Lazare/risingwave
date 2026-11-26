@@ -34,6 +34,7 @@ own rules.
 | US | Branches of a `UNION ALL` that read the same table read it once (`Expand` per branch); scans of other branches shared (`streaming_share_union_scans`) | done (prototype, branch `proto/plan-reduction-union-scans`); dominance under a top-1 not done |
 | 10 | Sharing again, within one query, the sub-plans that became identical, or that differ by their columns or by commuting filters; aggregations of one input with different filters merged with `FILTER` | done for stateful cores (prototype, branch `proto/plan-reduction-shared-aggs`) |
 | BK | Column facts (A to G, 8), unique keys (1, 2) and repeated lookups (3) in batch queries | done (prototype, branch `proto/plan-reduction-batch-keys`, variables `batch_simplify_column_facts`, `batch_simplify_on_unique_key`, `batch_merge_repeated_lookups`) |
+| BL | Batch: duplicates found with `lag` over a window ordered by the column, counted per value instead (`batch_rewrite_lag_duplicates`) | done (prototype, branch `proto/plan-reduction-batch-lag`) |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -770,6 +771,56 @@ aggregate of a constant of idea 8), `batch_simplify_on_unique_key` (ideas 1 and 
 - Tests: planner `batch_plan_reduction_keys.yaml`; differential `e2e_test/batch/plan_reduction_keys`
   (generator `plan_reduction_keys.gen.py`): every query runs through `INSERT ... SELECT` with and
   without its variables, after each of four rounds of changes of the data.
+### BL. Batch: duplicates found with `lag` (added on 2026-11-26, done on the branch)
+
+A uniqueness check is often written by comparing each value with the previous one in sorted
+order:
+
+```sql
+with ordered as (select x, lag(x) over (partition by true order by x) as prev from t where x is not null),
+duplicates as (select * from ordered where x = prev)
+select x, count(*) + 1 as n from duplicates group by x;
+```
+
+The batch plan sorts the whole relation on one node, in one window partition that does not spill
+(`BatchOverWindow` over `BatchSort` over a singleton exchange). No batch stage rewrites it:
+`OverWindowToAggAndJoinRule` (`CONVERT_OVER_WINDOW_FOR_BATCH`) only takes windows without order,
+`SPLIT_OVER_WINDOW` and `MERGE_OVER_WINDOW` only regroup window functions. `LagDuplicatesRule`
+(`batch_rewrite_lag_duplicates`, default false, batch only) runs after the first predicate
+pushdown, which leaves `Filter(x = w)` right above the window, and before `SPLIT_OVER_WINDOW`, so
+that the unused window functions sharing the window go away with it.
+
+- Shape: `Filter(x = w AND ...)` over `OverWindow(w = first_value(x) OVER (PARTITION BY p ORDER BY
+  x ROWS BETWEEN 1 PRECEDING AND 1 PRECEDING))` (that is `lag(x)`; `1 FOLLOWING` is `lead(x)`, and
+  `lag(x, -1)`; `last_value` with the same one-row frame is the same), where the first order column
+  that is not a partition column is `x`, and above the filter only `x`, `w` and the non-constant
+  partition columns are read.
+- Exactness: within a partition, rows are ordered by `x` first, so the `k` rows of a non-NULL
+  value `v` are contiguous whatever the direction, the place of NULLs or the order of ties; `x = w`
+  holds on exactly `k - 1` of them (all but the first in the frame's direction, which meets
+  another value or the NULL of a missing row) and never on a NULL `x`. Since only `x`, `w` (equal
+  to `x` there) and partition columns are read, the result is `k - 1` copies of `(p, v, v)`: the
+  multiset of `row_number() OVER (PARTITION BY p, x) > 1`. Ties are interchangeable.
+- Rewrite: `Agg(group p', x: c = count(*))` over `Filter(x IS NOT NULL)` of the input, where `p'`
+  drops the constant partition columns (`PARTITION BY true`), then
+  `ProjectSet(generate_series(2, c))` to produce `c - 1` rows per group. The work is distributed
+  by the group key and the hash aggregation can spill. When the consumer is an aggregation whose
+  group key covers `p'` and `x` (or `w`) with only `count(*)` or the count of `x` or `w`, the
+  expansion is skipped: `Filter(c > 1)` and `c - 1` as the count (the `+ 1` of the query above then
+  gives `k`).
+- Other conjuncts of the filter that read only `p'`, `x` and `w` and are pure are conditions on
+  the group, applied to the input rows (`w` replaced by `x`).
+- Refused: another column read above (the dropped duplicate would matter: the row id, another
+  window function, a partition column that is a constant, `count(y)`); an offset other than 1;
+  `IGNORE NULLS`; another frame (`ROWS 1 PRECEDING` ends at the current row: the first row compares
+  `x` with itself); `IS NOT DISTINCT FROM` (NULLs and the missing row would count, depending on
+  where NULLs sort); any other comparison or an `OR`; `x` in the partition key; `x` or a partition
+  column of a type where equal values can differ (`decimal` `1.0 = 1.00`, whose group keeps the normalized value; floats;
+  `interval`; composite types). `lag` with a default value is not supported by the binder anyway.
+- Tests: `batch_rewrite_lag_duplicates.yaml` (planner) and the differential
+  `e2e_test/batch/rewrite_lag_duplicates.gen.py` (every query inserted into a table with and
+  without the variable, multisets compared after inserts, deletes, updates, NULLs, no duplicates
+  and an empty table).
 
 ## Not for now: sharing between materialized views
 

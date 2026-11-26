@@ -287,6 +287,14 @@ static BATCH_MERGE_REPEATED_LOOKUPS: LazyLock<OptimizationStage> = LazyLock::new
         vec![RepeatedLookupMergeRule::create()],
         // Bottom-up: a lookup merged below is carried by the input of the lookups above.
         ApplyOrder::BottomUp,
+// Rule `LagDuplicatesRule` (`batch_rewrite_lag_duplicates`).
+static BATCH_REWRITE_LAG_DUPLICATES: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Rewrite Lag Duplicates For Batch",
+        vec![LagDuplicatesRule::create()],
+        // Top-down: an aggregation counting the duplicates is rewritten before the projection
+        // below it.
+        ApplyOrder::TopDown,
     )
 });
 
@@ -1402,6 +1410,17 @@ impl LogicalOptimizer {
 
         // Push down the calculation of inputs of join's condition.
         plan = plan.optimize_by_rules(&PUSH_CALC_OF_JOIN)?;
+
+        // Duplicates found with `lag` over a window ordered by the column
+        // (`batch_rewrite_lag_duplicates`): after predicate pushdown, which puts the filter
+        // `x = lag(x)` right above the window, and before the window functions are split
+        // (`SPLIT_OVER_WINDOW`), so that the unused functions sharing the window are dropped with
+        // it. No other batch stage rewrites such a window: `OverWindowToAggAndJoinRule` needs
+        // windows without order, and the predicate pushdown that follows pushes the new
+        // `x IS NOT NULL` into the scan.
+        if ctx.session_ctx().config().batch_rewrite_lag_duplicates() {
+            plan = plan.optimize_by_rules(&BATCH_REWRITE_LAG_DUPLICATES)?;
+        }
 
         plan = plan.optimize_by_rules(&SPLIT_OVER_WINDOW)?;
         // Must push down predicates again after split over window so that OverWindow can be
