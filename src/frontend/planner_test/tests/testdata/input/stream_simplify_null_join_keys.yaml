@@ -99,18 +99,85 @@
   expected_outputs:
   - eowc_stream_plan
 
+# Rewritten: the null key on the preserved side of an outer join, through unions and joins.
+
+- name: left join - the key of the left (preserved) side is null, the right side is not read
+  before: [setup]
+  sql: |
+    select a.id, b.label from (select * from a where bk is null) a left join b on a.bk = b.k;
+  expected_outputs:
+  - stream_plan
+- name: left join - the preserved side is a union of branches, each with a null key
+  before: [setup]
+  sql: |
+    select u.id, r.lab
+    from (select id, bk from a where bk is null union all select id, k from b where k is null) u
+    left join (select k, max(label) as lab from b group by k) r on u.bk = r.k;
+  expected_outputs:
+  - stream_plan
+- name: left join - a union branch with a null literal key
+  before: [setup]
+  sql: |
+    select u.id, b.label
+    from (select id, null::int as bk from a union all select id, k from b where k is null) u
+    left join b on u.bk = b.k;
+  expected_outputs:
+  - stream_plan
+- name: left join - the null key comes through an inner join and a top-n below the preserved side
+  before: [setup]
+  sql: |
+    select x.id, c.v
+    from (
+      select id, bk from (
+        select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn
+        from a join b on a.id = b.id where a.bk is null
+      ) t where rn = 1
+    ) x
+    left join c on x.bk = c.kb;
+  expected_outputs:
+  - stream_plan
+- name: right join - the key of the right (preserved) side is null
+  before: [setup]
+  sql: |
+    select a.x, b.id, b.label from a right join (select * from b where k is null) b on a.bk = b.k;
+  expected_outputs:
+  - stream_plan
+- name: anti join - the key of the left side is null, every left row is kept
+  before: [setup]
+  sql: |
+    select a.id from a where a.bk is null and not exists (select 1 from b where b.k = a.bk);
+  expected_outputs:
+  - stream_plan
+- name: full join - the key of one side is null, both sides are padded
+  before: [setup]
+  sql: |
+    select a.id, b.label from a full join (select * from b where k is null) b on a.bk = b.k;
+  expected_outputs:
+  - stream_plan
+
 # Kept.
+
+- name: kept - the null fact is in only one branch of the union
+  before: [setup]
+  sql: |
+    select u.id, b.label
+    from (select id, bk from a where bk is null union all select id, k from b) u
+    left join b on u.bk = b.k;
+  expected_outputs:
+  - stream_plan
+- name: kept - is not distinct from with a null key on the preserved side
+  before: [setup]
+  sql: |
+    select u.id, b.label
+    from (select id, bk from a where bk is null union all select id, k from b where k is null) u
+    left join b on u.bk is not distinct from b.k;
+  expected_outputs:
+  - stream_plan
 
 - name: kept - is not distinct from matches nulls
   before: [setup]
   sql: |
     select a.id, b.label from a join b on a.bk is not distinct from b.k where b.k is null;
-  expected_outputs:
-  - stream_plan
-- name: kept - full join
-  before: [setup]
-  sql: |
-    select a.id, b.label from a full join (select * from b where k is null) b on a.bk = b.k;
   expected_outputs:
   - stream_plan
 - name: kept - the null column is not in the condition
@@ -131,12 +198,6 @@
     select a.id from a left join b on a.bk = b.k where b.k is null;
   expected_outputs:
   - stream_plan
-- name: kept - left join, the null key is on the preserved side
-  before: [setup]
-  sql: |
-    select a.id, b.label from (select * from a where bk is null) a left join b on a.bk = b.k;
-  expected_outputs:
-  - stream_plan
 - name: kept - a removed side may carry a watermark (table with a watermark)
   before: [setup]
   sql: |
@@ -153,3 +214,15 @@
     group by window_start;
   expected_outputs:
   - eowc_stream_plan
+- name: kept - null key on the preserved side, the optional side may carry a watermark
+  before: [setup]
+  sql: |
+    select a.id, t.ts from (select * from a where bk is null) a left join t on a.bk = t.k;
+  expected_outputs:
+  - stream_plan
+- name: kept - full join with a side that may carry a watermark
+  before: [setup]
+  sql: |
+    select w.ts, b.label from t w full join (select * from b where k is null) b on w.k = b.k;
+  expected_outputs:
+  - stream_plan

@@ -129,16 +129,64 @@ statement ok
 create table nk_not_in_on (id int);
 
 statement ok
+create table nk_preserved_union_agg_off (id int, lab varchar);
+
+statement ok
+create table nk_preserved_union_agg_on (id int, lab varchar);
+
+statement ok
+create table nk_preserved_union_literal_off (id int, label varchar);
+
+statement ok
+create table nk_preserved_union_literal_on (id int, label varchar);
+
+statement ok
+create table nk_preserved_topn_join_off (id int, v int);
+
+statement ok
+create table nk_preserved_topn_join_on (id int, v int);
+
+statement ok
+create table nk_preserved_right_off (x int, id int, label varchar);
+
+statement ok
+create table nk_preserved_right_on (x int, id int, label varchar);
+
+statement ok
+create table nk_preserved_anti_off (id int);
+
+statement ok
+create table nk_preserved_anti_on (id int);
+
+statement ok
+create table nk_full_left_null_off (id int, x int, label varchar);
+
+statement ok
+create table nk_full_left_null_on (id int, x int, label varchar);
+
+statement ok
+create table nk_kept_one_branch_off (id int, label varchar);
+
+statement ok
+create table nk_kept_one_branch_on (id int, label varchar);
+
+statement ok
+create table nk_kept_union_indf_off (id int, label varchar);
+
+statement ok
+create table nk_kept_union_indf_on (id int, label varchar);
+
+statement ok
 create table nk_kept_indf_off (id int, label varchar);
 
 statement ok
 create table nk_kept_indf_on (id int, label varchar);
 
 statement ok
-create table nk_kept_full_off (id int, label varchar);
+create table nk_full_padded_off (id int, label varchar);
 
 statement ok
-create table nk_kept_full_on (id int, label varchar);
+create table nk_full_padded_on (id int, label varchar);
 
 statement ok
 create table nk_kept_label_off (id int, label varchar);
@@ -159,10 +207,10 @@ statement ok
 create table nk_kept_anti_pattern_on (id int);
 
 statement ok
-create table nk_kept_preserved_off (id int, label varchar);
+create table nk_preserved_left_off (id int, label varchar);
 
 statement ok
-create table nk_kept_preserved_on (id int, label varchar);
+create table nk_preserved_left_on (id int, label varchar);
 
 statement ok
 create table nk_kept_coalesce_off (id int, label varchar);
@@ -479,6 +527,150 @@ statement ok
 set batch_simplify_null_join_keys = false;
 
 statement ok
+delete from nk_preserved_union_agg_off;
+
+statement ok
+delete from nk_preserved_union_agg_on;
+
+statement ok
+insert into nk_preserved_union_agg_off select u.id, r.lab from (select id, bk from nk_a where bk is null union all select id, k from nk_b where k is null) u left join (select k, max(label) as lab from nk_b group by k) r on u.bk = r.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_union_agg_on select u.id, r.lab from (select id, bk from nk_a where bk is null union all select id, k from nk_b where k is null) u left join (select k, max(label) as lab from nk_b group by k) r on u.bk = r.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_preserved_union_literal_off;
+
+statement ok
+delete from nk_preserved_union_literal_on;
+
+statement ok
+insert into nk_preserved_union_literal_off select u.id, b.label from (select id, null::int as bk from nk_a union all select id, k from nk_b where k is null) u left join nk_b b on u.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_union_literal_on select u.id, b.label from (select id, null::int as bk from nk_a union all select id, k from nk_b where k is null) u left join nk_b b on u.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_preserved_topn_join_off;
+
+statement ok
+delete from nk_preserved_topn_join_on;
+
+statement ok
+insert into nk_preserved_topn_join_off select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from nk_a a join nk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join nk_c c on x.bk = c.kb;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_topn_join_on select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from nk_a a join nk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join nk_c c on x.bk = c.kb;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_preserved_right_off;
+
+statement ok
+delete from nk_preserved_right_on;
+
+statement ok
+insert into nk_preserved_right_off select a.x, b.id, b.label from nk_a a right join (select * from nk_b where k is null) b on a.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_right_on select a.x, b.id, b.label from nk_a a right join (select * from nk_b where k is null) b on a.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_preserved_anti_off;
+
+statement ok
+delete from nk_preserved_anti_on;
+
+statement ok
+insert into nk_preserved_anti_off select a.id from nk_a a where a.bk is null and not exists (select 1 from nk_b b where b.k = a.bk);
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_anti_on select a.id from nk_a a where a.bk is null and not exists (select 1 from nk_b b where b.k = a.bk);
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_full_left_null_off;
+
+statement ok
+delete from nk_full_left_null_on;
+
+statement ok
+insert into nk_full_left_null_off select a.id, a.x, b.label from (select * from nk_a where bk is null) a full join nk_b b on a.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_full_left_null_on select a.id, a.x, b.label from (select * from nk_a where bk is null) a full join nk_b b on a.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_kept_one_branch_off;
+
+statement ok
+delete from nk_kept_one_branch_on;
+
+statement ok
+insert into nk_kept_one_branch_off select u.id, b.label from (select id, bk from nk_a where bk is null union all select id, k from nk_b) u left join nk_b b on u.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_kept_one_branch_on select u.id, b.label from (select id, bk from nk_a where bk is null union all select id, k from nk_b) u left join nk_b b on u.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_kept_union_indf_off;
+
+statement ok
+delete from nk_kept_union_indf_on;
+
+statement ok
+insert into nk_kept_union_indf_off select u.id, b.label from (select id, bk from nk_a where bk is null union all select id, k from nk_b where k is null) u left join nk_b b on u.bk is not distinct from b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_kept_union_indf_on select u.id, b.label from (select id, bk from nk_a where bk is null union all select id, k from nk_b where k is null) u left join nk_b b on u.bk is not distinct from b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
 delete from nk_kept_indf_off;
 
 statement ok
@@ -497,19 +689,19 @@ statement ok
 set batch_simplify_null_join_keys = false;
 
 statement ok
-delete from nk_kept_full_off;
+delete from nk_full_padded_off;
 
 statement ok
-delete from nk_kept_full_on;
+delete from nk_full_padded_on;
 
 statement ok
-insert into nk_kept_full_off select a.id, b.label from nk_a a full join (select * from nk_b where k is null) b on a.bk = b.k;
+insert into nk_full_padded_off select a.id, b.label from nk_a a full join (select * from nk_b where k is null) b on a.bk = b.k;
 
 statement ok
 set batch_simplify_null_join_keys = true;
 
 statement ok
-insert into nk_kept_full_on select a.id, b.label from nk_a a full join (select * from nk_b where k is null) b on a.bk = b.k;
+insert into nk_full_padded_on select a.id, b.label from nk_a a full join (select * from nk_b where k is null) b on a.bk = b.k;
 
 statement ok
 set batch_simplify_null_join_keys = false;
@@ -569,19 +761,19 @@ statement ok
 set batch_simplify_null_join_keys = false;
 
 statement ok
-delete from nk_kept_preserved_off;
+delete from nk_preserved_left_off;
 
 statement ok
-delete from nk_kept_preserved_on;
+delete from nk_preserved_left_on;
 
 statement ok
-insert into nk_kept_preserved_off select a.id, b.label from (select * from nk_a where bk is null) a left join nk_b b on a.bk = b.k;
+insert into nk_preserved_left_off select a.id, b.label from (select * from nk_a where bk is null) a left join nk_b b on a.bk = b.k;
 
 statement ok
 set batch_simplify_null_join_keys = true;
 
 statement ok
-insert into nk_kept_preserved_on select a.id, b.label from (select * from nk_a where bk is null) a left join nk_b b on a.bk = b.k;
+insert into nk_preserved_left_on select a.id, b.label from (select * from nk_a where bk is null) a left join nk_b b on a.bk = b.k;
 
 statement ok
 set batch_simplify_null_join_keys = false;
@@ -744,6 +936,70 @@ select
 
 query III
 select
+  (select count(*) from (select id, lab, count(*) as nk_rows from nk_preserved_union_agg_on group by id, lab except select id, lab, count(*) as nk_rows from nk_preserved_union_agg_off group by id, lab) x),
+  (select count(*) from (select id, lab, count(*) as nk_rows from nk_preserved_union_agg_off group by id, lab except select id, lab, count(*) as nk_rows from nk_preserved_union_agg_on group by id, lab) y),
+  (select count(*) from nk_preserved_union_agg_on) - (select count(*) from nk_preserved_union_agg_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_preserved_union_literal_on group by id, label except select id, label, count(*) as nk_rows from nk_preserved_union_literal_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_preserved_union_literal_off group by id, label except select id, label, count(*) as nk_rows from nk_preserved_union_literal_on group by id, label) y),
+  (select count(*) from nk_preserved_union_literal_on) - (select count(*) from nk_preserved_union_literal_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as nk_rows from nk_preserved_topn_join_on group by id, v except select id, v, count(*) as nk_rows from nk_preserved_topn_join_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as nk_rows from nk_preserved_topn_join_off group by id, v except select id, v, count(*) as nk_rows from nk_preserved_topn_join_on group by id, v) y),
+  (select count(*) from nk_preserved_topn_join_on) - (select count(*) from nk_preserved_topn_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, id, label, count(*) as nk_rows from nk_preserved_right_on group by x, id, label except select x, id, label, count(*) as nk_rows from nk_preserved_right_off group by x, id, label) x),
+  (select count(*) from (select x, id, label, count(*) as nk_rows from nk_preserved_right_off group by x, id, label except select x, id, label, count(*) as nk_rows from nk_preserved_right_on group by x, id, label) y),
+  (select count(*) from nk_preserved_right_on) - (select count(*) from nk_preserved_right_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, count(*) as nk_rows from nk_preserved_anti_on group by id except select id, count(*) as nk_rows from nk_preserved_anti_off group by id) x),
+  (select count(*) from (select id, count(*) as nk_rows from nk_preserved_anti_off group by id except select id, count(*) as nk_rows from nk_preserved_anti_on group by id) y),
+  (select count(*) from nk_preserved_anti_on) - (select count(*) from nk_preserved_anti_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, x, label, count(*) as nk_rows from nk_full_left_null_on group by id, x, label except select id, x, label, count(*) as nk_rows from nk_full_left_null_off group by id, x, label) x),
+  (select count(*) from (select id, x, label, count(*) as nk_rows from nk_full_left_null_off group by id, x, label except select id, x, label, count(*) as nk_rows from nk_full_left_null_on group by id, x, label) y),
+  (select count(*) from nk_full_left_null_on) - (select count(*) from nk_full_left_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_one_branch_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_one_branch_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_one_branch_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_one_branch_on group by id, label) y),
+  (select count(*) from nk_kept_one_branch_on) - (select count(*) from nk_kept_one_branch_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_union_indf_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_union_indf_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_union_indf_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_union_indf_on group by id, label) y),
+  (select count(*) from nk_kept_union_indf_on) - (select count(*) from nk_kept_union_indf_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_indf_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_indf_off group by id, label) x),
   (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_indf_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_indf_on group by id, label) y),
   (select count(*) from nk_kept_indf_on) - (select count(*) from nk_kept_indf_off);
@@ -752,9 +1008,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_full_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_full_off group by id, label) x),
-  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_full_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_full_on group by id, label) y),
-  (select count(*) from nk_kept_full_on) - (select count(*) from nk_kept_full_off);
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_full_padded_on group by id, label except select id, label, count(*) as nk_rows from nk_full_padded_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_full_padded_off group by id, label except select id, label, count(*) as nk_rows from nk_full_padded_on group by id, label) y),
+  (select count(*) from nk_full_padded_on) - (select count(*) from nk_full_padded_off);
 ----
 0 0 0
 
@@ -784,9 +1040,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_preserved_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_preserved_off group by id, label) x),
-  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_preserved_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_preserved_on group by id, label) y),
-  (select count(*) from nk_kept_preserved_on) - (select count(*) from nk_kept_preserved_off);
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_preserved_left_on group by id, label except select id, label, count(*) as nk_rows from nk_preserved_left_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_preserved_left_off group by id, label except select id, label, count(*) as nk_rows from nk_preserved_left_on group by id, label) y),
+  (select count(*) from nk_preserved_left_on) - (select count(*) from nk_preserved_left_off);
 ----
 0 0 0
 
@@ -1124,6 +1380,150 @@ statement ok
 set batch_simplify_null_join_keys = false;
 
 statement ok
+delete from nk_preserved_union_agg_off;
+
+statement ok
+delete from nk_preserved_union_agg_on;
+
+statement ok
+insert into nk_preserved_union_agg_off select u.id, r.lab from (select id, bk from nk_a where bk is null union all select id, k from nk_b where k is null) u left join (select k, max(label) as lab from nk_b group by k) r on u.bk = r.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_union_agg_on select u.id, r.lab from (select id, bk from nk_a where bk is null union all select id, k from nk_b where k is null) u left join (select k, max(label) as lab from nk_b group by k) r on u.bk = r.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_preserved_union_literal_off;
+
+statement ok
+delete from nk_preserved_union_literal_on;
+
+statement ok
+insert into nk_preserved_union_literal_off select u.id, b.label from (select id, null::int as bk from nk_a union all select id, k from nk_b where k is null) u left join nk_b b on u.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_union_literal_on select u.id, b.label from (select id, null::int as bk from nk_a union all select id, k from nk_b where k is null) u left join nk_b b on u.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_preserved_topn_join_off;
+
+statement ok
+delete from nk_preserved_topn_join_on;
+
+statement ok
+insert into nk_preserved_topn_join_off select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from nk_a a join nk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join nk_c c on x.bk = c.kb;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_topn_join_on select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from nk_a a join nk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join nk_c c on x.bk = c.kb;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_preserved_right_off;
+
+statement ok
+delete from nk_preserved_right_on;
+
+statement ok
+insert into nk_preserved_right_off select a.x, b.id, b.label from nk_a a right join (select * from nk_b where k is null) b on a.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_right_on select a.x, b.id, b.label from nk_a a right join (select * from nk_b where k is null) b on a.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_preserved_anti_off;
+
+statement ok
+delete from nk_preserved_anti_on;
+
+statement ok
+insert into nk_preserved_anti_off select a.id from nk_a a where a.bk is null and not exists (select 1 from nk_b b where b.k = a.bk);
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_anti_on select a.id from nk_a a where a.bk is null and not exists (select 1 from nk_b b where b.k = a.bk);
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_full_left_null_off;
+
+statement ok
+delete from nk_full_left_null_on;
+
+statement ok
+insert into nk_full_left_null_off select a.id, a.x, b.label from (select * from nk_a where bk is null) a full join nk_b b on a.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_full_left_null_on select a.id, a.x, b.label from (select * from nk_a where bk is null) a full join nk_b b on a.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_kept_one_branch_off;
+
+statement ok
+delete from nk_kept_one_branch_on;
+
+statement ok
+insert into nk_kept_one_branch_off select u.id, b.label from (select id, bk from nk_a where bk is null union all select id, k from nk_b) u left join nk_b b on u.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_kept_one_branch_on select u.id, b.label from (select id, bk from nk_a where bk is null union all select id, k from nk_b) u left join nk_b b on u.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_kept_union_indf_off;
+
+statement ok
+delete from nk_kept_union_indf_on;
+
+statement ok
+insert into nk_kept_union_indf_off select u.id, b.label from (select id, bk from nk_a where bk is null union all select id, k from nk_b where k is null) u left join nk_b b on u.bk is not distinct from b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_kept_union_indf_on select u.id, b.label from (select id, bk from nk_a where bk is null union all select id, k from nk_b where k is null) u left join nk_b b on u.bk is not distinct from b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
 delete from nk_kept_indf_off;
 
 statement ok
@@ -1142,19 +1542,19 @@ statement ok
 set batch_simplify_null_join_keys = false;
 
 statement ok
-delete from nk_kept_full_off;
+delete from nk_full_padded_off;
 
 statement ok
-delete from nk_kept_full_on;
+delete from nk_full_padded_on;
 
 statement ok
-insert into nk_kept_full_off select a.id, b.label from nk_a a full join (select * from nk_b where k is null) b on a.bk = b.k;
+insert into nk_full_padded_off select a.id, b.label from nk_a a full join (select * from nk_b where k is null) b on a.bk = b.k;
 
 statement ok
 set batch_simplify_null_join_keys = true;
 
 statement ok
-insert into nk_kept_full_on select a.id, b.label from nk_a a full join (select * from nk_b where k is null) b on a.bk = b.k;
+insert into nk_full_padded_on select a.id, b.label from nk_a a full join (select * from nk_b where k is null) b on a.bk = b.k;
 
 statement ok
 set batch_simplify_null_join_keys = false;
@@ -1214,19 +1614,19 @@ statement ok
 set batch_simplify_null_join_keys = false;
 
 statement ok
-delete from nk_kept_preserved_off;
+delete from nk_preserved_left_off;
 
 statement ok
-delete from nk_kept_preserved_on;
+delete from nk_preserved_left_on;
 
 statement ok
-insert into nk_kept_preserved_off select a.id, b.label from (select * from nk_a where bk is null) a left join nk_b b on a.bk = b.k;
+insert into nk_preserved_left_off select a.id, b.label from (select * from nk_a where bk is null) a left join nk_b b on a.bk = b.k;
 
 statement ok
 set batch_simplify_null_join_keys = true;
 
 statement ok
-insert into nk_kept_preserved_on select a.id, b.label from (select * from nk_a where bk is null) a left join nk_b b on a.bk = b.k;
+insert into nk_preserved_left_on select a.id, b.label from (select * from nk_a where bk is null) a left join nk_b b on a.bk = b.k;
 
 statement ok
 set batch_simplify_null_join_keys = false;
@@ -1389,6 +1789,70 @@ select
 
 query III
 select
+  (select count(*) from (select id, lab, count(*) as nk_rows from nk_preserved_union_agg_on group by id, lab except select id, lab, count(*) as nk_rows from nk_preserved_union_agg_off group by id, lab) x),
+  (select count(*) from (select id, lab, count(*) as nk_rows from nk_preserved_union_agg_off group by id, lab except select id, lab, count(*) as nk_rows from nk_preserved_union_agg_on group by id, lab) y),
+  (select count(*) from nk_preserved_union_agg_on) - (select count(*) from nk_preserved_union_agg_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_preserved_union_literal_on group by id, label except select id, label, count(*) as nk_rows from nk_preserved_union_literal_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_preserved_union_literal_off group by id, label except select id, label, count(*) as nk_rows from nk_preserved_union_literal_on group by id, label) y),
+  (select count(*) from nk_preserved_union_literal_on) - (select count(*) from nk_preserved_union_literal_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as nk_rows from nk_preserved_topn_join_on group by id, v except select id, v, count(*) as nk_rows from nk_preserved_topn_join_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as nk_rows from nk_preserved_topn_join_off group by id, v except select id, v, count(*) as nk_rows from nk_preserved_topn_join_on group by id, v) y),
+  (select count(*) from nk_preserved_topn_join_on) - (select count(*) from nk_preserved_topn_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, id, label, count(*) as nk_rows from nk_preserved_right_on group by x, id, label except select x, id, label, count(*) as nk_rows from nk_preserved_right_off group by x, id, label) x),
+  (select count(*) from (select x, id, label, count(*) as nk_rows from nk_preserved_right_off group by x, id, label except select x, id, label, count(*) as nk_rows from nk_preserved_right_on group by x, id, label) y),
+  (select count(*) from nk_preserved_right_on) - (select count(*) from nk_preserved_right_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, count(*) as nk_rows from nk_preserved_anti_on group by id except select id, count(*) as nk_rows from nk_preserved_anti_off group by id) x),
+  (select count(*) from (select id, count(*) as nk_rows from nk_preserved_anti_off group by id except select id, count(*) as nk_rows from nk_preserved_anti_on group by id) y),
+  (select count(*) from nk_preserved_anti_on) - (select count(*) from nk_preserved_anti_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, x, label, count(*) as nk_rows from nk_full_left_null_on group by id, x, label except select id, x, label, count(*) as nk_rows from nk_full_left_null_off group by id, x, label) x),
+  (select count(*) from (select id, x, label, count(*) as nk_rows from nk_full_left_null_off group by id, x, label except select id, x, label, count(*) as nk_rows from nk_full_left_null_on group by id, x, label) y),
+  (select count(*) from nk_full_left_null_on) - (select count(*) from nk_full_left_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_one_branch_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_one_branch_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_one_branch_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_one_branch_on group by id, label) y),
+  (select count(*) from nk_kept_one_branch_on) - (select count(*) from nk_kept_one_branch_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_union_indf_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_union_indf_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_union_indf_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_union_indf_on group by id, label) y),
+  (select count(*) from nk_kept_union_indf_on) - (select count(*) from nk_kept_union_indf_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_indf_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_indf_off group by id, label) x),
   (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_indf_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_indf_on group by id, label) y),
   (select count(*) from nk_kept_indf_on) - (select count(*) from nk_kept_indf_off);
@@ -1397,9 +1861,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_full_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_full_off group by id, label) x),
-  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_full_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_full_on group by id, label) y),
-  (select count(*) from nk_kept_full_on) - (select count(*) from nk_kept_full_off);
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_full_padded_on group by id, label except select id, label, count(*) as nk_rows from nk_full_padded_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_full_padded_off group by id, label except select id, label, count(*) as nk_rows from nk_full_padded_on group by id, label) y),
+  (select count(*) from nk_full_padded_on) - (select count(*) from nk_full_padded_off);
 ----
 0 0 0
 
@@ -1429,9 +1893,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_preserved_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_preserved_off group by id, label) x),
-  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_preserved_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_preserved_on group by id, label) y),
-  (select count(*) from nk_kept_preserved_on) - (select count(*) from nk_kept_preserved_off);
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_preserved_left_on group by id, label except select id, label, count(*) as nk_rows from nk_preserved_left_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_preserved_left_off group by id, label except select id, label, count(*) as nk_rows from nk_preserved_left_on group by id, label) y),
+  (select count(*) from nk_preserved_left_on) - (select count(*) from nk_preserved_left_off);
 ----
 0 0 0
 
@@ -1784,6 +2248,150 @@ statement ok
 set batch_simplify_null_join_keys = false;
 
 statement ok
+delete from nk_preserved_union_agg_off;
+
+statement ok
+delete from nk_preserved_union_agg_on;
+
+statement ok
+insert into nk_preserved_union_agg_off select u.id, r.lab from (select id, bk from nk_a where bk is null union all select id, k from nk_b where k is null) u left join (select k, max(label) as lab from nk_b group by k) r on u.bk = r.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_union_agg_on select u.id, r.lab from (select id, bk from nk_a where bk is null union all select id, k from nk_b where k is null) u left join (select k, max(label) as lab from nk_b group by k) r on u.bk = r.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_preserved_union_literal_off;
+
+statement ok
+delete from nk_preserved_union_literal_on;
+
+statement ok
+insert into nk_preserved_union_literal_off select u.id, b.label from (select id, null::int as bk from nk_a union all select id, k from nk_b where k is null) u left join nk_b b on u.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_union_literal_on select u.id, b.label from (select id, null::int as bk from nk_a union all select id, k from nk_b where k is null) u left join nk_b b on u.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_preserved_topn_join_off;
+
+statement ok
+delete from nk_preserved_topn_join_on;
+
+statement ok
+insert into nk_preserved_topn_join_off select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from nk_a a join nk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join nk_c c on x.bk = c.kb;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_topn_join_on select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from nk_a a join nk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join nk_c c on x.bk = c.kb;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_preserved_right_off;
+
+statement ok
+delete from nk_preserved_right_on;
+
+statement ok
+insert into nk_preserved_right_off select a.x, b.id, b.label from nk_a a right join (select * from nk_b where k is null) b on a.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_right_on select a.x, b.id, b.label from nk_a a right join (select * from nk_b where k is null) b on a.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_preserved_anti_off;
+
+statement ok
+delete from nk_preserved_anti_on;
+
+statement ok
+insert into nk_preserved_anti_off select a.id from nk_a a where a.bk is null and not exists (select 1 from nk_b b where b.k = a.bk);
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_anti_on select a.id from nk_a a where a.bk is null and not exists (select 1 from nk_b b where b.k = a.bk);
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_full_left_null_off;
+
+statement ok
+delete from nk_full_left_null_on;
+
+statement ok
+insert into nk_full_left_null_off select a.id, a.x, b.label from (select * from nk_a where bk is null) a full join nk_b b on a.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_full_left_null_on select a.id, a.x, b.label from (select * from nk_a where bk is null) a full join nk_b b on a.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_kept_one_branch_off;
+
+statement ok
+delete from nk_kept_one_branch_on;
+
+statement ok
+insert into nk_kept_one_branch_off select u.id, b.label from (select id, bk from nk_a where bk is null union all select id, k from nk_b) u left join nk_b b on u.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_kept_one_branch_on select u.id, b.label from (select id, bk from nk_a where bk is null union all select id, k from nk_b) u left join nk_b b on u.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_kept_union_indf_off;
+
+statement ok
+delete from nk_kept_union_indf_on;
+
+statement ok
+insert into nk_kept_union_indf_off select u.id, b.label from (select id, bk from nk_a where bk is null union all select id, k from nk_b where k is null) u left join nk_b b on u.bk is not distinct from b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_kept_union_indf_on select u.id, b.label from (select id, bk from nk_a where bk is null union all select id, k from nk_b where k is null) u left join nk_b b on u.bk is not distinct from b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
 delete from nk_kept_indf_off;
 
 statement ok
@@ -1802,19 +2410,19 @@ statement ok
 set batch_simplify_null_join_keys = false;
 
 statement ok
-delete from nk_kept_full_off;
+delete from nk_full_padded_off;
 
 statement ok
-delete from nk_kept_full_on;
+delete from nk_full_padded_on;
 
 statement ok
-insert into nk_kept_full_off select a.id, b.label from nk_a a full join (select * from nk_b where k is null) b on a.bk = b.k;
+insert into nk_full_padded_off select a.id, b.label from nk_a a full join (select * from nk_b where k is null) b on a.bk = b.k;
 
 statement ok
 set batch_simplify_null_join_keys = true;
 
 statement ok
-insert into nk_kept_full_on select a.id, b.label from nk_a a full join (select * from nk_b where k is null) b on a.bk = b.k;
+insert into nk_full_padded_on select a.id, b.label from nk_a a full join (select * from nk_b where k is null) b on a.bk = b.k;
 
 statement ok
 set batch_simplify_null_join_keys = false;
@@ -1874,19 +2482,19 @@ statement ok
 set batch_simplify_null_join_keys = false;
 
 statement ok
-delete from nk_kept_preserved_off;
+delete from nk_preserved_left_off;
 
 statement ok
-delete from nk_kept_preserved_on;
+delete from nk_preserved_left_on;
 
 statement ok
-insert into nk_kept_preserved_off select a.id, b.label from (select * from nk_a where bk is null) a left join nk_b b on a.bk = b.k;
+insert into nk_preserved_left_off select a.id, b.label from (select * from nk_a where bk is null) a left join nk_b b on a.bk = b.k;
 
 statement ok
 set batch_simplify_null_join_keys = true;
 
 statement ok
-insert into nk_kept_preserved_on select a.id, b.label from (select * from nk_a where bk is null) a left join nk_b b on a.bk = b.k;
+insert into nk_preserved_left_on select a.id, b.label from (select * from nk_a where bk is null) a left join nk_b b on a.bk = b.k;
 
 statement ok
 set batch_simplify_null_join_keys = false;
@@ -2049,6 +2657,70 @@ select
 
 query III
 select
+  (select count(*) from (select id, lab, count(*) as nk_rows from nk_preserved_union_agg_on group by id, lab except select id, lab, count(*) as nk_rows from nk_preserved_union_agg_off group by id, lab) x),
+  (select count(*) from (select id, lab, count(*) as nk_rows from nk_preserved_union_agg_off group by id, lab except select id, lab, count(*) as nk_rows from nk_preserved_union_agg_on group by id, lab) y),
+  (select count(*) from nk_preserved_union_agg_on) - (select count(*) from nk_preserved_union_agg_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_preserved_union_literal_on group by id, label except select id, label, count(*) as nk_rows from nk_preserved_union_literal_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_preserved_union_literal_off group by id, label except select id, label, count(*) as nk_rows from nk_preserved_union_literal_on group by id, label) y),
+  (select count(*) from nk_preserved_union_literal_on) - (select count(*) from nk_preserved_union_literal_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as nk_rows from nk_preserved_topn_join_on group by id, v except select id, v, count(*) as nk_rows from nk_preserved_topn_join_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as nk_rows from nk_preserved_topn_join_off group by id, v except select id, v, count(*) as nk_rows from nk_preserved_topn_join_on group by id, v) y),
+  (select count(*) from nk_preserved_topn_join_on) - (select count(*) from nk_preserved_topn_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, id, label, count(*) as nk_rows from nk_preserved_right_on group by x, id, label except select x, id, label, count(*) as nk_rows from nk_preserved_right_off group by x, id, label) x),
+  (select count(*) from (select x, id, label, count(*) as nk_rows from nk_preserved_right_off group by x, id, label except select x, id, label, count(*) as nk_rows from nk_preserved_right_on group by x, id, label) y),
+  (select count(*) from nk_preserved_right_on) - (select count(*) from nk_preserved_right_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, count(*) as nk_rows from nk_preserved_anti_on group by id except select id, count(*) as nk_rows from nk_preserved_anti_off group by id) x),
+  (select count(*) from (select id, count(*) as nk_rows from nk_preserved_anti_off group by id except select id, count(*) as nk_rows from nk_preserved_anti_on group by id) y),
+  (select count(*) from nk_preserved_anti_on) - (select count(*) from nk_preserved_anti_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, x, label, count(*) as nk_rows from nk_full_left_null_on group by id, x, label except select id, x, label, count(*) as nk_rows from nk_full_left_null_off group by id, x, label) x),
+  (select count(*) from (select id, x, label, count(*) as nk_rows from nk_full_left_null_off group by id, x, label except select id, x, label, count(*) as nk_rows from nk_full_left_null_on group by id, x, label) y),
+  (select count(*) from nk_full_left_null_on) - (select count(*) from nk_full_left_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_one_branch_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_one_branch_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_one_branch_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_one_branch_on group by id, label) y),
+  (select count(*) from nk_kept_one_branch_on) - (select count(*) from nk_kept_one_branch_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_union_indf_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_union_indf_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_union_indf_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_union_indf_on group by id, label) y),
+  (select count(*) from nk_kept_union_indf_on) - (select count(*) from nk_kept_union_indf_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_indf_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_indf_off group by id, label) x),
   (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_indf_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_indf_on group by id, label) y),
   (select count(*) from nk_kept_indf_on) - (select count(*) from nk_kept_indf_off);
@@ -2057,9 +2729,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_full_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_full_off group by id, label) x),
-  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_full_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_full_on group by id, label) y),
-  (select count(*) from nk_kept_full_on) - (select count(*) from nk_kept_full_off);
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_full_padded_on group by id, label except select id, label, count(*) as nk_rows from nk_full_padded_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_full_padded_off group by id, label except select id, label, count(*) as nk_rows from nk_full_padded_on group by id, label) y),
+  (select count(*) from nk_full_padded_on) - (select count(*) from nk_full_padded_off);
 ----
 0 0 0
 
@@ -2089,9 +2761,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_preserved_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_preserved_off group by id, label) x),
-  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_preserved_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_preserved_on group by id, label) y),
-  (select count(*) from nk_kept_preserved_on) - (select count(*) from nk_kept_preserved_off);
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_preserved_left_on group by id, label except select id, label, count(*) as nk_rows from nk_preserved_left_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_preserved_left_off group by id, label except select id, label, count(*) as nk_rows from nk_preserved_left_on group by id, label) y),
+  (select count(*) from nk_preserved_left_on) - (select count(*) from nk_preserved_left_off);
 ----
 0 0 0
 
@@ -2438,6 +3110,150 @@ statement ok
 set batch_simplify_null_join_keys = false;
 
 statement ok
+delete from nk_preserved_union_agg_off;
+
+statement ok
+delete from nk_preserved_union_agg_on;
+
+statement ok
+insert into nk_preserved_union_agg_off select u.id, r.lab from (select id, bk from nk_a where bk is null union all select id, k from nk_b where k is null) u left join (select k, max(label) as lab from nk_b group by k) r on u.bk = r.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_union_agg_on select u.id, r.lab from (select id, bk from nk_a where bk is null union all select id, k from nk_b where k is null) u left join (select k, max(label) as lab from nk_b group by k) r on u.bk = r.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_preserved_union_literal_off;
+
+statement ok
+delete from nk_preserved_union_literal_on;
+
+statement ok
+insert into nk_preserved_union_literal_off select u.id, b.label from (select id, null::int as bk from nk_a union all select id, k from nk_b where k is null) u left join nk_b b on u.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_union_literal_on select u.id, b.label from (select id, null::int as bk from nk_a union all select id, k from nk_b where k is null) u left join nk_b b on u.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_preserved_topn_join_off;
+
+statement ok
+delete from nk_preserved_topn_join_on;
+
+statement ok
+insert into nk_preserved_topn_join_off select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from nk_a a join nk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join nk_c c on x.bk = c.kb;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_topn_join_on select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from nk_a a join nk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join nk_c c on x.bk = c.kb;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_preserved_right_off;
+
+statement ok
+delete from nk_preserved_right_on;
+
+statement ok
+insert into nk_preserved_right_off select a.x, b.id, b.label from nk_a a right join (select * from nk_b where k is null) b on a.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_right_on select a.x, b.id, b.label from nk_a a right join (select * from nk_b where k is null) b on a.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_preserved_anti_off;
+
+statement ok
+delete from nk_preserved_anti_on;
+
+statement ok
+insert into nk_preserved_anti_off select a.id from nk_a a where a.bk is null and not exists (select 1 from nk_b b where b.k = a.bk);
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_anti_on select a.id from nk_a a where a.bk is null and not exists (select 1 from nk_b b where b.k = a.bk);
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_full_left_null_off;
+
+statement ok
+delete from nk_full_left_null_on;
+
+statement ok
+insert into nk_full_left_null_off select a.id, a.x, b.label from (select * from nk_a where bk is null) a full join nk_b b on a.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_full_left_null_on select a.id, a.x, b.label from (select * from nk_a where bk is null) a full join nk_b b on a.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_kept_one_branch_off;
+
+statement ok
+delete from nk_kept_one_branch_on;
+
+statement ok
+insert into nk_kept_one_branch_off select u.id, b.label from (select id, bk from nk_a where bk is null union all select id, k from nk_b) u left join nk_b b on u.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_kept_one_branch_on select u.id, b.label from (select id, bk from nk_a where bk is null union all select id, k from nk_b) u left join nk_b b on u.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_kept_union_indf_off;
+
+statement ok
+delete from nk_kept_union_indf_on;
+
+statement ok
+insert into nk_kept_union_indf_off select u.id, b.label from (select id, bk from nk_a where bk is null union all select id, k from nk_b where k is null) u left join nk_b b on u.bk is not distinct from b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_kept_union_indf_on select u.id, b.label from (select id, bk from nk_a where bk is null union all select id, k from nk_b where k is null) u left join nk_b b on u.bk is not distinct from b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
 delete from nk_kept_indf_off;
 
 statement ok
@@ -2456,19 +3272,19 @@ statement ok
 set batch_simplify_null_join_keys = false;
 
 statement ok
-delete from nk_kept_full_off;
+delete from nk_full_padded_off;
 
 statement ok
-delete from nk_kept_full_on;
+delete from nk_full_padded_on;
 
 statement ok
-insert into nk_kept_full_off select a.id, b.label from nk_a a full join (select * from nk_b where k is null) b on a.bk = b.k;
+insert into nk_full_padded_off select a.id, b.label from nk_a a full join (select * from nk_b where k is null) b on a.bk = b.k;
 
 statement ok
 set batch_simplify_null_join_keys = true;
 
 statement ok
-insert into nk_kept_full_on select a.id, b.label from nk_a a full join (select * from nk_b where k is null) b on a.bk = b.k;
+insert into nk_full_padded_on select a.id, b.label from nk_a a full join (select * from nk_b where k is null) b on a.bk = b.k;
 
 statement ok
 set batch_simplify_null_join_keys = false;
@@ -2528,19 +3344,19 @@ statement ok
 set batch_simplify_null_join_keys = false;
 
 statement ok
-delete from nk_kept_preserved_off;
+delete from nk_preserved_left_off;
 
 statement ok
-delete from nk_kept_preserved_on;
+delete from nk_preserved_left_on;
 
 statement ok
-insert into nk_kept_preserved_off select a.id, b.label from (select * from nk_a where bk is null) a left join nk_b b on a.bk = b.k;
+insert into nk_preserved_left_off select a.id, b.label from (select * from nk_a where bk is null) a left join nk_b b on a.bk = b.k;
 
 statement ok
 set batch_simplify_null_join_keys = true;
 
 statement ok
-insert into nk_kept_preserved_on select a.id, b.label from (select * from nk_a where bk is null) a left join nk_b b on a.bk = b.k;
+insert into nk_preserved_left_on select a.id, b.label from (select * from nk_a where bk is null) a left join nk_b b on a.bk = b.k;
 
 statement ok
 set batch_simplify_null_join_keys = false;
@@ -2703,6 +3519,70 @@ select
 
 query III
 select
+  (select count(*) from (select id, lab, count(*) as nk_rows from nk_preserved_union_agg_on group by id, lab except select id, lab, count(*) as nk_rows from nk_preserved_union_agg_off group by id, lab) x),
+  (select count(*) from (select id, lab, count(*) as nk_rows from nk_preserved_union_agg_off group by id, lab except select id, lab, count(*) as nk_rows from nk_preserved_union_agg_on group by id, lab) y),
+  (select count(*) from nk_preserved_union_agg_on) - (select count(*) from nk_preserved_union_agg_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_preserved_union_literal_on group by id, label except select id, label, count(*) as nk_rows from nk_preserved_union_literal_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_preserved_union_literal_off group by id, label except select id, label, count(*) as nk_rows from nk_preserved_union_literal_on group by id, label) y),
+  (select count(*) from nk_preserved_union_literal_on) - (select count(*) from nk_preserved_union_literal_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as nk_rows from nk_preserved_topn_join_on group by id, v except select id, v, count(*) as nk_rows from nk_preserved_topn_join_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as nk_rows from nk_preserved_topn_join_off group by id, v except select id, v, count(*) as nk_rows from nk_preserved_topn_join_on group by id, v) y),
+  (select count(*) from nk_preserved_topn_join_on) - (select count(*) from nk_preserved_topn_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, id, label, count(*) as nk_rows from nk_preserved_right_on group by x, id, label except select x, id, label, count(*) as nk_rows from nk_preserved_right_off group by x, id, label) x),
+  (select count(*) from (select x, id, label, count(*) as nk_rows from nk_preserved_right_off group by x, id, label except select x, id, label, count(*) as nk_rows from nk_preserved_right_on group by x, id, label) y),
+  (select count(*) from nk_preserved_right_on) - (select count(*) from nk_preserved_right_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, count(*) as nk_rows from nk_preserved_anti_on group by id except select id, count(*) as nk_rows from nk_preserved_anti_off group by id) x),
+  (select count(*) from (select id, count(*) as nk_rows from nk_preserved_anti_off group by id except select id, count(*) as nk_rows from nk_preserved_anti_on group by id) y),
+  (select count(*) from nk_preserved_anti_on) - (select count(*) from nk_preserved_anti_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, x, label, count(*) as nk_rows from nk_full_left_null_on group by id, x, label except select id, x, label, count(*) as nk_rows from nk_full_left_null_off group by id, x, label) x),
+  (select count(*) from (select id, x, label, count(*) as nk_rows from nk_full_left_null_off group by id, x, label except select id, x, label, count(*) as nk_rows from nk_full_left_null_on group by id, x, label) y),
+  (select count(*) from nk_full_left_null_on) - (select count(*) from nk_full_left_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_one_branch_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_one_branch_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_one_branch_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_one_branch_on group by id, label) y),
+  (select count(*) from nk_kept_one_branch_on) - (select count(*) from nk_kept_one_branch_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_union_indf_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_union_indf_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_union_indf_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_union_indf_on group by id, label) y),
+  (select count(*) from nk_kept_union_indf_on) - (select count(*) from nk_kept_union_indf_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_indf_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_indf_off group by id, label) x),
   (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_indf_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_indf_on group by id, label) y),
   (select count(*) from nk_kept_indf_on) - (select count(*) from nk_kept_indf_off);
@@ -2711,9 +3591,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_full_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_full_off group by id, label) x),
-  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_full_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_full_on group by id, label) y),
-  (select count(*) from nk_kept_full_on) - (select count(*) from nk_kept_full_off);
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_full_padded_on group by id, label except select id, label, count(*) as nk_rows from nk_full_padded_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_full_padded_off group by id, label except select id, label, count(*) as nk_rows from nk_full_padded_on group by id, label) y),
+  (select count(*) from nk_full_padded_on) - (select count(*) from nk_full_padded_off);
 ----
 0 0 0
 
@@ -2743,9 +3623,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_preserved_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_preserved_off group by id, label) x),
-  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_preserved_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_preserved_on group by id, label) y),
-  (select count(*) from nk_kept_preserved_on) - (select count(*) from nk_kept_preserved_off);
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_preserved_left_on group by id, label except select id, label, count(*) as nk_rows from nk_preserved_left_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_preserved_left_off group by id, label except select id, label, count(*) as nk_rows from nk_preserved_left_on group by id, label) y),
+  (select count(*) from nk_preserved_left_on) - (select count(*) from nk_preserved_left_off);
 ----
 0 0 0
 
@@ -3071,6 +3951,150 @@ statement ok
 set batch_simplify_null_join_keys = false;
 
 statement ok
+delete from nk_preserved_union_agg_off;
+
+statement ok
+delete from nk_preserved_union_agg_on;
+
+statement ok
+insert into nk_preserved_union_agg_off select u.id, r.lab from (select id, bk from nk_a where bk is null union all select id, k from nk_b where k is null) u left join (select k, max(label) as lab from nk_b group by k) r on u.bk = r.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_union_agg_on select u.id, r.lab from (select id, bk from nk_a where bk is null union all select id, k from nk_b where k is null) u left join (select k, max(label) as lab from nk_b group by k) r on u.bk = r.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_preserved_union_literal_off;
+
+statement ok
+delete from nk_preserved_union_literal_on;
+
+statement ok
+insert into nk_preserved_union_literal_off select u.id, b.label from (select id, null::int as bk from nk_a union all select id, k from nk_b where k is null) u left join nk_b b on u.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_union_literal_on select u.id, b.label from (select id, null::int as bk from nk_a union all select id, k from nk_b where k is null) u left join nk_b b on u.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_preserved_topn_join_off;
+
+statement ok
+delete from nk_preserved_topn_join_on;
+
+statement ok
+insert into nk_preserved_topn_join_off select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from nk_a a join nk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join nk_c c on x.bk = c.kb;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_topn_join_on select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from nk_a a join nk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join nk_c c on x.bk = c.kb;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_preserved_right_off;
+
+statement ok
+delete from nk_preserved_right_on;
+
+statement ok
+insert into nk_preserved_right_off select a.x, b.id, b.label from nk_a a right join (select * from nk_b where k is null) b on a.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_right_on select a.x, b.id, b.label from nk_a a right join (select * from nk_b where k is null) b on a.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_preserved_anti_off;
+
+statement ok
+delete from nk_preserved_anti_on;
+
+statement ok
+insert into nk_preserved_anti_off select a.id from nk_a a where a.bk is null and not exists (select 1 from nk_b b where b.k = a.bk);
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_anti_on select a.id from nk_a a where a.bk is null and not exists (select 1 from nk_b b where b.k = a.bk);
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_full_left_null_off;
+
+statement ok
+delete from nk_full_left_null_on;
+
+statement ok
+insert into nk_full_left_null_off select a.id, a.x, b.label from (select * from nk_a where bk is null) a full join nk_b b on a.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_full_left_null_on select a.id, a.x, b.label from (select * from nk_a where bk is null) a full join nk_b b on a.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_kept_one_branch_off;
+
+statement ok
+delete from nk_kept_one_branch_on;
+
+statement ok
+insert into nk_kept_one_branch_off select u.id, b.label from (select id, bk from nk_a where bk is null union all select id, k from nk_b) u left join nk_b b on u.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_kept_one_branch_on select u.id, b.label from (select id, bk from nk_a where bk is null union all select id, k from nk_b) u left join nk_b b on u.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_kept_union_indf_off;
+
+statement ok
+delete from nk_kept_union_indf_on;
+
+statement ok
+insert into nk_kept_union_indf_off select u.id, b.label from (select id, bk from nk_a where bk is null union all select id, k from nk_b where k is null) u left join nk_b b on u.bk is not distinct from b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_kept_union_indf_on select u.id, b.label from (select id, bk from nk_a where bk is null union all select id, k from nk_b where k is null) u left join nk_b b on u.bk is not distinct from b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
 delete from nk_kept_indf_off;
 
 statement ok
@@ -3089,19 +4113,19 @@ statement ok
 set batch_simplify_null_join_keys = false;
 
 statement ok
-delete from nk_kept_full_off;
+delete from nk_full_padded_off;
 
 statement ok
-delete from nk_kept_full_on;
+delete from nk_full_padded_on;
 
 statement ok
-insert into nk_kept_full_off select a.id, b.label from nk_a a full join (select * from nk_b where k is null) b on a.bk = b.k;
+insert into nk_full_padded_off select a.id, b.label from nk_a a full join (select * from nk_b where k is null) b on a.bk = b.k;
 
 statement ok
 set batch_simplify_null_join_keys = true;
 
 statement ok
-insert into nk_kept_full_on select a.id, b.label from nk_a a full join (select * from nk_b where k is null) b on a.bk = b.k;
+insert into nk_full_padded_on select a.id, b.label from nk_a a full join (select * from nk_b where k is null) b on a.bk = b.k;
 
 statement ok
 set batch_simplify_null_join_keys = false;
@@ -3161,19 +4185,19 @@ statement ok
 set batch_simplify_null_join_keys = false;
 
 statement ok
-delete from nk_kept_preserved_off;
+delete from nk_preserved_left_off;
 
 statement ok
-delete from nk_kept_preserved_on;
+delete from nk_preserved_left_on;
 
 statement ok
-insert into nk_kept_preserved_off select a.id, b.label from (select * from nk_a where bk is null) a left join nk_b b on a.bk = b.k;
+insert into nk_preserved_left_off select a.id, b.label from (select * from nk_a where bk is null) a left join nk_b b on a.bk = b.k;
 
 statement ok
 set batch_simplify_null_join_keys = true;
 
 statement ok
-insert into nk_kept_preserved_on select a.id, b.label from (select * from nk_a where bk is null) a left join nk_b b on a.bk = b.k;
+insert into nk_preserved_left_on select a.id, b.label from (select * from nk_a where bk is null) a left join nk_b b on a.bk = b.k;
 
 statement ok
 set batch_simplify_null_join_keys = false;
@@ -3336,6 +4360,70 @@ select
 
 query III
 select
+  (select count(*) from (select id, lab, count(*) as nk_rows from nk_preserved_union_agg_on group by id, lab except select id, lab, count(*) as nk_rows from nk_preserved_union_agg_off group by id, lab) x),
+  (select count(*) from (select id, lab, count(*) as nk_rows from nk_preserved_union_agg_off group by id, lab except select id, lab, count(*) as nk_rows from nk_preserved_union_agg_on group by id, lab) y),
+  (select count(*) from nk_preserved_union_agg_on) - (select count(*) from nk_preserved_union_agg_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_preserved_union_literal_on group by id, label except select id, label, count(*) as nk_rows from nk_preserved_union_literal_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_preserved_union_literal_off group by id, label except select id, label, count(*) as nk_rows from nk_preserved_union_literal_on group by id, label) y),
+  (select count(*) from nk_preserved_union_literal_on) - (select count(*) from nk_preserved_union_literal_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as nk_rows from nk_preserved_topn_join_on group by id, v except select id, v, count(*) as nk_rows from nk_preserved_topn_join_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as nk_rows from nk_preserved_topn_join_off group by id, v except select id, v, count(*) as nk_rows from nk_preserved_topn_join_on group by id, v) y),
+  (select count(*) from nk_preserved_topn_join_on) - (select count(*) from nk_preserved_topn_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, id, label, count(*) as nk_rows from nk_preserved_right_on group by x, id, label except select x, id, label, count(*) as nk_rows from nk_preserved_right_off group by x, id, label) x),
+  (select count(*) from (select x, id, label, count(*) as nk_rows from nk_preserved_right_off group by x, id, label except select x, id, label, count(*) as nk_rows from nk_preserved_right_on group by x, id, label) y),
+  (select count(*) from nk_preserved_right_on) - (select count(*) from nk_preserved_right_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, count(*) as nk_rows from nk_preserved_anti_on group by id except select id, count(*) as nk_rows from nk_preserved_anti_off group by id) x),
+  (select count(*) from (select id, count(*) as nk_rows from nk_preserved_anti_off group by id except select id, count(*) as nk_rows from nk_preserved_anti_on group by id) y),
+  (select count(*) from nk_preserved_anti_on) - (select count(*) from nk_preserved_anti_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, x, label, count(*) as nk_rows from nk_full_left_null_on group by id, x, label except select id, x, label, count(*) as nk_rows from nk_full_left_null_off group by id, x, label) x),
+  (select count(*) from (select id, x, label, count(*) as nk_rows from nk_full_left_null_off group by id, x, label except select id, x, label, count(*) as nk_rows from nk_full_left_null_on group by id, x, label) y),
+  (select count(*) from nk_full_left_null_on) - (select count(*) from nk_full_left_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_one_branch_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_one_branch_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_one_branch_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_one_branch_on group by id, label) y),
+  (select count(*) from nk_kept_one_branch_on) - (select count(*) from nk_kept_one_branch_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_union_indf_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_union_indf_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_union_indf_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_union_indf_on group by id, label) y),
+  (select count(*) from nk_kept_union_indf_on) - (select count(*) from nk_kept_union_indf_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_indf_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_indf_off group by id, label) x),
   (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_indf_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_indf_on group by id, label) y),
   (select count(*) from nk_kept_indf_on) - (select count(*) from nk_kept_indf_off);
@@ -3344,9 +4432,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_full_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_full_off group by id, label) x),
-  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_full_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_full_on group by id, label) y),
-  (select count(*) from nk_kept_full_on) - (select count(*) from nk_kept_full_off);
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_full_padded_on group by id, label except select id, label, count(*) as nk_rows from nk_full_padded_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_full_padded_off group by id, label except select id, label, count(*) as nk_rows from nk_full_padded_on group by id, label) y),
+  (select count(*) from nk_full_padded_on) - (select count(*) from nk_full_padded_off);
 ----
 0 0 0
 
@@ -3376,9 +4464,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_preserved_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_preserved_off group by id, label) x),
-  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_preserved_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_preserved_on group by id, label) y),
-  (select count(*) from nk_kept_preserved_on) - (select count(*) from nk_kept_preserved_off);
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_preserved_left_on group by id, label except select id, label, count(*) as nk_rows from nk_preserved_left_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_preserved_left_off group by id, label except select id, label, count(*) as nk_rows from nk_preserved_left_on group by id, label) y),
+  (select count(*) from nk_preserved_left_on) - (select count(*) from nk_preserved_left_off);
 ----
 0 0 0
 
@@ -3702,6 +4790,150 @@ statement ok
 set batch_simplify_null_join_keys = false;
 
 statement ok
+delete from nk_preserved_union_agg_off;
+
+statement ok
+delete from nk_preserved_union_agg_on;
+
+statement ok
+insert into nk_preserved_union_agg_off select u.id, r.lab from (select id, bk from nk_a where bk is null union all select id, k from nk_b where k is null) u left join (select k, max(label) as lab from nk_b group by k) r on u.bk = r.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_union_agg_on select u.id, r.lab from (select id, bk from nk_a where bk is null union all select id, k from nk_b where k is null) u left join (select k, max(label) as lab from nk_b group by k) r on u.bk = r.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_preserved_union_literal_off;
+
+statement ok
+delete from nk_preserved_union_literal_on;
+
+statement ok
+insert into nk_preserved_union_literal_off select u.id, b.label from (select id, null::int as bk from nk_a union all select id, k from nk_b where k is null) u left join nk_b b on u.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_union_literal_on select u.id, b.label from (select id, null::int as bk from nk_a union all select id, k from nk_b where k is null) u left join nk_b b on u.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_preserved_topn_join_off;
+
+statement ok
+delete from nk_preserved_topn_join_on;
+
+statement ok
+insert into nk_preserved_topn_join_off select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from nk_a a join nk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join nk_c c on x.bk = c.kb;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_topn_join_on select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from nk_a a join nk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join nk_c c on x.bk = c.kb;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_preserved_right_off;
+
+statement ok
+delete from nk_preserved_right_on;
+
+statement ok
+insert into nk_preserved_right_off select a.x, b.id, b.label from nk_a a right join (select * from nk_b where k is null) b on a.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_right_on select a.x, b.id, b.label from nk_a a right join (select * from nk_b where k is null) b on a.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_preserved_anti_off;
+
+statement ok
+delete from nk_preserved_anti_on;
+
+statement ok
+insert into nk_preserved_anti_off select a.id from nk_a a where a.bk is null and not exists (select 1 from nk_b b where b.k = a.bk);
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_anti_on select a.id from nk_a a where a.bk is null and not exists (select 1 from nk_b b where b.k = a.bk);
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_full_left_null_off;
+
+statement ok
+delete from nk_full_left_null_on;
+
+statement ok
+insert into nk_full_left_null_off select a.id, a.x, b.label from (select * from nk_a where bk is null) a full join nk_b b on a.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_full_left_null_on select a.id, a.x, b.label from (select * from nk_a where bk is null) a full join nk_b b on a.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_kept_one_branch_off;
+
+statement ok
+delete from nk_kept_one_branch_on;
+
+statement ok
+insert into nk_kept_one_branch_off select u.id, b.label from (select id, bk from nk_a where bk is null union all select id, k from nk_b) u left join nk_b b on u.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_kept_one_branch_on select u.id, b.label from (select id, bk from nk_a where bk is null union all select id, k from nk_b) u left join nk_b b on u.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_kept_union_indf_off;
+
+statement ok
+delete from nk_kept_union_indf_on;
+
+statement ok
+insert into nk_kept_union_indf_off select u.id, b.label from (select id, bk from nk_a where bk is null union all select id, k from nk_b where k is null) u left join nk_b b on u.bk is not distinct from b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_kept_union_indf_on select u.id, b.label from (select id, bk from nk_a where bk is null union all select id, k from nk_b where k is null) u left join nk_b b on u.bk is not distinct from b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
 delete from nk_kept_indf_off;
 
 statement ok
@@ -3720,19 +4952,19 @@ statement ok
 set batch_simplify_null_join_keys = false;
 
 statement ok
-delete from nk_kept_full_off;
+delete from nk_full_padded_off;
 
 statement ok
-delete from nk_kept_full_on;
+delete from nk_full_padded_on;
 
 statement ok
-insert into nk_kept_full_off select a.id, b.label from nk_a a full join (select * from nk_b where k is null) b on a.bk = b.k;
+insert into nk_full_padded_off select a.id, b.label from nk_a a full join (select * from nk_b where k is null) b on a.bk = b.k;
 
 statement ok
 set batch_simplify_null_join_keys = true;
 
 statement ok
-insert into nk_kept_full_on select a.id, b.label from nk_a a full join (select * from nk_b where k is null) b on a.bk = b.k;
+insert into nk_full_padded_on select a.id, b.label from nk_a a full join (select * from nk_b where k is null) b on a.bk = b.k;
 
 statement ok
 set batch_simplify_null_join_keys = false;
@@ -3792,19 +5024,19 @@ statement ok
 set batch_simplify_null_join_keys = false;
 
 statement ok
-delete from nk_kept_preserved_off;
+delete from nk_preserved_left_off;
 
 statement ok
-delete from nk_kept_preserved_on;
+delete from nk_preserved_left_on;
 
 statement ok
-insert into nk_kept_preserved_off select a.id, b.label from (select * from nk_a where bk is null) a left join nk_b b on a.bk = b.k;
+insert into nk_preserved_left_off select a.id, b.label from (select * from nk_a where bk is null) a left join nk_b b on a.bk = b.k;
 
 statement ok
 set batch_simplify_null_join_keys = true;
 
 statement ok
-insert into nk_kept_preserved_on select a.id, b.label from (select * from nk_a where bk is null) a left join nk_b b on a.bk = b.k;
+insert into nk_preserved_left_on select a.id, b.label from (select * from nk_a where bk is null) a left join nk_b b on a.bk = b.k;
 
 statement ok
 set batch_simplify_null_join_keys = false;
@@ -3967,6 +5199,70 @@ select
 
 query III
 select
+  (select count(*) from (select id, lab, count(*) as nk_rows from nk_preserved_union_agg_on group by id, lab except select id, lab, count(*) as nk_rows from nk_preserved_union_agg_off group by id, lab) x),
+  (select count(*) from (select id, lab, count(*) as nk_rows from nk_preserved_union_agg_off group by id, lab except select id, lab, count(*) as nk_rows from nk_preserved_union_agg_on group by id, lab) y),
+  (select count(*) from nk_preserved_union_agg_on) - (select count(*) from nk_preserved_union_agg_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_preserved_union_literal_on group by id, label except select id, label, count(*) as nk_rows from nk_preserved_union_literal_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_preserved_union_literal_off group by id, label except select id, label, count(*) as nk_rows from nk_preserved_union_literal_on group by id, label) y),
+  (select count(*) from nk_preserved_union_literal_on) - (select count(*) from nk_preserved_union_literal_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as nk_rows from nk_preserved_topn_join_on group by id, v except select id, v, count(*) as nk_rows from nk_preserved_topn_join_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as nk_rows from nk_preserved_topn_join_off group by id, v except select id, v, count(*) as nk_rows from nk_preserved_topn_join_on group by id, v) y),
+  (select count(*) from nk_preserved_topn_join_on) - (select count(*) from nk_preserved_topn_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, id, label, count(*) as nk_rows from nk_preserved_right_on group by x, id, label except select x, id, label, count(*) as nk_rows from nk_preserved_right_off group by x, id, label) x),
+  (select count(*) from (select x, id, label, count(*) as nk_rows from nk_preserved_right_off group by x, id, label except select x, id, label, count(*) as nk_rows from nk_preserved_right_on group by x, id, label) y),
+  (select count(*) from nk_preserved_right_on) - (select count(*) from nk_preserved_right_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, count(*) as nk_rows from nk_preserved_anti_on group by id except select id, count(*) as nk_rows from nk_preserved_anti_off group by id) x),
+  (select count(*) from (select id, count(*) as nk_rows from nk_preserved_anti_off group by id except select id, count(*) as nk_rows from nk_preserved_anti_on group by id) y),
+  (select count(*) from nk_preserved_anti_on) - (select count(*) from nk_preserved_anti_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, x, label, count(*) as nk_rows from nk_full_left_null_on group by id, x, label except select id, x, label, count(*) as nk_rows from nk_full_left_null_off group by id, x, label) x),
+  (select count(*) from (select id, x, label, count(*) as nk_rows from nk_full_left_null_off group by id, x, label except select id, x, label, count(*) as nk_rows from nk_full_left_null_on group by id, x, label) y),
+  (select count(*) from nk_full_left_null_on) - (select count(*) from nk_full_left_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_one_branch_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_one_branch_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_one_branch_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_one_branch_on group by id, label) y),
+  (select count(*) from nk_kept_one_branch_on) - (select count(*) from nk_kept_one_branch_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_union_indf_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_union_indf_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_union_indf_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_union_indf_on group by id, label) y),
+  (select count(*) from nk_kept_union_indf_on) - (select count(*) from nk_kept_union_indf_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_indf_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_indf_off group by id, label) x),
   (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_indf_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_indf_on group by id, label) y),
   (select count(*) from nk_kept_indf_on) - (select count(*) from nk_kept_indf_off);
@@ -3975,9 +5271,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_full_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_full_off group by id, label) x),
-  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_full_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_full_on group by id, label) y),
-  (select count(*) from nk_kept_full_on) - (select count(*) from nk_kept_full_off);
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_full_padded_on group by id, label except select id, label, count(*) as nk_rows from nk_full_padded_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_full_padded_off group by id, label except select id, label, count(*) as nk_rows from nk_full_padded_on group by id, label) y),
+  (select count(*) from nk_full_padded_on) - (select count(*) from nk_full_padded_off);
 ----
 0 0 0
 
@@ -4007,9 +5303,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_preserved_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_preserved_off group by id, label) x),
-  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_preserved_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_preserved_on group by id, label) y),
-  (select count(*) from nk_kept_preserved_on) - (select count(*) from nk_kept_preserved_off);
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_preserved_left_on group by id, label except select id, label, count(*) as nk_rows from nk_preserved_left_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_preserved_left_off group by id, label except select id, label, count(*) as nk_rows from nk_preserved_left_on group by id, label) y),
+  (select count(*) from nk_preserved_left_on) - (select count(*) from nk_preserved_left_off);
 ----
 0 0 0
 
@@ -4341,6 +5637,150 @@ statement ok
 set batch_simplify_null_join_keys = false;
 
 statement ok
+delete from nk_preserved_union_agg_off;
+
+statement ok
+delete from nk_preserved_union_agg_on;
+
+statement ok
+insert into nk_preserved_union_agg_off select u.id, r.lab from (select id, bk from nk_a where bk is null union all select id, k from nk_b where k is null) u left join (select k, max(label) as lab from nk_b group by k) r on u.bk = r.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_union_agg_on select u.id, r.lab from (select id, bk from nk_a where bk is null union all select id, k from nk_b where k is null) u left join (select k, max(label) as lab from nk_b group by k) r on u.bk = r.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_preserved_union_literal_off;
+
+statement ok
+delete from nk_preserved_union_literal_on;
+
+statement ok
+insert into nk_preserved_union_literal_off select u.id, b.label from (select id, null::int as bk from nk_a union all select id, k from nk_b where k is null) u left join nk_b b on u.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_union_literal_on select u.id, b.label from (select id, null::int as bk from nk_a union all select id, k from nk_b where k is null) u left join nk_b b on u.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_preserved_topn_join_off;
+
+statement ok
+delete from nk_preserved_topn_join_on;
+
+statement ok
+insert into nk_preserved_topn_join_off select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from nk_a a join nk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join nk_c c on x.bk = c.kb;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_topn_join_on select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from nk_a a join nk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join nk_c c on x.bk = c.kb;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_preserved_right_off;
+
+statement ok
+delete from nk_preserved_right_on;
+
+statement ok
+insert into nk_preserved_right_off select a.x, b.id, b.label from nk_a a right join (select * from nk_b where k is null) b on a.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_right_on select a.x, b.id, b.label from nk_a a right join (select * from nk_b where k is null) b on a.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_preserved_anti_off;
+
+statement ok
+delete from nk_preserved_anti_on;
+
+statement ok
+insert into nk_preserved_anti_off select a.id from nk_a a where a.bk is null and not exists (select 1 from nk_b b where b.k = a.bk);
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_preserved_anti_on select a.id from nk_a a where a.bk is null and not exists (select 1 from nk_b b where b.k = a.bk);
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_full_left_null_off;
+
+statement ok
+delete from nk_full_left_null_on;
+
+statement ok
+insert into nk_full_left_null_off select a.id, a.x, b.label from (select * from nk_a where bk is null) a full join nk_b b on a.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_full_left_null_on select a.id, a.x, b.label from (select * from nk_a where bk is null) a full join nk_b b on a.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_kept_one_branch_off;
+
+statement ok
+delete from nk_kept_one_branch_on;
+
+statement ok
+insert into nk_kept_one_branch_off select u.id, b.label from (select id, bk from nk_a where bk is null union all select id, k from nk_b) u left join nk_b b on u.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_kept_one_branch_on select u.id, b.label from (select id, bk from nk_a where bk is null union all select id, k from nk_b) u left join nk_b b on u.bk = b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_kept_union_indf_off;
+
+statement ok
+delete from nk_kept_union_indf_on;
+
+statement ok
+insert into nk_kept_union_indf_off select u.id, b.label from (select id, bk from nk_a where bk is null union all select id, k from nk_b where k is null) u left join nk_b b on u.bk is not distinct from b.k;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_kept_union_indf_on select u.id, b.label from (select id, bk from nk_a where bk is null union all select id, k from nk_b where k is null) u left join nk_b b on u.bk is not distinct from b.k;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
 delete from nk_kept_indf_off;
 
 statement ok
@@ -4359,19 +5799,19 @@ statement ok
 set batch_simplify_null_join_keys = false;
 
 statement ok
-delete from nk_kept_full_off;
+delete from nk_full_padded_off;
 
 statement ok
-delete from nk_kept_full_on;
+delete from nk_full_padded_on;
 
 statement ok
-insert into nk_kept_full_off select a.id, b.label from nk_a a full join (select * from nk_b where k is null) b on a.bk = b.k;
+insert into nk_full_padded_off select a.id, b.label from nk_a a full join (select * from nk_b where k is null) b on a.bk = b.k;
 
 statement ok
 set batch_simplify_null_join_keys = true;
 
 statement ok
-insert into nk_kept_full_on select a.id, b.label from nk_a a full join (select * from nk_b where k is null) b on a.bk = b.k;
+insert into nk_full_padded_on select a.id, b.label from nk_a a full join (select * from nk_b where k is null) b on a.bk = b.k;
 
 statement ok
 set batch_simplify_null_join_keys = false;
@@ -4431,19 +5871,19 @@ statement ok
 set batch_simplify_null_join_keys = false;
 
 statement ok
-delete from nk_kept_preserved_off;
+delete from nk_preserved_left_off;
 
 statement ok
-delete from nk_kept_preserved_on;
+delete from nk_preserved_left_on;
 
 statement ok
-insert into nk_kept_preserved_off select a.id, b.label from (select * from nk_a where bk is null) a left join nk_b b on a.bk = b.k;
+insert into nk_preserved_left_off select a.id, b.label from (select * from nk_a where bk is null) a left join nk_b b on a.bk = b.k;
 
 statement ok
 set batch_simplify_null_join_keys = true;
 
 statement ok
-insert into nk_kept_preserved_on select a.id, b.label from (select * from nk_a where bk is null) a left join nk_b b on a.bk = b.k;
+insert into nk_preserved_left_on select a.id, b.label from (select * from nk_a where bk is null) a left join nk_b b on a.bk = b.k;
 
 statement ok
 set batch_simplify_null_join_keys = false;
@@ -4606,6 +6046,70 @@ select
 
 query III
 select
+  (select count(*) from (select id, lab, count(*) as nk_rows from nk_preserved_union_agg_on group by id, lab except select id, lab, count(*) as nk_rows from nk_preserved_union_agg_off group by id, lab) x),
+  (select count(*) from (select id, lab, count(*) as nk_rows from nk_preserved_union_agg_off group by id, lab except select id, lab, count(*) as nk_rows from nk_preserved_union_agg_on group by id, lab) y),
+  (select count(*) from nk_preserved_union_agg_on) - (select count(*) from nk_preserved_union_agg_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_preserved_union_literal_on group by id, label except select id, label, count(*) as nk_rows from nk_preserved_union_literal_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_preserved_union_literal_off group by id, label except select id, label, count(*) as nk_rows from nk_preserved_union_literal_on group by id, label) y),
+  (select count(*) from nk_preserved_union_literal_on) - (select count(*) from nk_preserved_union_literal_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as nk_rows from nk_preserved_topn_join_on group by id, v except select id, v, count(*) as nk_rows from nk_preserved_topn_join_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as nk_rows from nk_preserved_topn_join_off group by id, v except select id, v, count(*) as nk_rows from nk_preserved_topn_join_on group by id, v) y),
+  (select count(*) from nk_preserved_topn_join_on) - (select count(*) from nk_preserved_topn_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, id, label, count(*) as nk_rows from nk_preserved_right_on group by x, id, label except select x, id, label, count(*) as nk_rows from nk_preserved_right_off group by x, id, label) x),
+  (select count(*) from (select x, id, label, count(*) as nk_rows from nk_preserved_right_off group by x, id, label except select x, id, label, count(*) as nk_rows from nk_preserved_right_on group by x, id, label) y),
+  (select count(*) from nk_preserved_right_on) - (select count(*) from nk_preserved_right_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, count(*) as nk_rows from nk_preserved_anti_on group by id except select id, count(*) as nk_rows from nk_preserved_anti_off group by id) x),
+  (select count(*) from (select id, count(*) as nk_rows from nk_preserved_anti_off group by id except select id, count(*) as nk_rows from nk_preserved_anti_on group by id) y),
+  (select count(*) from nk_preserved_anti_on) - (select count(*) from nk_preserved_anti_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, x, label, count(*) as nk_rows from nk_full_left_null_on group by id, x, label except select id, x, label, count(*) as nk_rows from nk_full_left_null_off group by id, x, label) x),
+  (select count(*) from (select id, x, label, count(*) as nk_rows from nk_full_left_null_off group by id, x, label except select id, x, label, count(*) as nk_rows from nk_full_left_null_on group by id, x, label) y),
+  (select count(*) from nk_full_left_null_on) - (select count(*) from nk_full_left_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_one_branch_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_one_branch_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_one_branch_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_one_branch_on group by id, label) y),
+  (select count(*) from nk_kept_one_branch_on) - (select count(*) from nk_kept_one_branch_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_union_indf_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_union_indf_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_union_indf_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_union_indf_on group by id, label) y),
+  (select count(*) from nk_kept_union_indf_on) - (select count(*) from nk_kept_union_indf_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_indf_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_indf_off group by id, label) x),
   (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_indf_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_indf_on group by id, label) y),
   (select count(*) from nk_kept_indf_on) - (select count(*) from nk_kept_indf_off);
@@ -4614,9 +6118,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_full_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_full_off group by id, label) x),
-  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_full_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_full_on group by id, label) y),
-  (select count(*) from nk_kept_full_on) - (select count(*) from nk_kept_full_off);
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_full_padded_on group by id, label except select id, label, count(*) as nk_rows from nk_full_padded_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_full_padded_off group by id, label except select id, label, count(*) as nk_rows from nk_full_padded_on group by id, label) y),
+  (select count(*) from nk_full_padded_on) - (select count(*) from nk_full_padded_off);
 ----
 0 0 0
 
@@ -4646,9 +6150,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_preserved_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_preserved_off group by id, label) x),
-  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_preserved_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_preserved_on group by id, label) y),
-  (select count(*) from nk_kept_preserved_on) - (select count(*) from nk_kept_preserved_off);
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_preserved_left_on group by id, label except select id, label, count(*) as nk_rows from nk_preserved_left_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_preserved_left_off group by id, label except select id, label, count(*) as nk_rows from nk_preserved_left_on group by id, label) y),
+  (select count(*) from nk_preserved_left_on) - (select count(*) from nk_preserved_left_off);
 ----
 0 0 0
 
@@ -4669,10 +6173,10 @@ statement ok
 drop table nk_kept_coalesce_off;
 
 statement ok
-drop table nk_kept_preserved_on;
+drop table nk_preserved_left_on;
 
 statement ok
-drop table nk_kept_preserved_off;
+drop table nk_preserved_left_off;
 
 statement ok
 drop table nk_kept_anti_pattern_on;
@@ -4693,16 +6197,64 @@ statement ok
 drop table nk_kept_label_off;
 
 statement ok
-drop table nk_kept_full_on;
+drop table nk_full_padded_on;
 
 statement ok
-drop table nk_kept_full_off;
+drop table nk_full_padded_off;
 
 statement ok
 drop table nk_kept_indf_on;
 
 statement ok
 drop table nk_kept_indf_off;
+
+statement ok
+drop table nk_kept_union_indf_on;
+
+statement ok
+drop table nk_kept_union_indf_off;
+
+statement ok
+drop table nk_kept_one_branch_on;
+
+statement ok
+drop table nk_kept_one_branch_off;
+
+statement ok
+drop table nk_full_left_null_on;
+
+statement ok
+drop table nk_full_left_null_off;
+
+statement ok
+drop table nk_preserved_anti_on;
+
+statement ok
+drop table nk_preserved_anti_off;
+
+statement ok
+drop table nk_preserved_right_on;
+
+statement ok
+drop table nk_preserved_right_off;
+
+statement ok
+drop table nk_preserved_topn_join_on;
+
+statement ok
+drop table nk_preserved_topn_join_off;
+
+statement ok
+drop table nk_preserved_union_literal_on;
+
+statement ok
+drop table nk_preserved_union_literal_off;
+
+statement ok
+drop table nk_preserved_union_agg_on;
+
+statement ok
+drop table nk_preserved_union_agg_off;
 
 statement ok
 drop table nk_not_in_on;
