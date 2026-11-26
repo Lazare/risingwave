@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use risingwave_common::types::{DataType, DefaultOrd, ScalarImpl};
 use risingwave_pb::plan_common::JoinType;
@@ -22,7 +22,7 @@ use super::contradictory_null_filter_rule::is_null_contradiction;
 use super::prelude::{PlanRef, *};
 use crate::expr::{Expr, ExprImpl, ExprType};
 use crate::optimizer::plan_node::generic::GenericPlanRef;
-use crate::optimizer::plan_node::{LogicalJoin, LogicalValues, PlanTreeNodeBinary};
+use crate::optimizer::plan_node::{LogicalJoin, LogicalValues, PlanNodeId, PlanTreeNodeBinary};
 use crate::utils::Condition;
 
 /// Removes the work that depends on a predicate that can never be `TRUE`.
@@ -35,49 +35,112 @@ use crate::utils::Condition;
 ///   - `FullOuter` and as-of joins are left untouched.
 ///
 /// See [`is_never_true`] for the predicates that are recognized.
-pub struct NeverTruePredicateRule;
+///
+/// For a streaming job (`create_for_stream`), a part of the plan that may carry a watermark is
+/// never replaced with an empty relation, see [`may_carry_watermark`], nor a filter or a scan
+/// that reads a table `AS OF` (the lookup side of a temporal join).
+pub struct NeverTruePredicateRule {
+    for_stream: bool,
+}
 
 impl Rule<Logical> for NeverTruePredicateRule {
     fn apply(&self, plan: PlanRef) -> Option<PlanRef> {
         if let Some(join) = plan.as_logical_join() {
-            return Self::apply_join(&plan, join);
+            return self.apply_join(&plan, join);
         }
         let predicate = if let Some(filter) = plan.as_logical_filter() {
             filter.predicate()
         } else {
             plan.as_logical_scan()?.predicate()
         };
-        is_never_true(predicate).then(|| empty_like(&plan))
+        // In streaming, the lookup side of a temporal join (a scan `AS OF`) is kept as well:
+        // replaced with an empty relation, it would turn the temporal join into a hash join,
+        // which does not pass on the watermarks of its other side.
+        (is_never_true(predicate)
+            && !(self.for_stream && (may_carry_watermark(&plan) || has_temporal_lookup(&plan))))
+        .then(|| empty_like(&plan))
     }
 }
 
 impl NeverTruePredicateRule {
+    /// For batch queries.
     pub fn create() -> BoxedRule {
-        Box::new(NeverTruePredicateRule)
+        Box::new(NeverTruePredicateRule { for_stream: false })
     }
 
-    fn apply_join(plan: &PlanRef, join: &LogicalJoin) -> Option<PlanRef> {
+    /// For streaming jobs: the parts of the plan that may carry a watermark are kept.
+    pub fn create_for_stream() -> BoxedRule {
+        Box::new(NeverTruePredicateRule { for_stream: true })
+    }
+
+    fn apply_join(&self, plan: &PlanRef, join: &LogicalJoin) -> Option<PlanRef> {
         if !is_never_true(join.on()) {
             return None;
         }
-        fold_join_without_match(plan, join)
+        fold_join_without_match(plan, join, self.for_stream)
     }
 }
 
 /// Rewrites a join whose condition never holds, see [`NeverTruePredicateRule`]. Returns `None`
 /// for the join types that are left untouched, or if the join is already in its final form.
-pub(super) fn fold_join_without_match(plan: &PlanRef, join: &LogicalJoin) -> Option<PlanRef> {
+/// With `for_stream`, also returns `None` if a part that would be removed may carry a watermark.
+pub(super) fn fold_join_without_match(
+    plan: &PlanRef,
+    join: &LogicalJoin,
+    for_stream: bool,
+) -> Option<PlanRef> {
     let (left, right) = (join.left(), join.right());
+    let removable = |removed: &PlanRef| !(for_stream && may_carry_watermark(removed));
     match join.join_type() {
-        JoinType::Inner | JoinType::LeftSemi | JoinType::RightSemi => Some(empty_like(plan)),
-        JoinType::LeftOuter | JoinType::LeftAnti if !is_empty(&right) => {
+        JoinType::Inner | JoinType::LeftSemi | JoinType::RightSemi if removable(plan) => {
+            Some(empty_like(plan))
+        }
+        JoinType::LeftOuter | JoinType::LeftAnti if !is_empty(&right) && removable(&right) => {
             Some(join.clone_with_left_right(left, empty_like(&right)).into())
         }
-        JoinType::RightOuter | JoinType::RightAnti if !is_empty(&left) => {
+        JoinType::RightOuter | JoinType::RightAnti if !is_empty(&left) && removable(&left) => {
             Some(join.clone_with_left_right(empty_like(&left), right).into())
         }
         _ => None,
     }
+}
+
+/// Whether a part of a plan reads a table `AS OF` (the lookup side of a temporal join).
+fn has_temporal_lookup(plan: &PlanRef) -> bool {
+    plan.as_logical_scan()
+        .is_some_and(|scan| scan.as_of().is_some())
+        || plan.inputs().iter().any(has_temporal_lookup)
+}
+
+/// Whether a part of a streaming plan may produce a watermark: it holds a scan of a table (or a
+/// materialized view) with a watermark column, a source with a watermark, or `now()`. Such a
+/// part is never replaced with an empty relation in a streaming job, even if it can not produce
+/// any row: the watermark may be required above it, e.g. by `EMIT ON WINDOW CLOSE`, or recorded
+/// in the watermark columns of the materialized view for the jobs that read it. Batch plans have
+/// no watermark. A shared sub-plan is visited once.
+pub(super) fn may_carry_watermark(plan: &PlanRef) -> bool {
+    fn visit(plan: &PlanRef, visited: &mut HashSet<PlanNodeId>) -> bool {
+        if !visited.insert(plan.id()) {
+            return false;
+        }
+        if plan.as_logical_now().is_some() {
+            return true;
+        }
+        if let Some(source) = plan.as_logical_source()
+            && source
+                .source_catalog()
+                .is_some_and(|catalog| !catalog.watermark_descs.is_empty())
+        {
+            return true;
+        }
+        if let Some(scan) = plan.as_logical_scan()
+            && scan.table().watermark_columns.ones().next().is_some()
+        {
+            return true;
+        }
+        plan.inputs().iter().any(|input| visit(input, visited))
+    }
+    visit(plan, &mut HashSet::new())
 }
 
 fn is_empty(plan: &PlanRef) -> bool {

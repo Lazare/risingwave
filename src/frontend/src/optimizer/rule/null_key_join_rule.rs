@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 
 use risingwave_pb::plan_common::JoinType;
 
@@ -20,7 +20,7 @@ use super::never_true_predicate_rule::fold_join_without_match;
 use super::prelude::{PlanRef, *};
 use crate::expr::{ExprImpl, ExprType};
 use crate::optimizer::plan_node::generic::GenericPlanRef;
-use crate::optimizer::plan_node::{PlanNodeId, PlanTreeNodeBinary, PlanTreeNodeUnary};
+use crate::optimizer::plan_node::{PlanTreeNodeBinary, PlanTreeNodeUnary};
 use crate::utils::Condition;
 
 /// Removes the work of a join whose condition compares with `=` a column that is `NULL` in every
@@ -58,8 +58,9 @@ use crate::utils::Condition;
 /// is `NULL`).
 ///
 /// For a streaming job (`create_for_stream`), the rule leaves the join untouched if a sub-plan
-/// that it would remove may carry a watermark (a scan of a table with a watermark, a source,
-/// `now()`): the watermark could be required above, e.g. by `EMIT ON WINDOW CLOSE`.
+/// that it would remove may carry a watermark (a scan of a table with a watermark, a source with
+/// a watermark, `now()`): the watermark could be required above, e.g. by
+/// `EMIT ON WINDOW CLOSE`.
 ///
 /// The rule is only used on demand: `batch_simplify_null_join_keys`,
 /// `streaming_simplify_null_join_keys`.
@@ -83,11 +84,11 @@ impl Rule<Logical> for NullKeyJoinRule {
     fn apply(&self, plan: PlanRef) -> Option<PlanRef> {
         let join = plan.as_logical_join()?;
         let (left, right) = (join.left(), join.right());
-        // The sides whose `NULL` columns are looked at, and the sides that the rewrite removes.
-        let (check_left, check_right, remove_left, remove_right) = match join.join_type() {
-            JoinType::Inner | JoinType::LeftSemi | JoinType::RightSemi => (true, true, true, true),
-            JoinType::LeftOuter | JoinType::LeftAnti => (false, true, false, true),
-            JoinType::RightOuter | JoinType::RightAnti => (true, false, true, false),
+        // The sides whose `NULL` columns are looked at.
+        let (check_left, check_right) = match join.join_type() {
+            JoinType::Inner | JoinType::LeftSemi | JoinType::RightSemi => (true, true),
+            JoinType::LeftOuter | JoinType::LeftAnti => (false, true),
+            JoinType::RightOuter | JoinType::RightAnti => (true, false),
             _ => return None,
         };
         let left_null = if check_left {
@@ -124,13 +125,8 @@ impl Rule<Logical> for NullKeyJoinRule {
         if !never_matches {
             return None;
         }
-        if self.for_stream
-            && ((remove_left && may_carry_watermark(&left, &mut HashSet::new()))
-                || (remove_right && may_carry_watermark(&right, &mut HashSet::new())))
-        {
-            return None;
-        }
-        fold_join_without_match(&plan, join)
+        // In streaming, the parts that may carry a watermark are kept.
+        fold_join_without_match(&plan, join, self.for_stream)
     }
 }
 
@@ -205,23 +201,4 @@ fn always_null_columns(plan: &PlanRef) -> BTreeSet<usize> {
         return always_null_columns(&share.input());
     }
     BTreeSet::new()
-}
-
-/// Whether a sub-plan may produce a watermark: it holds a scan of a table with a watermark, a
-/// source or `now()`. A shared sub-plan is visited once.
-fn may_carry_watermark(plan: &PlanRef, visited: &mut HashSet<PlanNodeId>) -> bool {
-    if !visited.insert(plan.id()) {
-        return false;
-    }
-    if plan.as_logical_now().is_some() || plan.as_logical_source().is_some() {
-        return true;
-    }
-    if let Some(scan) = plan.as_logical_scan()
-        && scan.table().watermark_columns.ones().next().is_some()
-    {
-        return true;
-    }
-    plan.inputs()
-        .iter()
-        .any(|input| may_carry_watermark(input, visited))
 }

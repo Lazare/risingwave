@@ -740,12 +740,13 @@ static STREAM_PRUNE_EMPTY_RELATION: LazyLock<OptimizationStage> = LazyLock::new(
         "Prune Empty Relation For Stream",
         vec![
             // In this order: a predicate simplified with what is known about its columns may
-            // become never true, which may empty an input of the operator above.
-            ColumnFactsSimplifyRule::create(),
-            NeverTruePredicateRule::create(),
-            EmptyRelationPropagateRule::create(),
-            EmptyInputSimplifyRule::create(),
-            ConstantRowJoinRule::create(),
+            // become never true, which may empty an input of the operator above. The streaming
+            // variants never empty a part of the plan that may carry a watermark.
+            ColumnFactsSimplifyRule::create_for_stream(),
+            NeverTruePredicateRule::create_for_stream(),
+            EmptyRelationPropagateRule::create_for_stream(),
+            EmptyInputSimplifyRule::create_for_stream(),
+            ConstantRowJoinRule::create_for_stream(),
         ],
         // Must be bottom-up so that an empty relation is propagated to the top in one pass.
         ApplyOrder::BottomUp,
@@ -760,8 +761,8 @@ static STREAM_SIMPLIFY_NULL_JOIN_KEYS: LazyLock<OptimizationStage> = LazyLock::n
         "Simplify Null Join Keys For Stream",
         vec![
             NullKeyJoinRule::create_for_stream(),
-            EmptyRelationPropagateRule::create(),
-            EmptyInputSimplifyRule::create(),
+            EmptyRelationPropagateRule::create_for_stream(),
+            EmptyInputSimplifyRule::create_for_stream(),
         ],
         // Bottom-up so that an empty relation is propagated to the top in one pass.
         ApplyOrder::BottomUp,

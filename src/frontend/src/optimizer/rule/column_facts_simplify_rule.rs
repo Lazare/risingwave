@@ -747,8 +747,13 @@ fn drop_redundant_bounds(conjuncts: &[ExprImpl]) -> Option<Vec<ExprImpl>> {
 /// The rule is only used on demand, by the streaming optimizer and by the batch one
 /// (`batch_simplify_column_facts`).
 ///
+/// For a streaming job (`create_for_stream`), a join whose condition never holds is folded only
+/// if the part it removes can not carry a watermark (see `fold_join_without_match`).
+///
 /// [`NeverTruePredicateRule`]: super::NeverTruePredicateRule
-pub struct ColumnFactsSimplifyRule;
+pub struct ColumnFactsSimplifyRule {
+    for_stream: bool,
+}
 
 impl Rule<Logical> for ColumnFactsSimplifyRule {
     fn apply(&self, plan: PlanRef) -> Option<PlanRef> {
@@ -768,10 +773,17 @@ impl Rule<Logical> for ColumnFactsSimplifyRule {
                 &table_constraint_facts(scan),
                 false,
             )?;
-            return Some(scan.clone_with_predicate(to_condition(conjuncts)).into());
+            let predicate = to_condition(conjuncts);
+            // A predicate that is never true is folded into `FALSE`, which would make the
+            // condition of the temporal join that reads this scan `AS OF` trivial: in streaming,
+            // such a scan keeps its predicate as written (it is never emptied either).
+            if self.for_stream && scan.as_of().is_some() && is_never_true(&predicate) {
+                return None;
+            }
+            return Some(scan.clone_with_predicate(predicate).into());
         }
         if let Some(join) = plan.as_logical_join() {
-            return Self::apply_join(&plan, join);
+            return self.apply_join(&plan, join);
         }
         let project = plan.as_logical_project()?;
         let input = project.input();
@@ -792,11 +804,17 @@ impl Rule<Logical> for ColumnFactsSimplifyRule {
 }
 
 impl ColumnFactsSimplifyRule {
+    /// For batch queries.
     pub fn create() -> BoxedRule {
-        Box::new(ColumnFactsSimplifyRule)
+        Box::new(ColumnFactsSimplifyRule { for_stream: false })
     }
 
-    fn apply_join(plan: &PlanRef, join: &LogicalJoin) -> Option<PlanRef> {
+    /// For streaming jobs: a part that may carry a watermark is never emptied.
+    pub fn create_for_stream() -> BoxedRule {
+        Box::new(ColumnFactsSimplifyRule { for_stream: true })
+    }
+
+    fn apply_join(&self, plan: &PlanRef, join: &LogicalJoin) -> Option<PlanRef> {
         if matches!(
             join.join_type(),
             JoinType::AsofInner | JoinType::AsofLeftOuter
@@ -826,9 +844,15 @@ impl ColumnFactsSimplifyRule {
                 .collect(),
         };
         if is_never_true(&substituted)
-            && let Some(folded) = fold_join_without_match(current, current_join)
+            && let Some(folded) = fold_join_without_match(current, current_join, self.for_stream)
         {
             return Some(folded);
+        }
+        // In streaming, a join that is not folded (a part that it would remove may carry a
+        // watermark) keeps its condition as written: a condition folded into `FALSE` would lose
+        // its equalities, and a join without them can not be planned in streaming.
+        if self.for_stream && is_never_true(current_join.on()) {
+            return None;
         }
         simplified
     }

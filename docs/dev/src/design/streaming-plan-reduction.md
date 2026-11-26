@@ -80,6 +80,17 @@ Limits that are known and accepted:
 - `IS NULL` on the key of an inner join is not simplified when the filter was already pushed below
   the join.
 - `FULL OUTER JOIN` whose condition is never true, and as-of joins, are left untouched.
+- Watermarks (fixed on the branch `proto/plan-reduction-nullkey`): a part of the plan that may
+  carry a watermark (a scan of a table or materialized view with a watermark column, a source with
+  a watermark, `now()`) is never replaced with an empty relation, whatever the rule (never-true
+  predicate, join folding, propagation, `LIMIT 0`, constant row). Nor is the lookup side of a
+  temporal join (a scan `AS OF`): emptied, it turns the temporal join into a hash join, which does
+  not pass on the watermarks of its other side; its predicate is also kept as written when it is
+  never true, and so is the condition of a join that is not folded, since a condition folded into
+  `FALSE` loses its equalities. Without this, an `EMIT ON WINDOW CLOSE` job over a temporal join
+  with a contradictory filter on the looked up side could not be planned any more. The cost: a
+  contradiction next to a temporal filter keeps the `now()` side and the dynamic filter (over an
+  empty input). Batch plans are not concerned (the batch variants of the rules are unchanged).
 
 Open points:
 
@@ -652,7 +663,8 @@ Join(Inner, a.b_ref = b.id)              Values([])
   `s.k IS NULL` above a left join on its optional side (the anti-join pattern: the filter stays
   above the join and is not read).
 - Streaming and watermarks: the rule leaves the join untouched if a sub-plan it would remove holds
-  a scan of a table with a watermark, a source or `now()`. Without this, an inner join with a
+  a scan of a table with a watermark, a source with a watermark or `now()` (the same guard as the
+  other rules of A and B in streaming, see the limits of A). Without this, an inner join with a
   temporal join's left side carrying the watermark of `EMIT ON WINDOW CLOSE` would become an
   empty `VALUES` without a watermark, and the job could no longer be planned. A left join whose
   optional side is removed keeps the watermarks of its preserved side.

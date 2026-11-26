@@ -195,7 +195,12 @@
     select * from t where ts > now() - interval '1 hour' and v1 is null and v1 = 3;
   stream_plan: |-
     StreamMaterialize { columns: [v1, v2, v3, b, f, ts, _row_id(hidden)], stream_key: [_row_id], pk_columns: [_row_id], pk_conflict: NoCheck }
-    └─StreamValues { rows: [] }
+    └─StreamProject { exprs: [t.v1, t.v2, t.v3, t.b, t.f, t.ts, _row_id] }
+      └─StreamDynamicFilter { predicate: ($expr10011 > $expr1), output_watermarks: [[$expr10011]], output: [t.v1, t.v2, t.v3, t.b, t.f, t.ts, $expr10011, _row_id], cleaned_by_watermark: true }
+        ├─StreamValues { rows: [] }
+        └─StreamExchange { dist: Broadcast }
+          └─StreamProject { exprs: [SubtractWithTimeZone(now, '01:00:00':Interval, 'UTC':Varchar) as $expr1], output_watermarks: [[$expr1]], noop_update_hint: true }
+            └─StreamNow { output: [now] }
 - name: contradiction split between a subquery and the outer filter
   before:
   - setup
@@ -1104,3 +1109,50 @@
       └─LogicalAgg { group_key: [t.v1], aggs: [last_value('set':Varchar order_by(t.ts ASC))] }
         └─LogicalProject { exprs: [t.v1, 'set':Varchar, t.ts] }
           └─LogicalScan { table: t, columns: [t.v1, t.ts] }
+- id: setup_watermark
+  sql: |
+    set streaming_prune_empty_relation = true;
+    create table wt (k int, ts timestamp, watermark for ts as ts - interval '5 minutes') append only;
+    create table d (id int primary key, k int, label varchar);
+- name: kept - temporal join under emit on window close, contradiction on the looked up side
+  before:
+  - setup_watermark
+  sql: |
+    select window_start, count(*) as n
+    from tumble(wt, ts, interval '1' hour) w
+    join d for system_time as of proctime() on w.k = d.id
+    where d.k = 1 and d.k = 2
+    group by window_start;
+  eowc_stream_plan: |-
+    StreamMaterialize { columns: [window_start, n], stream_key: [window_start], pk_columns: [window_start], pk_conflict: NoCheck, watermark_columns: [window_start] }
+    └─StreamHashAgg [append_only, eowc] { group_key: [$expr1], aggs: [count], output_watermarks: [[$expr1]] }
+      └─StreamExchange { dist: HashShard($expr1) }
+        └─StreamProject { exprs: [TumbleStart(wt.ts, '01:00:00':Interval) as $expr1, wt._row_id, wt.k], output_watermarks: [[$expr1]] }
+          └─StreamTemporalJoin { type: Inner, append_only: true, predicate: wt.k = d.id AND (d.k = 1:Int32) AND (d.k = 2:Int32), nested_loop: false, output_watermarks: [[wt.ts]], output: [wt.ts, wt._row_id, wt.k, d.id] }
+            ├─StreamExchange { dist: HashShard(wt.k) }
+            │ └─StreamTableScan { table: wt, columns: [wt.k, wt.ts, wt._row_id], stream_scan_type: ArrangementBackfill, stream_key: [wt._row_id], pk: [_row_id], dist: UpstreamHashShard(wt._row_id) }
+            └─StreamExchange [no_shuffle] { dist: UpstreamHashShard(d.id) }
+              └─StreamTableScan { table: d, columns: [d.id, d.k], stream_scan_type: UpstreamOnly, stream_key: [d.id], pk: [id], dist: UpstreamHashShard(d.id) }
+- name: kept - contradiction on a table with a watermark
+  before:
+  - setup_watermark
+  sql: |
+    select k, ts from wt where k = 1 and k = 2;
+  stream_plan: |-
+    StreamMaterialize { columns: [k, ts, wt._row_id(hidden)], stream_key: [wt._row_id], pk_columns: [wt._row_id], pk_conflict: NoCheck, watermark_columns: [ts] }
+    └─StreamFilter { predicate: false:Boolean }
+      └─StreamTableScan { table: wt, columns: [wt.k, wt.ts, wt._row_id], stream_scan_type: SnapshotBackfill, stream_key: [wt._row_id], pk: [_row_id], dist: UpstreamHashShard(wt._row_id) }
+- name: left join under emit on window close - the optional side without watermark is removed
+  before:
+  - setup_watermark
+  sql: |
+    select window_start, count(*) as n, count(d.label) as m
+    from tumble(wt, ts, interval '1' hour) w
+    left join (select * from d where k = 1 and k = 2) d on w.k = d.id
+    group by window_start;
+  eowc_stream_plan: |-
+    StreamMaterialize { columns: [window_start, n, m], stream_key: [window_start], pk_columns: [window_start], pk_conflict: NoCheck, watermark_columns: [window_start] }
+    └─StreamHashAgg [append_only, eowc] { group_key: [$expr1], aggs: [count, count(null:Varchar)], output_watermarks: [[$expr1]] }
+      └─StreamExchange { dist: HashShard($expr1) }
+        └─StreamProject { exprs: [TumbleStart(wt.ts, '01:00:00':Interval) as $expr1, null:Varchar, wt._row_id], output_watermarks: [[$expr1]] }
+          └─StreamTableScan { table: wt, columns: [wt.ts, wt._row_id], stream_scan_type: SnapshotBackfill, stream_key: [wt._row_id], pk: [_row_id], dist: UpstreamHashShard(wt._row_id) }

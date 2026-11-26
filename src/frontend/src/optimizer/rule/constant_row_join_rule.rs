@@ -16,7 +16,7 @@ use risingwave_common::types::DataType;
 use risingwave_common::util::iter_util::ZipEqFast;
 use risingwave_pb::plan_common::JoinType;
 
-use super::never_true_predicate_rule::is_never_true;
+use super::never_true_predicate_rule::{is_never_true, may_carry_watermark};
 use super::prelude::{PlanRef, *};
 use crate::expr::{Expr, ExprImpl, ExprRewriter, InputRef};
 use crate::optimizer::plan_node::generic::GenericPlanRef;
@@ -41,7 +41,14 @@ use crate::optimizer::plan_node::{
 ///
 /// The rule is only used on demand, by the streaming optimizer and by the batch one
 /// (`batch_simplify_column_facts`).
-pub struct ConstantRowJoinRule;
+///
+/// For a streaming job (`create_for_stream`), a join whose condition never holds is not replaced
+/// with an empty relation if its other side may carry a watermark, see [`may_carry_watermark`].
+///
+/// [`may_carry_watermark`]: super::never_true_predicate_rule::may_carry_watermark
+pub struct ConstantRowJoinRule {
+    for_stream: bool,
+}
 
 impl Rule<Logical> for ConstantRowJoinRule {
     fn apply(&self, plan: PlanRef) -> Option<PlanRef> {
@@ -78,6 +85,9 @@ impl Rule<Logical> for ConstantRowJoinRule {
         };
         let predicate = join.on().clone().rewrite_expr(&mut rewriter);
         if is_never_true(&predicate) {
+            if self.for_stream && may_carry_watermark(&plan) {
+                return None;
+            }
             return Some(LogicalValues::create(
                 vec![],
                 plan.schema().clone(),
@@ -98,8 +108,14 @@ impl Rule<Logical> for ConstantRowJoinRule {
 }
 
 impl ConstantRowJoinRule {
+    /// For batch queries.
     pub fn create() -> BoxedRule {
-        Box::new(ConstantRowJoinRule)
+        Box::new(ConstantRowJoinRule { for_stream: false })
+    }
+
+    /// For streaming jobs: a part that may carry a watermark is never emptied.
+    pub fn create_for_stream() -> BoxedRule {
+        Box::new(ConstantRowJoinRule { for_stream: true })
     }
 }
 
