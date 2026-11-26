@@ -1,2 +1,4 @@
 # Differential tests run by `proto-streaming-prune-check.yml`: <name> <path under e2e_test, e.g. streaming/x or batch/x> <minutes>.
 batchmem batch/spill_on_memory_wait 60
+batchtpch batch/tpch 60
+batchgrouptopn batch/top_n/group_top_n 30
