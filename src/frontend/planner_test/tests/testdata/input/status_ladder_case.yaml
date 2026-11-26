@@ -30,7 +30,7 @@
       select k, st, row_number() over (partition by k order by p desc) as rn from (
         select k, 'open' as st, 1 as p from f
         union all select k, 'paid', 2 from f where amt > 0
-        union all select k, 'refunded', 3 from f where st = 'refund'
+        union all select k, 'returned', 3 from f where st = 'back'
         union all select k, 'blocked', 4 from g
       ) u
     ) x where rn = 1;
@@ -44,7 +44,7 @@
       select k, st, row_number() over (partition by k order by p desc) as rn from (
         select k, 'open' as st, 1 as p from f
         union all select k, 'paid', 2 from f where amt > 0
-        union all select k, 'refunded', 3 from f where st = 'refund'
+        union all select k, 'returned', 3 from f where st = 'back'
         union all select k, 'blocked', 4 from g
       ) u
     ) x where rn = 1;
