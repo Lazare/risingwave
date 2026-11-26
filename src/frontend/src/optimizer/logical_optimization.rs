@@ -1309,6 +1309,10 @@ impl LogicalOptimizer {
         // windows without order, and the predicate pushdown that follows pushes the new
         // `x IS NOT NULL` into the scan.
         if ctx.session_ctx().config().batch_rewrite_lag_duplicates() {
+            // A column pruning since the last predicate pushdown (another reduction of the batch
+            // plan may prune early) may have left a projection between the filter and the window:
+            // push the filter down again so that it sits right above the window.
+            plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
             plan = plan.optimize_by_rules(&BATCH_REWRITE_LAG_DUPLICATES)?;
         }
 
