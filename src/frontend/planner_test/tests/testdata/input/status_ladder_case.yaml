@@ -1,0 +1,206 @@
+# Tests for the status ladder picked with one `CASE` (`streaming_status_ladder_case`,
+# `batch_status_ladder_case`): `StatusLadderCaseRule`.
+- id: setup
+  sql: |
+    set streaming_status_ladder_case = true;
+    set batch_status_ladder_case = true;
+    create table e (id int primary key, a int, b int, s varchar, ts timestamptz);
+    create table f (r int primary key, k int, st varchar, amt int, ts timestamptz);
+    create table g (r int primary key, k int);
+  expected_outputs: []
+- id: setup_off
+  sql: |
+    create table e (id int primary key, a int, b int, s varchar, ts timestamptz);
+    create table f (r int primary key, k int, st varchar, amt int, ts timestamptz);
+    create table g (r int primary key, k int);
+  expected_outputs: []
+- id: setup_both
+  sql: |
+    set streaming_status_ladder_case = true;
+    set streaming_merge_union_scans = true;
+    create table e (id int primary key, a int, b int, s varchar, ts timestamptz);
+    create table f (r int primary key, k int, st varchar, amt int, ts timestamptz);
+    create table g (r int primary key, k int);
+  expected_outputs: []
+
+- name: off by default - one branch per status
+  before: [setup_off]
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select k, 'open' as st, 1 as p from f
+        union all select k, 'paid', 2 from f where amt > 0
+        union all select k, 'refunded', 3 from f where st = 'refund'
+        union all select k, 'blocked', 4 from g
+      ) u
+    ) x where rn = 1;
+  expected_outputs:
+  - stream_plan
+
+- name: branches over the same table become one CASE, the other branch stays
+  before: [setup]
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select k, 'open' as st, 1 as p from f
+        union all select k, 'paid', 2 from f where amt > 0
+        union all select k, 'refunded', 3 from f where st = 'refund'
+        union all select k, 'blocked', 4 from g
+      ) u
+    ) x where rn = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+  - batch_plan
+- name: every branch reads a table unique on the key - the top-n is removed
+  before: [setup]
+  sql: |
+    select id, st from (
+      select id, st, row_number() over (partition by id order by p desc) as rn from (
+        select id, 'new' as st, 1 as p from e
+        union all select id, 'active', 2 from e where a > 0
+        union all select id, 'closed', 3 from e where s = 'closed'
+      ) u
+    ) x where rn = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+  - batch_plan
+- name: every branch reads a table unique on the key, no default branch - the top-n is removed
+  before: [setup]
+  sql: |
+    select id, st from (
+      select id, st, row_number() over (partition by id order by p desc) as rn from (
+        select id, 'active' as st, 2 as p from e where a > 0
+        union all select id, 'closed', 3 from e where b > 0
+      ) u
+    ) x where rn = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: every branch reads a table that is not unique on the key - the top-n stays
+  before: [setup]
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select k, 'open' as st, 1 as p from f
+        union all select k, 'paid', 2 from f where amt > 0
+      ) u
+    ) x where rn = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: ascending priority
+  before: [setup]
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p asc) as rn from (
+        select k, 'first' as st, 1 as p from f where amt > 10
+        union all select k, 'second', 2 from f where amt > 0
+        union all select k, 'last', 9 from f
+      ) u
+    ) x where rn = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: the priority is output too
+  before: [setup]
+  sql: |
+    select k, st, p from (
+      select k, st, p, row_number() over (partition by k order by p desc) as rn from (
+        select k, 'open' as st, 1 as p from f
+        union all select k, 'paid', 2 from f where amt > 0
+      ) u
+    ) x where rn = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: branches over the same shared sub-plan
+  before: [setup]
+  sql: |
+    with c as (select f.k, f.amt, f.st from f join g on f.k = g.k)
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select k, 'open' as st, 1 as p from c
+        union all select k, 'paid', 2 from c where amt > 0
+        union all select k, 'new', 0 from e
+      ) u
+    ) x where rn = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: the CASE is chosen over the copies of the merge of union scans
+  before: [setup_both]
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select k, 'open' as st, 1 as p from f
+        union all select k, 'paid', 2 from f where amt > 0
+        union all select k, 'blocked', 4 from g
+      ) u
+    ) x where rn = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: a branch with now() stays a separate branch in streaming
+  before: [setup]
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select k, 'open' as st, 1 as p from f
+        union all select k, 'paid', 2 from f where amt > 0
+        union all select k, 'expired', 3 from f where ts < now()
+      ) u
+    ) x where rn = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+
+- name: kept - two branches with the same priority and different statuses
+  before: [setup]
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select k, 'open' as st, 1 as p from f
+        union all select k, 'paid', 1 from f where amt > 0
+      ) u
+    ) x where rn = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - a status that is not a literal
+  before: [setup]
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select k, 'open' as st, 1 as p from f
+        union all select k, st, 2 from f where amt > 0
+      ) u
+    ) x where rn = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - the branches compute the key differently
+  before: [setup]
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select k, 'open' as st, 1 as p from f
+        union all select r, 'paid', 2 from f where amt > 0
+      ) u
+    ) x where rn = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - two rows per key
+  before: [setup]
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select k, 'open' as st, 1 as p from f
+        union all select k, 'paid', 2 from f where amt > 0
+      ) u
+    ) x where rn <= 2;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - another column of the row is output
+  before: [setup]
+  sql: |
+    select k, st, amt from (
+      select k, st, amt, row_number() over (partition by k order by p desc) as rn from (
+        select k, 'open' as st, amt, 1 as p from f
+        union all select k, 'paid', amt, 2 from f where amt > 0
+      ) u
+    ) x where rn = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_stream

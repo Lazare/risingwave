@@ -222,6 +222,9 @@ pub use apply_one_row_join_split_rule::*;
 // Rule `UnionScanMergeRule` (`streaming_merge_union_scans`).
 mod union_scan_merge_rule;
 pub use union_scan_merge_rule::*;
+// Rule `StatusLadderCaseRule` (`streaming_status_ladder_case`, `batch_status_ladder_case`).
+mod status_ladder_case_rule;
+pub use status_ladder_case_rule::*;
 mod repeated_lookup_merge_rule;
 pub use repeated_lookup_merge_rule::*;
 mod unique_key_simplify_rule;
@@ -377,6 +380,7 @@ macro_rules! for_all_rules {
             , { ApplyOneRowJoinSplitRule }
             , { UnionScanMergeRule }
             , { UnionScanShareRule }
+            , { StatusLadderCaseRule }
             , { BushyTreeJoinOrderingRule }
             , { StreamProjectMergeRule }
             , { StreamProjectSplitRule }
