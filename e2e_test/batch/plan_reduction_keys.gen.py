@@ -50,6 +50,17 @@ CASES = [
     ('kept_anti', (FACTS,), 'id int',
      f"select f.id from {F} f left join {D} d on f.dim_id = d.id where d.id is null"),
     # Unique keys.
+    # A set operation without ALL depends on every column, even those its parent does not read:
+    # pruned before it becomes an aggregation or a join, it once counted one row over no row.
+    ('count_union_distinct', ALL, 'c bigint',
+     f"select count(*) as c from (select id, name from {D} where grp is null "
+     f"union select id, label from {F} where amt is null) x"),
+    ('count_union_distinct_dups', ALL, 'c bigint',
+     f"select count(*) as c from (select dim_id, label from {F} union select grp, name from {D}) x"),
+    ('count_except', ALL, 'c bigint',
+     f"select count(*) as c from (select dim_id, label from {F} except select grp, name from {D}) x"),
+    ('one_col_intersect', ALL, 'dim_id int',
+     f"select dim_id from (select dim_id, label from {F} intersect select grp, name from {D}) x"),
     ('unused_left', (KEYS,), 'id int, amt int',
      f"select f.id, f.amt from {F} f left join {D} d on f.dim_id = d.id"),
     ('unused_left_extra', (KEYS,), 'id int, amt int',

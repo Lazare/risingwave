@@ -89,6 +89,22 @@ impl_distill_by_unit!(LogicalUnion, core, "LogicalUnion");
 
 impl ColPrunable for LogicalUnion {
     fn prune_col(&self, required_cols: &[usize], ctx: &mut ColumnPruningContext) -> PlanRef {
+        // A `UNION` without `ALL` removes the rows that are equal on every column: the columns that
+        // the parent does not read still decide which rows are duplicates, so none is pruned below
+        // it (this matters when the columns are pruned before the union becomes an aggregation).
+        if !self.all() {
+            let all_cols = (0..self.schema().len()).collect_vec();
+            let new_inputs = self
+                .inputs()
+                .iter()
+                .map(|input| input.prune_col(&all_cols, ctx))
+                .collect_vec();
+            let set_op = self.clone_with_inputs(&new_inputs);
+            if required_cols == all_cols.as_slice() {
+                return set_op;
+            }
+            return LogicalProject::with_out_col_idx(set_op, required_cols.iter().copied()).into();
+        }
         let new_inputs = self
             .inputs()
             .iter()

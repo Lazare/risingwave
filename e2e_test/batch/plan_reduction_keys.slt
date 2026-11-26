@@ -127,6 +127,30 @@ statement ok
 create table bk_kept_anti_on (id int);
 
 statement ok
+create table bk_count_union_distinct_off (c bigint);
+
+statement ok
+create table bk_count_union_distinct_on (c bigint);
+
+statement ok
+create table bk_count_union_distinct_dups_off (c bigint);
+
+statement ok
+create table bk_count_union_distinct_dups_on (c bigint);
+
+statement ok
+create table bk_count_except_off (c bigint);
+
+statement ok
+create table bk_count_except_on (c bigint);
+
+statement ok
+create table bk_one_col_intersect_off (dim_id int);
+
+statement ok
+create table bk_one_col_intersect_on (dim_id int);
+
+statement ok
 create table bk_unused_left_off (id int, amt int);
 
 statement ok
@@ -690,6 +714,126 @@ insert into bk_kept_anti_on select f.id from bk_f f left join bk_d d on f.dim_id
 
 statement ok
 set batch_simplify_column_facts = false;
+
+statement ok
+delete from bk_count_union_distinct_off;
+
+statement ok
+delete from bk_count_union_distinct_on;
+
+statement ok
+insert into bk_count_union_distinct_off select count(*) as c from (select id, name from bk_d where grp is null union select id, label from bk_f where amt is null) x;
+
+statement ok
+set batch_simplify_column_facts = true;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+set batch_merge_repeated_lookups = true;
+
+statement ok
+insert into bk_count_union_distinct_on select count(*) as c from (select id, name from bk_d where grp is null union select id, label from bk_f where amt is null) x;
+
+statement ok
+set batch_simplify_column_facts = false;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+set batch_merge_repeated_lookups = false;
+
+statement ok
+delete from bk_count_union_distinct_dups_off;
+
+statement ok
+delete from bk_count_union_distinct_dups_on;
+
+statement ok
+insert into bk_count_union_distinct_dups_off select count(*) as c from (select dim_id, label from bk_f union select grp, name from bk_d) x;
+
+statement ok
+set batch_simplify_column_facts = true;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+set batch_merge_repeated_lookups = true;
+
+statement ok
+insert into bk_count_union_distinct_dups_on select count(*) as c from (select dim_id, label from bk_f union select grp, name from bk_d) x;
+
+statement ok
+set batch_simplify_column_facts = false;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+set batch_merge_repeated_lookups = false;
+
+statement ok
+delete from bk_count_except_off;
+
+statement ok
+delete from bk_count_except_on;
+
+statement ok
+insert into bk_count_except_off select count(*) as c from (select dim_id, label from bk_f except select grp, name from bk_d) x;
+
+statement ok
+set batch_simplify_column_facts = true;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+set batch_merge_repeated_lookups = true;
+
+statement ok
+insert into bk_count_except_on select count(*) as c from (select dim_id, label from bk_f except select grp, name from bk_d) x;
+
+statement ok
+set batch_simplify_column_facts = false;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+set batch_merge_repeated_lookups = false;
+
+statement ok
+delete from bk_one_col_intersect_off;
+
+statement ok
+delete from bk_one_col_intersect_on;
+
+statement ok
+insert into bk_one_col_intersect_off select dim_id from (select dim_id, label from bk_f intersect select grp, name from bk_d) x;
+
+statement ok
+set batch_simplify_column_facts = true;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+set batch_merge_repeated_lookups = true;
+
+statement ok
+insert into bk_one_col_intersect_on select dim_id from (select dim_id, label from bk_f intersect select grp, name from bk_d) x;
+
+statement ok
+set batch_simplify_column_facts = false;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+set batch_merge_repeated_lookups = false;
 
 statement ok
 delete from bk_unused_left_off;
@@ -1735,6 +1879,38 @@ select
 
 query III
 select
+  (select count(*) from (select c, count(*) as bk_rows from bk_count_union_distinct_on group by c except select c, count(*) as bk_rows from bk_count_union_distinct_off group by c) x),
+  (select count(*) from (select c, count(*) as bk_rows from bk_count_union_distinct_off group by c except select c, count(*) as bk_rows from bk_count_union_distinct_on group by c) y),
+  (select count(*) from bk_count_union_distinct_on) - (select count(*) from bk_count_union_distinct_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select c, count(*) as bk_rows from bk_count_union_distinct_dups_on group by c except select c, count(*) as bk_rows from bk_count_union_distinct_dups_off group by c) x),
+  (select count(*) from (select c, count(*) as bk_rows from bk_count_union_distinct_dups_off group by c except select c, count(*) as bk_rows from bk_count_union_distinct_dups_on group by c) y),
+  (select count(*) from bk_count_union_distinct_dups_on) - (select count(*) from bk_count_union_distinct_dups_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select c, count(*) as bk_rows from bk_count_except_on group by c except select c, count(*) as bk_rows from bk_count_except_off group by c) x),
+  (select count(*) from (select c, count(*) as bk_rows from bk_count_except_off group by c except select c, count(*) as bk_rows from bk_count_except_on group by c) y),
+  (select count(*) from bk_count_except_on) - (select count(*) from bk_count_except_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select dim_id, count(*) as bk_rows from bk_one_col_intersect_on group by dim_id except select dim_id, count(*) as bk_rows from bk_one_col_intersect_off group by dim_id) x),
+  (select count(*) from (select dim_id, count(*) as bk_rows from bk_one_col_intersect_off group by dim_id except select dim_id, count(*) as bk_rows from bk_one_col_intersect_on group by dim_id) y),
+  (select count(*) from bk_one_col_intersect_on) - (select count(*) from bk_one_col_intersect_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, amt, count(*) as bk_rows from bk_unused_left_on group by id, amt except select id, amt, count(*) as bk_rows from bk_unused_left_off group by id, amt) x),
   (select count(*) from (select id, amt, count(*) as bk_rows from bk_unused_left_off group by id, amt except select id, amt, count(*) as bk_rows from bk_unused_left_on group by id, amt) y),
   (select count(*) from bk_unused_left_on) - (select count(*) from bk_unused_left_off);
@@ -2394,6 +2570,126 @@ insert into bk_kept_anti_on select f.id from bk_f f left join bk_d d on f.dim_id
 
 statement ok
 set batch_simplify_column_facts = false;
+
+statement ok
+delete from bk_count_union_distinct_off;
+
+statement ok
+delete from bk_count_union_distinct_on;
+
+statement ok
+insert into bk_count_union_distinct_off select count(*) as c from (select id, name from bk_d where grp is null union select id, label from bk_f where amt is null) x;
+
+statement ok
+set batch_simplify_column_facts = true;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+set batch_merge_repeated_lookups = true;
+
+statement ok
+insert into bk_count_union_distinct_on select count(*) as c from (select id, name from bk_d where grp is null union select id, label from bk_f where amt is null) x;
+
+statement ok
+set batch_simplify_column_facts = false;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+set batch_merge_repeated_lookups = false;
+
+statement ok
+delete from bk_count_union_distinct_dups_off;
+
+statement ok
+delete from bk_count_union_distinct_dups_on;
+
+statement ok
+insert into bk_count_union_distinct_dups_off select count(*) as c from (select dim_id, label from bk_f union select grp, name from bk_d) x;
+
+statement ok
+set batch_simplify_column_facts = true;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+set batch_merge_repeated_lookups = true;
+
+statement ok
+insert into bk_count_union_distinct_dups_on select count(*) as c from (select dim_id, label from bk_f union select grp, name from bk_d) x;
+
+statement ok
+set batch_simplify_column_facts = false;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+set batch_merge_repeated_lookups = false;
+
+statement ok
+delete from bk_count_except_off;
+
+statement ok
+delete from bk_count_except_on;
+
+statement ok
+insert into bk_count_except_off select count(*) as c from (select dim_id, label from bk_f except select grp, name from bk_d) x;
+
+statement ok
+set batch_simplify_column_facts = true;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+set batch_merge_repeated_lookups = true;
+
+statement ok
+insert into bk_count_except_on select count(*) as c from (select dim_id, label from bk_f except select grp, name from bk_d) x;
+
+statement ok
+set batch_simplify_column_facts = false;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+set batch_merge_repeated_lookups = false;
+
+statement ok
+delete from bk_one_col_intersect_off;
+
+statement ok
+delete from bk_one_col_intersect_on;
+
+statement ok
+insert into bk_one_col_intersect_off select dim_id from (select dim_id, label from bk_f intersect select grp, name from bk_d) x;
+
+statement ok
+set batch_simplify_column_facts = true;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+set batch_merge_repeated_lookups = true;
+
+statement ok
+insert into bk_one_col_intersect_on select dim_id from (select dim_id, label from bk_f intersect select grp, name from bk_d) x;
+
+statement ok
+set batch_simplify_column_facts = false;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+set batch_merge_repeated_lookups = false;
 
 statement ok
 delete from bk_unused_left_off;
@@ -3439,6 +3735,38 @@ select
 
 query III
 select
+  (select count(*) from (select c, count(*) as bk_rows from bk_count_union_distinct_on group by c except select c, count(*) as bk_rows from bk_count_union_distinct_off group by c) x),
+  (select count(*) from (select c, count(*) as bk_rows from bk_count_union_distinct_off group by c except select c, count(*) as bk_rows from bk_count_union_distinct_on group by c) y),
+  (select count(*) from bk_count_union_distinct_on) - (select count(*) from bk_count_union_distinct_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select c, count(*) as bk_rows from bk_count_union_distinct_dups_on group by c except select c, count(*) as bk_rows from bk_count_union_distinct_dups_off group by c) x),
+  (select count(*) from (select c, count(*) as bk_rows from bk_count_union_distinct_dups_off group by c except select c, count(*) as bk_rows from bk_count_union_distinct_dups_on group by c) y),
+  (select count(*) from bk_count_union_distinct_dups_on) - (select count(*) from bk_count_union_distinct_dups_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select c, count(*) as bk_rows from bk_count_except_on group by c except select c, count(*) as bk_rows from bk_count_except_off group by c) x),
+  (select count(*) from (select c, count(*) as bk_rows from bk_count_except_off group by c except select c, count(*) as bk_rows from bk_count_except_on group by c) y),
+  (select count(*) from bk_count_except_on) - (select count(*) from bk_count_except_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select dim_id, count(*) as bk_rows from bk_one_col_intersect_on group by dim_id except select dim_id, count(*) as bk_rows from bk_one_col_intersect_off group by dim_id) x),
+  (select count(*) from (select dim_id, count(*) as bk_rows from bk_one_col_intersect_off group by dim_id except select dim_id, count(*) as bk_rows from bk_one_col_intersect_on group by dim_id) y),
+  (select count(*) from bk_one_col_intersect_on) - (select count(*) from bk_one_col_intersect_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, amt, count(*) as bk_rows from bk_unused_left_on group by id, amt except select id, amt, count(*) as bk_rows from bk_unused_left_off group by id, amt) x),
   (select count(*) from (select id, amt, count(*) as bk_rows from bk_unused_left_off group by id, amt except select id, amt, count(*) as bk_rows from bk_unused_left_on group by id, amt) y),
   (select count(*) from bk_unused_left_on) - (select count(*) from bk_unused_left_off);
@@ -4101,6 +4429,126 @@ insert into bk_kept_anti_on select f.id from bk_f f left join bk_d d on f.dim_id
 
 statement ok
 set batch_simplify_column_facts = false;
+
+statement ok
+delete from bk_count_union_distinct_off;
+
+statement ok
+delete from bk_count_union_distinct_on;
+
+statement ok
+insert into bk_count_union_distinct_off select count(*) as c from (select id, name from bk_d where grp is null union select id, label from bk_f where amt is null) x;
+
+statement ok
+set batch_simplify_column_facts = true;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+set batch_merge_repeated_lookups = true;
+
+statement ok
+insert into bk_count_union_distinct_on select count(*) as c from (select id, name from bk_d where grp is null union select id, label from bk_f where amt is null) x;
+
+statement ok
+set batch_simplify_column_facts = false;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+set batch_merge_repeated_lookups = false;
+
+statement ok
+delete from bk_count_union_distinct_dups_off;
+
+statement ok
+delete from bk_count_union_distinct_dups_on;
+
+statement ok
+insert into bk_count_union_distinct_dups_off select count(*) as c from (select dim_id, label from bk_f union select grp, name from bk_d) x;
+
+statement ok
+set batch_simplify_column_facts = true;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+set batch_merge_repeated_lookups = true;
+
+statement ok
+insert into bk_count_union_distinct_dups_on select count(*) as c from (select dim_id, label from bk_f union select grp, name from bk_d) x;
+
+statement ok
+set batch_simplify_column_facts = false;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+set batch_merge_repeated_lookups = false;
+
+statement ok
+delete from bk_count_except_off;
+
+statement ok
+delete from bk_count_except_on;
+
+statement ok
+insert into bk_count_except_off select count(*) as c from (select dim_id, label from bk_f except select grp, name from bk_d) x;
+
+statement ok
+set batch_simplify_column_facts = true;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+set batch_merge_repeated_lookups = true;
+
+statement ok
+insert into bk_count_except_on select count(*) as c from (select dim_id, label from bk_f except select grp, name from bk_d) x;
+
+statement ok
+set batch_simplify_column_facts = false;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+set batch_merge_repeated_lookups = false;
+
+statement ok
+delete from bk_one_col_intersect_off;
+
+statement ok
+delete from bk_one_col_intersect_on;
+
+statement ok
+insert into bk_one_col_intersect_off select dim_id from (select dim_id, label from bk_f intersect select grp, name from bk_d) x;
+
+statement ok
+set batch_simplify_column_facts = true;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+set batch_merge_repeated_lookups = true;
+
+statement ok
+insert into bk_one_col_intersect_on select dim_id from (select dim_id, label from bk_f intersect select grp, name from bk_d) x;
+
+statement ok
+set batch_simplify_column_facts = false;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+set batch_merge_repeated_lookups = false;
 
 statement ok
 delete from bk_unused_left_off;
@@ -5146,6 +5594,38 @@ select
 
 query III
 select
+  (select count(*) from (select c, count(*) as bk_rows from bk_count_union_distinct_on group by c except select c, count(*) as bk_rows from bk_count_union_distinct_off group by c) x),
+  (select count(*) from (select c, count(*) as bk_rows from bk_count_union_distinct_off group by c except select c, count(*) as bk_rows from bk_count_union_distinct_on group by c) y),
+  (select count(*) from bk_count_union_distinct_on) - (select count(*) from bk_count_union_distinct_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select c, count(*) as bk_rows from bk_count_union_distinct_dups_on group by c except select c, count(*) as bk_rows from bk_count_union_distinct_dups_off group by c) x),
+  (select count(*) from (select c, count(*) as bk_rows from bk_count_union_distinct_dups_off group by c except select c, count(*) as bk_rows from bk_count_union_distinct_dups_on group by c) y),
+  (select count(*) from bk_count_union_distinct_dups_on) - (select count(*) from bk_count_union_distinct_dups_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select c, count(*) as bk_rows from bk_count_except_on group by c except select c, count(*) as bk_rows from bk_count_except_off group by c) x),
+  (select count(*) from (select c, count(*) as bk_rows from bk_count_except_off group by c except select c, count(*) as bk_rows from bk_count_except_on group by c) y),
+  (select count(*) from bk_count_except_on) - (select count(*) from bk_count_except_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select dim_id, count(*) as bk_rows from bk_one_col_intersect_on group by dim_id except select dim_id, count(*) as bk_rows from bk_one_col_intersect_off group by dim_id) x),
+  (select count(*) from (select dim_id, count(*) as bk_rows from bk_one_col_intersect_off group by dim_id except select dim_id, count(*) as bk_rows from bk_one_col_intersect_on group by dim_id) y),
+  (select count(*) from bk_one_col_intersect_on) - (select count(*) from bk_one_col_intersect_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, amt, count(*) as bk_rows from bk_unused_left_on group by id, amt except select id, amt, count(*) as bk_rows from bk_unused_left_off group by id, amt) x),
   (select count(*) from (select id, amt, count(*) as bk_rows from bk_unused_left_off group by id, amt except select id, amt, count(*) as bk_rows from bk_unused_left_on group by id, amt) y),
   (select count(*) from bk_unused_left_on) - (select count(*) from bk_unused_left_off);
@@ -5784,6 +6264,126 @@ insert into bk_kept_anti_on select f.id from bk_f f left join bk_d d on f.dim_id
 
 statement ok
 set batch_simplify_column_facts = false;
+
+statement ok
+delete from bk_count_union_distinct_off;
+
+statement ok
+delete from bk_count_union_distinct_on;
+
+statement ok
+insert into bk_count_union_distinct_off select count(*) as c from (select id, name from bk_d where grp is null union select id, label from bk_f where amt is null) x;
+
+statement ok
+set batch_simplify_column_facts = true;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+set batch_merge_repeated_lookups = true;
+
+statement ok
+insert into bk_count_union_distinct_on select count(*) as c from (select id, name from bk_d where grp is null union select id, label from bk_f where amt is null) x;
+
+statement ok
+set batch_simplify_column_facts = false;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+set batch_merge_repeated_lookups = false;
+
+statement ok
+delete from bk_count_union_distinct_dups_off;
+
+statement ok
+delete from bk_count_union_distinct_dups_on;
+
+statement ok
+insert into bk_count_union_distinct_dups_off select count(*) as c from (select dim_id, label from bk_f union select grp, name from bk_d) x;
+
+statement ok
+set batch_simplify_column_facts = true;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+set batch_merge_repeated_lookups = true;
+
+statement ok
+insert into bk_count_union_distinct_dups_on select count(*) as c from (select dim_id, label from bk_f union select grp, name from bk_d) x;
+
+statement ok
+set batch_simplify_column_facts = false;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+set batch_merge_repeated_lookups = false;
+
+statement ok
+delete from bk_count_except_off;
+
+statement ok
+delete from bk_count_except_on;
+
+statement ok
+insert into bk_count_except_off select count(*) as c from (select dim_id, label from bk_f except select grp, name from bk_d) x;
+
+statement ok
+set batch_simplify_column_facts = true;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+set batch_merge_repeated_lookups = true;
+
+statement ok
+insert into bk_count_except_on select count(*) as c from (select dim_id, label from bk_f except select grp, name from bk_d) x;
+
+statement ok
+set batch_simplify_column_facts = false;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+set batch_merge_repeated_lookups = false;
+
+statement ok
+delete from bk_one_col_intersect_off;
+
+statement ok
+delete from bk_one_col_intersect_on;
+
+statement ok
+insert into bk_one_col_intersect_off select dim_id from (select dim_id, label from bk_f intersect select grp, name from bk_d) x;
+
+statement ok
+set batch_simplify_column_facts = true;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+set batch_merge_repeated_lookups = true;
+
+statement ok
+insert into bk_one_col_intersect_on select dim_id from (select dim_id, label from bk_f intersect select grp, name from bk_d) x;
+
+statement ok
+set batch_simplify_column_facts = false;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+set batch_merge_repeated_lookups = false;
 
 statement ok
 delete from bk_unused_left_off;
@@ -6829,6 +7429,38 @@ select
 
 query III
 select
+  (select count(*) from (select c, count(*) as bk_rows from bk_count_union_distinct_on group by c except select c, count(*) as bk_rows from bk_count_union_distinct_off group by c) x),
+  (select count(*) from (select c, count(*) as bk_rows from bk_count_union_distinct_off group by c except select c, count(*) as bk_rows from bk_count_union_distinct_on group by c) y),
+  (select count(*) from bk_count_union_distinct_on) - (select count(*) from bk_count_union_distinct_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select c, count(*) as bk_rows from bk_count_union_distinct_dups_on group by c except select c, count(*) as bk_rows from bk_count_union_distinct_dups_off group by c) x),
+  (select count(*) from (select c, count(*) as bk_rows from bk_count_union_distinct_dups_off group by c except select c, count(*) as bk_rows from bk_count_union_distinct_dups_on group by c) y),
+  (select count(*) from bk_count_union_distinct_dups_on) - (select count(*) from bk_count_union_distinct_dups_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select c, count(*) as bk_rows from bk_count_except_on group by c except select c, count(*) as bk_rows from bk_count_except_off group by c) x),
+  (select count(*) from (select c, count(*) as bk_rows from bk_count_except_off group by c except select c, count(*) as bk_rows from bk_count_except_on group by c) y),
+  (select count(*) from bk_count_except_on) - (select count(*) from bk_count_except_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select dim_id, count(*) as bk_rows from bk_one_col_intersect_on group by dim_id except select dim_id, count(*) as bk_rows from bk_one_col_intersect_off group by dim_id) x),
+  (select count(*) from (select dim_id, count(*) as bk_rows from bk_one_col_intersect_off group by dim_id except select dim_id, count(*) as bk_rows from bk_one_col_intersect_on group by dim_id) y),
+  (select count(*) from bk_one_col_intersect_on) - (select count(*) from bk_one_col_intersect_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, amt, count(*) as bk_rows from bk_unused_left_on group by id, amt except select id, amt, count(*) as bk_rows from bk_unused_left_off group by id, amt) x),
   (select count(*) from (select id, amt, count(*) as bk_rows from bk_unused_left_off group by id, amt except select id, amt, count(*) as bk_rows from bk_unused_left_on group by id, amt) y),
   (select count(*) from bk_unused_left_on) - (select count(*) from bk_unused_left_off);
@@ -7528,6 +8160,30 @@ drop table bk_unused_left_on;
 
 statement ok
 drop table bk_unused_left_off;
+
+statement ok
+drop table bk_one_col_intersect_on;
+
+statement ok
+drop table bk_one_col_intersect_off;
+
+statement ok
+drop table bk_count_except_on;
+
+statement ok
+drop table bk_count_except_off;
+
+statement ok
+drop table bk_count_union_distinct_dups_on;
+
+statement ok
+drop table bk_count_union_distinct_dups_off;
+
+statement ok
+drop table bk_count_union_distinct_on;
+
+statement ok
+drop table bk_count_union_distinct_off;
 
 statement ok
 drop table bk_kept_anti_on;
