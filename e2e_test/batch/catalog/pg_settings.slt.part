@@ -27,12 +27,17 @@ user batch_enable_distributed_dml
 user batch_enable_lookup_join
 user batch_enable_sort_agg
 user batch_expr_strict_mode
+user batch_factor_union_join
 user batch_hnsw_ef_search
 user batch_merge_repeated_lookups
 user batch_parallelism
 user batch_simplify_column_facts
 user batch_simplify_on_unique_key
 user batch_rewrite_lag_duplicates
+user batch_merge_union_scans
+user batch_parallelism
+user batch_simplify_subquery_unnesting
+user batch_unnest_lateral_functions
 user bypass_cluster_limits
 user bytea_output
 user cdc_source_wait_streaming_start_timeout

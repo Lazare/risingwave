@@ -66,7 +66,8 @@ use crate::utils::{Condition, IndexSet};
 /// a projection above the join gives the value of the empty input to the outer rows that no group
 /// matched. It also applies to a scalar subquery still marked as returning at most one row (an
 /// aggregation without group key does), and only to a left outer apply, the form of a subquery in
-/// a select list or a condition.
+/// a select list or a condition. Nothing in it is specific to streaming: batch plans use it too,
+/// behind `batch_simplify_subquery_unnesting`.
 pub struct PullUpCorrelatedPredicateAggRule {
     for_stream: bool,
 }

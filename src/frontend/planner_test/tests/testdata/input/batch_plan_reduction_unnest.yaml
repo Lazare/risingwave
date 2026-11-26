@@ -1,0 +1,476 @@
+# Tests for the batch counterparts of stages of the streaming plan reduction prototype, each behind
+# its own batch variable:
+# - `batch_simplify_subquery_unnesting`: `PullUpCorrelatedPredicateAggRule::create_for_stream` and
+#   `ApplyOneRowJoinSplitRule`;
+# - `batch_unnest_lateral_functions`: `LateralTableFunctionRule::create_for_batch`,
+#   `UnnestArrayOfTableFunctionRule` and `SelfAggregateJoinRule::create_for_batch`;
+# - `batch_factor_union_join`: `CommonJoinOverUnionRule`;
+# - `batch_merge_union_scans`: `UnionScanMergeRule::create_for_batch`.
+- id: tables
+  sql: |
+    create table p (id int primary key, v int, g int);
+    create table r (id int primary key, pid int, s varchar, x int);
+    create table q (id int primary key, pid int);
+    create table u (k int, v int, arr int[]);
+    create table t (id int primary key, s varchar, c varchar, j jsonb, arr int[], arr2 int[][], n int);
+    create table w (rid int primary key, id int, j jsonb);
+    create table f (id int primary key, dim_id int, other_id int, amt int, label varchar);
+    create table d (id int primary key, name varchar, grp int, active boolean);
+    create table e (id int primary key, code varchar, ref int);
+    create table g (id int primary key, a int, b int);
+    create view dagg as select grp, count(*) as cnt, max(name) as mx from d group by grp;
+    create view dnames as select grp, string_agg(name, ',') as names from d group by grp;
+    create table m (k int primary key, a int, b int, x varchar, y varchar, flag boolean);
+    create table mw (k int, v int, ts timestamp, watermark for ts as ts - interval '1' second) append only;
+  expected_outputs: []
+- id: setup_unnest
+  sql: |
+    set batch_simplify_subquery_unnesting = true;
+  expected_outputs: []
+- id: setup_lateral
+  sql: |
+    set batch_unnest_lateral_functions = true;
+  expected_outputs: []
+- id: setup_union
+  sql: |
+    set batch_factor_union_join = true;
+  expected_outputs: []
+- id: setup_scans
+  sql: |
+    set batch_merge_union_scans = true;
+  expected_outputs: []
+
+# `batch_simplify_subquery_unnesting`.
+
+- name: off by default - EXISTS in the select list reads the outer side again for its domain
+  before: [tables]
+  sql: |
+    select p.id, exists (select 1 from r where r.pid = p.id) as e from p;
+  expected_outputs:
+  - batch_plan
+
+- name: unnesting - EXISTS in the select list
+  before: [tables, setup_unnest]
+  sql: |
+    select p.id, exists (select 1 from r where r.pid = p.id and r.s = 'x') as e from p;
+  expected_outputs:
+  - batch_plan
+
+- name: unnesting - NOT EXISTS in the select list
+  before: [tables, setup_unnest]
+  sql: |
+    select p.id, not exists (select 1 from r where r.pid = p.id) as e from p;
+  expected_outputs:
+  - batch_plan
+
+- name: unnesting - EXISTS under OR in WHERE
+  before: [tables, setup_unnest]
+  sql: |
+    select p.id from p where p.v > 0 or exists (select 1 from r where r.pid = p.id);
+  expected_outputs:
+  - batch_plan
+
+- name: unnesting - scalar min
+  before: [tables, setup_unnest]
+  sql: |
+    select p.id, (select min(r.x) from r where r.pid = p.id) as m from p;
+  expected_outputs:
+  - batch_plan
+
+- name: unnesting - scalar count, 0 when nothing matches
+  before: [tables, setup_unnest]
+  sql: |
+    select p.id, (select count(*) from r where r.pid = p.id) as c from p;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+
+- name: unnesting - two subqueries of one select list
+  before: [tables, setup_unnest]
+  sql: |
+    select p.id,
+      (select sum(r.x) from r where r.pid = p.id) as s,
+      (select count(r.x) + count(distinct r.s) from r where r.pid = p.id) as c
+    from p;
+  expected_outputs:
+  - batch_plan
+
+- name: unnesting - ARRAY subquery, an empty array when nothing matches
+  before: [tables, setup_unnest]
+  sql: |
+    select p.id, array(select r.x from r where r.pid = p.id) as xs from p;
+  expected_outputs:
+  - batch_plan
+
+- name: unnesting - count compared in WHERE
+  before: [tables, setup_unnest]
+  sql: |
+    select p.id from p where p.v = (select count(*) from r where r.pid = p.id);
+  expected_outputs:
+  - batch_plan
+
+- name: unnesting - correlated on two columns
+  before: [tables, setup_unnest]
+  sql: |
+    select p.id, (select count(*) from r where r.pid = p.id and r.x = p.v) as c from p;
+  expected_outputs:
+  - batch_plan
+
+- name: unnesting - outer side without a key
+  before: [tables, setup_unnest]
+  sql: |
+    select u.k, exists (select 1 from r where r.pid = u.k) as e from u;
+  expected_outputs:
+  - batch_plan
+
+- name: unnesting - one outer row, the whole inner table is aggregated
+  before: [tables, setup_unnest]
+  sql: |
+    select p.id, (select count(*) from r where r.pid = p.id) as c from p where p.id = 1;
+  expected_outputs:
+  - batch_plan
+
+- name: unnesting kept - correlated column in the aggregated expression
+  before: [tables, setup_unnest]
+  sql: |
+    select p.id, (select max(r.x + p.v) from r where r.pid = p.id) as m from p;
+  expected_outputs:
+  - batch_plan
+
+- name: unnesting kept - a correlated condition that is not an equality
+  before: [tables, setup_unnest]
+  sql: |
+    select p.id, (select count(*) from r where r.pid = p.id and r.x > p.v) as c from p;
+  expected_outputs:
+  - batch_plan
+
+- name: unnesting kept - IS NOT DISTINCT FROM written in the subquery
+  before: [tables, setup_unnest]
+  sql: |
+    select p.id, (select count(*) from r where r.pid is not distinct from p.id) as c from p;
+  expected_outputs:
+  - batch_plan
+
+- name: unnesting unchanged - EXISTS in a WHERE conjunction is a semi join without the variable too
+  before: [tables, setup_unnest]
+  sql: |
+    select p.id from p where exists (select 1 from r where r.pid = p.id);
+  expected_outputs:
+  - batch_plan
+
+# `batch_unnest_lateral_functions`: subqueries over set-returning functions of the outer row.
+
+- name: off by default - LEFT JOIN LATERAL over regexp_matches reads the outer side again for its domain
+  before: [tables]
+  sql: |
+    select t.id, a.x from t left join lateral (select (regexp_matches(t.s, 'A([0-9]+)'))[1] as x) as a on true;
+  expected_outputs:
+  - batch_plan
+
+- name: lateral - two LEFT JOIN LATERAL over regexp_matches, with a filter on the outer side
+  before: [tables, setup_lateral]
+  sql: |
+    select t.id, a.x, b.y
+    from t
+    left join lateral (select (regexp_matches(t.s, 'A([0-9]+)'))[1] as x) as a on true
+    left join lateral (select (regexp_matches(t.s, 'B([0-9]+)'))[1] as y) as b on true
+    where t.c = 'K';
+  expected_outputs:
+  - batch_plan
+
+- name: lateral - LEFT JOIN of unnest WITH ORDINALITY, the ordinality is NULL on the padded row
+  before: [tables, setup_lateral]
+  sql: |
+    select t.id, x.v, x.o from t left join unnest(t.arr) with ordinality as x(v, o) on true;
+  expected_outputs:
+  - batch_plan
+
+- name: lateral - ARRAY of a set-returning function of the outer row
+  before: [tables, setup_lateral]
+  sql: |
+    select t.id, array(select jsonb_array_elements_text(coalesce(t.j -> 'xs', '[]'::jsonb))) as xs from t;
+  expected_outputs:
+  - batch_plan
+
+- name: lateral - scalar sum, without the guard of streaming plans
+  before: [tables, setup_lateral]
+  sql: |
+    select t.id, (select sum((e ->> 'a')::bigint) from jsonb_array_elements(t.j -> 'ys') as e) as total from t;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+
+- name: lateral - count and EXISTS over unnest in one select list
+  before: [tables, setup_lateral]
+  sql: |
+    select t.id, (select count(*) from unnest(t.arr) as v) as c, exists (select 1 from unnest(t.arr) as v) as e from t;
+  expected_outputs:
+  - batch_plan
+
+- name: lateral - outer side without a key of its own, with duplicates
+  before: [tables, setup_lateral]
+  sql: |
+    select u.k, (select max(v) from unnest(u.arr) as v) as m from u;
+  expected_outputs:
+  - batch_plan
+
+- name: lateral - unnest of a COALESCE of an ARRAY of a set-returning function
+  before: [tables, setup_lateral]
+  sql: |
+    select t1.id, x.v
+    from (select id, coalesce(array(select jsonb_array_elements_text(coalesce(j -> 'xs', '[]'::jsonb))), array[]::text[]) as arr from t) as t1
+    join unnest(t1.arr) as x(v) on true;
+  expected_outputs:
+  - batch_plan
+
+- name: lateral - running sum over unnest WITH ORDINALITY in a lateral subquery
+  before: [tables, setup_lateral]
+  sql: |
+    select t.id, x.v, x.run
+    from t cross join lateral (
+      select v, sum(v) over (order by o rows unbounded preceding) as run
+      from unnest(t.arr) with ordinality as w(v, o)
+    ) as x;
+  expected_outputs:
+  - batch_plan
+
+- name: lateral kept - a condition inside the subquery
+  before: [tables, setup_lateral]
+  sql: |
+    select t.id, (select count(*) from unnest(t.arr) as v where v > 1) as c from t;
+  expected_outputs:
+  - batch_plan
+
+- name: lateral kept - the outer side is a UNION ALL, whose stream key is not a key of its rows yet
+  before: [tables, setup_lateral]
+  sql: |
+    select x.id, (select max(v) from unnest(x.arr) as v) as m
+    from (select id, arr from t union all select id, arr from t) as x;
+  expected_outputs:
+  - batch_plan
+
+- name: lateral kept - the outer side reads a source, whose row id is not generated in batch
+  before: [tables, setup_lateral]
+  sql: |
+    create source src (k int, arr int[]) with (
+      connector = 'kafka',
+      properties.bootstrap.server = 'fake',
+      topic = 'src'
+    ) FORMAT PLAIN ENCODE JSON;
+    select s.k, (select max(v) from unnest(s.arr) as v) as m from src as s;
+  expected_outputs:
+  - batch_plan
+
+- name: lateral fixed in streaming plans too - the outer side is a UNION ALL
+  before: [tables]
+  sql: |
+    set streaming_unnest_lateral_functions = true;
+    select x.id, (select max(v) from unnest(x.arr) as v) as m
+    from (select id, arr from t union all select id, arr from t) as x;
+  expected_outputs:
+  - stream_plan
+
+# `batch_unnest_lateral_functions`: a table joined back on its key with an aggregation of itself.
+
+- name: off by default - table joined back on its key with an aggregate over a function of itself
+  before: [tables]
+  sql: |
+    select t.id, a.m from t left join (select t2.id, max(x) as m from t t2, jsonb_array_elements_text(t2.j) as x group by t2.id) a on t.id = a.id where t.c = 'c';
+  expected_outputs:
+  - batch_plan
+
+- name: self aggregate - max over a function of the row, with a filter on the outer side
+  before: [tables, setup_lateral]
+  sql: |
+    select t.id, a.m from t left join (select t2.id, max(x) as m from t t2, jsonb_array_elements_text(t2.j) as x group by t2.id) a on t.id = a.id where t.c = 'c';
+  expected_outputs:
+  - batch_plan
+
+- name: self aggregate - sum with a default
+  before: [tables, setup_lateral]
+  sql: |
+    select t.id, coalesce(s.total, 0) as total from t left join (select t.id, sum((e ->> 'x')::bigint) as total from t cross join jsonb_array_elements(t.j) as e group by t.id) s on t.id = s.id;
+  expected_outputs:
+  - batch_plan
+
+- name: self aggregate - inner join with a child table inside, and a test of the match
+  before: [tables, setup_lateral]
+  sql: |
+    select t.id, t.n, s.sx, s.id is not null as matched from t left join (select t.id, sum(r.x) as sx from t join r on t.id = r.pid group by t.id) s on t.id = s.id;
+  expected_outputs:
+  - batch_plan
+
+- name: self aggregate - inner join, with a condition on the rows of the function
+  before: [tables, setup_lateral]
+  sql: |
+    select t.id, s.cnt from t join (select t.id, count(*) as cnt from t, unnest(t.arr) as v where v > 1 group by t.id) s on t.id = s.id;
+  expected_outputs:
+  - batch_plan
+
+- name: self aggregate kept - grouped by a column that is not the key
+  before: [tables, setup_lateral]
+  sql: |
+    select t.id, a.m from t left join (select t2.n, max(v) as m from t t2, unnest(t2.arr) as v group by t2.n) a on t.n = a.n;
+  expected_outputs:
+  - batch_plan
+
+- name: self aggregate kept - on a column that is not a proven key
+  before: [tables, setup_lateral]
+  sql: |
+    select w.id, a.m from w left join (select w2.id, max(x) as m from w w2, jsonb_array_elements_text(w2.j) as x group by w2.id) a on w.id = a.id;
+  expected_outputs:
+  - batch_plan
+
+# `batch_factor_union_join`.
+
+- name: off by default - each branch keeps its join
+  before: [tables]
+  sql: |
+    select f.id, d.name from f join d on f.dim_id = d.id
+    union all
+    select e.id, d.name from e join d on e.ref = d.id;
+  expected_outputs:
+  - batch_plan
+
+- name: union join - two branches with the same inner join
+  before: [tables, setup_union]
+  sql: |
+    select f.id, d.name from f join d on f.dim_id = d.id
+    union all
+    select e.id, d.name from e join d on e.ref = d.id;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+
+- name: union join - left joins with different projections above
+  before: [tables, setup_union]
+  sql: |
+    select f.id, f.label as txt, least(f.amt, d.grp) as n from f left join d on f.dim_id = d.id
+    union all
+    select e.id, e.code, d.grp from e left join d on e.ref = d.id;
+  expected_outputs:
+  - batch_plan
+
+- name: union join - inner joins with a different filter of the joined table in each branch
+  before: [tables, setup_union]
+  sql: |
+    select f.id, d.name from f join d on f.dim_id = d.id where d.active
+    union all
+    select e.id, d.name from e join d on e.ref = d.id where d.grp = 2;
+  expected_outputs:
+  - batch_plan
+
+- name: union join - anti joins with a different filter of the joined table
+  before: [tables, setup_union]
+  sql: |
+    select f.id, f.label from f where not exists (select 1 from d where d.id = f.dim_id and d.active)
+    union all
+    select e.id, e.code from e where not exists (select 1 from d where d.id = e.ref);
+  expected_outputs:
+  - batch_plan
+
+- name: union join - a joined side derived from an aggregating view, left joins
+  before: [tables, setup_union]
+  sql: |
+    select f.id, v.cnt, v.mx from f left join dagg v on f.amt = v.grp
+    union all
+    select e.id, v.cnt, e.code from e left join dagg v on e.ref = v.grp;
+  expected_outputs:
+  - batch_plan
+
+- name: union join - three branches, two of them share their join
+  before: [tables, setup_union]
+  sql: |
+    select f.id, d.name from f join d on f.dim_id = d.id
+    union all
+    select g.id, e.code from g join e on g.a = e.id
+    union all
+    select e.id, d.name from e join d on e.ref = d.id;
+  expected_outputs:
+  - batch_plan
+
+- name: union join kept - the joined table is compared with different columns
+  before: [tables, setup_union]
+  sql: |
+    select f.id, d.name from f join d on f.dim_id = d.id
+    union all
+    select e.id, d.name from e join d on e.ref = d.grp;
+  expected_outputs:
+  - batch_plan
+
+- name: union join kept - an aggregate that depends on the order of the rows
+  before: [tables, setup_union]
+  sql: |
+    select f.id, v.names from f join dnames v on f.amt = v.grp
+    union all
+    select e.id, v.names from e join dnames v on e.ref = v.grp;
+  expected_outputs:
+  - batch_plan
+
+# `batch_merge_union_scans`.
+
+- name: off by default - each branch scans the table
+  before: [tables]
+  sql: |
+    select a, x from m where a > 0
+    union all
+    select b, y from m where b > 0;
+  expected_outputs:
+  - batch_plan
+
+- name: union scans - two branches with a different filter and projection
+  before: [tables, setup_scans]
+  sql: |
+    select a, x from m where a > 0
+    union all
+    select b, y from m where b > 0;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+
+- name: union scans - three branches, two of them read the same table
+  before: [tables, setup_scans]
+  sql: |
+    select k, a, 'm' as src from m where a > 0
+    union all
+    select id, v, 'p' from p
+    union all
+    select k, b, 'm2' from m where b > 0;
+  expected_outputs:
+  - batch_plan
+
+- name: union scans - the same branch twice keeps its duplicates
+  before: [tables, setup_scans]
+  sql: |
+    select k, a from m where a > 0
+    union all
+    select k, a from m where a > 0;
+  expected_outputs:
+  - batch_plan
+
+- name: union scans - a table with a watermark is merged in batch
+  before: [tables, setup_scans]
+  sql: |
+    select k, v from mw where v > 0
+    union all
+    select k, -v from mw where v < 0;
+  expected_outputs:
+  - batch_plan
+
+- name: union scans kept - a branch with a join
+  before: [tables, setup_scans]
+  sql: |
+    select m.k, m.a from m where m.a > 0
+    union all
+    select m.k, p.v from m join p on m.b = p.id;
+  expected_outputs:
+  - batch_plan
+
+- name: union scans kept - union without all
+  before: [tables, setup_scans]
+  sql: |
+    select a, x from m where a > 0
+    union
+    select b, y from m where b > 0;
+  expected_outputs:
+  - batch_plan

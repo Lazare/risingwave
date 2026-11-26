@@ -35,6 +35,7 @@ own rules.
 | 10 | Sharing again, within one query, the sub-plans that became identical, or that differ by their columns or by commuting filters; aggregations of one input with different filters merged with `FILTER` | done for stateful cores (prototype, branch `proto/plan-reduction-shared-aggs`) |
 | BK | Column facts (A to G, 8), unique keys (1, 2) and repeated lookups (3) in batch queries | done (prototype, branch `proto/plan-reduction-batch-keys`, variables `batch_simplify_column_facts`, `batch_simplify_on_unique_key`, `batch_merge_repeated_lookups`) |
 | BL | Batch: duplicates found with `lag` over a window ordered by the column, counted per value instead (`batch_rewrite_lag_duplicates`) | done (prototype, branch `proto/plan-reduction-batch-lag`) |
+| B | Batch counterparts of 9, 9b, 9c, 7 and US, each behind a `batch_` variable | done (prototype, branch `proto/plan-reduction-batch-unnest`), see "Batch counterparts" |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -538,6 +539,13 @@ Not done:
 - A relation joined with an aggregate of a set-returning function of itself on its key
   (`t LEFT JOIN (SELECT t.id, max(x) FROM t, srf(t.a) x GROUP BY t.id) ON ..`): the same per-row
   aggregation once it is recognised, which needs the key of `t` and is the self-join of idea 3.
+- Found on the way, fixed (branch `proto/plan-reduction-batch-unnest`): the aggregation and the
+  window grouped by the stream key of the outer side trusted that key, but during the logical
+  optimization the stream key of a `UNION ALL` is the union of the keys of its branches; the
+  number of the branch is only added when the plan becomes a streaming plan. `SELECT x.id,
+  (SELECT max(v) FROM unnest(x.a) v) FROM (SELECT id, a FROM t UNION ALL SELECT id, a FROM t) x`
+  was grouped by `id` alone: one row per `id` instead of two. An outer side with a `UNION ALL`
+  that no aggregation or dedup re-keys now stays in the general way.
 
 ### 9c. A table joined back with an aggregation of itself on its key (added on 2026-11-25, done)
 
@@ -821,6 +829,49 @@ that the unused window functions sharing the window go away with it.
   `e2e_test/batch/rewrite_lag_duplicates.gen.py` (every query inserted into a table with and
   without the variable, multisets compared after inserts, deletes, updates, NULLs, no duplicates
   and an empty table).
+## Batch counterparts (added on 2026-11-26, done on the branch `proto/plan-reduction-batch-unnest`)
+
+Four batch variables, off by default, run the same rules in the batch optimizer
+(`gen_optimized_logical_plan_for_batch`). Batch plans are not frozen and see no retraction, but
+the general unnesting is just as costly: every query that holds such a subquery reads its outer
+side again for the domain.
+
+| Variable | Rules | Where |
+|----------|-------|-------|
+| `batch_simplify_subquery_unnesting` | `ApplyOneRowJoinSplitRule`, `PullUpCorrelatedPredicateAggRule::create_for_stream` (9) | subquery unnesting, after the simple unnesting |
+| `batch_unnest_lateral_functions` | `UnnestArrayOfTableFunctionRule`, `LateralTableFunctionRule::create_for_batch` (9b) | subquery unnesting, after the stage above |
+| | `SelfAggregateJoinRule::create_for_batch` (9c) | after the first predicate pushdown, before join ordering |
+| `batch_factor_union_join` | `CommonJoinOverUnionRule` (7) | after the first predicate pushdown, before join ordering |
+| `batch_merge_union_scans` | `UnionScanMergeRule::create_for_batch` (US) | after the first predicate pushdown, before join ordering |
+
+- Before join ordering: the joins of the branches of a union are still as written (join ordering
+  may reorder each branch differently), the filters are next to the scans, and the joins and
+  unions that the rewrites build are ordered with the rest. A stage that rewrote something is
+  followed by a predicate pushdown, so that join ordering finds the filters where it expects.
+- What differs from streaming:
+  - the variant of `PullUpCorrelatedPredicateAggRule` named "for stream" has nothing specific to
+    streaming: the `CASE` that gives `count` its 0 and `EXISTS` its false is exact in batch;
+  - `sum` evaluated per row (9b, 9c) is not guarded by a count: a batch `sum` over no value is
+    `NULL`; the guard only works around the streaming `sum` that returns 0 after retractions;
+  - the per-row aggregation of 9b needs a unique key of the outer side. In batch every leaf of the
+    outer side must be the scan of a table: the row id of a source read by a batch query is not
+    generated (it is `NULL`), so its stream key tells no rows apart;
+  - a table with a watermark is merged by `UnionScanMergeRule` (the watermark only matters to a
+    streaming union);
+  - no `UnionScanShareRule` and no sharing of identical sub-plans: a batch plan has no shared
+    sub-plan (`DAG_TO_TREE` runs first). Two copies of a view in two branches are matched by
+    `CommonJoinOverUnionRule` as equal sub-plans: in one batch query they read the same snapshot.
+- Costs to keep in mind, and why the variables stay off by default:
+  - the aggregation of an aggregating subquery covers the whole inner table, grouped by the
+    correlated columns, where the domain restricted it to the keys of the outer rows (possibly with
+    a lookup join on an index): worse for a query that keeps few outer rows of a large inner table;
+  - a merged scan reads the rows of every branch with the `OR` of their filters, and copies each
+    row once per branch before the filter of the branch: a branch that could use an index or a
+    range of the primary key alone may read more;
+  - a factored join joins the rows of every branch with the relation in one hash table.
+- Tests: planner cases in `batch_plan_reduction_unnest.yaml`, the differential batch test
+  `e2e_test/batch/plan_reduction_unnest.gen.py` (every query run as an `INSERT ... SELECT` with and
+  without its variable, the two results compared as multisets after each round of changes).
 
 ## Not for now: sharing between materialized views
 

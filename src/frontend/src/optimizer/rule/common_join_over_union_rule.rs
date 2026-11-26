@@ -30,7 +30,8 @@
 //! A join distributes over a union of its left input, for the inner, left outer, left semi and
 //! left anti joins: `(A ⋈ C) ∪ (B ⋈ C) = (A ∪ B) ⋈ C`. No key is needed. The joined relation is
 //! computed once and its join state is kept once; the rows of the branches are kept in one state
-//! instead of one per branch. Only used by the streaming optimizer, on demand.
+//! instead of one per branch. Used on demand, behind `streaming_factor_union_join` for streaming
+//! plans and `batch_factor_union_join` for batch plans.
 //!
 //! The joined relation `C` is the scan of a table, or a sub-plan (a view, a shared sub-plan,
 //! joins, aggregations) that is the same plan in every merged branch and that gives the same rows

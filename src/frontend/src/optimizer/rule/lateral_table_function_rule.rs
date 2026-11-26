@@ -13,8 +13,8 @@
 // limitations under the License.
 
 //! Per-row evaluation of the correlated subqueries that read no table, only columns of the outer
-//! row through set-returning functions. Used for streaming plans only, behind
-//! `streaming_unnest_lateral_functions`.
+//! row through set-returning functions. Used on demand, behind `streaming_unnest_lateral_functions`
+//! for streaming plans and `batch_unnest_lateral_functions` for batch plans.
 //!
 //! The general unnesting evaluates such a subquery on the distinct values of the correlated
 //! columns (the domain, read again from the outer side and aggregated), and joins the result back
@@ -79,7 +79,13 @@ use crate::utils::{Condition, IndexSet};
 ///   non-NULL values of its group while new rows come in, a streaming `sum` returns 0, not NULL.
 /// - window functions over the functions in an inner apply: the windows are partitioned by the
 ///   stream key of the outer side.
-pub struct LateralTableFunctionRule {}
+///
+/// The stream key of the outer side must be a unique key of its rows, see `has_unique_key`. The
+/// variant for batch plans (`create_for_batch`) computes `sum` as it is: a batch `sum` over no row
+/// is NULL.
+pub struct LateralTableFunctionRule {
+    for_batch: bool,
+}
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Shape {
@@ -165,6 +171,9 @@ impl Rule<Logical> for LateralTableFunctionRule {
         let stream_key: Vec<usize> = match shape {
             Shape::Plain => vec![],
             Shape::Agg | Shape::Window => {
+                if !has_unique_key(&left, self.for_batch) {
+                    return None;
+                }
                 let mut key = left.stream_key()?.to_vec();
                 key.sort_unstable();
                 key.dedup();
@@ -268,6 +277,7 @@ impl Rule<Logical> for LateralTableFunctionRule {
                             &stream_key,
                             left_len,
                             &mut rewriter,
+                            !self.for_batch,
                         );
                         offset = left_len;
                     }
@@ -288,14 +298,46 @@ impl Rule<Logical> for LateralTableFunctionRule {
 
 impl LateralTableFunctionRule {
     pub fn create() -> BoxedRule {
-        Box::new(LateralTableFunctionRule {})
+        Box::new(LateralTableFunctionRule { for_batch: false })
     }
+
+    /// The variant for batch plans, see the rule.
+    pub fn create_for_batch() -> BoxedRule {
+        Box::new(LateralTableFunctionRule { for_batch: true })
+    }
+}
+
+/// Whether the stream key of a logical plan is a unique key of its rows, so that a group or a
+/// partition keyed by it holds the rows of one row of the plan.
+///
+/// Not under a `UNION ALL`: during the logical optimization its stream key is the union of the
+/// keys of its inputs, two branches may hold rows with the same key, and the number of the branch
+/// that tells them apart is only added when the plan is converted to a streaming plan. An
+/// aggregation or a dedup is keyed by its group key whatever its input. For a batch plan, every
+/// leaf must be the scan of a table: the row id of a source that a batch query reads is not
+/// generated (it is NULL).
+fn has_unique_key(plan: &PlanRef, for_batch: bool) -> bool {
+    if plan.as_logical_union().is_some() {
+        return false;
+    }
+    if let Some(agg) = plan.as_logical_agg() {
+        return agg.grouping_sets().is_empty();
+    }
+    if plan.as_logical_dedup().is_some() {
+        return true;
+    }
+    let inputs = plan.inputs();
+    if inputs.is_empty() {
+        return !for_batch || plan.as_logical_scan().is_some();
+    }
+    inputs.iter().all(|input| has_unique_key(input, for_batch))
 }
 
 /// The aggregation of a subquery evaluated per row: grouped by the stream key of the outer side,
 /// which carries its other columns with `internal_last_seen_value`; each call is filtered on the
 /// rows that are not padded. `input` has the layout [outer columns, flag, columns of the input of
-/// the aggregation]. The result has the layout [outer columns, calls].
+/// the aggregation]. The result has the layout [outer columns, calls]. With `guard_sum`, a `sum`
+/// is NULL when it saw no non-NULL value (a streaming `sum` returns 0 once they are retracted).
 fn per_row_agg(
     calls: &[PlanAggCall],
     input: PlanRef,
@@ -303,6 +345,7 @@ fn per_row_agg(
     stream_key: &[usize],
     left_len: usize,
     rewriter: &mut CorrelatedRewriter,
+    guard_sum: bool,
 ) -> PlanRef {
     let flag = Condition::with_expr(InputRef::new(left_len, DataType::Boolean).into());
     let mut new_calls = vec![];
@@ -323,7 +366,7 @@ fn per_row_agg(
             .map(|e| rewriter.rewrite_expr(e))
             .collect();
         call.filter = Condition { conjunctions }.and(flag.clone());
-        if call.agg_type == AggType::Builtin(PbAggKind::Sum) {
+        if guard_sum && call.agg_type == AggType::Builtin(PbAggKind::Sum) {
             guards.push((
                 new_calls.len(),
                 PlanAggCall {
