@@ -859,3 +859,40 @@
     ) z on s.k = z.v1;
   expected_outputs:
   - optimized_logical_plan_for_stream
+
+# Watermarks: a part of the plan that may carry a watermark (a table or a source with a
+# watermark, `now()`) is never replaced with an empty relation.
+- id: setup_watermark
+  sql: |
+    set streaming_prune_empty_relation = true;
+    create table wt (k int, ts timestamp, watermark for ts as ts - interval '5 minutes') append only;
+    create table d (id int primary key, k int, label varchar);
+  expected_outputs: []
+- name: kept - temporal join under emit on window close, contradiction on the looked up side
+  before:
+  - setup_watermark
+  sql: |
+    select window_start, count(*) as n
+    from tumble(wt, ts, interval '1' hour) w
+    join d for system_time as of proctime() on w.k = d.id
+    where d.k = 1 and d.k = 2
+    group by window_start;
+  expected_outputs:
+  - eowc_stream_plan
+- name: kept - contradiction on a table with a watermark
+  before:
+  - setup_watermark
+  sql: |
+    select k, ts from wt where k = 1 and k = 2;
+  expected_outputs:
+  - stream_plan
+- name: left join under emit on window close - the optional side without watermark is removed
+  before:
+  - setup_watermark
+  sql: |
+    select window_start, count(*) as n, count(d.label) as m
+    from tumble(wt, ts, interval '1' hour) w
+    left join (select * from d where k = 1 and k = 2) d on w.k = d.id
+    group by window_start;
+  expected_outputs:
+  - eowc_stream_plan

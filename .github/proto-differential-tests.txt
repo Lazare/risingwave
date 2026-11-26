@@ -2,3 +2,4 @@
 nullkey batch/simplify_null_join_keys 60
 nullkeystream streaming/simplify_null_join_keys 60
 batchkeys batch/plan_reduction_keys 60
+prune streaming/prune_empty_relation 60

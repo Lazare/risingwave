@@ -9,6 +9,7 @@ Usage: python3 e2e_test/streaming/simplify_null_join_keys.gen.py e2e_test/stream
 import sys
 
 A, B, C, E, N, V = 'snk_a', 'snk_b', 'snk_c', 'snk_e', 'snk_n', 'snk_v'
+W = 'snk_w'  # append-only table with a watermark
 VAR = 'streaming_simplify_null_join_keys'
 
 # (name, columns of the result, query)
@@ -155,6 +156,37 @@ compare_all("After the right side is filled again")
 stmt(f"delete from {A}")
 stmt(f"delete from {N}")
 compare_all("After the left side is emptied")
+
+out.append("""# Watermarks: an `EMIT ON WINDOW CLOSE` job over a temporal join whose looked up side can not
+# match must still be planned, with the variable of this test and with the pruning of empty
+# relations: the left side, which carries the watermark, is never replaced with an empty relation.
+""")
+stmt(f"create table {W} (k int, ts timestamp, watermark for ts as ts - interval '5 minutes') append only")
+stmt(f"set {VAR} = true")
+stmt(f"create materialized view snk_eowc_null as select window_start, count(*) as n "
+     f"from tumble({W}, ts, interval '1' hour) w join {B} for system_time as of proctime() on w.k = {B}.id "
+     f"where {B}.id is null group by window_start emit on window close")
+stmt(f"set {VAR} = false")
+stmt("set streaming_prune_empty_relation = true")
+stmt(f"create materialized view snk_eowc_prune as select window_start, count(*) as n "
+     f"from tumble({W}, ts, interval '1' hour) w join {B} for system_time as of proctime() on w.k = {B}.id "
+     f"where {B}.k = 1 and {B}.k = 2 group by window_start emit on window close")
+stmt(f"create materialized view snk_eowc_left as select window_start, count(*) as n, count(b.label) as m "
+     f"from tumble({W}, ts, interval '1' hour) w left join (select * from {B} where k = 1 and k = 2) b "
+     f"on w.k = b.id group by window_start emit on window close")
+stmt("set streaming_prune_empty_relation = false")
+stmt(f"insert into {W} values (1, '2026-01-01 00:10:00'), (2, '2026-01-01 00:20:00'), (1, '2026-01-01 01:10:00'), "
+     f"(3, '2026-01-01 03:00:00')")
+stmt("flush")
+query('I', "select count(*) from snk_eowc_null", ["0"])
+query('I', "select count(*) from snk_eowc_prune", ["0"])
+out.append("# The windows closed by the watermark are emitted, the optional side is padded with NULLs.\n")
+query('TII', "select window_start, n, m from snk_eowc_left order by window_start",
+      ["2026-01-01 00:00:00 2 0", "2026-01-01 01:00:00 1 0"])
+stmt("drop materialized view snk_eowc_left")
+stmt("drop materialized view snk_eowc_prune")
+stmt("drop materialized view snk_eowc_null")
+stmt(f"drop table {W}")
 
 out.append("# Cleanup.\n")
 for sfx in ('on', 'off'):

@@ -16,6 +16,7 @@ use risingwave_common::types::DataType;
 use risingwave_expr::aggregate::{AggType, PbAggKind};
 use risingwave_pb::plan_common::JoinType;
 
+use super::never_true_predicate_rule::may_carry_watermark;
 use super::prelude::{PlanRef, *};
 use crate::expr::{ExprImpl, InputRef};
 use crate::optimizer::plan_node::generic::GenericPlanRef;
@@ -46,7 +47,15 @@ use crate::optimizer::plan_node::{
 /// (`batch_simplify_column_facts`).
 ///
 /// [`EmptyRelationPropagateRule`]: super::EmptyRelationPropagateRule
-pub struct EmptyInputSimplifyRule;
+///
+/// For a streaming job (`create_for_stream`), a `Limit` or `TopN` with a limit of 0 is not
+/// replaced with an empty relation if its input may carry a watermark, see
+/// [`may_carry_watermark`]. The other simplifications keep the side that is not empty.
+///
+/// [`may_carry_watermark`]: super::never_true_predicate_rule::may_carry_watermark
+pub struct EmptyInputSimplifyRule {
+    for_stream: bool,
+}
 
 fn is_empty(plan: &PlanRef) -> bool {
     plan.as_logical_values()
@@ -74,13 +83,20 @@ impl Rule<Logical> for EmptyInputSimplifyRule {
         } else {
             false
         };
-        produces_nothing.then(|| empty_like(&plan))
+        (produces_nothing && !(self.for_stream && may_carry_watermark(&plan)))
+            .then(|| empty_like(&plan))
     }
 }
 
 impl EmptyInputSimplifyRule {
+    /// For batch queries.
     pub fn create() -> BoxedRule {
-        Box::new(EmptyInputSimplifyRule)
+        Box::new(EmptyInputSimplifyRule { for_stream: false })
+    }
+
+    /// For streaming jobs: a part that may carry a watermark is never emptied.
+    pub fn create_for_stream() -> BoxedRule {
+        Box::new(EmptyInputSimplifyRule { for_stream: true })
     }
 
     fn apply_join(plan: &PlanRef, join: &LogicalJoin) -> Option<PlanRef> {

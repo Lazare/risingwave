@@ -14,6 +14,7 @@
 
 use risingwave_pb::plan_common::JoinType;
 
+use super::never_true_predicate_rule::may_carry_watermark;
 use super::prelude::{PlanRef, *};
 use crate::optimizer::PlanTreeNode;
 use crate::optimizer::plan_node::generic::GenericPlanRef;
@@ -45,8 +46,13 @@ use crate::optimizer::plan_node::{LogicalUnion, LogicalValues, PlanTreeNodeBinar
 /// and a volatile expression that is evaluated zero times can not affect the result. A runtime
 /// error that would have been raised by a removed sub-plan is no longer raised.
 ///
-/// The rule is only used by the batch optimizer.
-pub struct EmptyRelationPropagateRule;
+/// For a streaming job (`create_for_stream`), a join is not replaced with an empty relation if
+/// its other side may carry a watermark, see [`may_carry_watermark`].
+///
+/// [`may_carry_watermark`]: super::never_true_predicate_rule::may_carry_watermark
+pub struct EmptyRelationPropagateRule {
+    for_stream: bool,
+}
 
 fn is_empty(plan: &PlanRef) -> bool {
     plan.as_logical_values()
@@ -84,8 +90,9 @@ impl Rule<Logical> for EmptyRelationPropagateRule {
                     | JoinType::RightSemi
                     | JoinType::RightAnti
             );
-            return if (empty_if_left_empty && is_empty(&join.left()))
-                || (empty_if_right_empty && is_empty(&join.right()))
+            return if ((empty_if_left_empty && is_empty(&join.left()))
+                || (empty_if_right_empty && is_empty(&join.right())))
+                && !(self.for_stream && may_carry_watermark(&plan))
             {
                 to_empty()
             } else {
@@ -118,8 +125,14 @@ impl Rule<Logical> for EmptyRelationPropagateRule {
 }
 
 impl EmptyRelationPropagateRule {
+    /// For batch queries.
     pub fn create() -> BoxedRule {
-        Box::new(EmptyRelationPropagateRule)
+        Box::new(EmptyRelationPropagateRule { for_stream: false })
+    }
+
+    /// For streaming jobs: a join whose other side may carry a watermark is kept.
+    pub fn create_for_stream() -> BoxedRule {
+        Box::new(EmptyRelationPropagateRule { for_stream: true })
     }
 
     fn apply_union(plan: &PlanRef, union: &LogicalUnion) -> Option<PlanRef> {

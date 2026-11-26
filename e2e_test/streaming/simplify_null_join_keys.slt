@@ -2092,6 +2092,70 @@ select
 ----
 0 0 0
 
+# Watermarks: an `EMIT ON WINDOW CLOSE` job over a temporal join whose looked up side can not
+# match must still be planned, with the variable of this test and with the pruning of empty
+# relations: the left side, which carries the watermark, is never replaced with an empty relation.
+
+statement ok
+create table snk_w (k int, ts timestamp, watermark for ts as ts - interval '5 minutes') append only;
+
+statement ok
+set streaming_simplify_null_join_keys = true;
+
+statement ok
+create materialized view snk_eowc_null as select window_start, count(*) as n from tumble(snk_w, ts, interval '1' hour) w join snk_b for system_time as of proctime() on w.k = snk_b.id where snk_b.id is null group by window_start emit on window close;
+
+statement ok
+set streaming_simplify_null_join_keys = false;
+
+statement ok
+set streaming_prune_empty_relation = true;
+
+statement ok
+create materialized view snk_eowc_prune as select window_start, count(*) as n from tumble(snk_w, ts, interval '1' hour) w join snk_b for system_time as of proctime() on w.k = snk_b.id where snk_b.k = 1 and snk_b.k = 2 group by window_start emit on window close;
+
+statement ok
+create materialized view snk_eowc_left as select window_start, count(*) as n, count(b.label) as m from tumble(snk_w, ts, interval '1' hour) w left join (select * from snk_b where k = 1 and k = 2) b on w.k = b.id group by window_start emit on window close;
+
+statement ok
+set streaming_prune_empty_relation = false;
+
+statement ok
+insert into snk_w values (1, '2026-01-01 00:10:00'), (2, '2026-01-01 00:20:00'), (1, '2026-01-01 01:10:00'), (3, '2026-01-01 03:00:00');
+
+statement ok
+flush;
+
+query I
+select count(*) from snk_eowc_null;
+----
+0
+
+query I
+select count(*) from snk_eowc_prune;
+----
+0
+
+# The windows closed by the watermark are emitted, the optional side is padded with NULLs.
+
+query TII
+select window_start, n, m from snk_eowc_left order by window_start;
+----
+2026-01-01 00:00:00 2 0
+2026-01-01 01:00:00 1 0
+
+statement ok
+drop materialized view snk_eowc_left;
+
+statement ok
+drop materialized view snk_eowc_prune;
+
+statement ok
+drop materialized view snk_eowc_null;
+
+statement ok
+drop table snk_w;
+
 # Cleanup.
 
 statement ok
