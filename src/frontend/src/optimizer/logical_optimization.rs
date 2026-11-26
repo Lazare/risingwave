@@ -249,6 +249,47 @@ static STREAM_SIMPLE_UNNESTING_AGG: LazyLock<OptimizationStage> = LazyLock::new(
     )
 });
 
+// Batch counterparts of `STREAM_PRUNE_EMPTY_RELATION`, `STREAM_SIMPLIFY_ON_UNIQUE_KEY` and
+// `STREAM_MERGE_REPEATED_LOOKUPS`, with the same rules (`batch_simplify_column_facts`,
+// `batch_simplify_on_unique_key`, `batch_merge_repeated_lookups`), see `reduce_batch_on_keys`.
+static BATCH_SIMPLIFY_COLUMN_FACTS: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Simplify With Column Facts For Batch",
+        vec![
+            // In this order: a predicate simplified with what is known about its columns may
+            // become never true, which may empty an input of the operator above.
+            ColumnFactsSimplifyRule::create(),
+            NeverTruePredicateRule::create(),
+            EmptyRelationPropagateRule::create(),
+            EmptyInputSimplifyRule::create(),
+            ConstantRowJoinRule::create(),
+        ],
+        // Bottom-up so that an empty relation is propagated to the top in one pass.
+        ApplyOrder::BottomUp,
+    )
+});
+
+static BATCH_SIMPLIFY_ON_UNIQUE_KEY: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Simplify On Unique Key For Batch",
+        vec![
+            UnusedOuterJoinEliminateRule::create(),
+            AggOnKeyEliminateRule::create(),
+        ],
+        // Bottom-up: an operator removed below may give a key to the input of an operator above.
+        ApplyOrder::BottomUp,
+    )
+});
+
+static BATCH_MERGE_REPEATED_LOOKUPS: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Merge Repeated Lookups For Batch",
+        vec![RepeatedLookupMergeRule::create()],
+        // Bottom-up: a lookup merged below is carried by the input of the lookups above.
+        ApplyOrder::BottomUp,
+    )
+});
+
 // Rule `UnionScanMergeRule` (`streaming_merge_union_scans`).
 static STREAM_MERGE_UNION_SCANS: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
@@ -1217,6 +1258,73 @@ impl LogicalOptimizer {
         Ok(plan)
     }
 
+    /// The simplifications of the streaming plan reduction that rely on what is known about the
+    /// columns and on unique keys, applied to a batch query on demand: `batch_simplify_column_facts`
+    /// (`ColumnFactsSimplifyRule` and the rules that remove what a never-true predicate empties),
+    /// `batch_simplify_on_unique_key` (`UnusedOuterJoinEliminateRule`, `AggOnKeyEliminateRule`)
+    /// and `batch_merge_repeated_lookups` (`RepeatedLookupMergeRule`).
+    ///
+    /// Applied after subquery unnesting and the first predicate pushdown, before join ordering, so
+    /// that the joins that they remove are not ordered. The plan is a tree: the rules never meet a
+    /// shared sub-plan. `now()` is already a constant, and a scan in the past is never a lookup.
+    fn reduce_batch_on_keys(
+        mut plan: LogicalPlanRef,
+        explain_trace: bool,
+        ctx: &OptimizerContextRef,
+    ) -> Result<LogicalPlanRef> {
+        let (column_facts, unique_key, repeated_lookups) = {
+            let config = ctx.session_ctx().config();
+            (
+                config.batch_simplify_column_facts(),
+                config.batch_simplify_on_unique_key(),
+                config.batch_merge_repeated_lookups(),
+            )
+        };
+        let mut need_column_pruning = unique_key || repeated_lookups;
+        if column_facts {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&BATCH_SIMPLIFY_COLUMN_FACTS)?;
+            // A simplified filter or projection may not use a column any more.
+            need_column_pruning |= ctx.total_rule_applied() != applied_before;
+        }
+        if !need_column_pruning {
+            return Ok(plan);
+        }
+        // An outer join is only seen as unused once the columns that nobody reads are pruned, and
+        // a lookup only widens the scan that it keeps with the columns that are read.
+        plan = Self::column_pruning(plan, explain_trace, ctx);
+
+        // An operator that is removed may leave columns unused, which may in turn make a join
+        // below unused: prune the columns and try again.
+        if unique_key {
+            for _ in 0..3 {
+                let applied_before = ctx.total_rule_applied();
+                plan = plan.optimize_by_rules(&BATCH_SIMPLIFY_ON_UNIQUE_KEY)?;
+                if ctx.total_rule_applied() == applied_before {
+                    break;
+                }
+                plan = Self::column_pruning(plan, explain_trace, ctx);
+            }
+        }
+
+        // After the simplifications above, which remove the lookups that are not used at all. A
+        // rewritten join is not looked at again in the same pass: a lookup that it still holds is
+        // merged by the next pass.
+        if repeated_lookups {
+            for _ in 0..3 {
+                let applied_before = ctx.total_rule_applied();
+                plan = plan.optimize_by_rules(&BATCH_MERGE_REPEATED_LOOKUPS)?;
+                if ctx.total_rule_applied() == applied_before {
+                    break;
+                }
+                plan = Self::predicate_pushdown(plan, explain_trace, ctx);
+                plan = Self::column_pruning(plan, explain_trace, ctx);
+                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
+            }
+        }
+        Ok(plan)
+    }
+
     pub fn gen_optimized_logical_plan_for_batch(
         mut plan: LogicalPlanRef,
     ) -> Result<LogicalPlanRef> {
@@ -1269,6 +1377,11 @@ impl LogicalOptimizer {
         // Predicate Push-down
         let mut last_total_rule_applied_before_predicate_pushdown = ctx.total_rule_applied();
         plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+
+        // Simplifications with column facts and unique keys, and merge of repeated lookups, on
+        // demand (`batch_simplify_column_facts`, `batch_simplify_on_unique_key`,
+        // `batch_merge_repeated_lookups`): before join ordering.
+        plan = Self::reduce_batch_on_keys(plan, explain_trace, &ctx)?;
 
         if plan.ctx().session_ctx().config().enable_join_ordering() {
             // Merge inner joins and intermediate filters into multijoin

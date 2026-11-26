@@ -42,7 +42,8 @@ use crate::optimizer::plan_node::{
 /// - `Limit` / `TopN` with a limit of 0: empty.
 /// - `Share` of an empty relation: empty.
 ///
-/// The rule is only used by the streaming optimizer, on demand.
+/// The rule is only used on demand, by the streaming optimizer and by the batch one
+/// (`batch_simplify_column_facts`).
 ///
 /// [`EmptyRelationPropagateRule`]: super::EmptyRelationPropagateRule
 pub struct EmptyInputSimplifyRule;

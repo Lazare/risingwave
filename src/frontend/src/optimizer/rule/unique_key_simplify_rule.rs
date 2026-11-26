@@ -17,7 +17,8 @@
 //!
 //! The rules replace a stateful operator with a projection, or remove it. The result then relies
 //! on the keys being exact, where the removed operator would have tolerated or reported a
-//! duplicate. They are only used by the streaming optimizer, on demand.
+//! duplicate. They are only used on demand, by the streaming optimizer and by the batch one
+//! (`batch_simplify_on_unique_key`).
 
 use std::collections::{BTreeSet, HashMap};
 

@@ -36,8 +36,8 @@
 //!   └─Scan(d, [id, name, grp])
 //! ```
 //!
-//! A join, its two states and a scan of the table disappear. Only used by the streaming
-//! optimizer, on demand.
+//! A join, its two states and a scan of the table disappear. Only used on demand, by the
+//! streaming optimizer and by the batch one (`batch_merge_repeated_lookups`).
 //!
 //! # Vocabulary
 //!
