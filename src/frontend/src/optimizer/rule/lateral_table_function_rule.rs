@@ -391,7 +391,7 @@ fn per_row_agg(
 
 /// The aggregate calls whose value over the rows of one outer row is computed exactly by a
 /// streaming aggregation grouped by that row, with a filter.
-fn per_row_agg_call(call: &PlanAggCall) -> bool {
+pub(super) fn per_row_agg_call(call: &PlanAggCall) -> bool {
     if call.distinct {
         return false;
     }
@@ -516,7 +516,7 @@ fn build_base(
 }
 
 /// Built-in table functions, deterministic, that the rule evaluates per row.
-fn supported(table_function: &TableFunction) -> bool {
+pub(super) fn supported(table_function: &TableFunction) -> bool {
     table_function.user_defined.is_none()
         && matches!(
             table_function.function_type,
@@ -538,7 +538,7 @@ fn supported(table_function: &TableFunction) -> bool {
 }
 
 /// How to tell the padded row of an outer `ProjectSet` from the rows of a set-returning function.
-enum PaddingTest {
+pub(super) enum PaddingTest {
     /// The function never returns NULL: it is NULL on the padded row only.
     NeverNull,
     /// A function that returns as many rows, never NULL, and fails on the same rows.
@@ -546,7 +546,7 @@ enum PaddingTest {
     Unknown,
 }
 
-fn padding_test(function: &TableFunction) -> PaddingTest {
+pub(super) fn padding_test(function: &TableFunction) -> PaddingTest {
     let twin = match (function.function_type, function.args.as_slice()) {
         // `unnest` flattens a nested array, `generate_subscripts` does not.
         (TableFunctionType::Unnest, [array]) => match array.return_type() {

@@ -263,7 +263,10 @@ static STREAM_MERGE_UNION_SCANS: LazyLock<OptimizationStage> = LazyLock::new(|| 
 static STREAM_MERGE_STACKED_AGGS: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Merge Stacked Aggregations For Stream",
-        vec![StackedAggMergeRule::create()],
+        vec![
+            StackedAggMergeRule::create(),
+            StackedAggOverUnionMergeRule::create(),
+        ],
         // Bottom-up: an aggregation merged below can be merged again with the one above.
         ApplyOrder::BottomUp,
     )
@@ -280,6 +283,16 @@ static STREAM_UNNEST_ARRAY_OF_FUNCTION: LazyLock<OptimizationStage> = LazyLock::
     )
 });
 
+// A table joined back on its key with an aggregation of rows derived from itself
+// (`streaming_unnest_lateral_functions`), after the final column pruning.
+static STREAM_SELF_AGGREGATE_JOIN: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Stream Self Aggregate Join",
+        vec![SelfAggregateJoinRule::create()],
+        ApplyOrder::BottomUp,
+    )
+});
+
 static STREAM_UNNEST_LATERAL_FUNCTIONS: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Stream Unnest Lateral Functions",
@@ -287,6 +300,16 @@ static STREAM_UNNEST_LATERAL_FUNCTIONS: LazyLock<OptimizationStage> = LazyLock::
             ApplyOneRowJoinSplitRule::create(),
             LateralTableFunctionRule::create(),
         ],
+        ApplyOrder::BottomUp,
+    )
+});
+
+// Rule `UnionScanShareRule` (`streaming_share_union_scans`).
+static STREAM_SHARE_UNION_SCANS: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Share Union Scans For Stream",
+        vec![UnionScanShareRule::create()],
+        // Bottom-up: the scans of an inner union are shared before the outer union is looked at.
         ApplyOrder::BottomUp,
     )
 });
@@ -583,6 +606,19 @@ static STREAM_MERGE_REPEATED_LOOKUPS: LazyLock<OptimizationStage> = LazyLock::ne
         "Merge Repeated Lookups For Stream",
         vec![RepeatedLookupMergeRule::create()],
         // Bottom-up: a lookup merged below is carried by the input of the lookups above.
+        ApplyOrder::BottomUp,
+    )
+});
+
+// The default branch of a top-1 over a union, the unused joins below an operator that does not
+// see duplicates (`streaming_merge_lookups_under_dedup`).
+static STREAM_TOP_ONE_DEFAULT_BRANCH: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Remove Default Branch Of Top One For Stream",
+        vec![
+            TopOneDefaultBranchRule::create(),
+            UnusedJoinUnderDedupRule::create(),
+        ],
         ApplyOrder::BottomUp,
     )
 });
@@ -1010,8 +1046,33 @@ impl LogicalOptimizer {
             .streaming_merge_repeated_lookups()
             && !ctx.is_stream_prune_baseline()
         {
+            // A rewritten join is not looked at again in the same pass: a lookup that it still
+            // holds (the second of two in its right side) is merged by the next pass.
+            for _ in 0..3 {
+                let applied_before = ctx.total_rule_applied();
+                plan = plan.optimize_by_rules(&STREAM_MERGE_REPEATED_LOOKUPS)?;
+                let applied = ctx.total_rule_applied() - applied_before;
+                if applied == 0 {
+                    break;
+                }
+                ctx.add_stream_prune_rule_applied(applied);
+                plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
+            }
+        }
+
+        // Remove the default branch of a top-1 per key over a union (a status computed from
+        // candidate rows), when the other side of the join that reads it carries the row of the
+        // default branch. On demand only.
+        if ctx
+            .session_ctx()
+            .config()
+            .streaming_merge_lookups_under_dedup()
+            && !ctx.is_stream_prune_baseline()
+        {
             let applied_before = ctx.total_rule_applied();
-            plan = plan.optimize_by_rules(&STREAM_MERGE_REPEATED_LOOKUPS)?;
+            plan = plan.optimize_by_rules(&STREAM_TOP_ONE_DEFAULT_BRANCH)?;
             let applied = ctx.total_rule_applied() - applied_before;
             if applied > 0 {
                 ctx.add_stream_prune_rule_applied(applied);
@@ -1039,6 +1100,26 @@ impl LogicalOptimizer {
             }
         }
 
+        // A table joined back on its key with an aggregation, grouped by that key, of rows derived
+        // from itself (`streaming_unnest_lateral_functions`): the aggregation is evaluated on each
+        // row of the table, which is read once.
+        if ctx
+            .session_ctx()
+            .config()
+            .streaming_unnest_lateral_functions()
+            && !ctx.is_stream_prune_baseline()
+        {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&STREAM_SELF_AGGREGATE_JOIN)?;
+            let applied = ctx.total_rule_applied() - applied_before;
+            if applied > 0 {
+                ctx.add_stream_prune_rule_applied(applied);
+                plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
+            }
+        }
+
         // Rule `UnionScanMergeRule`: read once the table that several branches of a union read,
         // each with its own filter and projection. The filter that the single scan needs is then
         // pushed into it, and the columns that no branch uses are pruned.
@@ -1047,6 +1128,22 @@ impl LogicalOptimizer {
         {
             let applied_before = ctx.total_rule_applied();
             plan = plan.optimize_by_rules(&STREAM_MERGE_UNION_SCANS)?;
+            let applied = ctx.total_rule_applied() - applied_before;
+            if applied > 0 {
+                ctx.add_stream_prune_rule_applied(applied);
+                plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
+            }
+        }
+        // Rule `UnionScanShareRule`: read once, in a shared scan, a table that several branches of
+        // a union still scan after the merge above. The filters of the branches are then pushed
+        // into the shared scan, and the columns that no branch uses are pruned.
+        if ctx.session_ctx().config().streaming_share_union_scans()
+            && !ctx.is_stream_prune_baseline()
+        {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&STREAM_SHARE_UNION_SCANS)?;
             let applied = ctx.total_rule_applied() - applied_before;
             if applied > 0 {
                 ctx.add_stream_prune_rule_applied(applied);
@@ -1082,6 +1179,19 @@ impl LogicalOptimizer {
                 .streaming_share_identical_subplans()
             && !ctx.is_stream_prune_baseline()
         {
+            // Copies that differ by their columns or by filters that commute with them first:
+            // column pruning then narrows each shared core to the columns its consumers read.
+            let (shared, merged_copies) = share_widened_subplans(plan);
+            plan = shared;
+            if merged_copies > 0 {
+                ctx.add_stream_prune_rule_applied(merged_copies);
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
+                if explain_trace {
+                    ctx.trace("Share Widened Sub-plans:");
+                    ctx.trace(plan.explain_to_string());
+                }
+            }
             let (shared, new_shares) = share_identical_subplans(plan);
             plan = shared;
             if new_shares > 0 {

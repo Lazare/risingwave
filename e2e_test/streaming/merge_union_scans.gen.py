@@ -1,6 +1,6 @@
 """Generates `e2e_test/streaming/merge_union_scans.slt`, the differential test of the single read of
 a table that several branches of a union read in streaming plans: every query is materialized with
-and without `streaming_merge_union_scans`.
+and without `streaming_merge_union_scans` and `streaming_share_union_scans` (both on, or both off).
 
 Every query names its output columns c1, c2, ...: the materialized views are compared as multisets
 (each distinct row with its number of occurrences), since the rewrite must keep the duplicates.
@@ -9,7 +9,7 @@ Usage: python3 e2e_test/streaming/merge_union_scans.gen.py e2e_test/streaming/me
 """
 import sys
 
-T, U, H, N = 'mus_t', 'mus_u', 'mus_h', 'mus_n'
+T, U, H, N, M, J = 'mus_t', 'mus_u', 'mus_h', 'mus_n', 'mus_m', 'mus_j'
 
 # (name, comment, number of output columns, query)
 CASES = [
@@ -72,15 +72,35 @@ CASES = [
     ('no_key', 'a table without a primary key holding duplicate rows', 2,
      f"select k as c1, a as c2 from {N} where a > 0 "
      f"union all select a, k from {N} where k > 0 or a is null"),
-    # Unions that are kept: they must hold the same rows anyway.
-    ('kept_join', 'kept: a branch with a join', 2,
+    ('share_join', 'branches over a shared join', 2,
+     f"with c as (select {T}.k, {T}.a, {U}.c from {T} join {U} on {T}.a = {U}.a) "
+     f"select k as c1, a as c2 from c where c > 0 union all select k, c from c where a > 0"),
+    ('share_agg', 'branches over a shared aggregation', 2,
+     f"with c as (select a, count(*) as n from {T} group by a) "
+     f"select a as c1, n as c2 from c where n > 1 union all select n, a from c where a > 0"),
+    # Scans shared by branches that do more than filter and project the table.
+    ('join_plain', 'a branch with a join and a plain branch', 2,
      f"select k as c1, a as c2 from {T} where a > 0 "
      f"union all select {T}.k, {U}.c from {T} join {U} on {T}.k = {U}.k"),
+    ('left_join_plain', 'a branch with a left join and a plain branch', 2,
+     f"select t.k as c1, coalesce(m.v, 0) as c2 from {T} t left join {M} m on t.k = m.g where t.x = 'A' "
+     f"union all select t.k, 1 from {T} t where t.x = 'B'"),
+    ('two_joins', 'two joins on different columns', 2,
+     f"select t.k as c1, m.v as c2 from {T} t join {M} m on t.a = m.g and m.v > 0 "
+     f"union all select t.k, m.v from {T} t join {M} m on t.b = m.g and m.v < 0"),
+    ('srf', 'two table functions and a plain branch', 2,
+     f"select j.r as c1, x.key as c2 from {J} j cross join jsonb_each_text(j.f -> 'a') as x where kind in ('e', 'p') "
+     f"union all select j.r, x.key from {J} j cross join jsonb_each_text(j.f -> 'b') as x where kind in ('e', 'p') "
+     f"union all select r, kind from {J} where kind = 'p' and f ? 'a'"),
+    ('anti', 'an anti join in one branch', 2,
+     f"select k as c1, 'u' as c2 from {U} "
+     f"union all select t.k, 't' from {T} t where not exists (select 1 from {U} u where u.k = t.k)"),
 ]
 
 out = []
 def switch(on):
     stmt(f"set streaming_merge_union_scans = {'true' if on else 'false'}")
+    stmt(f"set streaming_share_union_scans = {'true' if on else 'false'}")
 
 def stmt(sql):
     out.append(f"statement ok\n{sql};\n")
@@ -117,6 +137,8 @@ stmt(f"create table {T} (k int primary key, a int, b int, x varchar, y varchar, 
 stmt(f"create table {U} (k int primary key, a int, c int)")
 stmt(f"create table {H} (r int primary key, k int, a int)")
 stmt(f"create table {N} (k int, a int)")
+stmt(f"create table {M} (r int primary key, g int, v int)")
+stmt(f"create table {J} (r int primary key, kind varchar, f jsonb)")
 out.append("# Rows present before the materialized views are created: they go through the backfill.\n")
 stmt(f"insert into {T} values (1, 1, 2, 'A', 'A', true), (2, 3, null, 'B', 'x', false), (3, null, 4, 'in', null, null), "
      f"(4, -1, -2, 'out', 'out', true), (5, 6, 1, null, 'y', false), (6, 0, 0, 'A', 'B', null), "
@@ -124,6 +146,9 @@ stmt(f"insert into {T} values (1, 1, 2, 'A', 'A', true), (2, 3, null, 'B', 'x', 
 stmt(f"insert into {U} values (1, 1, 5), (2, -3, 0), (3, null, 2), (10, -1, null), (11, 4, -4)")
 stmt(f"insert into {H} values (1, 1, 5), (2, 1, 20), (3, 2, 3), (4, 2, null), (5, 3, -1), (6, null, 15), (7, 4, 11), (8, 4, 2)")
 stmt(f"insert into {N} values (1, 1), (1, 1), (2, null), (2, null), (0, 3), (-1, -1), (null, 2), (null, null)")
+stmt(f"insert into {M} values (1, 1, 5), (2, 1, -5), (3, 2, null), (4, 6, 7), (5, null, 1), (6, 7, -2), (7, 3, 3)")
+stmt(f"""insert into {J} values (1, 'e', '{{"a": {{"x": 1, "y": 2}}, "b": {{"z": 3}}}}'), (2, 'p', '{{"a": {{"x": 1}}}}'), """
+     f"""(3, 'q', '{{"a": {{"w": 0}}}}'), (4, 'p', null), (5, null, '{{"b": {{"x": 1, "x2": 2}}}}'), (6, 'p', '{{"a": {{}}}}')""")
 
 for sfx in ('off', 'on'):
     switch(sfx == 'on')
@@ -162,6 +187,10 @@ stmt(f"update {U} set a = 9 where k = 3")
 stmt(f"update {H} set a = 1 where r = 2")
 stmt(f"update {H} set a = 12 where r = 3")
 stmt(f"update {N} set a = 5 where k = 2")
+stmt(f"update {M} set g = 2 where r = 1")
+stmt(f"update {M} set v = -v where r in (4, 7)")
+stmt(f"update {J} set kind = 'e' where r = 3")
+stmt(f"""update {J} set f = '{{"a": {{"n": 9}}, "b": {{"m": 8}}}}' where r = 2""")
 compare_all("After the updates")
 
 out.append("# Third round of changes: deletes, including all the copies of a duplicate row.\n")
@@ -171,6 +200,8 @@ stmt(f"delete from {U} where k = 2")
 stmt(f"delete from {H} where k = 4")
 stmt(f"delete from {N} where k = 1")
 stmt(f"delete from {N} where a is null")
+stmt(f"delete from {M} where r = 2")
+stmt(f"delete from {J} where r = 1")
 compare_all("After the deletes")
 
 out.append("# Fourth round of changes: the table is emptied and filled again.\n")
@@ -183,7 +214,7 @@ out.append("# Cleanup.\n")
 for sfx in ('on', 'off'):
     for name, _, _, _ in reversed(CASES):
         stmt(f"drop materialized view mus_{name}_{sfx}")
-for table in (N, H, U, T):
+for table in (J, M, N, H, U, T):
     stmt(f"drop table {table}")
 switch(False)
 

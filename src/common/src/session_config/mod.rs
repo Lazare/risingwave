@@ -294,6 +294,12 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     streaming_merge_repeated_lookups: bool,
 
+    /// In the plan of a new streaming job, remove what only adds duplicates that a consumer above
+    /// does not see: the default branch of a top-1 per key over a union, when the other side of
+    /// the join that reads the top-1 already carries its row. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    streaming_merge_lookups_under_dedup: bool,
+
     /// In the plan of a new streaming job, join once, above a `UNION ALL`, the table that several
     /// of its branches join on the same columns: the table is scanned once and its join state is
     /// kept once. Defaults to false.
@@ -333,6 +339,13 @@ pub struct SessionConfig {
     /// re-reading the outer side to build the set of its distinct values. Defaults to false.
     #[parameter(default = false, flags = "SESSION_INIT")]
     streaming_unnest_lateral_functions: bool,
+
+    /// In the plan of a new streaming job, read once, in a shared scan, a table that several
+    /// branches of a union scan below a join, a table function or anything else: each branch
+    /// filters and projects the shared scan as its own scan did. Fewer scans and backfills, but
+    /// one more fragment per shared scan. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    streaming_share_union_scans: bool,
 
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]

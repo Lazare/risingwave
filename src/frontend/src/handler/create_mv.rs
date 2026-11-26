@@ -377,6 +377,7 @@ pub(crate) fn gen_create_mv_graph(
         config.streaming_prune_empty_relation()
             || config.streaming_simplify_on_unique_key()
             || config.streaming_merge_repeated_lookups()
+            || config.streaming_merge_lookups_under_dedup()
             || config.streaming_factor_union_join()
             || config.streaming_simplify_subquery_unnesting()
             // Rule `UnionScanMergeRule`.
@@ -384,6 +385,8 @@ pub(crate) fn gen_create_mv_graph(
             || config.streaming_merge_stacked_aggregations()
             || config.streaming_share_identical_subplans()
             || config.streaming_unnest_lateral_functions()
+            // Rule `UnionScanShareRule`.
+            || config.streaming_share_union_scans()
     };
     let baseline_args = prune_enabled.then(|| {
         (

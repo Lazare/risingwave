@@ -230,8 +230,18 @@ pub use identical_subplan_share::*;
 // Per-row evaluation of lateral set-returning functions (`streaming_unnest_lateral_functions`).
 mod lateral_table_function_rule;
 pub use lateral_table_function_rule::*;
+mod self_aggregate_join_rule;
+pub use self_aggregate_join_rule::*;
+mod widened_subplan_share;
+pub use widened_subplan_share::*;
 mod repeated_lookup_merge_rule;
 pub use repeated_lookup_merge_rule::*;
+// The default branch of a top-1 over a union, the unused joins below an operator that does not
+// see duplicates (`streaming_merge_lookups_under_dedup`).
+mod top_one_default_branch_rule;
+pub use top_one_default_branch_rule::*;
+mod unused_join_under_dedup_rule;
+pub use unused_join_under_dedup_rule::*;
 mod unique_key_simplify_rule;
 pub use unique_key_simplify_rule::*;
 mod join_project_transpose_rule;
@@ -381,12 +391,17 @@ macro_rules! for_all_rules {
             , { UnusedOuterJoinEliminateRule }
             , { AggOnKeyEliminateRule }
             , { RepeatedLookupMergeRule }
+            , { TopOneDefaultBranchRule }
+            , { UnusedJoinUnderDedupRule }
             , { CommonJoinOverUnionRule }
             , { ApplyOneRowJoinSplitRule }
             , { UnionScanMergeRule }
             , { StackedAggMergeRule }
             , { LateralTableFunctionRule }
             , { UnnestArrayOfTableFunctionRule }
+            , { UnionScanShareRule }
+            , { SelfAggregateJoinRule }
+            , { StackedAggOverUnionMergeRule }
             , { BushyTreeJoinOrderingRule }
             , { StreamProjectMergeRule }
             , { StreamProjectSplitRule }

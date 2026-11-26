@@ -82,6 +82,7 @@ user streaming_factor_union_join
 user streaming_force_filter_inside_join
 user streaming_join_encoding
 user streaming_max_parallelism
+user streaming_merge_lookups_under_dedup
 user streaming_merge_repeated_lookups
 user streaming_merge_stacked_aggregations
 user streaming_merge_union_scans
@@ -99,6 +100,7 @@ user streaming_prune_empty_relation
 user streaming_separate_consecutive_join
 user streaming_separate_sink
 user streaming_share_identical_subplans
+user streaming_share_union_scans
 user streaming_simplify_on_unique_key
 user streaming_simplify_subquery_unnesting
 user streaming_sync_log_store_buffer_size

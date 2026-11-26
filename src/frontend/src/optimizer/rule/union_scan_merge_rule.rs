@@ -36,9 +36,15 @@
 //! The table is scanned and backfilled once instead of once per branch. Only used by the
 //! streaming optimizer, on demand.
 //!
-//! The branches that are merged read either the same shared sub-plan (`Share`) of the scan of a
-//! table, which stays shared with its other consumers, or a scan of the same table. Branches that
-//! read anything else (a join, an aggregation, a table function) are kept as they are.
+//! The branches that are merged read either the same shared sub-plan (`Share`), whatever it
+//! computes, which stays shared with its other consumers, or a scan of the same table.
+//!
+//! The branches that are not merged this way (a join, a table function above the scan of a
+//! table) still read the same table in several places: [`UnionScanShareRule`], behind its own
+//! variable `streaming_share_union_scans`, then reads it once, in a shared scan that each of them
+//! filters and projects as its own scan did.
+
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use risingwave_common::catalog::TableId;
 use risingwave_common::types::DataType;
@@ -46,13 +52,14 @@ use risingwave_common::util::iter_util::ZipEqFast;
 
 use super::prelude::{PlanRef, *};
 use super::repeated_lookup_merge_rule::{
-    PureScan, and_all, map_input_refs, pure_scan, referred_columns,
+    PureScan, and_all, map_input_refs, pure_scan, referred_columns, table_column,
 };
+use crate::catalog::table_catalog::TableType;
 use crate::expr::{Expr, ExprImpl, ExprType, FunctionCall, InputRef};
 use crate::optimizer::plan_node::generic::GenericPlanRef;
 use crate::optimizer::plan_node::{
-    LogicalExpand, LogicalFilter, LogicalProject, LogicalScan, LogicalUnion, PlanNodeId,
-    PlanTreeNodeUnary,
+    LogicalExpand, LogicalFilter, LogicalProject, LogicalScan, LogicalShare, LogicalUnion,
+    PlanNodeId, PlanTreeNodeUnary,
 };
 use crate::utils::Condition;
 
@@ -87,6 +94,26 @@ fn has_watermark(pure: &PureScan) -> bool {
     pure.scan.table().watermark_columns.ones().next().is_some()
 }
 
+/// Whether the content of a shared sub-plan may be read by merged branches: nothing in it may
+/// carry a watermark (a scan of a table with a watermark, a source, `now()`), for the same reason
+/// as [`has_watermark`].
+fn is_mergeable_share_content(plan: &PlanRef, visited: &mut HashSet<PlanNodeId>) -> bool {
+    if !visited.insert(plan.id()) {
+        return true;
+    }
+    if plan.as_logical_now().is_some() || plan.as_logical_source().is_some() {
+        return false;
+    }
+    if let Some(scan) = plan.as_logical_scan()
+        && scan.table().watermark_columns.ones().next().is_some()
+    {
+        return false;
+    }
+    plan.inputs()
+        .iter()
+        .all(|input| is_mergeable_share_content(input, visited))
+}
+
 /// Describes a branch of the union, if it has the form of a [`Branch`].
 fn branch_of(plan: &PlanRef) -> Option<Branch> {
     // The projection and the filters above the base, over the output of the node reached.
@@ -114,9 +141,8 @@ fn branch_of(plan: &PlanRef) -> Option<Branch> {
     // The base, and its output columns over the columns that the branch refers to.
     let (base, base_exprs, mut predicate): (Base, Vec<ExprImpl>, Vec<ExprImpl>) =
         if node.as_logical_share().is_some() {
-            // Only the shared scan of a table, possibly filtered and projected.
-            let pure = pure_scan(&node)?;
-            if has_watermark(&pure) {
+            // Any shared sub-plan: each of its rows gives one row per branch whose filter is true.
+            if !is_mergeable_share_content(&node, &mut HashSet::new()) {
                 return None;
             }
             let identity = node
@@ -386,4 +412,182 @@ fn merge(members: &[&Branch]) -> PlanRef {
         })
         .collect();
     LogicalProject::create(filtered, exprs)
+}
+
+/// Whether the scan of a table may be shared by the branches of a union. As for the merged
+/// branches, the scan of a table with a watermark is left alone.
+fn is_shareable_scan(scan: &LogicalScan) -> bool {
+    let table = scan.table();
+    scan.as_of().is_none()
+        && !matches!(table.table_type(), TableType::Internal)
+        && !table.stream_key().is_empty()
+        && table.watermark_columns.ones().next().is_none()
+}
+
+/// The scans of a plan that may be shared, outside the shared sub-plans, which are already read
+/// once.
+fn collect_scans(plan: &PlanRef, scans: &mut Vec<PlanRef>) {
+    if plan.as_logical_share().is_some() {
+        return;
+    }
+    if let Some(scan) = plan.as_logical_scan() {
+        if is_shareable_scan(scan) {
+            scans.push(plan.clone());
+        }
+        return;
+    }
+    for input in plan.inputs() {
+        collect_scans(&input, scans);
+    }
+}
+
+/// Replaces the scans of a plan, outside the shared sub-plans.
+fn replace_scans(plan: &PlanRef, replacements: &HashMap<PlanNodeId, PlanRef>) -> PlanRef {
+    if let Some(replacement) = replacements.get(&plan.id()) {
+        return replacement.clone();
+    }
+    if plan.as_logical_share().is_some() {
+        return plan.clone();
+    }
+    let inputs = plan.inputs();
+    if inputs.is_empty() {
+        return plan.clone();
+    }
+    let new_inputs: Vec<PlanRef> = inputs
+        .iter()
+        .map(|input| replace_scans(input, replacements))
+        .collect();
+    if new_inputs
+        .iter()
+        .zip_eq_fast(inputs.iter())
+        .all(|(new, old)| new.id() == old.id())
+    {
+        return plan.clone();
+    }
+    plan.clone_root_with_inputs(&new_inputs)
+}
+
+/// Reads once, in a shared scan, the table that several branches of a union read, whatever the
+/// branches do with its rows.
+///
+/// ```text
+/// Union                                Union
+/// ├─Join(on: a.x = c.k)                ├─Join(on: a.x = c.k)
+/// │ ├─Filter(p0)                       │ ├─Filter(p0)
+/// │ │ └─Scan(a, [x])              =>   │ │ └─Project(x)
+/// │ └─Scan(c)                          │ │   └─Share
+/// └─ProjectSet(unnest(a.arr))          │ │     └─Scan(a, [x, arr])
+///   └─Scan(a, [arr])                   │ └─Scan(c)
+///                                      └─ProjectSet(unnest(arr))
+///                                        └─Project(arr)
+///                                          └─Share (the same)
+/// ```
+///
+/// Each scan is replaced with a filter and a projection of the shared scan that give its rows:
+/// the rows of every branch are unchanged. The table is scanned and backfilled once instead of
+/// once per scan. Only the scans of the table in at least two branches are shared, and only
+/// outside the shared sub-plans of the branches. Applied after [`UnionScanMergeRule`], which
+/// leaves fewer operators when the branches only filter and project the table. Each shared scan
+/// adds a fragment: fewer scans and backfills against more actors and exchanges, a trade-off
+/// left to its own variable `streaming_share_union_scans`.
+pub struct UnionScanShareRule;
+
+impl Rule<Logical> for UnionScanShareRule {
+    fn apply(&self, plan: PlanRef) -> Option<PlanRef> {
+        let union = plan.as_logical_union()?;
+        if union.source_col().is_some() {
+            return None;
+        }
+        let inputs = plan.inputs();
+
+        // The scans of each table, with the branch they are in.
+        let mut groups: Vec<(TableId, Vec<(usize, PlanRef)>)> = vec![];
+        for (branch, input) in inputs.iter().enumerate() {
+            let mut scans = vec![];
+            collect_scans(input, &mut scans);
+            for scan in scans {
+                let table_id = scan.as_logical_scan().expect("a scan").table().id();
+                match groups.iter_mut().find(|(id, _)| *id == table_id) {
+                    Some((_, members)) => {
+                        if members.iter().all(|(_, other)| other.id() != scan.id()) {
+                            members.push((branch, scan));
+                        }
+                    }
+                    None => groups.push((table_id, vec![(branch, scan)])),
+                }
+            }
+        }
+
+        let mut replacements: HashMap<PlanNodeId, PlanRef> = HashMap::new();
+        for (_, members) in &groups {
+            let branches: BTreeSet<usize> = members.iter().map(|(branch, _)| *branch).collect();
+            if branches.len() < 2 {
+                continue;
+            }
+            let scans: Vec<&LogicalScan> = members
+                .iter()
+                .map(|(_, scan)| scan.as_logical_scan().expect("a scan"))
+                .collect();
+            // The shared scan reads every column that one of the scans outputs or filters on.
+            let mut columns: BTreeSet<usize> = BTreeSet::new();
+            for scan in &scans {
+                columns.extend(scan.output_col_idx().iter().copied());
+                columns.extend(referred_columns(&scan.predicate().conjunctions));
+            }
+            let columns: Vec<usize> = columns.into_iter().collect();
+            let position = |column: usize| {
+                columns
+                    .iter()
+                    .position(|&other| other == column)
+                    .expect("the column is read")
+            };
+            let shared: PlanRef = LogicalShare::create(
+                scans[0]
+                    .clone_with_output_indices(columns.clone())
+                    .clone_with_predicate(Condition::true_cond())
+                    .into(),
+            );
+            for ((_, member), scan) in members.iter().zip_eq_fast(scans.iter()) {
+                // The predicate of a scan refers to the columns of the table.
+                let input = if scan.predicate().always_true() {
+                    shared.clone()
+                } else {
+                    let conjunctions = scan
+                        .predicate()
+                        .conjunctions
+                        .iter()
+                        .map(|conjunct| {
+                            map_input_refs(conjunct, |r| {
+                                InputRef::new(position(r.index()), r.return_type()).into()
+                            })
+                        })
+                        .collect();
+                    LogicalFilter::create(shared.clone(), Condition { conjunctions })
+                };
+                let exprs: Vec<ExprImpl> = scan
+                    .output_col_idx()
+                    .iter()
+                    .map(|&column| {
+                        InputRef::new(position(column), table_column(scan, column).return_type())
+                            .into()
+                    })
+                    .collect();
+                replacements.insert(member.id(), LogicalProject::create(input, exprs));
+            }
+        }
+        if replacements.is_empty() {
+            return None;
+        }
+        let new_inputs: Vec<PlanRef> = inputs
+            .iter()
+            .map(|input| replace_scans(input, &replacements))
+            .collect();
+        Some(plan.clone_root_with_inputs(&new_inputs))
+    }
+}
+
+impl UnionScanShareRule {
+    pub fn create() -> BoxedRule {
+        Box::new(UnionScanShareRule)
+    }
 }
