@@ -16,6 +16,7 @@ use risingwave_pb::batch_plan::FilterNode;
 use risingwave_pb::batch_plan::plan_node::NodeBody;
 
 use super::batch::prelude::*;
+use super::batch_union::passes_required_dist_to_union;
 use super::utils::impl_distill_by_unit;
 use super::{
     BatchPlanRef as PlanRef, ExprRewritable, PlanTreeNodeUnary, ToBatchPb, ToDistributedBatch,
@@ -25,6 +26,7 @@ use crate::error::Result;
 use crate::expr::{Expr, ExprImpl, ExprRewriter, ExprVisitor};
 use crate::optimizer::plan_node::expr_visitable::ExprVisitable;
 use crate::optimizer::plan_node::{PlanBase, ToLocalBatch};
+use crate::optimizer::property::{Order, RequiredDist};
 use crate::utils::Condition;
 
 /// `BatchFilter` implements [`super::LogicalFilter`]
@@ -75,6 +77,26 @@ impl ToDistributedBatch for BatchFilter {
     fn to_distributed(&self) -> Result<PlanRef> {
         let new_input = self.input().to_distributed()?;
         Ok(self.clone_with_input(new_input).into())
+    }
+
+    fn to_distributed_with_required(
+        &self,
+        required_order: &Order,
+        required_dist: &RequiredDist,
+    ) -> Result<PlanRef> {
+        // `batch_distributed_union`: pass the required distribution down to a union, which can
+        // then bring each of its inputs to it. Any other plan is converted as before.
+        let ret = if passes_required_dist_to_union(&self.input()) {
+            let input_required = required_dist.clone();
+            let new_input = self
+                .input()
+                .to_distributed_with_required(&Order::any(), &input_required)?;
+            self.clone_with_input(new_input).into()
+        } else {
+            self.to_distributed()?
+        };
+        let ret = required_order.enforce_if_not_satisfies(ret)?;
+        required_dist.batch_enforce_if_not_satisfies(ret, required_order)
     }
 }
 

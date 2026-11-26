@@ -16,6 +16,7 @@ use risingwave_pb::batch_plan::GroupTopNNode;
 use risingwave_pb::batch_plan::plan_node::NodeBody;
 
 use super::batch::prelude::*;
+use super::batch_union::input_to_distributed_with_required;
 use super::utils::impl_distill_by_unit;
 use super::{
     BatchPlanRef as PlanRef, ExprRewritable, PlanBase, PlanTreeNodeUnary, ToBatchPb,
@@ -64,9 +65,10 @@ impl_plan_tree_node_for_unary! { Batch, BatchGroupTopN}
 
 impl ToDistributedBatch for BatchGroupTopN {
     fn to_distributed(&self) -> Result<PlanRef> {
-        let input = self.input().to_distributed()?;
-        let input = RequiredDist::hash_shard(self.group_key())
-            .batch_enforce_if_not_satisfies(input, &Order::any())?;
+        let input = input_to_distributed_with_required(
+            &self.input(),
+            &RequiredDist::hash_shard(self.group_key()),
+        )?;
         Ok(self.clone_with_input(input).into())
     }
 }

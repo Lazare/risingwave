@@ -17,6 +17,7 @@ use risingwave_pb::batch_plan::MaxOneRowNode;
 use risingwave_pb::batch_plan::plan_node::NodeBody;
 
 use super::batch::prelude::*;
+use super::batch_union::input_to_distributed_with_required;
 use super::generic::DistillUnit;
 use super::utils::Distill;
 use super::{
@@ -68,8 +69,7 @@ impl Distill for BatchMaxOneRow {
 
 impl ToDistributedBatch for BatchMaxOneRow {
     fn to_distributed(&self) -> Result<PlanRef> {
-        let new_input = RequiredDist::single()
-            .batch_enforce_if_not_satisfies(self.input().to_distributed()?, &Order::any())?;
+        let new_input = input_to_distributed_with_required(&self.input(), &RequiredDist::single())?;
         Ok(self.clone_with_input(new_input).into())
     }
 }
