@@ -119,7 +119,7 @@
       select k, st, row_number() over (partition by k order by p desc) as rn from (
         select k, 'open' as st, 1 as p from c
         union all select k, 'paid', 2 from c where amt > 0
-        union all select k, 'new', 0 from e
+        union all select id, 'new', 0 from e
       ) u
     ) x where rn = 1;
   expected_outputs:

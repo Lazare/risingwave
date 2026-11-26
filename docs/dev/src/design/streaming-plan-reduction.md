@@ -32,6 +32,7 @@ own rules.
 | 8 | Aggregate of a constant over a group | done (prototype, branch of idea 3) |
 | 9 | Leftovers of subquery decorrelation (domain re-scan, aggregation and null-safe join back) | aggregating subqueries done (prototype, branch `proto/streaming-simplify-subquery-unnesting`); laterals without a table not started |
 | US | Branches of a `UNION ALL` that read the same table read it once (`Expand` per branch); scans of other branches shared (`streaming_share_union_scans`) | done (prototype, branch `proto/plan-reduction-union-scans`); dominance under a top-1 not done |
+| SL | Status ladder: the branches of a top-1 by priority that read the same relation picked with one `CASE` | done (prototype, branch `proto/plan-reduction-union-scans`); default branch rewritten into a join not done |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -340,6 +341,37 @@ priority DESC) = 1` above a union of constant-priority branches):
   rewrites a join above the top-1 from a fact about a branch below it, and only holds when the
   joined relation is exactly the scan of that branch (same filters, `k` not `NULL`). Both are
   left for a dedicated rule after the prototype.
+
+### SL. Status ladder picked with one `CASE` (added on 2026-11-26, done on the branch)
+
+Variables `streaming_status_ladder_case` and `batch_status_ladder_case`, rule
+`StatusLadderCaseRule`. A status ladder keeps, per key, the row of the branch with the highest
+priority: `row_number() OVER (PARTITION BY k ORDER BY priority DESC) = 1` over a `UNION ALL` of
+branches `SELECT k, '<status>', <priority> FROM ... WHERE ...`, planned as a top-n with limit 1
+per group over the union.
+
+- The branches that filter and project the same relation (a table, or the same shared sub-plan)
+  with the same key become one branch: for each row, the literals of the first branch by
+  priority whose filter holds (`CASE WHEN f3 THEN 'c' WHEN f2 THEN 'b' ELSE 'a' END`), and the
+  rows where no filter holds dropped. Exact under the top-1: the candidates of one row all have
+  the same key, and one of lower priority than another is never kept; a `NULL` filter falls
+  through the `CASE` as it dropped the row; overlapping filters and duplicates need nothing
+  more. One row per row of the relation instead of one per branch whose filter holds, and one
+  read (the merge of union scans would read once too, but with one copy per branch).
+- When that branch is the whole union and the relation is unique on the key (the key of the
+  table, or the stream key of the shared sub-plan), each key has at most one row and the top-n
+  is removed.
+- Required: limit 1 without ties and offset, one order column, the priority; every column other
+  than the group key is a literal in each merged branch; the priority is an integer literal;
+  two merged branches with the same priority output the same literals (otherwise the top-n
+  chose between them arbitrarily, and is left alone).
+- Streaming: a branch with `now()` is a join with `Now` at this stage and stays a separate
+  branch. Batch: `now()` is a constant, so it joins the `CASE`. The stage runs before the merge
+  of union scans, so the `CASE` wins when both apply.
+- Not done: replacing the top-1 by `max(priority)` and a `CASE` from priority to status (exact,
+  but in streaming both keep every row of a group in their state, nothing saved); turning a
+  default branch read from the entity table into a left join of that table (a join replaces a
+  union branch, no operator saved).
 
 ### 5. Aggregation pushed below a join onto the unique side
 
