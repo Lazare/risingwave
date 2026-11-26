@@ -1,4 +1,1 @@
-# Differential tests run by `proto-streaming-prune-check.yml`: <name> <file> <minutes>.
-unionscans merge_union_scans 90
-flatlookups merge_lookups_flat 90
-sharedaggs share_and_stacked_aggs 90
+# Differential tests run by `proto-streaming-prune-check.yml`: <name> <path under e2e_test, e.g. streaming/x or batch/x> <minutes>.
