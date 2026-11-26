@@ -33,8 +33,8 @@
 //! stream key is the key of the table and the number of the branch, as the key of the union was
 //! the key of the branch and the number of the branch.
 //!
-//! The table is scanned and backfilled once instead of once per branch. Only used by the
-//! streaming optimizer, on demand.
+//! The table is scanned and backfilled once instead of once per branch. Used on demand, behind
+//! `streaming_merge_union_scans` for streaming plans and `batch_merge_union_scans` for batch plans.
 //!
 //! The branches that are merged read either the same shared sub-plan (`Share`), whatever it
 //! computes, which stays shared with its other consumers, or a scan of the same table.
@@ -114,8 +114,9 @@ fn is_mergeable_share_content(plan: &PlanRef, visited: &mut HashSet<PlanNodeId>)
         .all(|input| is_mergeable_share_content(input, visited))
 }
 
-/// Describes a branch of the union, if it has the form of a [`Branch`].
-fn branch_of(plan: &PlanRef) -> Option<Branch> {
+/// Describes a branch of the union, if it has the form of a [`Branch`]. A table with a watermark
+/// is only a concern of streaming plans (`for_batch`: a batch plan has no watermark).
+fn branch_of(plan: &PlanRef, for_batch: bool) -> Option<Branch> {
     // The projection and the filters above the base, over the output of the node reached.
     let mut exprs: Option<Vec<ExprImpl>> = None;
     let mut filter: Vec<ExprImpl> = vec![];
@@ -155,7 +156,7 @@ fn branch_of(plan: &PlanRef) -> Option<Branch> {
             (Base::Share(node.id()), identity, vec![])
         } else if node.as_logical_scan().is_some() {
             let pure = pure_scan(&node)?;
-            if has_watermark(&pure) {
+            if !for_batch && has_watermark(&pure) {
                 return None;
             }
             (
@@ -188,8 +189,11 @@ fn or(left: ExprImpl, right: ExprImpl) -> ExprImpl {
 }
 
 /// Reads once the table that several branches of a `UNION ALL` read. See the documentation of
-/// the module.
-pub struct UnionScanMergeRule;
+/// the module. The variant for batch plans (`create_for_batch`) also merges the scans of a table
+/// with a watermark.
+pub struct UnionScanMergeRule {
+    for_batch: bool,
+}
 
 impl Rule<Logical> for UnionScanMergeRule {
     fn apply(&self, plan: PlanRef) -> Option<PlanRef> {
@@ -202,7 +206,7 @@ impl Rule<Logical> for UnionScanMergeRule {
         let branches: Vec<Option<Branch>> = inputs
             .iter()
             .map(|input| {
-                branch_of(input).filter(|branch| {
+                branch_of(input, self.for_batch).filter(|branch| {
                     branch.exprs.len() == fields.len()
                         && branch
                             .exprs
@@ -252,7 +256,12 @@ impl Rule<Logical> for UnionScanMergeRule {
 
 impl UnionScanMergeRule {
     pub fn create() -> BoxedRule {
-        Box::new(UnionScanMergeRule)
+        Box::new(UnionScanMergeRule { for_batch: false })
+    }
+
+    /// The variant for batch plans, see the rule.
+    pub fn create_for_batch() -> BoxedRule {
+        Box::new(UnionScanMergeRule { for_batch: true })
     }
 }
 

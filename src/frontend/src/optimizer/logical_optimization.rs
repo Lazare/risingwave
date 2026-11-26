@@ -249,6 +249,70 @@ static STREAM_SIMPLE_UNNESTING_AGG: LazyLock<OptimizationStage> = LazyLock::new(
     )
 });
 
+// Batch counterparts of stages of the streaming plan reduction prototype, each behind its own
+// batch variable: the same rules, or their variants for batch plans.
+// `batch_simplify_subquery_unnesting`: the variant of `PullUpCorrelatedPredicateAggRule` named
+// "for stream" has nothing specific to streaming (no retraction is involved).
+static BATCH_SIMPLE_UNNESTING_AGG: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Batch Simple Unnesting of Aggregations",
+        vec![
+            ApplyOneRowJoinSplitRule::create(),
+            PullUpCorrelatedPredicateAggRule::create_for_stream(),
+        ],
+        ApplyOrder::BottomUp,
+    )
+});
+
+// `batch_unnest_lateral_functions`, see `STREAM_UNNEST_ARRAY_OF_FUNCTION`,
+// `STREAM_UNNEST_LATERAL_FUNCTIONS` and `STREAM_SELF_AGGREGATE_JOIN`.
+static BATCH_UNNEST_ARRAY_OF_FUNCTION: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Batch Unnest Array Of Lateral Function",
+        vec![UnnestArrayOfTableFunctionRule::create()],
+        ApplyOrder::TopDown,
+    )
+});
+
+static BATCH_UNNEST_LATERAL_FUNCTIONS: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Batch Unnest Lateral Functions",
+        vec![
+            ApplyOneRowJoinSplitRule::create(),
+            LateralTableFunctionRule::create_for_batch(),
+        ],
+        ApplyOrder::BottomUp,
+    )
+});
+
+static BATCH_SELF_AGGREGATE_JOIN: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Batch Self Aggregate Join",
+        vec![SelfAggregateJoinRule::create_for_batch()],
+        ApplyOrder::BottomUp,
+    )
+});
+
+// `batch_factor_union_join`: rule `CommonJoinOverUnionRule`.
+static BATCH_FACTOR_UNION_JOIN: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Factor Union Join For Batch",
+        vec![CommonJoinOverUnionRule::create()],
+        // Bottom-up: the branches of a union are reduced before the union is looked at.
+        ApplyOrder::BottomUp,
+    )
+});
+
+// `batch_merge_union_scans`: rule `UnionScanMergeRule`. Not `UnionScanShareRule`: a batch plan
+// has no shared sub-plan.
+static BATCH_MERGE_UNION_SCANS: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Merge Union Scans For Batch",
+        vec![UnionScanMergeRule::create_for_batch()],
+        ApplyOrder::BottomUp,
+    )
+});
+
 // Rule `UnionScanMergeRule` (`streaming_merge_union_scans`).
 static STREAM_MERGE_UNION_SCANS: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
@@ -806,6 +870,20 @@ impl LogicalOptimizer {
             plan = plan.optimize_by_rules(&STREAM_UNNEST_ARRAY_OF_FUNCTION)?;
             plan = plan.optimize_by_rules_until_fix_point(&STREAM_UNNEST_LATERAL_FUNCTIONS)?;
         }
+        // The same two stages for batch queries, each behind its own batch variable. In batch the
+        // domain of the general way is read again from the outer side for every query.
+        if !for_stream
+            && ctx
+                .session_ctx()
+                .config()
+                .batch_simplify_subquery_unnesting()
+        {
+            plan = plan.optimize_by_rules_until_fix_point(&BATCH_SIMPLE_UNNESTING_AGG)?;
+        }
+        if !for_stream && ctx.session_ctx().config().batch_unnest_lateral_functions() {
+            plan = plan.optimize_by_rules(&BATCH_UNNEST_ARRAY_OF_FUNCTION)?;
+            plan = plan.optimize_by_rules_until_fix_point(&BATCH_UNNEST_LATERAL_FUNCTIONS)?;
+        }
         debug_assert!(!HasMaxOneRowApply().visit(plan.clone()));
         // Predicate push down before translate apply, because we need to calculate the domain
         // and predicate push down can reduce the size of domain.
@@ -1269,6 +1347,42 @@ impl LogicalOptimizer {
         // Predicate Push-down
         let mut last_total_rule_applied_before_predicate_pushdown = ctx.total_rule_applied();
         plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+
+        // Batch counterparts of stages of the streaming plan reduction prototype, each behind its
+        // own batch variable, before join ordering: the joins of the branches of a union are
+        // still as written, and the filters are next to the scans. The filters that a rewrite
+        // leaves above are pushed down again, so that join ordering finds them where it expects.
+        // - `batch_factor_union_join`: the relation that several branches of a `UNION ALL` join
+        //   on the same columns is joined once above the union (`CommonJoinOverUnionRule`).
+        // - `batch_unnest_lateral_functions`: a table joined back on its key with an aggregation
+        //   of rows derived from itself computes the aggregation on its own rows
+        //   (`SelfAggregateJoinRule`).
+        // - `batch_merge_union_scans`: the table that several branches of a `UNION ALL` read,
+        //   each with its own filter and projection, is read once (`UnionScanMergeRule`).
+        for (enabled, stage) in [
+            (
+                ctx.session_ctx().config().batch_factor_union_join(),
+                &BATCH_FACTOR_UNION_JOIN,
+            ),
+            (
+                ctx.session_ctx().config().batch_unnest_lateral_functions(),
+                &BATCH_SELF_AGGREGATE_JOIN,
+            ),
+            (
+                ctx.session_ctx().config().batch_merge_union_scans(),
+                &BATCH_MERGE_UNION_SCANS,
+            ),
+        ] {
+            if !enabled {
+                continue;
+            }
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(stage)?;
+            if ctx.total_rule_applied() != applied_before {
+                plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
+            }
+        }
 
         if plan.ctx().session_ctx().config().enable_join_ordering() {
             // Merge inner joins and intermediate filters into multijoin

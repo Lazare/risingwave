@@ -313,6 +313,35 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     streaming_simplify_subquery_unnesting: bool,
 
+    // Batch counterparts of `streaming_simplify_subquery_unnesting`,
+    // `streaming_unnest_lateral_functions`, `streaming_factor_union_join` and
+    // `streaming_merge_union_scans` (the same rules, in the batch optimizer).
+    /// In a batch query, turn a correlated subquery that aggregates the rows equal to columns of
+    /// the outer row (`EXISTS`, `count`, `min`, `ARRAY(...)`, ...) into a left join with the
+    /// aggregation grouped by those columns, instead of re-reading the outer side to build the
+    /// set of its distinct values. Defaults to false.
+    #[parameter(default = false)]
+    batch_simplify_subquery_unnesting: bool,
+
+    /// In a batch query, evaluate on each outer row a correlated subquery that reads no table,
+    /// only columns of the outer row through set-returning functions, instead of re-reading the
+    /// outer side to build the set of its distinct values; and compute on each row of a table an
+    /// aggregation of rows derived from it that the table is joined back with on its key.
+    /// Defaults to false.
+    #[parameter(default = false)]
+    batch_unnest_lateral_functions: bool,
+
+    /// In a batch query, join once, above a `UNION ALL`, the relation that several of its branches
+    /// join on the same columns: the relation is read once. Defaults to false.
+    #[parameter(default = false)]
+    batch_factor_union_join: bool,
+
+    /// In a batch query, read once the table that several branches of a `UNION ALL` read, each
+    /// with its own filter and projection: one scan, one copy of each row per branch, and the
+    /// filter and projection of each branch applied to its copies. Defaults to false.
+    #[parameter(default = false)]
+    batch_merge_union_scans: bool,
+
     /// In the plan of a new streaming job, read once the table that several branches of a
     /// `UNION ALL` read, each with its own filter and projection: one scan, one copy of each row
     /// per branch, and the filter and projection of each branch applied to its copies. Defaults to
