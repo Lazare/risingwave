@@ -419,6 +419,15 @@ static STREAM_SHARE_UNION_SCANS: LazyLock<OptimizationStage> = LazyLock::new(|| 
     )
 });
 
+// Rule `StatusLadderCaseRule` (`streaming_status_ladder_case`, `batch_status_ladder_case`).
+static STATUS_LADDER_CASE: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Status Ladder Case",
+        vec![StatusLadderCaseRule::create()],
+        ApplyOrder::BottomUp,
+    )
+});
+
 static SET_OPERATION_MERGE: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Set Operation Merge",
@@ -1230,6 +1239,14 @@ impl LogicalOptimizer {
         {
             let applied_before = ctx.total_rule_applied();
             plan = plan.optimize_by_rules(&STREAM_SELF_AGGREGATE_JOIN)?;
+        // Rule `StatusLadderCaseRule`: under a status ladder, the branches that read the same
+        // relation become one branch that picks the best of them with a `CASE`. Before the merge
+        // of the union scans below, which would otherwise make one copy of each row per branch.
+        if ctx.session_ctx().config().streaming_status_ladder_case()
+            && !ctx.is_stream_prune_baseline()
+        {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&STATUS_LADDER_CASE)?;
             let applied = ctx.total_rule_applied() - applied_before;
             if applied > 0 {
                 ctx.add_stream_prune_rule_applied(applied);
@@ -1561,6 +1578,17 @@ impl LogicalOptimizer {
         // `x IS NULL AND x IN (...)` have been merged into the same filter or scan. Remove the
         // sub-plans that are proven to be empty. Only for batch queries.
         plan = plan.optimize_by_rules(&BATCH_PRUNE_EMPTY_RELATION)?;
+
+        // Rule `StatusLadderCaseRule`: under a status ladder, the branches that read the same
+        // relation become one branch that picks the best of them with a `CASE`. On demand.
+        if ctx.session_ctx().config().batch_status_ladder_case() {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&STATUS_LADDER_CASE)?;
+            if ctx.total_rule_applied() != applied_before {
+                plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+            }
+        }
 
         // Materialize Iceberg intermediate scans after predicate pushdown and column pruning.
         plan = plan.optimize_by_rules(&MATERIALIZE_ICEBERG_SCAN)?;

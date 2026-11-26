@@ -405,6 +405,18 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     streaming_share_union_scans: bool,
 
+    /// In the plan of a new streaming job, under a "status ladder" (`row_number() OVER (PARTITION
+    /// BY key ORDER BY priority) = 1` over a `UNION ALL` of branches that output the key and
+    /// literals), replace the branches that filter and project the same relation with one branch
+    /// that picks the best of them with a `CASE`, and remove the top-n when nothing else is left
+    /// and the relation is unique on the key. Defaults to false.
+    #[parameter(default = false)]
+    streaming_status_ladder_case: bool,
+
+    /// The same as `streaming_status_ladder_case`, for batch queries. Defaults to false.
+    #[parameter(default = false)]
+    batch_status_ladder_case: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,

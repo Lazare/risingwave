@@ -237,6 +237,9 @@ mod self_aggregate_join_rule;
 pub use self_aggregate_join_rule::*;
 mod widened_subplan_share;
 pub use widened_subplan_share::*;
+// Rule `StatusLadderCaseRule` (`streaming_status_ladder_case`, `batch_status_ladder_case`).
+mod status_ladder_case_rule;
+pub use status_ladder_case_rule::*;
 mod repeated_lookup_merge_rule;
 pub use repeated_lookup_merge_rule::*;
 // The default branch of a top-1 over a union, the unused joins below an operator that does not
@@ -406,6 +409,7 @@ macro_rules! for_all_rules {
             , { UnionScanShareRule }
             , { SelfAggregateJoinRule }
             , { StackedAggOverUnionMergeRule }
+            , { StatusLadderCaseRule }
             , { BushyTreeJoinOrderingRule }
             , { StreamProjectMergeRule }
             , { StreamProjectSplitRule }

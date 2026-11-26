@@ -65,7 +65,7 @@ use crate::utils::Condition;
 
 /// What the branches that are merged read.
 #[derive(PartialEq)]
-enum Base {
+pub(super) enum Base {
     /// A shared sub-plan, whose output columns the expressions of the branch refer to.
     Share(PlanNodeId),
     /// A scan of a table, whose columns the expressions of the branch refer to.
@@ -73,15 +73,15 @@ enum Base {
 }
 
 /// A branch of the union, of the form `(Project | Filter)* base`.
-struct Branch {
-    base: Base,
+pub(super) struct Branch {
+    pub(super) base: Base,
     /// The base: the shared sub-plan, or one of the scans of the table.
-    plan: PlanRef,
+    pub(super) plan: PlanRef,
     /// The conjuncts that a row of the base satisfies to give a row of the branch, over the
     /// columns of the base.
-    predicate: Vec<ExprImpl>,
+    pub(super) predicate: Vec<ExprImpl>,
     /// The output columns of the branch, over the columns of the base.
-    exprs: Vec<ExprImpl>,
+    pub(super) exprs: Vec<ExprImpl>,
 }
 
 fn is_movable(expr: &ExprImpl) -> bool {
@@ -117,6 +117,8 @@ fn is_mergeable_share_content(plan: &PlanRef, visited: &mut HashSet<PlanNodeId>)
 /// Describes a branch of the union, if it has the form of a [`Branch`]. A table with a watermark
 /// is only a concern of streaming plans (`for_batch`: a batch plan has no watermark).
 fn branch_of(plan: &PlanRef, for_batch: bool) -> Option<Branch> {
+/// Describes a branch of the union, if it has the form of a [`Branch`].
+pub(super) fn branch_of(plan: &PlanRef) -> Option<Branch> {
     // The projection and the filters above the base, over the output of the node reached.
     let mut exprs: Option<Vec<ExprImpl>> = None;
     let mut filter: Vec<ExprImpl> = vec![];
@@ -184,7 +186,7 @@ fn branch_of(plan: &PlanRef, for_batch: bool) -> Option<Branch> {
     })
 }
 
-fn or(left: ExprImpl, right: ExprImpl) -> ExprImpl {
+pub(super) fn or(left: ExprImpl, right: ExprImpl) -> ExprImpl {
     FunctionCall::new_unchecked(ExprType::Or, vec![left, right], DataType::Boolean).into()
 }
 
@@ -265,13 +267,9 @@ impl UnionScanMergeRule {
     }
 }
 
-/// Builds the single read of the branches, which read the same base.
-fn merge(members: &[&Branch]) -> PlanRef {
-    let first = members[0];
-
-    // What every branch requires is checked once below the `Expand`, with one of what each
-    // branch requires besides; the latter is checked again for the copy of each branch.
-    let common: Vec<ExprImpl> = first
+/// The conjuncts that every member requires, and for each member those it requires besides.
+pub(super) fn split_predicates(members: &[&Branch]) -> (Vec<ExprImpl>, Vec<Vec<ExprImpl>>) {
+    let common: Vec<ExprImpl> = members[0]
         .predicate
         .iter()
         .filter(|conjunct| {
@@ -292,20 +290,19 @@ fn merge(members: &[&Branch]) -> PlanRef {
                 .collect()
         })
         .collect();
-    let mut below = common;
-    if own.iter().all(|conjuncts| !conjuncts.is_empty()) {
-        below.push(
-            own.iter()
-                .map(|conjuncts| and_all(conjuncts.clone()))
-                .reduce(or)
-                .expect("at least two branches"),
-        );
-    }
+    (common, own)
+}
 
-    // The input of the `Expand`, and the columns of the table that the single scan reads: a
-    // column of the base is the column of the input at its position among them. The shared
-    // sub-plan is read as it is.
-    let (input, read): (PlanRef, Option<Vec<usize>>) = match first.base {
+/// The single read of the base of the members, which read the same base, filtered by `below`
+/// (over the columns of the base); and the columns of the table that the single scan reads: a
+/// column of the base is the column of the read at its position among them (see
+/// [`position_in`]). The shared sub-plan is read as it is.
+pub(super) fn read_base(
+    members: &[&Branch],
+    below: Vec<ExprImpl>,
+) -> (PlanRef, Option<Vec<usize>>) {
+    let first = members[0];
+    match first.base {
         Base::Share(_) => {
             let input = if below.is_empty() {
                 first.plan.clone()
@@ -321,13 +318,13 @@ fn merge(members: &[&Branch]) -> PlanRef {
         }
         Base::Table(_) => {
             let scan: &LogicalScan = first.plan.as_logical_scan().expect("a scan");
-            let read: Vec<usize> = referred_columns(
+            let mut read: BTreeSet<usize> = referred_columns(
                 members
                     .iter()
                     .flat_map(|member| member.exprs.iter().chain(&member.predicate)),
-            )
-            .into_iter()
-            .collect();
+            );
+            read.extend(referred_columns(&below));
+            let read: Vec<usize> = read.into_iter().collect();
             let scan = scan
                 .clone_with_output_indices(read.clone())
                 .clone_with_predicate(Condition {
@@ -335,14 +332,38 @@ fn merge(members: &[&Branch]) -> PlanRef {
                 });
             (scan.into(), Some(read))
         }
-    };
-    let position = |column: usize| match &read {
+    }
+}
+
+/// The column of the read of [`read_base`] of a column of the base.
+pub(super) fn position_in(read: &Option<Vec<usize>>, column: usize) -> usize {
+    match read {
         None => column,
         Some(read) => read
             .iter()
             .position(|&other| other == column)
             .expect("the column is read"),
-    };
+    }
+}
+
+/// Builds the single read of the branches, which read the same base.
+fn merge(members: &[&Branch]) -> PlanRef {
+    let first = members[0];
+
+    // What every branch requires is checked once below the `Expand`, with one of what each
+    // branch requires besides; the latter is checked again for the copy of each branch.
+    let (common, own) = split_predicates(members);
+    let mut below = common;
+    if own.iter().all(|conjuncts| !conjuncts.is_empty()) {
+        below.push(
+            own.iter()
+                .map(|conjuncts| and_all(conjuncts.clone()))
+                .reduce(or)
+                .expect("at least two branches"),
+        );
+    }
+    let (input, read) = read_base(members, below);
+    let position = |column: usize| position_in(&read, column);
 
     // One copy of each row per branch: the copy of the branch `i` has `flag = i`. Every subset
     // keeps every column, so that no column is replaced with `NULL`; the expressions below refer

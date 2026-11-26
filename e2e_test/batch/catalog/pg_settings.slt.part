@@ -38,6 +38,7 @@ user batch_merge_union_scans
 user batch_parallelism
 user batch_simplify_subquery_unnesting
 user batch_unnest_lateral_functions
+user batch_status_ladder_case
 user bypass_cluster_limits
 user bytea_output
 user cdc_source_wait_streaming_start_timeout
@@ -112,6 +113,7 @@ user streaming_share_identical_subplans
 user streaming_share_union_scans
 user streaming_simplify_on_unique_key
 user streaming_simplify_subquery_unnesting
+user streaming_status_ladder_case
 user streaming_sync_log_store_buffer_size
 user streaming_sync_log_store_pause_duration_ms
 user streaming_unnest_lateral_functions
