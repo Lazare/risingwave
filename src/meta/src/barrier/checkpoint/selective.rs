@@ -885,7 +885,14 @@ mod tests {
         };
         let graph = vec![
             fragment(1, &[Source, Dml, Mview], vec![], 1, 1, 11),
-            fragment(2, &[Source, Mview], vec![merge(1), connector_source], 2, 1, 12),
+            fragment(
+                2,
+                &[Source, Mview],
+                vec![merge(1), connector_source],
+                2,
+                1,
+                12,
+            ),
             fragment(3, &[Mview], vec![merge(2)], 3, 1, 13),
             fragment(4, &[Mview], vec![merge(1)], 4, 1, 14),
         ];
@@ -1105,15 +1112,17 @@ mod tests {
     fn test_sink_into_table() {
         use FragmentTypeFlag::*;
         let sink_union = |upstreams: &[u32]| StreamNode {
-            node_body: Some(NodeBody::UpstreamSinkUnion(Box::new(UpstreamSinkUnionNode {
-                init_upstreams: upstreams
-                    .iter()
-                    .map(|upstream| UpstreamSinkInfo {
-                        upstream_fragment_id: (*upstream).into(),
-                        ..Default::default()
-                    })
-                    .collect(),
-            }))),
+            node_body: Some(NodeBody::UpstreamSinkUnion(Box::new(
+                UpstreamSinkUnionNode {
+                    init_upstreams: upstreams
+                        .iter()
+                        .map(|upstream| UpstreamSinkInfo {
+                            upstream_fragment_id: (*upstream).into(),
+                            ..Default::default()
+                        })
+                        .collect(),
+                },
+            ))),
             ..Default::default()
         };
         const ALL: [u32; 7] = [1, 2, 3, 4, 5, 6, 7];

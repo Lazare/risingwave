@@ -1029,7 +1029,10 @@ mod tests {
             test_env
                 .storage
                 .start_epoch(next, HashSet::from_iter([table.id]));
-            writer.flush_current_epoch_for_test(next, true).await.unwrap();
+            writer
+                .flush_current_epoch_for_test(next, true)
+                .await
+                .unwrap();
         }
 
         // The live reader receives every barrier.
@@ -1071,7 +1074,8 @@ mod tests {
             .unwrap();
         reader.init().await.unwrap();
         reader.start_from(None).await.unwrap();
-        for (expected_epoch, expected_chunk) in [(epoch1, &stream_chunk1), (epoch4, &stream_chunk2)] {
+        for (expected_epoch, expected_chunk) in [(epoch1, &stream_chunk1), (epoch4, &stream_chunk2)]
+        {
             match reader.next_item().await.unwrap() {
                 (epoch, LogStoreReadItem::StreamChunk { chunk, .. }) => {
                     assert_eq!(epoch, expected_epoch);

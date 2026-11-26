@@ -151,8 +151,7 @@ impl<LS: LocalStateStore> LogWriter for KvLogStoreWriter<LS> {
         // means one barrier less before the next epoch with data. Barriers carrying a schema
         // change or a stop are still persisted.
         let epoch_has_data = self.seq_id != FIRST_SEQ_ID;
-        if !self.is_paused
-            && (epoch_has_data || options.schema_change.is_some() || options.is_stop)
+        if !self.is_paused && (epoch_has_data || options.schema_change.is_some() || options.is_stop)
         {
             writer.write_barrier(epoch, options.is_checkpoint)?;
         }
