@@ -66,6 +66,10 @@ impl MergeSortExecutor {
             match input_stream.next().await {
                 Some(chunk) => {
                     let chunk = chunk?;
+                    // Counted like the next chunks of the input: `get_input_chunk` subtracts it
+                    // when it is replaced.
+                    self.mem_context
+                        .force_add(chunk.estimated_heap_size() as i64);
                     self.current_chunks.push(Some(chunk));
                     if let Some(chunk) = &self.current_chunks[input_idx] {
                         // We assume that we would always get a non-empty chunk from the upstream of
