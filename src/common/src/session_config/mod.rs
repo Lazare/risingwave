@@ -476,6 +476,14 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_narrow_value_aggregates: bool,
 
+    // `BatchUnion::to_distributed_with_required`.
+    /// In a distributed batch query, run a `UNION ALL` in parallel tasks instead of gathering all
+    /// its inputs into one task: each input is sent to the tasks by a hash of the columns that the
+    /// operator above needs (the group key of an aggregation, the key of a join), or of all the
+    /// columns, and the operator above then needs no exchange of its own. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_distributed_union: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,
