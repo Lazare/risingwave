@@ -38,7 +38,7 @@ own rules.
 | B | Batch counterparts of 9, 9b, 9c, 7 and US, each behind a `batch_` variable | done (prototype, branch `proto/plan-reduction-batch-unnest`), see "Batch counterparts" |
 | SL | Status ladder: the branches of a top-1 by priority that read the same relation picked with one `CASE` | done (prototype, branch `proto/plan-reduction-union-scans`); default branch rewritten into a join not done |
 | NK | Join on a column known to be `NULL` matches nothing (`batch_simplify_null_join_keys`, `streaming_simplify_null_join_keys`) | done (prototype, branch `proto/plan-reduction-nullkey`), see "NK" below |
-| BJ | Batch: cost-based ordering of the inner joins from the row counts of the tables (`batch_cost_based_join_ordering`) | first version (prototype, branch `proto/plan-reduction-batch-joinorder`, see "BJ" below); index lookups and column statistics not done |
+| BJ | Batch: cost-based ordering of the inner joins from the row counts and sizes of the tables (`batch_cost_based_join_ordering`) | first version (prototype, branch `proto/plan-reduction-batch-joinorder`, see "BJ" below), width-aware since 2026-11-27 (the build side is the side with fewer bytes; left outer, semi and anti joins can become right joins); index lookups and column statistics not done |
 | BF | Batch: cardinality feedback, step 1: count the rows of the operators at execution and compare them with the estimates (`batch_cardinality_feedback`) | first version (prototype, branch `proto/batch-cardinality-feedback`, see "BF" below): observation only, no plan changes |
 | BP | Batch: second pass of the reductions on keys after the stages that create aggregations (`batch_reduce_keys_after_conversions`) | done (prototype, branch `proto/plan-reduction-batch-pass2`, see "BP and BT" below) |
 | BT | Batch: `row_number() <= n` per partition becomes a top-n per group, small `n` only (`batch_over_window_to_topn`) | done (prototype, branch `proto/plan-reduction-batch-pass2`, see "BP and BT" below) |
@@ -1001,12 +1001,33 @@ estimated rows instead (`cost_based_join_ordering_rule.rs`, stages
   columns holding a unique key of one side has the selectivity 1 over the rows of the table of
   that side before its filters (key to foreign key: one row of the key side per row of the other
   side, fewer if the key side is filtered); on other columns, it returns twice the larger side.
-- **Cost.** The batch hash join builds its hash table on its right side: probe rows cost 1, build
-  rows 3 (they are held in memory), output rows 1, plus the rows read by the inputs. When the
-  right side is a table scan whose key prefix (the shortest one that holds the distribution key)
-  is given by equalities with the left side, the planner makes a lookup join: it costs 2 per row
-  of the left side and the table is not scanned. The model follows what the planner does: a
-  lookup join is not optional when it is possible.
+- **Width (added on 2026-11-27).** A real plan built its hash table on 1.8 M rows holding about
+  17 GB of JSON against 4.5 M rows of 40 bytes: fewer rows, a hundred times more memory. The
+  cost therefore counts bytes. The width of a row of an input is the sum of the widths of the
+  columns that the plan above still reads (a top-down pass, `required_output_columns`, since the
+  scans still read every column before the column pruning). The width of a column of a table is
+  the average size of a row in storage (`(total_key_size + total_value_size) / total_key_count`)
+  shared out among the columns of the table by the weights of their types, or the type width
+  alone without sizes (1 to 16 bytes for numbers and times, 64 for `varchar`, 256 for `bytea`,
+  1024 for `jsonb`, 128 for the rest). Widths go through projections (an expression gets the
+  width of its type), filters, top-n, window functions and aggregations (group key columns keep
+  their width, an aggregate returning the type of its argument, such as `first_value` or
+  `last_value` of a JSON column, keeps the width of the argument), plus 8 bytes of overhead per
+  row. Widths are always known: the fallback only depends on the row counts.
+- **Cost.** The batch hash join builds its hash table on its right side: probe bytes cost 1,
+  build bytes 3 (they are held in memory), output bytes 1, plus the bytes read by the inputs.
+  When the right side is a table scan whose key prefix (the shortest one that holds the
+  distribution key) is given by equalities with the left side, the planner makes a lookup join:
+  it costs the bytes of the left row and of the row read, per row of the left side, and the table
+  is not scanned. The model follows what the planner does: a lookup join is not optional when it
+  is possible. With the same width on both sides, the side choice is the one by rows.
+- **Outer, semi and anti joins (added on 2026-11-27).** After the column pruning (exact widths)
+  and after `JoinCommuteRule` (which turns right joins into left ones), a left outer, semi or anti
+  join becomes the right join of the other side (`CostBasedOuterJoinSidesRule`) when that at
+  least halves the estimated cost of its hash join (probe bytes + 3 x build bytes): it then
+  builds the smaller side and streams the larger one (the batch hash join executor supports
+  right outer, semi and anti joins). Not done when the join may become a lookup join (the right
+  side is a table read by its key, or a table that has an index) or without estimates.
 - **Enumeration.** Dynamic programming over the connected sets of inputs (bushy trees allowed),
   up to 10 inputs per set of inputs linked by equalities, greedy beyond (the pair of linked
   sub-trees of fewest estimated rows, then of lowest cost). Sets of inputs that no equality links
@@ -1021,7 +1042,9 @@ estimated rows instead (`cost_based_join_ordering_rule.rs`, stages
   (`test_utils::set_table_row_counts_for_test`) gives the frontend row counts by table name
   before the query is planned (`batch_cost_based_join_ordering.yaml`: star and chain queries,
   outer, semi and anti joins, scalar subquery, aggregation input, no statistics, partial
-  statistics, twelve inputs). The differential test `e2e_test/batch/cost_based_join_ordering.slt`
+  statistics, twelve inputs; with the test-only option `table_sizes`, a narrow side against a
+  JSON side as a table, an aggregation or a top-1 per group, inner and left joins, equal widths).
+  The differential test `e2e_test/batch/cost_based_join_ordering.slt`
   (generated by its `.gen.py`) runs each query with and without the variable on tables of very
   different sizes, before and after changes, and compares the results as multisets.
 - **Not done.** Lookups into indexes are not modeled (index selection happens after the
