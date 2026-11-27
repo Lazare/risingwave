@@ -36,7 +36,7 @@ use risingwave_frontend::optimizer::plan_node::ConventionMarker;
 use risingwave_frontend::session::SessionImpl;
 use risingwave_frontend::test_utils::{
     LocalFrontend, clear_cardinality_learning_for_test, create_proto_file, get_explain_output,
-    record_cardinality_observation_for_test, set_table_row_counts_for_test,
+    record_cardinality_observation_for_test, set_table_stats_for_test,
 };
 use risingwave_frontend::{
     Binder, Explain, FrontendOpts, OptimizerContext, OptimizerContextRef, PlanRef, Planner,
@@ -138,6 +138,8 @@ pub struct TestCase {
     /// Test only: row counts given to the frontend as the storage statistics of the tables, by
     /// table name, before the query is planned (for `batch_cost_based_join_ordering`).
     pub table_row_counts: Option<BTreeMap<String, u64>>,
+    /// Test only: with `table_row_counts`, the total size in bytes of some of these tables.
+    pub table_sizes: Option<BTreeMap<String, u64>>,
     /// Test only: executions given to the cardinality feedback learning
     /// (`batch_cardinality_feedback_learning`) before the query is planned. The learned ratios
     /// are forgotten, then each query is planned and recorded as if it had run.
@@ -277,6 +279,8 @@ pub struct TestCaseResult {
     pub with_config_map: Option<BTreeMap<String, String>>,
     /// Test only: row counts given as the storage statistics of the tables
     pub table_row_counts: Option<BTreeMap<String, u64>>,
+    /// Test only: total sizes in bytes given as the storage statistics of the tables
+    pub table_sizes: Option<BTreeMap<String, u64>>,
     /// Test only: executions given to the cardinality feedback learning
     pub cardinality_observations: Option<Vec<CardinalityObservation>>,
 }
@@ -338,6 +342,7 @@ impl TestCase {
             .clone_from(self.create_table_with_connector());
         result.with_config_map.clone_from(self.with_config_map());
         result.table_row_counts.clone_from(&self.table_row_counts);
+        result.table_sizes.clone_from(&self.table_sizes);
         result
             .cardinality_observations
             .clone_from(&self.cardinality_observations);
@@ -445,7 +450,8 @@ impl TestCase {
                         panic!("two queries in one test case");
                     }
                     if let Some(row_counts) = &self.table_row_counts {
-                        set_table_row_counts_for_test(&session, row_counts)?;
+                        let sizes = self.table_sizes.clone().unwrap_or_default();
+                        set_table_stats_for_test(&session, row_counts, &sizes)?;
                     }
                     if let Some(observations) = &self.cardinality_observations {
                         clear_cardinality_learning_for_test();

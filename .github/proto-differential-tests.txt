@@ -1,3 +1,4 @@
 # Differential tests run by `proto-streaming-prune-check.yml`: <name> <path under e2e_test, e.g. streaming/x or batch/x> <minutes>.
+batchjoinorder batch/cost_based_join_ordering 60
 batchfeedback batch/cardinality_feedback 60
 batchlearning batch/cardinality_feedback_learning 60

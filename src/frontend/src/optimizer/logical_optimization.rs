@@ -108,7 +108,7 @@ impl<C: ConventionMarker> OptimizationStage<C> {
 }
 
 use std::collections::{HashMap, HashSet};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use risingwave_common::id::ObjectId;
 use risingwave_pb::common::PbObjectType;
@@ -305,19 +305,13 @@ static BATCH_MERGE_REPEATED_LOOKUPS: LazyLock<OptimizationStage> = LazyLock::new
     )
 });
 
-// Rules `CostBasedJoinSidesRule` and `CostBasedJoinOrderingRule` (`batch_cost_based_join_ordering`).
-static BATCH_COST_BASED_JOIN_SIDES: LazyLock<OptimizationStage> = LazyLock::new(|| {
+// Rules `CostBasedJoinSidesRule` and `CostBasedJoinOrderingRule` (`batch_cost_based_join_ordering`)
+// are built for each query (they are given the columns that the plan reads); the rule
+// `CostBasedOuterJoinSidesRule` runs after the column pruning.
+static BATCH_COST_BASED_OUTER_JOIN_SIDES: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
-        "Cost-Based Join Sides For Batch",
-        vec![CostBasedJoinSidesRule::create()],
-        ApplyOrder::TopDown,
-    )
-});
-
-static BATCH_COST_BASED_JOIN_ORDERING: LazyLock<OptimizationStage> = LazyLock::new(|| {
-    OptimizationStage::new(
-        "Cost-Based Join Ordering For Batch",
-        vec![CostBasedJoinOrderingRule::create()],
+        "Cost-Based Outer Join Sides For Batch",
+        vec![CostBasedOuterJoinSidesRule::create()],
         ApplyOrder::TopDown,
     )
 });
@@ -1663,8 +1657,20 @@ impl LogicalOptimizer {
                 .config()
                 .batch_cost_based_join_ordering()
             {
-                plan = plan.optimize_by_rules(&BATCH_COST_BASED_JOIN_SIDES)?;
-                plan = plan.optimize_by_rules(&BATCH_COST_BASED_JOIN_ORDERING)?;
+                // The columns that the plan reads, for the widths of the inputs of the joins:
+                // the scans still read all the columns of their tables at this point.
+                let required = Arc::new(required_output_columns(&plan));
+                plan = plan.optimize_by_rules(&OptimizationStage::new(
+                    "Cost-Based Join Sides For Batch",
+                    vec![CostBasedJoinSidesRule::create(required)],
+                    ApplyOrder::TopDown,
+                ))?;
+                let required = Arc::new(required_output_columns(&plan));
+                plan = plan.optimize_by_rules(&OptimizationStage::new(
+                    "Cost-Based Join Ordering For Batch",
+                    vec![CostBasedJoinOrderingRule::create(required)],
+                    ApplyOrder::TopDown,
+                ))?;
             }
 
             // Reorder multijoin into left-deep join tree.
@@ -1730,6 +1736,13 @@ impl LogicalOptimizer {
         plan = plan.optimize_by_rules(&SIMPLIFY_AGG)?;
 
         plan = plan.optimize_by_rules(&JOIN_COMMUTE)?;
+
+        // Cost-based sides of the outer, semi and anti joins (`batch_cost_based_join_ordering`):
+        // after the column pruning, which leaves in the inputs only the columns that are read,
+        // and after `JOIN_COMMUTE`, which would turn a right join back into a left one.
+        if ctx.session_ctx().config().batch_cost_based_join_ordering() {
+            plan = plan.optimize_by_rules(&BATCH_COST_BASED_OUTER_JOIN_SIDES)?;
+        }
 
         plan = plan.optimize_by_rules(&TOP_N_TO_VECTOR_SEARCH)?;
 

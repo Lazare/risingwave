@@ -40,6 +40,12 @@ statement ok
 create table cbj_m (k1 int, k2 int, val int, primary key (k1, k2));
 
 statement ok
+create table cbj_n (id int primary key, src varchar, n int);
+
+statement ok
+create table cbj_w (id int primary key, src varchar, body jsonb, done_at timestamp);
+
+statement ok
 create table cbj_r_off_star (c0 int, c1 int, c2 int);
 
 statement ok
@@ -171,6 +177,66 @@ create table cbj_r_off_twelve (c0 int, c1 int, c2 int, c3 int, c4 int, c5 int, c
 statement ok
 create table cbj_r_on_twelve (c0 int, c1 int, c2 int, c3 int, c4 int, c5 int, c6 int, c7 int, c8 int, c9 int, c10 int, c11 int);
 
+statement ok
+create table cbj_r_off_wide_inner (c0 int, c1 varchar, c2 timestamp);
+
+statement ok
+create table cbj_r_on_wide_inner (c0 int, c1 varchar, c2 timestamp);
+
+statement ok
+create table cbj_r_off_wide_left (c0 int, c1 int, c2 varchar);
+
+statement ok
+create table cbj_r_on_wide_left (c0 int, c1 int, c2 varchar);
+
+statement ok
+create table cbj_r_off_wide_left_preserved (c0 int, c1 int);
+
+statement ok
+create table cbj_r_on_wide_left_preserved (c0 int, c1 int);
+
+statement ok
+create table cbj_r_off_wide_semi (c0 int, c1 int);
+
+statement ok
+create table cbj_r_on_wide_semi (c0 int, c1 int);
+
+statement ok
+create table cbj_r_off_wide_anti (c0 int, c1 int);
+
+statement ok
+create table cbj_r_on_wide_anti (c0 int, c1 int);
+
+statement ok
+create table cbj_r_off_wide_agg (c0 int, c1 varchar, c2 bigint);
+
+statement ok
+create table cbj_r_on_wide_agg (c0 int, c1 varchar, c2 bigint);
+
+statement ok
+create table cbj_r_off_wide_agg_left (c0 int, c1 varchar, c2 bigint);
+
+statement ok
+create table cbj_r_on_wide_agg_left (c0 int, c1 varchar, c2 bigint);
+
+statement ok
+create table cbj_r_off_wide_top1 (c0 int, c1 varchar);
+
+statement ok
+create table cbj_r_on_wide_top1 (c0 int, c1 varchar);
+
+statement ok
+create table cbj_r_off_wide_top1_left (c0 int, c1 varchar);
+
+statement ok
+create table cbj_r_on_wide_top1_left (c0 int, c1 varchar);
+
+statement ok
+create table cbj_r_off_wide_three (c0 int, c1 varchar, c2 int);
+
+statement ok
+create table cbj_r_on_wide_three (c0 int, c1 varchar, c2 int);
+
 # Initial data: a large table, small and medium ones, NULLs and keys without match.
 
 statement ok
@@ -202,6 +268,12 @@ insert into cbj_c select i % 7, i from generate_series(0, 9) i;
 
 statement ok
 insert into cbj_m select i / 5, i % 5, i from generate_series(0, 99) i;
+
+statement ok
+insert into cbj_n select i, case when i % 97 = 0 then null else 's' || (i % 500) end, i % 8 from generate_series(0, 2999) i;
+
+statement ok
+insert into cbj_w select i, case when i % 89 = 0 then null else 's' || (i % 400) end, jsonb_build_object('k', i, 'pad', repeat('x', 2000)), '2026-01-01 00:00:00'::timestamp + i * interval '1 minute' from generate_series(0, 999) i;
 
 statement ok
 set batch_cost_based_join_ordering = false;
@@ -535,6 +607,156 @@ set batch_cost_based_join_ordering = true;
 
 statement ok
 insert into cbj_r_on_twelve select f.id, x1.a, x2.a, x3.b, x4.b, x5.c, x6.c, x7.x, x8.x, x9.x, x10.b, x11.a from cbj_d1 x1 join cbj_f f on f.d1_id = x1.id join cbj_d1 x2 on f.v = x2.id join cbj_d2 x3 on f.d2_id = x3.id join cbj_d2 x4 on f.w = x4.id join cbj_d3 x5 on f.d3_id = x5.id join cbj_d3 x6 on x1.k = x6.id join cbj_h x7 on x2.k = x7.id join cbj_g x8 on x3.k = x8.id join cbj_h x9 on x4.k = x9.id join cbj_d2 x10 on x7.y = x10.id join cbj_d1 x11 on x8.y = x11.id;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+insert into cbj_r_off_wide_inner select n.id, w.body->>'k', w.done_at from cbj_n n join cbj_w w on n.src = w.src;
+
+statement ok
+set batch_cost_based_join_ordering = true;
+
+statement ok
+insert into cbj_r_on_wide_inner select n.id, w.body->>'k', w.done_at from cbj_n n join cbj_w w on n.src = w.src;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+insert into cbj_r_off_wide_left select n.id, w.id, w.body->>'k' from cbj_n n left join cbj_w w on n.src = w.src;
+
+statement ok
+set batch_cost_based_join_ordering = true;
+
+statement ok
+insert into cbj_r_on_wide_left select n.id, w.id, w.body->>'k' from cbj_n n left join cbj_w w on n.src = w.src;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+insert into cbj_r_off_wide_left_preserved select w.id, n.n from cbj_w w left join cbj_n n on n.src = w.src;
+
+statement ok
+set batch_cost_based_join_ordering = true;
+
+statement ok
+insert into cbj_r_on_wide_left_preserved select w.id, n.n from cbj_w w left join cbj_n n on n.src = w.src;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+insert into cbj_r_off_wide_semi select n.id, n.n from cbj_n n where exists (select 1 from cbj_w w where w.src = n.src and w.id % 3 = 0);
+
+statement ok
+set batch_cost_based_join_ordering = true;
+
+statement ok
+insert into cbj_r_on_wide_semi select n.id, n.n from cbj_n n where exists (select 1 from cbj_w w where w.src = n.src and w.id % 3 = 0);
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+insert into cbj_r_off_wide_anti select n.id, n.n from cbj_n n where not exists (select 1 from cbj_w w where w.src = n.src and w.id % 3 = 0);
+
+statement ok
+set batch_cost_based_join_ordering = true;
+
+statement ok
+insert into cbj_r_on_wide_anti select n.id, n.n from cbj_n n where not exists (select 1 from cbj_w w where w.src = n.src and w.id % 3 = 0);
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+insert into cbj_r_off_wide_agg select n.id, w.body->>'k', w.cnt from cbj_n n join (select src, last_value(body order by done_at) as body, count(*) as cnt from cbj_w group by src) w on n.src = w.src;
+
+statement ok
+set batch_cost_based_join_ordering = true;
+
+statement ok
+insert into cbj_r_on_wide_agg select n.id, w.body->>'k', w.cnt from cbj_n n join (select src, last_value(body order by done_at) as body, count(*) as cnt from cbj_w group by src) w on n.src = w.src;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+insert into cbj_r_off_wide_agg_left select n.id, w.body->>'k', w.cnt from cbj_n n left join (select src, last_value(body order by done_at) as body, count(*) as cnt from cbj_w group by src) w on n.src = w.src;
+
+statement ok
+set batch_cost_based_join_ordering = true;
+
+statement ok
+insert into cbj_r_on_wide_agg_left select n.id, w.body->>'k', w.cnt from cbj_n n left join (select src, last_value(body order by done_at) as body, count(*) as cnt from cbj_w group by src) w on n.src = w.src;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+insert into cbj_r_off_wide_top1 select n.id, w.body->>'k' from cbj_n n join (select src, body from (select src, body, row_number() over (partition by src order by done_at desc) as rn from cbj_w) t where rn = 1) w on n.src = w.src;
+
+statement ok
+set batch_cost_based_join_ordering = true;
+
+statement ok
+insert into cbj_r_on_wide_top1 select n.id, w.body->>'k' from cbj_n n join (select src, body from (select src, body, row_number() over (partition by src order by done_at desc) as rn from cbj_w) t where rn = 1) w on n.src = w.src;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+insert into cbj_r_off_wide_top1_left select n.id, w.body->>'k' from cbj_n n left join (select src, body from (select src, body, row_number() over (partition by src order by done_at desc) as rn from cbj_w) t where rn = 1) w on n.src = w.src;
+
+statement ok
+set batch_cost_based_join_ordering = true;
+
+statement ok
+insert into cbj_r_on_wide_top1_left select n.id, w.body->>'k' from cbj_n n left join (select src, body from (select src, body, row_number() over (partition by src order by done_at desc) as rn from cbj_w) t where rn = 1) w on n.src = w.src;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+insert into cbj_r_off_wide_three select n.id, w.body->>'k', d3.c from cbj_n n join cbj_w w on n.src = w.src join cbj_d3 d3 on d3.id = n.n;
+
+statement ok
+set batch_cost_based_join_ordering = true;
+
+statement ok
+insert into cbj_r_on_wide_three select n.id, w.body->>'k', d3.c from cbj_n n join cbj_w w on n.src = w.src join cbj_d3 d3 on d3.id = n.n;
 
 statement ok
 set batch_cost_based_join_ordering = false;
@@ -717,6 +939,86 @@ select
 ----
 0 0 0
 
+query III
+select
+  (select count(*) from (select c0, c1, c2, count(*) as n from cbj_r_on_wide_inner group by c0, c1, c2 except select c0, c1, c2, count(*) as n from cbj_r_off_wide_inner group by c0, c1, c2) x),
+  (select count(*) from (select c0, c1, c2, count(*) as n from cbj_r_off_wide_inner group by c0, c1, c2 except select c0, c1, c2, count(*) as n from cbj_r_on_wide_inner group by c0, c1, c2) y),
+  (select count(*) from cbj_r_on_wide_inner) - (select count(*) from cbj_r_off_wide_inner);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select c0, c1, c2, count(*) as n from cbj_r_on_wide_left group by c0, c1, c2 except select c0, c1, c2, count(*) as n from cbj_r_off_wide_left group by c0, c1, c2) x),
+  (select count(*) from (select c0, c1, c2, count(*) as n from cbj_r_off_wide_left group by c0, c1, c2 except select c0, c1, c2, count(*) as n from cbj_r_on_wide_left group by c0, c1, c2) y),
+  (select count(*) from cbj_r_on_wide_left) - (select count(*) from cbj_r_off_wide_left);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select c0, c1, count(*) as n from cbj_r_on_wide_left_preserved group by c0, c1 except select c0, c1, count(*) as n from cbj_r_off_wide_left_preserved group by c0, c1) x),
+  (select count(*) from (select c0, c1, count(*) as n from cbj_r_off_wide_left_preserved group by c0, c1 except select c0, c1, count(*) as n from cbj_r_on_wide_left_preserved group by c0, c1) y),
+  (select count(*) from cbj_r_on_wide_left_preserved) - (select count(*) from cbj_r_off_wide_left_preserved);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select c0, c1, count(*) as n from cbj_r_on_wide_semi group by c0, c1 except select c0, c1, count(*) as n from cbj_r_off_wide_semi group by c0, c1) x),
+  (select count(*) from (select c0, c1, count(*) as n from cbj_r_off_wide_semi group by c0, c1 except select c0, c1, count(*) as n from cbj_r_on_wide_semi group by c0, c1) y),
+  (select count(*) from cbj_r_on_wide_semi) - (select count(*) from cbj_r_off_wide_semi);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select c0, c1, count(*) as n from cbj_r_on_wide_anti group by c0, c1 except select c0, c1, count(*) as n from cbj_r_off_wide_anti group by c0, c1) x),
+  (select count(*) from (select c0, c1, count(*) as n from cbj_r_off_wide_anti group by c0, c1 except select c0, c1, count(*) as n from cbj_r_on_wide_anti group by c0, c1) y),
+  (select count(*) from cbj_r_on_wide_anti) - (select count(*) from cbj_r_off_wide_anti);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select c0, c1, c2, count(*) as n from cbj_r_on_wide_agg group by c0, c1, c2 except select c0, c1, c2, count(*) as n from cbj_r_off_wide_agg group by c0, c1, c2) x),
+  (select count(*) from (select c0, c1, c2, count(*) as n from cbj_r_off_wide_agg group by c0, c1, c2 except select c0, c1, c2, count(*) as n from cbj_r_on_wide_agg group by c0, c1, c2) y),
+  (select count(*) from cbj_r_on_wide_agg) - (select count(*) from cbj_r_off_wide_agg);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select c0, c1, c2, count(*) as n from cbj_r_on_wide_agg_left group by c0, c1, c2 except select c0, c1, c2, count(*) as n from cbj_r_off_wide_agg_left group by c0, c1, c2) x),
+  (select count(*) from (select c0, c1, c2, count(*) as n from cbj_r_off_wide_agg_left group by c0, c1, c2 except select c0, c1, c2, count(*) as n from cbj_r_on_wide_agg_left group by c0, c1, c2) y),
+  (select count(*) from cbj_r_on_wide_agg_left) - (select count(*) from cbj_r_off_wide_agg_left);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select c0, c1, count(*) as n from cbj_r_on_wide_top1 group by c0, c1 except select c0, c1, count(*) as n from cbj_r_off_wide_top1 group by c0, c1) x),
+  (select count(*) from (select c0, c1, count(*) as n from cbj_r_off_wide_top1 group by c0, c1 except select c0, c1, count(*) as n from cbj_r_on_wide_top1 group by c0, c1) y),
+  (select count(*) from cbj_r_on_wide_top1) - (select count(*) from cbj_r_off_wide_top1);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select c0, c1, count(*) as n from cbj_r_on_wide_top1_left group by c0, c1 except select c0, c1, count(*) as n from cbj_r_off_wide_top1_left group by c0, c1) x),
+  (select count(*) from (select c0, c1, count(*) as n from cbj_r_off_wide_top1_left group by c0, c1 except select c0, c1, count(*) as n from cbj_r_on_wide_top1_left group by c0, c1) y),
+  (select count(*) from cbj_r_on_wide_top1_left) - (select count(*) from cbj_r_off_wide_top1_left);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select c0, c1, c2, count(*) as n from cbj_r_on_wide_three group by c0, c1, c2 except select c0, c1, c2, count(*) as n from cbj_r_off_wide_three group by c0, c1, c2) x),
+  (select count(*) from (select c0, c1, c2, count(*) as n from cbj_r_off_wide_three group by c0, c1, c2 except select c0, c1, c2, count(*) as n from cbj_r_on_wide_three group by c0, c1, c2) y),
+  (select count(*) from cbj_r_on_wide_three) - (select count(*) from cbj_r_off_wide_three);
+----
+0 0 0
+
 # Spot checks: the queries return rows.
 
 query T
@@ -749,6 +1051,41 @@ select count(*) > 0 from cbj_r_on_two_way_non_key;
 ----
 t
 
+query T
+select count(*) > 0 from cbj_r_on_wide_inner;
+----
+t
+
+query T
+select count(*) > 0 from cbj_r_on_wide_left;
+----
+t
+
+query T
+select count(*) > 0 from cbj_r_on_wide_agg;
+----
+t
+
+query T
+select count(*) > 0 from cbj_r_on_wide_top1;
+----
+t
+
+query T
+select count(*) > 0 from cbj_r_on_wide_three;
+----
+t
+
+query T
+select count(*) > 0 from cbj_r_on_wide_semi;
+----
+t
+
+query T
+select count(*) > 0 from cbj_r_on_wide_anti;
+----
+t
+
 # Changes: more rows in the large table, deleted and NULL keys, duplicates.
 
 statement ok
@@ -774,6 +1111,15 @@ insert into cbj_c values (null, 100), (3, 101), (3, 102);
 
 statement ok
 insert into cbj_d3 values (5, null), (6, 6);
+
+statement ok
+delete from cbj_w where id % 10 = 0;
+
+statement ok
+insert into cbj_w select i, 's' || (i % 450), jsonb_build_object('k', i, 'pad', repeat('y', 1000)), '2026-01-01 00:00:00'::timestamp + i * interval '1 minute' from generate_series(1000, 1499) i;
+
+statement ok
+insert into cbj_n select i, 's' || (i % 700), i % 8 from generate_series(3000, 3999) i;
 
 statement ok
 delete from cbj_r_off_star;
@@ -906,6 +1252,66 @@ delete from cbj_r_off_twelve;
 
 statement ok
 delete from cbj_r_on_twelve;
+
+statement ok
+delete from cbj_r_off_wide_inner;
+
+statement ok
+delete from cbj_r_on_wide_inner;
+
+statement ok
+delete from cbj_r_off_wide_left;
+
+statement ok
+delete from cbj_r_on_wide_left;
+
+statement ok
+delete from cbj_r_off_wide_left_preserved;
+
+statement ok
+delete from cbj_r_on_wide_left_preserved;
+
+statement ok
+delete from cbj_r_off_wide_semi;
+
+statement ok
+delete from cbj_r_on_wide_semi;
+
+statement ok
+delete from cbj_r_off_wide_anti;
+
+statement ok
+delete from cbj_r_on_wide_anti;
+
+statement ok
+delete from cbj_r_off_wide_agg;
+
+statement ok
+delete from cbj_r_on_wide_agg;
+
+statement ok
+delete from cbj_r_off_wide_agg_left;
+
+statement ok
+delete from cbj_r_on_wide_agg_left;
+
+statement ok
+delete from cbj_r_off_wide_top1;
+
+statement ok
+delete from cbj_r_on_wide_top1;
+
+statement ok
+delete from cbj_r_off_wide_top1_left;
+
+statement ok
+delete from cbj_r_on_wide_top1_left;
+
+statement ok
+delete from cbj_r_off_wide_three;
+
+statement ok
+delete from cbj_r_on_wide_three;
 
 statement ok
 set batch_cost_based_join_ordering = false;
@@ -1243,6 +1649,156 @@ insert into cbj_r_on_twelve select f.id, x1.a, x2.a, x3.b, x4.b, x5.c, x6.c, x7.
 statement ok
 set batch_cost_based_join_ordering = false;
 
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+insert into cbj_r_off_wide_inner select n.id, w.body->>'k', w.done_at from cbj_n n join cbj_w w on n.src = w.src;
+
+statement ok
+set batch_cost_based_join_ordering = true;
+
+statement ok
+insert into cbj_r_on_wide_inner select n.id, w.body->>'k', w.done_at from cbj_n n join cbj_w w on n.src = w.src;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+insert into cbj_r_off_wide_left select n.id, w.id, w.body->>'k' from cbj_n n left join cbj_w w on n.src = w.src;
+
+statement ok
+set batch_cost_based_join_ordering = true;
+
+statement ok
+insert into cbj_r_on_wide_left select n.id, w.id, w.body->>'k' from cbj_n n left join cbj_w w on n.src = w.src;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+insert into cbj_r_off_wide_left_preserved select w.id, n.n from cbj_w w left join cbj_n n on n.src = w.src;
+
+statement ok
+set batch_cost_based_join_ordering = true;
+
+statement ok
+insert into cbj_r_on_wide_left_preserved select w.id, n.n from cbj_w w left join cbj_n n on n.src = w.src;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+insert into cbj_r_off_wide_semi select n.id, n.n from cbj_n n where exists (select 1 from cbj_w w where w.src = n.src and w.id % 3 = 0);
+
+statement ok
+set batch_cost_based_join_ordering = true;
+
+statement ok
+insert into cbj_r_on_wide_semi select n.id, n.n from cbj_n n where exists (select 1 from cbj_w w where w.src = n.src and w.id % 3 = 0);
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+insert into cbj_r_off_wide_anti select n.id, n.n from cbj_n n where not exists (select 1 from cbj_w w where w.src = n.src and w.id % 3 = 0);
+
+statement ok
+set batch_cost_based_join_ordering = true;
+
+statement ok
+insert into cbj_r_on_wide_anti select n.id, n.n from cbj_n n where not exists (select 1 from cbj_w w where w.src = n.src and w.id % 3 = 0);
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+insert into cbj_r_off_wide_agg select n.id, w.body->>'k', w.cnt from cbj_n n join (select src, last_value(body order by done_at) as body, count(*) as cnt from cbj_w group by src) w on n.src = w.src;
+
+statement ok
+set batch_cost_based_join_ordering = true;
+
+statement ok
+insert into cbj_r_on_wide_agg select n.id, w.body->>'k', w.cnt from cbj_n n join (select src, last_value(body order by done_at) as body, count(*) as cnt from cbj_w group by src) w on n.src = w.src;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+insert into cbj_r_off_wide_agg_left select n.id, w.body->>'k', w.cnt from cbj_n n left join (select src, last_value(body order by done_at) as body, count(*) as cnt from cbj_w group by src) w on n.src = w.src;
+
+statement ok
+set batch_cost_based_join_ordering = true;
+
+statement ok
+insert into cbj_r_on_wide_agg_left select n.id, w.body->>'k', w.cnt from cbj_n n left join (select src, last_value(body order by done_at) as body, count(*) as cnt from cbj_w group by src) w on n.src = w.src;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+insert into cbj_r_off_wide_top1 select n.id, w.body->>'k' from cbj_n n join (select src, body from (select src, body, row_number() over (partition by src order by done_at desc) as rn from cbj_w) t where rn = 1) w on n.src = w.src;
+
+statement ok
+set batch_cost_based_join_ordering = true;
+
+statement ok
+insert into cbj_r_on_wide_top1 select n.id, w.body->>'k' from cbj_n n join (select src, body from (select src, body, row_number() over (partition by src order by done_at desc) as rn from cbj_w) t where rn = 1) w on n.src = w.src;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+insert into cbj_r_off_wide_top1_left select n.id, w.body->>'k' from cbj_n n left join (select src, body from (select src, body, row_number() over (partition by src order by done_at desc) as rn from cbj_w) t where rn = 1) w on n.src = w.src;
+
+statement ok
+set batch_cost_based_join_ordering = true;
+
+statement ok
+insert into cbj_r_on_wide_top1_left select n.id, w.body->>'k' from cbj_n n left join (select src, body from (select src, body, row_number() over (partition by src order by done_at desc) as rn from cbj_w) t where rn = 1) w on n.src = w.src;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+insert into cbj_r_off_wide_three select n.id, w.body->>'k', d3.c from cbj_n n join cbj_w w on n.src = w.src join cbj_d3 d3 on d3.id = n.n;
+
+statement ok
+set batch_cost_based_join_ordering = true;
+
+statement ok
+insert into cbj_r_on_wide_three select n.id, w.body->>'k', d3.c from cbj_n n join cbj_w w on n.src = w.src join cbj_d3 d3 on d3.id = n.n;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
 # After the changes: with and without the cost-based join ordering, the same rows.
 
 query III
@@ -1421,6 +1977,86 @@ select
 ----
 0 0 0
 
+query III
+select
+  (select count(*) from (select c0, c1, c2, count(*) as n from cbj_r_on_wide_inner group by c0, c1, c2 except select c0, c1, c2, count(*) as n from cbj_r_off_wide_inner group by c0, c1, c2) x),
+  (select count(*) from (select c0, c1, c2, count(*) as n from cbj_r_off_wide_inner group by c0, c1, c2 except select c0, c1, c2, count(*) as n from cbj_r_on_wide_inner group by c0, c1, c2) y),
+  (select count(*) from cbj_r_on_wide_inner) - (select count(*) from cbj_r_off_wide_inner);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select c0, c1, c2, count(*) as n from cbj_r_on_wide_left group by c0, c1, c2 except select c0, c1, c2, count(*) as n from cbj_r_off_wide_left group by c0, c1, c2) x),
+  (select count(*) from (select c0, c1, c2, count(*) as n from cbj_r_off_wide_left group by c0, c1, c2 except select c0, c1, c2, count(*) as n from cbj_r_on_wide_left group by c0, c1, c2) y),
+  (select count(*) from cbj_r_on_wide_left) - (select count(*) from cbj_r_off_wide_left);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select c0, c1, count(*) as n from cbj_r_on_wide_left_preserved group by c0, c1 except select c0, c1, count(*) as n from cbj_r_off_wide_left_preserved group by c0, c1) x),
+  (select count(*) from (select c0, c1, count(*) as n from cbj_r_off_wide_left_preserved group by c0, c1 except select c0, c1, count(*) as n from cbj_r_on_wide_left_preserved group by c0, c1) y),
+  (select count(*) from cbj_r_on_wide_left_preserved) - (select count(*) from cbj_r_off_wide_left_preserved);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select c0, c1, count(*) as n from cbj_r_on_wide_semi group by c0, c1 except select c0, c1, count(*) as n from cbj_r_off_wide_semi group by c0, c1) x),
+  (select count(*) from (select c0, c1, count(*) as n from cbj_r_off_wide_semi group by c0, c1 except select c0, c1, count(*) as n from cbj_r_on_wide_semi group by c0, c1) y),
+  (select count(*) from cbj_r_on_wide_semi) - (select count(*) from cbj_r_off_wide_semi);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select c0, c1, count(*) as n from cbj_r_on_wide_anti group by c0, c1 except select c0, c1, count(*) as n from cbj_r_off_wide_anti group by c0, c1) x),
+  (select count(*) from (select c0, c1, count(*) as n from cbj_r_off_wide_anti group by c0, c1 except select c0, c1, count(*) as n from cbj_r_on_wide_anti group by c0, c1) y),
+  (select count(*) from cbj_r_on_wide_anti) - (select count(*) from cbj_r_off_wide_anti);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select c0, c1, c2, count(*) as n from cbj_r_on_wide_agg group by c0, c1, c2 except select c0, c1, c2, count(*) as n from cbj_r_off_wide_agg group by c0, c1, c2) x),
+  (select count(*) from (select c0, c1, c2, count(*) as n from cbj_r_off_wide_agg group by c0, c1, c2 except select c0, c1, c2, count(*) as n from cbj_r_on_wide_agg group by c0, c1, c2) y),
+  (select count(*) from cbj_r_on_wide_agg) - (select count(*) from cbj_r_off_wide_agg);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select c0, c1, c2, count(*) as n from cbj_r_on_wide_agg_left group by c0, c1, c2 except select c0, c1, c2, count(*) as n from cbj_r_off_wide_agg_left group by c0, c1, c2) x),
+  (select count(*) from (select c0, c1, c2, count(*) as n from cbj_r_off_wide_agg_left group by c0, c1, c2 except select c0, c1, c2, count(*) as n from cbj_r_on_wide_agg_left group by c0, c1, c2) y),
+  (select count(*) from cbj_r_on_wide_agg_left) - (select count(*) from cbj_r_off_wide_agg_left);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select c0, c1, count(*) as n from cbj_r_on_wide_top1 group by c0, c1 except select c0, c1, count(*) as n from cbj_r_off_wide_top1 group by c0, c1) x),
+  (select count(*) from (select c0, c1, count(*) as n from cbj_r_off_wide_top1 group by c0, c1 except select c0, c1, count(*) as n from cbj_r_on_wide_top1 group by c0, c1) y),
+  (select count(*) from cbj_r_on_wide_top1) - (select count(*) from cbj_r_off_wide_top1);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select c0, c1, count(*) as n from cbj_r_on_wide_top1_left group by c0, c1 except select c0, c1, count(*) as n from cbj_r_off_wide_top1_left group by c0, c1) x),
+  (select count(*) from (select c0, c1, count(*) as n from cbj_r_off_wide_top1_left group by c0, c1 except select c0, c1, count(*) as n from cbj_r_on_wide_top1_left group by c0, c1) y),
+  (select count(*) from cbj_r_on_wide_top1_left) - (select count(*) from cbj_r_off_wide_top1_left);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select c0, c1, c2, count(*) as n from cbj_r_on_wide_three group by c0, c1, c2 except select c0, c1, c2, count(*) as n from cbj_r_off_wide_three group by c0, c1, c2) x),
+  (select count(*) from (select c0, c1, c2, count(*) as n from cbj_r_off_wide_three group by c0, c1, c2 except select c0, c1, c2, count(*) as n from cbj_r_on_wide_three group by c0, c1, c2) y),
+  (select count(*) from cbj_r_on_wide_three) - (select count(*) from cbj_r_off_wide_three);
+----
+0 0 0
+
 # Cleanup.
 
 statement ok
@@ -1556,6 +2192,66 @@ statement ok
 drop table cbj_r_on_twelve;
 
 statement ok
+drop table cbj_r_off_wide_inner;
+
+statement ok
+drop table cbj_r_on_wide_inner;
+
+statement ok
+drop table cbj_r_off_wide_left;
+
+statement ok
+drop table cbj_r_on_wide_left;
+
+statement ok
+drop table cbj_r_off_wide_left_preserved;
+
+statement ok
+drop table cbj_r_on_wide_left_preserved;
+
+statement ok
+drop table cbj_r_off_wide_semi;
+
+statement ok
+drop table cbj_r_on_wide_semi;
+
+statement ok
+drop table cbj_r_off_wide_anti;
+
+statement ok
+drop table cbj_r_on_wide_anti;
+
+statement ok
+drop table cbj_r_off_wide_agg;
+
+statement ok
+drop table cbj_r_on_wide_agg;
+
+statement ok
+drop table cbj_r_off_wide_agg_left;
+
+statement ok
+drop table cbj_r_on_wide_agg_left;
+
+statement ok
+drop table cbj_r_off_wide_top1;
+
+statement ok
+drop table cbj_r_on_wide_top1;
+
+statement ok
+drop table cbj_r_off_wide_top1_left;
+
+statement ok
+drop table cbj_r_on_wide_top1_left;
+
+statement ok
+drop table cbj_r_off_wide_three;
+
+statement ok
+drop table cbj_r_on_wide_three;
+
+statement ok
 drop table cbj_f;
 
 statement ok
@@ -1584,3 +2280,9 @@ drop table cbj_c;
 
 statement ok
 drop table cbj_m;
+
+statement ok
+drop table cbj_n;
+
+statement ok
+drop table cbj_w;

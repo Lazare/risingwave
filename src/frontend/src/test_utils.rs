@@ -248,6 +248,17 @@ pub fn set_table_row_counts_for_test(
     session: &SessionImpl,
     row_counts: &BTreeMap<String, u64>,
 ) -> Result<()> {
+    set_table_stats_for_test(session, row_counts, &BTreeMap::new())
+}
+
+/// Test only: as [`set_table_row_counts_for_test`], with the total size in bytes of some tables
+/// (key and value sizes in storage, read by the cost-based join ordering for the width of the
+/// rows). A table with a size and no row count is not given statistics.
+pub fn set_table_stats_for_test(
+    session: &SessionImpl,
+    row_counts: &BTreeMap<String, u64>,
+    sizes: &BTreeMap<String, u64>,
+) -> Result<()> {
     use risingwave_pb::hummock::{HummockVersionStats, TableStats};
 
     use crate::catalog::root_catalog::SchemaPath;
@@ -276,6 +287,9 @@ pub fn set_table_row_counts_for_test(
                 table_id,
                 TableStats {
                     total_key_count: i64::try_from(*rows).unwrap_or(i64::MAX),
+                    total_value_size: sizes
+                        .get(qualified_name)
+                        .map_or(0, |size| i64::try_from(*size).unwrap_or(i64::MAX)),
                     ..Default::default()
                 },
             );

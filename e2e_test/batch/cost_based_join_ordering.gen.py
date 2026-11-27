@@ -10,6 +10,12 @@ import sys
 
 P = 'cbj_'
 F, D1, D2, D3, G, H, A, B, C, M = (P + t for t in ('f', 'd1', 'd2', 'd3', 'g', 'h', 'a', 'b', 'c', 'm'))
+# A narrow table with many rows and a table with a large JSON column: the cost of a join counts
+# bytes, so the narrow side becomes the build side (and a left join a right join).
+N, W = P + 'n', P + 'w'
+TOP1 = (f"(select src, body from (select src, body, row_number() over (partition by src order by done_at desc) "
+        f"as rn from {W}) t where rn = 1)")
+LAST = f"(select src, last_value(body order by done_at) as body, count(*) as cnt from {W} group by src)"
 
 STAR = (f"from {D1} d1 join {F} f on f.d1_id = d1.id join {D2} d2 on f.d2_id = d2.id")
 
@@ -73,6 +79,26 @@ CASES = [
      f"join {D2} x3 on f.d2_id = x3.id join {D2} x4 on f.w = x4.id join {D3} x5 on f.d3_id = x5.id "
      f"join {D3} x6 on x1.k = x6.id join {H} x7 on x2.k = x7.id join {G} x8 on x3.k = x8.id "
      f"join {H} x9 on x4.k = x9.id join {D2} x10 on x7.y = x10.id join {D1} x11 on x8.y = x11.id", None),
+    ('wide_inner', 'int, varchar, timestamp',
+     f"select n.id, w.body->>'k', w.done_at from {N} n join {W} w on n.src = w.src", None),
+    ('wide_left', 'int, int, varchar',
+     f"select n.id, w.id, w.body->>'k' from {N} n left join {W} w on n.src = w.src", None),
+    ('wide_left_preserved', 'int, int',
+     f"select w.id, n.n from {W} w left join {N} n on n.src = w.src", None),
+    ('wide_semi', 'int, int',
+     f"select n.id, n.n from {N} n where exists (select 1 from {W} w where w.src = n.src and w.id % 3 = 0)", None),
+    ('wide_anti', 'int, int',
+     f"select n.id, n.n from {N} n where not exists (select 1 from {W} w where w.src = n.src and w.id % 3 = 0)", None),
+    ('wide_agg', 'int, varchar, bigint',
+     f"select n.id, w.body->>'k', w.cnt from {N} n join {LAST} w on n.src = w.src", None),
+    ('wide_agg_left', 'int, varchar, bigint',
+     f"select n.id, w.body->>'k', w.cnt from {N} n left join {LAST} w on n.src = w.src", None),
+    ('wide_top1', 'int, varchar',
+     f"select n.id, w.body->>'k' from {N} n join {TOP1} w on n.src = w.src", None),
+    ('wide_top1_left', 'int, varchar',
+     f"select n.id, w.body->>'k' from {N} n left join {TOP1} w on n.src = w.src", None),
+    ('wide_three', 'int, varchar, int',
+     f"select n.id, w.body->>'k', d3.c from {N} n join {W} w on n.src = w.src join {D3} d3 on d3.id = n.n", None),
 ]
 
 out = []
@@ -136,6 +162,8 @@ stmt(f"create table {A} (x int, y int)")
 stmt(f"create table {B} (x int, y int)")
 stmt(f"create table {C} (x int, y int)")
 stmt(f"create table {M} (k1 int, k2 int, val int, primary key (k1, k2))")
+stmt(f"create table {N} (id int primary key, src varchar, n int)")
+stmt(f"create table {W} (id int primary key, src varchar, body jsonb, done_at timestamp)")
 for name, types, _, _ in CASES:
     cols = ', '.join(f"c{i} {t.strip()}" for i, t in enumerate(types.split(',')))
     for sfx in ('off', 'on'):
@@ -154,12 +182,18 @@ stmt(f"insert into {A} select case when i % 50 = 0 then null else i % 100 end, i
 stmt(f"insert into {B} select i % 37, i % 7 from generate_series(0, 199) i")
 stmt(f"insert into {C} select i % 7, i from generate_series(0, 9) i")
 stmt(f"insert into {M} select i / 5, i % 5, i from generate_series(0, 99) i")
+stmt(f"insert into {N} select i, case when i % 97 = 0 then null else 's' || (i % 500) end, i % 8 "
+     f"from generate_series(0, 2999) i")
+stmt(f"insert into {W} select i, case when i % 89 = 0 then null else 's' || (i % 400) end, "
+     f"jsonb_build_object('k', i, 'pad', repeat('x', 2000)), "
+     f"'2026-01-01 00:00:00'::timestamp + i * interval '1 minute' from generate_series(0, 999) i")
 
 run_all()
 compare_all("Initial data")
 
 out.append("# Spot checks: the queries return rows.\n")
-for name in ('star', 'star4', 'chain', 'snowflake', 'twelve', 'two_way_non_key'):
+for name in ('star', 'star4', 'chain', 'snowflake', 'twelve', 'two_way_non_key', 'wide_inner', 'wide_left',
+             'wide_agg', 'wide_top1', 'wide_three', 'wide_semi', 'wide_anti'):
     query('T', f"select count(*) > 0 from {P}r_on_{name}", ["t"])
 
 out.append("# Changes: more rows in the large table, deleted and NULL keys, duplicates.\n")
@@ -171,6 +205,10 @@ stmt(f"insert into {B} select i % 37, i % 7 from generate_series(0, 49) i")
 stmt(f"delete from {A} where x < 10")
 stmt(f"insert into {C} values (null, 100), (3, 101), (3, 102)")
 stmt(f"insert into {D3} values (5, null), (6, 6)")
+stmt(f"delete from {W} where id % 10 = 0")
+stmt(f"insert into {W} select i, 's' || (i % 450), jsonb_build_object('k', i, 'pad', repeat('y', 1000)), "
+     f"'2026-01-01 00:00:00'::timestamp + i * interval '1 minute' from generate_series(1000, 1499) i")
+stmt(f"insert into {N} select i, 's' || (i % 700), i % 8 from generate_series(3000, 3999) i")
 
 clear_all()
 run_all()
@@ -180,7 +218,7 @@ out.append("# Cleanup.\n")
 for name, _, _, _ in CASES:
     for sfx in ('off', 'on'):
         stmt(f"drop table {P}r_{sfx}_{name}")
-for t in (F, D1, D2, D3, G, H, A, B, C, M):
+for t in (F, D1, D2, D3, G, H, A, B, C, M, N, W):
     stmt(f"drop table {t}")
 
 with open(sys.argv[1], 'w') as f:

@@ -294,15 +294,15 @@
     select * from d3 left join (d1 join f on f.d1_id = d1.id join d2 on f.d2_id = d2.id) on f.d3_id = d3.id;
   batch_plan: |-
     BatchExchange { order: [], dist: Single }
-    └─BatchHashJoin { type: LeftOuter, predicate: d3.id = f.d3_id, output: all }
-      ├─BatchExchange { order: [], dist: HashShard(d3.id) }
-      │ └─BatchScan { table: d3, columns: [d3.id, d3.c], distribution: UpstreamHashShard(d3.id) }
-      └─BatchExchange { order: [], dist: HashShard(f.d3_id) }
-        └─BatchLookupJoin { type: Inner, predicate: f.d1_id = d1.id, output: [d1.id, d1.a, d1.k, f.id, f.d1_id, f.d2_id, f.d3_id, f.v, f.w, d2.id, d2.b, d2.k], lookup table: d1 }
-          └─BatchExchange { order: [], dist: UpstreamHashShard(f.d1_id) }
-            └─BatchLookupJoin { type: Inner, predicate: f.d2_id = d2.id, output: all, lookup table: d2 }
-              └─BatchExchange { order: [], dist: UpstreamHashShard(f.d2_id) }
-                └─BatchScan { table: f, columns: [f.id, f.d1_id, f.d2_id, f.d3_id, f.v, f.w], distribution: UpstreamHashShard(f.id) }
+    └─BatchHashJoin { type: RightOuter, predicate: f.d3_id = d3.id, output: [d3.id, d3.c, d1.id, d1.a, d1.k, f.id, f.d1_id, f.d2_id, f.d3_id, f.v, f.w, d2.id, d2.b, d2.k] }
+      ├─BatchExchange { order: [], dist: HashShard(f.d3_id) }
+      │ └─BatchLookupJoin { type: Inner, predicate: f.d1_id = d1.id, output: [d1.id, d1.a, d1.k, f.id, f.d1_id, f.d2_id, f.d3_id, f.v, f.w, d2.id, d2.b, d2.k], lookup table: d1 }
+      │   └─BatchExchange { order: [], dist: UpstreamHashShard(f.d1_id) }
+      │     └─BatchLookupJoin { type: Inner, predicate: f.d2_id = d2.id, output: all, lookup table: d2 }
+      │       └─BatchExchange { order: [], dist: UpstreamHashShard(f.d2_id) }
+      │         └─BatchScan { table: f, columns: [f.id, f.d1_id, f.d2_id, f.d3_id, f.v, f.w], distribution: UpstreamHashShard(f.id) }
+      └─BatchExchange { order: [], dist: HashShard(d3.id) }
+        └─BatchScan { table: d3, columns: [d3.id, d3.c], distribution: UpstreamHashShard(d3.id) }
   table_row_counts:
     d1: 100
     d2: 1000
@@ -423,31 +423,31 @@
     BatchExchange { order: [], dist: Single }
     └─BatchHashJoin { type: Inner, predicate: f.d2_id = d2.id, output: [f.id, d1.a, d1.a, d2.b, d2.b, d3.c, d3.c, h.x, g.x, h.x, d2.b, d1.a] }
       ├─BatchExchange { order: [], dist: HashShard(f.d2_id) }
-      │ └─BatchLookupJoin { type: Inner, predicate: f.d3_id = d3.id, output: [f.id, f.d2_id, d1.a, d3.c, d1.a, h.x, d2.b, d2.b, h.x, d3.c], lookup table: d3 }
-      │   └─BatchExchange { order: [], dist: UpstreamHashShard(f.d3_id) }
-      │     └─BatchHashJoin { type: Inner, predicate: f.w = d2.id, output: [f.id, f.d2_id, f.d3_id, d1.a, d3.c, d1.a, h.x, d2.b, d2.b, h.x] }
-      │       ├─BatchExchange { order: [], dist: HashShard(f.w) }
-      │       │ └─BatchHashJoin { type: Inner, predicate: f.v = d1.id, output: [f.id, f.d2_id, f.d3_id, f.w, d1.a, d3.c, d1.a, h.x, d2.b] }
-      │       │   ├─BatchExchange { order: [], dist: HashShard(f.v) }
-      │       │   │ └─BatchHashJoin { type: Inner, predicate: f.d1_id = d1.id, output: [f.id, f.d2_id, f.d3_id, f.v, f.w, d1.a, d3.c] }
-      │       │   │   ├─BatchExchange { order: [], dist: HashShard(f.d1_id) }
-      │       │   │   │ └─BatchScan { table: f, columns: [f.id, f.d1_id, f.d2_id, f.d3_id, f.v, f.w], distribution: UpstreamHashShard(f.id) }
-      │       │   │   └─BatchExchange { order: [], dist: HashShard(d1.id) }
-      │       │   │     └─BatchLookupJoin { type: Inner, predicate: d1.k = d3.id, output: [d1.id, d1.a, d3.c], lookup table: d3 }
-      │       │   │       └─BatchExchange { order: [], dist: UpstreamHashShard(d1.k) }
-      │       │   │         └─BatchScan { table: d1, columns: [d1.id, d1.a, d1.k], distribution: UpstreamHashShard(d1.id) }
-      │       │   └─BatchExchange { order: [], dist: HashShard(d1.id) }
-      │       │     └─BatchHashJoin { type: Inner, predicate: d1.k = h.id, output: [d1.id, d1.a, h.x, d2.b] }
-      │       │       ├─BatchExchange { order: [], dist: HashShard(d1.k) }
-      │       │       │ └─BatchScan { table: d1, columns: [d1.id, d1.a, d1.k], distribution: UpstreamHashShard(d1.id) }
-      │       │       └─BatchExchange { order: [], dist: HashShard(h.id) }
-      │       │         └─BatchLookupJoin { type: Inner, predicate: h.y = d2.id, output: [h.id, h.x, d2.b], lookup table: d2 }
-      │       │           └─BatchExchange { order: [], dist: UpstreamHashShard(h.y) }
-      │       │             └─BatchScan { table: h, columns: [h.id, h.x, h.y], distribution: UpstreamHashShard(h.id) }
-      │       └─BatchExchange { order: [], dist: HashShard(d2.id) }
-      │         └─BatchLookupJoin { type: Inner, predicate: d2.k = h.id, output: [d2.id, d2.b, h.x], lookup table: h }
-      │           └─BatchExchange { order: [], dist: UpstreamHashShard(d2.k) }
-      │             └─BatchScan { table: d2, columns: [d2.id, d2.b, d2.k], distribution: UpstreamHashShard(d2.id) }
+      │ └─BatchHashJoin { type: Inner, predicate: f.v = d1.id, output: [f.id, f.d2_id, d3.c, d1.a, d3.c, d2.b, h.x, d1.a, h.x, d2.b] }
+      │   ├─BatchExchange { order: [], dist: HashShard(f.v) }
+      │   │ └─BatchHashJoin { type: Inner, predicate: f.w = d2.id, output: [f.id, f.d2_id, f.v, d3.c, d1.a, d3.c, d2.b, h.x] }
+      │   │   ├─BatchExchange { order: [], dist: HashShard(f.w) }
+      │   │   │ └─BatchHashJoin { type: Inner, predicate: f.d1_id = d1.id, output: [f.id, f.d2_id, f.v, f.w, d3.c, d1.a, d3.c] }
+      │   │   │   ├─BatchExchange { order: [], dist: HashShard(f.d1_id) }
+      │   │   │   │ └─BatchLookupJoin { type: Inner, predicate: f.d3_id = d3.id, output: [f.id, f.d1_id, f.d2_id, f.v, f.w, d3.c], lookup table: d3 }
+      │   │   │   │   └─BatchExchange { order: [], dist: UpstreamHashShard(f.d3_id) }
+      │   │   │   │     └─BatchScan { table: f, columns: [f.id, f.d1_id, f.d2_id, f.d3_id, f.v, f.w], distribution: UpstreamHashShard(f.id) }
+      │   │   │   └─BatchExchange { order: [], dist: HashShard(d1.id) }
+      │   │   │     └─BatchLookupJoin { type: Inner, predicate: d1.k = d3.id, output: [d1.id, d1.a, d3.c], lookup table: d3 }
+      │   │   │       └─BatchExchange { order: [], dist: UpstreamHashShard(d1.k) }
+      │   │   │         └─BatchScan { table: d1, columns: [d1.id, d1.a, d1.k], distribution: UpstreamHashShard(d1.id) }
+      │   │   └─BatchExchange { order: [], dist: HashShard(d2.id) }
+      │   │     └─BatchLookupJoin { type: Inner, predicate: d2.k = h.id, output: [d2.id, d2.b, h.x], lookup table: h }
+      │   │       └─BatchExchange { order: [], dist: UpstreamHashShard(d2.k) }
+      │   │         └─BatchScan { table: d2, columns: [d2.id, d2.b, d2.k], distribution: UpstreamHashShard(d2.id) }
+      │   └─BatchExchange { order: [], dist: HashShard(d1.id) }
+      │     └─BatchHashJoin { type: Inner, predicate: d1.k = h.id, output: [d1.id, d1.a, h.x, d2.b] }
+      │       ├─BatchExchange { order: [], dist: HashShard(d1.k) }
+      │       │ └─BatchScan { table: d1, columns: [d1.id, d1.a, d1.k], distribution: UpstreamHashShard(d1.id) }
+      │       └─BatchExchange { order: [], dist: HashShard(h.id) }
+      │         └─BatchLookupJoin { type: Inner, predicate: h.y = d2.id, output: [h.id, h.x, d2.b], lookup table: d2 }
+      │           └─BatchExchange { order: [], dist: UpstreamHashShard(h.y) }
+      │             └─BatchScan { table: h, columns: [h.id, h.x, h.y], distribution: UpstreamHashShard(h.id) }
       └─BatchExchange { order: [], dist: HashShard(d2.id) }
         └─BatchLookupJoin { type: Inner, predicate: g.y = d1.id, output: [d2.id, d2.b, g.x, d1.a], lookup table: d1 }
           └─BatchExchange { order: [], dist: UpstreamHashShard(g.y) }
@@ -461,3 +461,285 @@
     f: 1000000
     g: 100000
     h: 50
+- id: wide_tables
+  sql: |
+    create table nt (id int primary key, src varchar, n int);
+    create table wt (id int primary key, src varchar, body jsonb, done_at timestamp, note varchar);
+    create table et (id int primary key, src varchar, n int);
+- name: narrow side with more rows against a side with a JSON column, heuristic (variable off)
+  before:
+  - wide_tables
+  sql: |
+    select nt.id, wt.body, wt.done_at from nt join wt on nt.src = wt.src;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: Inner, predicate: nt.src = wt.src, output: [nt.id, wt.body, wt.done_at] }
+      ├─BatchExchange { order: [], dist: HashShard(nt.src) }
+      │ └─BatchScan { table: nt, columns: [nt.id, nt.src], distribution: UpstreamHashShard(nt.id) }
+      └─BatchExchange { order: [], dist: HashShard(wt.src) }
+        └─BatchScan { table: wt, columns: [wt.src, wt.body, wt.done_at], distribution: SomeShard }
+  table_row_counts:
+    nt: 4500000
+    wt: 1800000
+  table_sizes:
+    nt: 180000000
+    wt: 17000000000
+- name: narrow side with more rows against a side with a JSON column, the build goes on the narrow side
+  before:
+  - wide_tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select nt.id, wt.body, wt.done_at from nt join wt on nt.src = wt.src;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: Inner, predicate: wt.src = nt.src, output: [nt.id, wt.body, wt.done_at] }
+      ├─BatchExchange { order: [], dist: HashShard(wt.src) }
+      │ └─BatchScan { table: wt, columns: [wt.src, wt.body, wt.done_at], distribution: SomeShard }
+      └─BatchExchange { order: [], dist: HashShard(nt.src) }
+        └─BatchScan { table: nt, columns: [nt.id, nt.src], distribution: UpstreamHashShard(nt.id) }
+  table_row_counts:
+    nt: 4500000
+    wt: 1800000
+  table_sizes:
+    nt: 180000000
+    wt: 17000000000
+- name: the same join written the other way round is kept
+  before:
+  - wide_tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select nt.id, wt.body, wt.done_at from wt join nt on nt.src = wt.src;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: Inner, predicate: wt.src = nt.src, output: [nt.id, wt.body, wt.done_at] }
+      ├─BatchExchange { order: [], dist: HashShard(wt.src) }
+      │ └─BatchScan { table: wt, columns: [wt.src, wt.body, wt.done_at], distribution: SomeShard }
+      └─BatchExchange { order: [], dist: HashShard(nt.src) }
+        └─BatchScan { table: nt, columns: [nt.id, nt.src], distribution: UpstreamHashShard(nt.id) }
+  table_row_counts:
+    nt: 4500000
+    wt: 1800000
+  table_sizes:
+    nt: 180000000
+    wt: 17000000000
+- name: without table sizes the widths of the data types give the same choice
+  before:
+  - wide_tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select nt.id, wt.body, wt.done_at from nt join wt on nt.src = wt.src;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: Inner, predicate: wt.src = nt.src, output: [nt.id, wt.body, wt.done_at] }
+      ├─BatchExchange { order: [], dist: HashShard(wt.src) }
+      │ └─BatchScan { table: wt, columns: [wt.src, wt.body, wt.done_at], distribution: SomeShard }
+      └─BatchExchange { order: [], dist: HashShard(nt.src) }
+        └─BatchScan { table: nt, columns: [nt.id, nt.src], distribution: UpstreamHashShard(nt.id) }
+  table_row_counts:
+    nt: 4500000
+    wt: 1800000
+- name: without statistics nothing changes
+  before:
+  - wide_tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select nt.id, wt.body, wt.done_at from nt join wt on nt.src = wt.src;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: Inner, predicate: nt.src = wt.src, output: [nt.id, wt.body, wt.done_at] }
+      ├─BatchExchange { order: [], dist: HashShard(nt.src) }
+      │ └─BatchScan { table: nt, columns: [nt.id, nt.src], distribution: UpstreamHashShard(nt.id) }
+      └─BatchExchange { order: [], dist: HashShard(wt.src) }
+        └─BatchScan { table: wt, columns: [wt.src, wt.body, wt.done_at], distribution: SomeShard }
+- name: equal widths, the side with fewer rows is the build side (the larger side written last)
+  before:
+  - wide_tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select * from et join nt on nt.src = et.src;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: Inner, predicate: nt.src = et.src, output: [et.id, et.src, et.n, nt.id, nt.src, nt.n] }
+      ├─BatchExchange { order: [], dist: HashShard(nt.src) }
+      │ └─BatchScan { table: nt, columns: [nt.id, nt.src, nt.n], distribution: UpstreamHashShard(nt.id) }
+      └─BatchExchange { order: [], dist: HashShard(et.src) }
+        └─BatchScan { table: et, columns: [et.id, et.src, et.n], distribution: UpstreamHashShard(et.id) }
+  table_row_counts:
+    et: 1800000
+    nt: 4500000
+  table_sizes:
+    et: 72000000
+    nt: 180000000
+- name: equal widths, the side with fewer rows is already the build side
+  before:
+  - wide_tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select * from nt join et on nt.src = et.src;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: Inner, predicate: nt.src = et.src, output: all }
+      ├─BatchExchange { order: [], dist: HashShard(nt.src) }
+      │ └─BatchScan { table: nt, columns: [nt.id, nt.src, nt.n], distribution: UpstreamHashShard(nt.id) }
+      └─BatchExchange { order: [], dist: HashShard(et.src) }
+        └─BatchScan { table: et, columns: [et.id, et.src, et.n], distribution: UpstreamHashShard(et.id) }
+  table_row_counts:
+    et: 1800000
+    nt: 4500000
+  table_sizes:
+    et: 72000000
+    nt: 180000000
+- name: the JSON side is an aggregation keeping the last value of the JSON column
+  before:
+  - wide_tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select nt.id, w.body from nt join (select src, last_value(body order by done_at) as body from wt group by src) w on nt.src = w.src;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: Inner, predicate: wt.src = nt.src, output: [nt.id, last_value(wt.body order_by(wt.done_at ASC))] }
+      ├─BatchHashAgg { group_key: [wt.src], aggs: [last_value(wt.body order_by(wt.done_at ASC))] }
+      │ └─BatchExchange { order: [], dist: HashShard(wt.src) }
+      │   └─BatchScan { table: wt, columns: [wt.src, wt.body, wt.done_at], distribution: SomeShard }
+      └─BatchExchange { order: [], dist: HashShard(nt.src) }
+        └─BatchScan { table: nt, columns: [nt.id, nt.src], distribution: UpstreamHashShard(nt.id) }
+  table_row_counts:
+    nt: 4500000
+    wt: 1800000
+  table_sizes:
+    nt: 180000000
+    wt: 17000000000
+- name: the JSON side is a top-1 per group
+  before:
+  - wide_tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select nt.id, w.body from nt join (select src, body from (select src, body, row_number() over (partition by src order by done_at desc) as rn from wt) where rn = 1) w on nt.src = w.src;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: Inner, predicate: wt.src = nt.src, output: [nt.id, wt.body] }
+      ├─BatchFilter { predicate: (row_number = 1:Int32) }
+      │ └─BatchOverWindow { window_functions: [row_number() OVER(PARTITION BY wt.src ORDER BY wt.done_at DESC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)] }
+      │   └─BatchExchange { order: [wt.src ASC, wt.done_at DESC], dist: HashShard(wt.src) }
+      │     └─BatchSort { order: [wt.src ASC, wt.done_at DESC] }
+      │       └─BatchScan { table: wt, columns: [wt.src, wt.body, wt.done_at], distribution: SomeShard }
+      └─BatchExchange { order: [], dist: HashShard(nt.src) }
+        └─BatchScan { table: nt, columns: [nt.id, nt.src], distribution: UpstreamHashShard(nt.id) }
+  table_row_counts:
+    nt: 4500000
+    wt: 1800000
+  table_sizes:
+    nt: 180000000
+    wt: 17000000000
+- name: left join with the JSON side optional, heuristic (variable off)
+  before:
+  - wide_tables
+  sql: |
+    select nt.id, wt.body from nt left join wt on nt.src = wt.src;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: LeftOuter, predicate: nt.src = wt.src, output: [nt.id, wt.body] }
+      ├─BatchExchange { order: [], dist: HashShard(nt.src) }
+      │ └─BatchScan { table: nt, columns: [nt.id, nt.src], distribution: UpstreamHashShard(nt.id) }
+      └─BatchExchange { order: [], dist: HashShard(wt.src) }
+        └─BatchScan { table: wt, columns: [wt.src, wt.body], distribution: SomeShard }
+  table_row_counts:
+    nt: 4500000
+    wt: 1800000
+  table_sizes:
+    nt: 180000000
+    wt: 17000000000
+- name: left join with the JSON side optional becomes a right join that builds the narrow side
+  before:
+  - wide_tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select nt.id, wt.body from nt left join wt on nt.src = wt.src;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: RightOuter, predicate: wt.src = nt.src, output: [nt.id, wt.body] }
+      ├─BatchExchange { order: [], dist: HashShard(wt.src) }
+      │ └─BatchScan { table: wt, columns: [wt.src, wt.body], distribution: SomeShard }
+      └─BatchExchange { order: [], dist: HashShard(nt.src) }
+        └─BatchScan { table: nt, columns: [nt.id, nt.src], distribution: UpstreamHashShard(nt.id) }
+  table_row_counts:
+    nt: 4500000
+    wt: 1800000
+  table_sizes:
+    nt: 180000000
+    wt: 17000000000
+- name: left join with the JSON side preserved is kept (it already builds the narrow side)
+  before:
+  - wide_tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select nt.n, wt.body from wt left join nt on nt.src = wt.src;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: LeftOuter, predicate: wt.src = nt.src, output: [nt.n, wt.body] }
+      ├─BatchExchange { order: [], dist: HashShard(wt.src) }
+      │ └─BatchScan { table: wt, columns: [wt.src, wt.body], distribution: SomeShard }
+      └─BatchExchange { order: [], dist: HashShard(nt.src) }
+        └─BatchScan { table: nt, columns: [nt.src, nt.n], distribution: SomeShard }
+  table_row_counts:
+    nt: 4500000
+    wt: 1800000
+  table_sizes:
+    nt: 180000000
+    wt: 17000000000
+- name: left join with equal widths and similar sizes is kept
+  before:
+  - wide_tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select nt.id, et.n from nt left join et on nt.src = et.src;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: LeftOuter, predicate: nt.src = et.src, output: [nt.id, et.n] }
+      ├─BatchExchange { order: [], dist: HashShard(nt.src) }
+      │ └─BatchScan { table: nt, columns: [nt.id, nt.src], distribution: UpstreamHashShard(nt.id) }
+      └─BatchExchange { order: [], dist: HashShard(et.src) }
+        └─BatchScan { table: et, columns: [et.src, et.n], distribution: SomeShard }
+  table_row_counts:
+    et: 1800000
+    nt: 4500000
+  table_sizes:
+    et: 72000000
+    nt: 180000000
+- name: left join without statistics is kept
+  before:
+  - wide_tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select nt.id, wt.body from nt left join wt on nt.src = wt.src;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: LeftOuter, predicate: nt.src = wt.src, output: [nt.id, wt.body] }
+      ├─BatchExchange { order: [], dist: HashShard(nt.src) }
+      │ └─BatchScan { table: nt, columns: [nt.id, nt.src], distribution: UpstreamHashShard(nt.id) }
+      └─BatchExchange { order: [], dist: HashShard(wt.src) }
+        └─BatchScan { table: wt, columns: [wt.src, wt.body], distribution: SomeShard }
+- name: three-way join with a JSON side (multi-join ordering by bytes)
+  before:
+  - wide_tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select nt.id, wt.body, et.n from nt join wt on nt.src = wt.src join et on et.src = nt.src;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: Inner, predicate: wt.src = nt.src, output: [nt.id, wt.body, et.n] }
+      ├─BatchExchange { order: [], dist: HashShard(wt.src) }
+      │ └─BatchScan { table: wt, columns: [wt.src, wt.body], distribution: SomeShard }
+      └─BatchHashJoin { type: Inner, predicate: nt.src = et.src, output: [nt.id, nt.src, et.n] }
+        ├─BatchExchange { order: [], dist: HashShard(nt.src) }
+        │ └─BatchScan { table: nt, columns: [nt.id, nt.src], distribution: UpstreamHashShard(nt.id) }
+        └─BatchExchange { order: [], dist: HashShard(et.src) }
+          └─BatchScan { table: et, columns: [et.src, et.n], distribution: SomeShard }
+  table_row_counts:
+    et: 1800000
+    nt: 4500000
+    wt: 1800000
+  table_sizes:
+    et: 72000000
+    nt: 180000000
+    wt: 17000000000

@@ -319,14 +319,14 @@ impl LogicalMultiJoin {
             .collect::<Option<Vec<_>>>()
     }
 
-    /// The columns of the concatenated inputs that the multi-join outputs.
-    pub fn output_indices(&self) -> &[usize] {
-        &self.output_indices
-    }
-
     /// Get a reference to the logical join's on.
     pub fn on(&self) -> &Condition {
         &self.on
+    }
+
+    /// The output columns, as indices into the columns of all the inputs.
+    pub fn output_indices(&self) -> &[usize] {
+        &self.output_indices
     }
 
     /// Clone with new `on` condition
