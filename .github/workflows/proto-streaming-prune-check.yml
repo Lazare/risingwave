@@ -297,6 +297,8 @@ jobs:
         run: |
           grep -a -i 'panicked' "$RUNNER_TEMP/e2e/node.log" | head -20 || true
           grep -a -c 'pruned the sub-plans proven empty' "$RUNNER_TEMP/e2e/node.log" || true
+          echo "memory contexts dropped with a negative usage:"
+          grep -a -c 'memory context dropped with a negative usage' "$RUNNER_TEMP/e2e/node.log" || true
 
       - name: Upload the logs
         if: ${{ always() }}

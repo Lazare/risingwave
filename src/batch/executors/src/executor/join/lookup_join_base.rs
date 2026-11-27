@@ -136,7 +136,8 @@ impl<K: HashKey, B: LookupExecutorBuilder> LookupJoinBase<K, B> {
                 if build_chunk.cardinality() > 0 {
                     build_row_count += build_chunk.cardinality();
                     let chunk_estimated_heap_size = build_chunk.estimated_heap_size() as i64;
-                    self.mem_ctx.add(chunk_estimated_heap_size);
+                    // Held whatever the limit, and subtracted below: always counted.
+                    self.mem_ctx.force_add(chunk_estimated_heap_size);
                     self.memory.settle().await?;
                     tmp_heap_size += chunk_estimated_heap_size;
                     build_side.push(build_chunk);
@@ -164,7 +165,7 @@ impl<K: HashKey, B: LookupExecutorBuilder> LookupJoinBase<K, B> {
                     if build_key.null_bitmap().is_subset(&null_matched) {
                         let row_id = RowId::new(build_chunk_id, build_row_id);
                         let build_key_estimated_heap_size = build_key.estimated_heap_size() as i64;
-                        self.mem_ctx.add(build_key_estimated_heap_size);
+                        self.mem_ctx.force_add(build_key_estimated_heap_size);
                         tmp_heap_size += build_key_estimated_heap_size;
                         next_build_row_with_same_key[row_id] = hash_map.insert(build_key, row_id);
                     }

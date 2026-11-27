@@ -300,6 +300,14 @@ impl MemoryContext {
 impl Drop for MemoryContextInner {
     fn drop(&mut self) {
         let used = self.counter.get_bytes_used();
+        if used < 0 {
+            // More was released than counted: the parents count less than what is held, and
+            // may grant memory that is not there.
+            tracing::warn!(
+                used,
+                "memory context dropped with a negative usage: memory released without being counted"
+            );
+        }
         if let Some(reservation) = &self.reservation {
             let (reserved, shared) = reservation.split(used);
             reservation.charged_to.add(-reserved);
