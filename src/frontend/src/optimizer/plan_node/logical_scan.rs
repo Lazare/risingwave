@@ -529,7 +529,8 @@ impl LogicalScan {
         // (`batch_cardinality_feedback_learning`), keyed as during planning; only computed when
         // batch queries are observed.
         let learning_key = {
-            let config = self.base.ctx().session_ctx().config();
+            let ctx = self.base.ctx();
+            let config = ctx.session_ctx().config();
             (config.batch_cardinality_feedback() || config.batch_cardinality_feedback_learning())
                 .then(|| leaf_key(self.table(), self.predicate()))
         };

@@ -71,7 +71,7 @@ use risingwave_pb::plan_common::JoinType;
 
 use super::cardinality_feedback::{column_identity, hash, hex, normalize_expr, sorted_conjuncts};
 use super::plan_node::generic::GenericPlanRef;
-use super::plan_node::{LogicalPlanRef, PlanTreeNodeBinary, PlanTreeNodeUnary};
+use super::plan_node::{LogicalPlanRef, PlanTreeNode, PlanTreeNodeBinary, PlanTreeNodeUnary};
 use crate::catalog::TableCatalog;
 use crate::expr::ExprImpl;
 use crate::utils::Condition;
