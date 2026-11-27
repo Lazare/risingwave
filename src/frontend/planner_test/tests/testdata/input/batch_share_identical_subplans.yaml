@@ -110,10 +110,17 @@
   expected_outputs:
   - batch_plan
   - batch_local_plan
+- name: joins read twice in a union
+  before: [setup]
+  sql: |
+    with j as (select t.k, d.name from t join d on t.v = d.k2)
+    select k, name from j union all select k, name from j;
+  expected_outputs:
+  - batch_local_plan
 - name: aggregations read twice below a limit
   before: [setup]
   sql: |
-    select a.k, b.n from latest a join latest b on a.k = b.k limit 5;
+    select a.k, a.n, b.n as n2 from latest a join latest b on a.k = b.k limit 5;
   expected_outputs:
   - batch_plan
   - batch_local_plan
@@ -152,7 +159,7 @@
 - name: kept - joins read twice below a limit
   before: [setup]
   sql: |
-    with j as (select t.k, t.v, d.name from t join d on t.k = d.k)
-    select a.k, b.name from j a join j b on a.k = b.k limit 5;
+    with j as (select t.k, d.name from t join d on t.v = d.k2)
+    select * from (select k, name from j union all select k, name from j) u limit 5;
   expected_outputs:
   - batch_local_plan
