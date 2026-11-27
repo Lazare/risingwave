@@ -1185,8 +1185,10 @@ equality (every field of the batch nodes but their ids: distributions and orders
 sub-plan is shared when it has at least two copies in its stage, only nodes that compute the same
 rows each time they run (scans, exchanges, projections, filters, joins, aggregations with builtin
 functions, sorts, top-n, limits, unions, over windows, ...: no source, external query, DML or
-system table), no impure expression, and at least one aggregation, join, sort, top-n or over
-window. The first copy becomes `BatchSpool { spool: n }` above the sub-plan, the others
+system table), no impure expression, at least one aggregation, join, sort, top-n or over window,
+and a copy that is not below a `LIMIT` unless it computes all its rows before the first one
+anyway (an aggregation, sort or top-n at its root): a join below a limit may stop early, the
+spool would compute it whole. The first copy becomes `BatchSpool { spool: n }` above the sub-plan, the others
 `BatchSpoolRead { spool: n }`, a leaf: the exchanges below a reader are gone, so are the stages
 below them. The largest sub-plans win; a smaller one repeated inside the producer and elsewhere is
 shared again.

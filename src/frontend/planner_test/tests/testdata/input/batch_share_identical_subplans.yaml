@@ -110,6 +110,13 @@
   expected_outputs:
   - batch_plan
   - batch_local_plan
+- name: aggregations read twice below a limit
+  before: [setup]
+  sql: |
+    select a.k, b.n from latest a join latest b on a.k = b.k limit 5;
+  expected_outputs:
+  - batch_plan
+  - batch_local_plan
 
 # Kept.
 
@@ -142,3 +149,10 @@
     join (select k, sum(v) as s from t group by k) b on a.k = b.k;
   expected_outputs:
   - batch_plan
+- name: kept - joins read twice below a limit
+  before: [setup]
+  sql: |
+    with j as (select t.k, t.v, d.name from t join d on t.k = d.k)
+    select a.k, b.name from j a join j b on a.k = b.k limit 5;
+  expected_outputs:
+  - batch_local_plan

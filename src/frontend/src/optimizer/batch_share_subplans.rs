@@ -34,7 +34,10 @@
 //! - has no impure expression (`random()`, `now()` that was not folded, volatile UDF...) and no
 //!   user-defined aggregate;
 //! - contains an aggregation, a join, a sort, a top-n or an over window: a chain of scan, filter and
-//!   projection costs less to compute again than to keep.
+//!   projection costs less to compute again than to keep;
+//! - has a copy that is not below a `LIMIT`, or computes all its rows before its first one anyway
+//!   (an aggregation, a sort or a top-n at its root): the spool computes the whole sub-plan before
+//!   giving its first row, where a join below a limit may stop early.
 //!
 //! The largest shared sub-plans win: the copies inside a reader are gone, and a sub-plan repeated
 //! inside the producer and elsewhere is shared again on its own.
@@ -67,11 +70,11 @@ type Key = (Stage, PlanRef);
 #[allow(clippy::mutable_key_type)]
 pub fn share_identical_batch_subplans(plan: PlanRef) -> PlanRef {
     let mut counter = Counter::default();
-    counter.visit(&plan, &Stage::new(), &mut Vec::new());
-    let repeated: HashSet<Key> = counter
-        .counts
+    counter.visit(&plan, &Stage::new(), &mut Vec::new(), false);
+    let Counter { counts, unlimited } = counter;
+    let repeated: HashSet<Key> = counts
         .into_iter()
-        .filter(|(_, count)| *count >= 2)
+        .filter(|(key, count)| *count >= 2 && unlimited.contains(key))
         .map(|(key, _)| key)
         .collect();
     if repeated.is_empty() {
@@ -164,33 +167,56 @@ fn is_costly(node: &PlanRef) -> bool {
     )
 }
 
+/// Whether `node` computes all its rows before returning the first one.
+fn computes_all_rows_first(node: &PlanRef) -> bool {
+    use BatchPlanNodeType::*;
+    match node.node_type() {
+        BatchHashAgg | BatchSimpleAgg | BatchSort | BatchTopN | BatchGroupTopN => true,
+        BatchProject | BatchFilter | BatchExchange => {
+            node.inputs().iter().all(computes_all_rows_first)
+        }
+        _ => false,
+    }
+}
+
 /// Counts the copies of each sub-plan that may be shared, by stage.
 #[derive(Default)]
 #[allow(clippy::mutable_key_type)]
 struct Counter {
     counts: HashMap<Key, usize>,
+    /// The sub-plans with a copy that is not below a limit.
+    unlimited: HashSet<Key>,
 }
 
 impl Counter {
-    /// Visits the sub-plan of `node` at `path` in `stage`. Returns whether all its nodes are
-    /// allowed and whether one of them is costly.
+    /// Visits the sub-plan of `node` at `path` in `stage`, below a limit or not. Returns whether
+    /// all its nodes are allowed and whether one of them is costly.
     #[allow(clippy::mutable_key_type)]
-    fn visit(&mut self, node: &PlanRef, stage: &Stage, path: &mut Vec<u32>) -> (bool, bool) {
+    fn visit(
+        &mut self,
+        node: &PlanRef,
+        stage: &Stage,
+        path: &mut Vec<u32>,
+        under_limit: bool,
+    ) -> (bool, bool) {
         let input_stage = input_stage(node, stage, path);
+        let input_under_limit = under_limit || node.node_type() == BatchPlanNodeType::BatchLimit;
         let mut allowed = is_allowed(node);
         let mut costly = is_costly(node);
         for (i, input) in node.inputs().iter().enumerate() {
             path.push(i as u32);
-            let (input_allowed, input_costly) = self.visit(input, &input_stage, path);
+            let (input_allowed, input_costly) =
+                self.visit(input, &input_stage, path, input_under_limit);
             path.pop();
             allowed &= input_allowed;
             costly |= input_costly;
         }
         if allowed && costly {
-            *self
-                .counts
-                .entry((stage.clone(), node.clone()))
-                .or_insert(0) += 1;
+            let key = (stage.clone(), node.clone());
+            if !under_limit || computes_all_rows_first(node) {
+                self.unlimited.insert(key.clone());
+            }
+            *self.counts.entry(key).or_insert(0) += 1;
         }
         (allowed, costly)
     }
