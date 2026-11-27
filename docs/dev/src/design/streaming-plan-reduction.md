@@ -705,7 +705,11 @@ Agg(count)                                   Agg(count)
   of them become one aggregate of `ROW(f1(x), f2(x), ...)`, whose fields are read above.
 - `NarrowValuePushRule`: a projection that reads a wide column of a `UNION ALL` only through
   allowed functions computes them in each branch; one that reads a wide column of one side of a
-  join (not compared by the join) only through them computes them in that side. A lower
+  join (not compared by the join) only through them computes them in that side. Only on the paths
+  of value aggregates: the column is the result of a value aggregate below (through filters,
+  column selections, allowed functions, unions and joins), or the projection is the input of an
+  aggregation and the column feeds the argument of a value aggregate. Other projections over
+  joins are left as they are, so that the plans without value aggregates do not change. A lower
   `first_value(j)` in a branch, under a `CASE` over `j`, is then narrowed in turn, and the join
   below it carries the narrow value. `JoinProjectTransposeRule` keeps such a projection below the
   join once the rules applied to the plan (it would otherwise pull it above again).
