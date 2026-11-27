@@ -130,6 +130,9 @@ jobs:
           cargo nextest run --locked --no-fail-fast --lib \
             -p risingwave_frontend -p risingwave_common -p risingwave_batch \
             -p risingwave_batch_executors
+          # The memory pool of the DataFusion engine (feature of the release builds).
+          cargo nextest run --locked --no-fail-fast --lib -p risingwave_frontend \
+            --features risingwave_frontend/datafusion -E 'test(/datafusion::execute::memory_ctx/)'
 
   clippy:
     name: Clippy on the frontend
@@ -185,7 +188,8 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           cargo clippy --locked -p risingwave_frontend -p risingwave_batch \
-            -p risingwave_batch_executors --all-targets -- -D warnings
+            -p risingwave_batch_executors --features risingwave_frontend/datafusion \
+            --all-targets -- -D warnings
 
   tests:
     # The differential tests to run are listed in `.github/proto-differential-tests.txt`, one per
