@@ -59,8 +59,18 @@ select count(*) from rw_catalog.rw_batch_cardinality_learning;
 
 # Join ordering. With the fixed guesses, the aggregation returns a tenth of its 100000 rows, fewer
 # than the 12000 rows of `cfl_mid`: it is the build side of the hash join.
-statement ok
+query T
 explain (verbose) select count(*) from (select k, count(*) as n from cfl_big group by k) g join cfl_mid m on m.k = g.k;
+----
+BatchSimpleAgg { aggs: [sum0(count)] }
+└─BatchExchange { order: [], dist: Single }
+  └─BatchSimpleAgg { aggs: [count] }
+    └─BatchHashJoin { type: Inner, predicate: cfl_mid.k = cfl_big.k, output: [] }
+      ├─BatchExchange { order: [], dist: HashShard(cfl_mid.k) }
+      │ └─BatchScan { table: cfl_mid, columns: [cfl_mid.k], distribution: SomeShard }
+      └─BatchHashAgg { group_key: [cfl_big.k], aggs: [] }
+        └─BatchExchange { order: [], dist: HashShard(cfl_big.k) }
+          └─BatchScan { table: cfl_big, columns: [cfl_big.k], distribution: SomeShard }
 
 query I
 select count(*) from (select k, count(*) as n from cfl_big group by k) g join cfl_mid m on m.k = g.k;
@@ -74,8 +84,18 @@ where ratio_kind = 'group_ratio';
 ----
 group_ratio 1 1
 
-statement ok
+query T retry 5 backoff 1s
 explain (verbose) select count(*) from (select k, count(*) as n from cfl_big group by k) g join cfl_mid m on m.k = g.k;
+----
+BatchSimpleAgg { aggs: [sum0(count)] }
+└─BatchExchange { order: [], dist: Single }
+  └─BatchSimpleAgg { aggs: [count] }
+    └─BatchHashJoin { type: Inner, predicate: cfl_big.k = cfl_mid.k, output: [] }
+      ├─BatchHashAgg { group_key: [cfl_big.k], aggs: [] }
+      │ └─BatchExchange { order: [], dist: HashShard(cfl_big.k) }
+      │   └─BatchScan { table: cfl_big, columns: [cfl_big.k], distribution: SomeShard }
+      └─BatchExchange { order: [], dist: HashShard(cfl_mid.k) }
+        └─BatchScan { table: cfl_mid, columns: [cfl_mid.k], distribution: SomeShard }
 
 # The same result with the other plan, which stays the same over more executions.
 query I
@@ -94,16 +114,35 @@ where ratio_kind = 'group_ratio';
 ----
 group_ratio 3
 
-statement ok
+query T
 explain (verbose) select count(*) from (select k, count(*) as n from cfl_big group by k) g join cfl_mid m on m.k = g.k;
+----
+BatchSimpleAgg { aggs: [sum0(count)] }
+└─BatchExchange { order: [], dist: Single }
+  └─BatchSimpleAgg { aggs: [count] }
+    └─BatchHashJoin { type: Inner, predicate: cfl_big.k = cfl_mid.k, output: [] }
+      ├─BatchHashAgg { group_key: [cfl_big.k], aggs: [] }
+      │ └─BatchExchange { order: [], dist: HashShard(cfl_big.k) }
+      │   └─BatchScan { table: cfl_big, columns: [cfl_big.k], distribution: SomeShard }
+      └─BatchExchange { order: [], dist: HashShard(cfl_mid.k) }
+        └─BatchScan { table: cfl_mid, columns: [cfl_mid.k], distribution: SomeShard }
 
 # Top-n per group (`batch_over_window_to_topn`): 20 rows per group is above the fixed limit of 10,
 # so the window stays...
 statement ok
 set batch_over_window_to_topn = true;
 
-statement ok
+query T
 explain (verbose) select count(*), sum(id), sum(v) from (select id, k, v, row_number() over (partition by k order by v, id) as rn from cfl_win) t where rn <= 20;
+----
+BatchSimpleAgg { aggs: [sum0(count), sum(sum(cfl_win.id)), sum(sum(cfl_win.v))] }
+└─BatchExchange { order: [], dist: Single }
+  └─BatchSimpleAgg { aggs: [count, sum(cfl_win.id), sum(cfl_win.v)] }
+    └─BatchFilter { predicate: (row_number <= 20:Int32) }
+      └─BatchOverWindow { window_functions: [row_number() OVER(PARTITION BY cfl_win.k ORDER BY cfl_win.v ASC, cfl_win.id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)] }
+        └─BatchExchange { order: [cfl_win.k ASC, cfl_win.v ASC, cfl_win.id ASC], dist: HashShard(cfl_win.k) }
+          └─BatchSort { order: [cfl_win.k ASC, cfl_win.v ASC, cfl_win.id ASC] }
+            └─BatchScan { table: cfl_win, columns: [cfl_win.id, cfl_win.k, cfl_win.v], distribution: UpstreamHashShard(cfl_win.id) }
 
 query III
 select count(*), sum(id), sum(v) from (select id, k, v, row_number() over (partition by k order by v, id) as rn from cfl_win) t where rn <= 20;
@@ -123,8 +162,15 @@ where ratio_kind = 'group_ratio' and max_ratio < 0.5;
 ----
 group_ratio 1 0.01
 
-statement ok
+query T retry 5 backoff 1s
 explain (verbose) select count(*), sum(id), sum(v) from (select id, k, v, row_number() over (partition by k order by v, id) as rn from cfl_win) t where rn <= 20;
+----
+BatchSimpleAgg { aggs: [sum0(count), sum(sum(cfl_win.id)), sum(sum(cfl_win.v))] }
+└─BatchExchange { order: [], dist: Single }
+  └─BatchSimpleAgg { aggs: [count, sum(cfl_win.id), sum(cfl_win.v)] }
+    └─BatchGroupTopN { order: [cfl_win.v ASC, cfl_win.id ASC], limit: 20, offset: 0, group_key: [cfl_win.k] }
+      └─BatchExchange { order: [], dist: HashShard(cfl_win.k) }
+        └─BatchScan { table: cfl_win, columns: [cfl_win.id, cfl_win.k, cfl_win.v], distribution: UpstreamHashShard(cfl_win.id) }
 
 query III
 select count(*), sum(id), sum(v) from (select id, k, v, row_number() over (partition by k order by v, id) as rn from cfl_win) t where rn <= 20;
@@ -135,8 +181,18 @@ select count(*), sum(id), sum(v) from (select id, k, v, row_number() over (parti
 statement ok
 set batch_cardinality_feedback_learning = false;
 
-statement ok
+query T
 explain (verbose) select count(*) from (select k, count(*) as n from cfl_big group by k) g join cfl_mid m on m.k = g.k;
+----
+BatchSimpleAgg { aggs: [sum0(count)] }
+└─BatchExchange { order: [], dist: Single }
+  └─BatchSimpleAgg { aggs: [count] }
+    └─BatchHashJoin { type: Inner, predicate: cfl_mid.k = cfl_big.k, output: [] }
+      ├─BatchExchange { order: [], dist: HashShard(cfl_mid.k) }
+      │ └─BatchScan { table: cfl_mid, columns: [cfl_mid.k], distribution: SomeShard }
+      └─BatchHashAgg { group_key: [cfl_big.k], aggs: [] }
+        └─BatchExchange { order: [], dist: HashShard(cfl_big.k) }
+          └─BatchScan { table: cfl_big, columns: [cfl_big.k], distribution: SomeShard }
 
 query I
 select count(*) from (select k, count(*) as n from cfl_big group by k) g join cfl_mid m on m.k = g.k;
