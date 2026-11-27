@@ -134,6 +134,9 @@ statement ok
 create materialized view snv_fallible_function_off as select id, jsonb_array_length(fact->'arr') as n from snv_v;
 
 statement ok
+create materialized view snv_key_exists_off as select id, fact ? 'dir' as has_dir, fact @> '{"a": "a6"}' as is_a6 from snv_v;
+
+statement ok
 create materialized view snv_projection_off as select doc->>'dir' as dir, key from (select id as key, fact as doc from snv_v) w where key > 1;
 
 statement ok
@@ -210,6 +213,9 @@ create materialized view snv_cast_fails_below_on as select id, (fact->>'n')::int
 
 statement ok
 create materialized view snv_fallible_function_on as select id, jsonb_array_length(fact->'arr') as n from snv_v;
+
+statement ok
+create materialized view snv_key_exists_on as select id, fact ? 'dir' as has_dir, fact @> '{"a": "a6"}' as is_a6 from snv_v;
 
 statement ok
 create materialized view snv_projection_on as select doc->>'dir' as dir, key from (select id as key, fact as doc from snv_v) w where key > 1;
@@ -353,6 +359,22 @@ select
   (select count(*) from (select id, n, count(*) as snv_rows from snv_fallible_function_on group by id, n except select id, n, count(*) as snv_rows from (select id, jsonb_array_length(fact->'arr') as n from snv_v) q group by id, n) x),
   (select count(*) from (select id, n, count(*) as snv_rows from (select id, jsonb_array_length(fact->'arr') as n from snv_v) q group by id, n except select id, n, count(*) as snv_rows from snv_fallible_function_on group by id, n) y),
   (select count(*) from snv_fallible_function_on) - (select count(*) from (select id, jsonb_array_length(fact->'arr') as n from snv_v) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_off group by id, has_dir, is_a6) x),
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_off group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6) y),
+  (select count(*) from snv_key_exists_on) - (select count(*) from snv_key_exists_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from (select id, fact ? 'dir' as has_dir, fact @> '{"a": "a6"}' as is_a6 from snv_v) q group by id, has_dir, is_a6) x),
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from (select id, fact ? 'dir' as has_dir, fact @> '{"a": "a6"}' as is_a6 from snv_v) q group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6) y),
+  (select count(*) from snv_key_exists_on) - (select count(*) from (select id, fact ? 'dir' as has_dir, fact @> '{"a": "a6"}' as is_a6 from snv_v) q);
 ----
 0 0 0
 
@@ -837,6 +859,22 @@ select
 
 query III
 select
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_off group by id, has_dir, is_a6) x),
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_off group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6) y),
+  (select count(*) from snv_key_exists_on) - (select count(*) from snv_key_exists_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from (select id, fact ? 'dir' as has_dir, fact @> '{"a": "a6"}' as is_a6 from snv_v) q group by id, has_dir, is_a6) x),
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from (select id, fact ? 'dir' as has_dir, fact @> '{"a": "a6"}' as is_a6 from snv_v) q group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6) y),
+  (select count(*) from snv_key_exists_on) - (select count(*) from (select id, fact ? 'dir' as has_dir, fact @> '{"a": "a6"}' as is_a6 from snv_v) q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select dir, key, count(*) as snv_rows from snv_projection_on group by dir, key except select dir, key, count(*) as snv_rows from snv_projection_off group by dir, key) x),
   (select count(*) from (select dir, key, count(*) as snv_rows from snv_projection_off group by dir, key except select dir, key, count(*) as snv_rows from snv_projection_on group by dir, key) y),
   (select count(*) from snv_projection_on) - (select count(*) from snv_projection_off);
@@ -1292,6 +1330,22 @@ select
 
 query III
 select
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_off group by id, has_dir, is_a6) x),
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_off group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6) y),
+  (select count(*) from snv_key_exists_on) - (select count(*) from snv_key_exists_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from (select id, fact ? 'dir' as has_dir, fact @> '{"a": "a6"}' as is_a6 from snv_v) q group by id, has_dir, is_a6) x),
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from (select id, fact ? 'dir' as has_dir, fact @> '{"a": "a6"}' as is_a6 from snv_v) q group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6) y),
+  (select count(*) from snv_key_exists_on) - (select count(*) from (select id, fact ? 'dir' as has_dir, fact @> '{"a": "a6"}' as is_a6 from snv_v) q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select dir, key, count(*) as snv_rows from snv_projection_on group by dir, key except select dir, key, count(*) as snv_rows from snv_projection_off group by dir, key) x),
   (select count(*) from (select dir, key, count(*) as snv_rows from snv_projection_off group by dir, key except select dir, key, count(*) as snv_rows from snv_projection_on group by dir, key) y),
   (select count(*) from snv_projection_on) - (select count(*) from snv_projection_off);
@@ -1709,6 +1763,22 @@ select
   (select count(*) from (select id, n, count(*) as snv_rows from snv_fallible_function_on group by id, n except select id, n, count(*) as snv_rows from (select id, jsonb_array_length(fact->'arr') as n from snv_v) q group by id, n) x),
   (select count(*) from (select id, n, count(*) as snv_rows from (select id, jsonb_array_length(fact->'arr') as n from snv_v) q group by id, n except select id, n, count(*) as snv_rows from snv_fallible_function_on group by id, n) y),
   (select count(*) from snv_fallible_function_on) - (select count(*) from (select id, jsonb_array_length(fact->'arr') as n from snv_v) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_off group by id, has_dir, is_a6) x),
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_off group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6) y),
+  (select count(*) from snv_key_exists_on) - (select count(*) from snv_key_exists_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from (select id, fact ? 'dir' as has_dir, fact @> '{"a": "a6"}' as is_a6 from snv_v) q group by id, has_dir, is_a6) x),
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from (select id, fact ? 'dir' as has_dir, fact @> '{"a": "a6"}' as is_a6 from snv_v) q group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6) y),
+  (select count(*) from snv_key_exists_on) - (select count(*) from (select id, fact ? 'dir' as has_dir, fact @> '{"a": "a6"}' as is_a6 from snv_v) q);
 ----
 0 0 0
 
@@ -2141,6 +2211,22 @@ select
   (select count(*) from (select id, n, count(*) as snv_rows from snv_fallible_function_on group by id, n except select id, n, count(*) as snv_rows from (select id, jsonb_array_length(fact->'arr') as n from snv_v) q group by id, n) x),
   (select count(*) from (select id, n, count(*) as snv_rows from (select id, jsonb_array_length(fact->'arr') as n from snv_v) q group by id, n except select id, n, count(*) as snv_rows from snv_fallible_function_on group by id, n) y),
   (select count(*) from snv_fallible_function_on) - (select count(*) from (select id, jsonb_array_length(fact->'arr') as n from snv_v) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_off group by id, has_dir, is_a6) x),
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_off group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6) y),
+  (select count(*) from snv_key_exists_on) - (select count(*) from snv_key_exists_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from (select id, fact ? 'dir' as has_dir, fact @> '{"a": "a6"}' as is_a6 from snv_v) q group by id, has_dir, is_a6) x),
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from (select id, fact ? 'dir' as has_dir, fact @> '{"a": "a6"}' as is_a6 from snv_v) q group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6) y),
+  (select count(*) from snv_key_exists_on) - (select count(*) from (select id, fact ? 'dir' as has_dir, fact @> '{"a": "a6"}' as is_a6 from snv_v) q);
 ----
 0 0 0
 
@@ -2581,6 +2667,22 @@ select
 
 query III
 select
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_off group by id, has_dir, is_a6) x),
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_off group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6) y),
+  (select count(*) from snv_key_exists_on) - (select count(*) from snv_key_exists_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from (select id, fact ? 'dir' as has_dir, fact @> '{"a": "a6"}' as is_a6 from snv_v) q group by id, has_dir, is_a6) x),
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from (select id, fact ? 'dir' as has_dir, fact @> '{"a": "a6"}' as is_a6 from snv_v) q group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6) y),
+  (select count(*) from snv_key_exists_on) - (select count(*) from (select id, fact ? 'dir' as has_dir, fact @> '{"a": "a6"}' as is_a6 from snv_v) q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select dir, key, count(*) as snv_rows from snv_projection_on group by dir, key except select dir, key, count(*) as snv_rows from snv_projection_off group by dir, key) x),
   (select count(*) from (select dir, key, count(*) as snv_rows from snv_projection_off group by dir, key except select dir, key, count(*) as snv_rows from snv_projection_on group by dir, key) y),
   (select count(*) from snv_projection_on) - (select count(*) from snv_projection_off);
@@ -2971,6 +3073,9 @@ statement ok
 drop materialized view snv_projection_on;
 
 statement ok
+drop materialized view snv_key_exists_on;
+
+statement ok
 drop materialized view snv_fallible_function_on;
 
 statement ok
@@ -3044,6 +3149,9 @@ drop materialized view snv_first_value_off;
 
 statement ok
 drop materialized view snv_projection_off;
+
+statement ok
+drop materialized view snv_key_exists_off;
 
 statement ok
 drop materialized view snv_fallible_function_off;

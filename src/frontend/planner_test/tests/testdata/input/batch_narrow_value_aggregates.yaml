@@ -129,6 +129,12 @@
     select v.id, t.x from v join t on v.fact->>'ref' = t.doc->>'ref';
   expected_outputs:
   - batch_plan
+- name: key existence and containment
+  before: [setup]
+  sql: |
+    select id, fact ? 'dir' as has_dir, fact @> '{"a": "a1"}' as is_a1 from v;
+  expected_outputs:
+  - batch_plan
 - name: dbt-like count of a filter on one field
   before: [setup]
   sql: |

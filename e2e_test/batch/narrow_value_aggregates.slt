@@ -146,6 +146,12 @@ statement ok
 create table snv_fallible_function_on (id int, n int);
 
 statement ok
+create table snv_key_exists_off (id int, has_dir boolean, is_a6 boolean);
+
+statement ok
+create table snv_key_exists_on (id int, has_dir boolean, is_a6 boolean);
+
+statement ok
 create table snv_projection_off (dir varchar, key int);
 
 statement ok
@@ -353,6 +359,24 @@ set batch_narrow_value_aggregates = true;
 
 statement ok
 insert into snv_fallible_function_on select id, jsonb_array_length(fact->'arr') as n from snv_v;
+
+statement ok
+set batch_narrow_value_aggregates = false;
+
+statement ok
+delete from snv_key_exists_off;
+
+statement ok
+delete from snv_key_exists_on;
+
+statement ok
+insert into snv_key_exists_off select id, fact ? 'dir' as has_dir, fact @> '{"a": "a6"}' as is_a6 from snv_v;
+
+statement ok
+set batch_narrow_value_aggregates = true;
+
+statement ok
+insert into snv_key_exists_on select id, fact ? 'dir' as has_dir, fact @> '{"a": "a6"}' as is_a6 from snv_v;
 
 statement ok
 set batch_narrow_value_aggregates = false;
@@ -761,6 +785,14 @@ select
 
 query III
 select
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_off group by id, has_dir, is_a6) x),
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_off group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6) y),
+  (select count(*) from snv_key_exists_on) - (select count(*) from snv_key_exists_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select dir, key, count(*) as snv_rows from snv_projection_on group by dir, key except select dir, key, count(*) as snv_rows from snv_projection_off group by dir, key) x),
   (select count(*) from (select dir, key, count(*) as snv_rows from snv_projection_off group by dir, key except select dir, key, count(*) as snv_rows from snv_projection_on group by dir, key) y),
   (select count(*) from snv_projection_on) - (select count(*) from snv_projection_off);
@@ -1099,6 +1131,24 @@ set batch_narrow_value_aggregates = true;
 
 statement ok
 insert into snv_fallible_function_on select id, jsonb_array_length(fact->'arr') as n from snv_v;
+
+statement ok
+set batch_narrow_value_aggregates = false;
+
+statement ok
+delete from snv_key_exists_off;
+
+statement ok
+delete from snv_key_exists_on;
+
+statement ok
+insert into snv_key_exists_off select id, fact ? 'dir' as has_dir, fact @> '{"a": "a6"}' as is_a6 from snv_v;
+
+statement ok
+set batch_narrow_value_aggregates = true;
+
+statement ok
+insert into snv_key_exists_on select id, fact ? 'dir' as has_dir, fact @> '{"a": "a6"}' as is_a6 from snv_v;
 
 statement ok
 set batch_narrow_value_aggregates = false;
@@ -1507,6 +1557,14 @@ select
 
 query III
 select
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_off group by id, has_dir, is_a6) x),
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_off group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6) y),
+  (select count(*) from snv_key_exists_on) - (select count(*) from snv_key_exists_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select dir, key, count(*) as snv_rows from snv_projection_on group by dir, key except select dir, key, count(*) as snv_rows from snv_projection_off group by dir, key) x),
   (select count(*) from (select dir, key, count(*) as snv_rows from snv_projection_off group by dir, key except select dir, key, count(*) as snv_rows from snv_projection_on group by dir, key) y),
   (select count(*) from snv_projection_on) - (select count(*) from snv_projection_off);
@@ -1821,6 +1879,24 @@ set batch_narrow_value_aggregates = true;
 
 statement ok
 insert into snv_fallible_function_on select id, jsonb_array_length(fact->'arr') as n from snv_v;
+
+statement ok
+set batch_narrow_value_aggregates = false;
+
+statement ok
+delete from snv_key_exists_off;
+
+statement ok
+delete from snv_key_exists_on;
+
+statement ok
+insert into snv_key_exists_off select id, fact ? 'dir' as has_dir, fact @> '{"a": "a6"}' as is_a6 from snv_v;
+
+statement ok
+set batch_narrow_value_aggregates = true;
+
+statement ok
+insert into snv_key_exists_on select id, fact ? 'dir' as has_dir, fact @> '{"a": "a6"}' as is_a6 from snv_v;
 
 statement ok
 set batch_narrow_value_aggregates = false;
@@ -2229,6 +2305,14 @@ select
 
 query III
 select
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_off group by id, has_dir, is_a6) x),
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_off group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6) y),
+  (select count(*) from snv_key_exists_on) - (select count(*) from snv_key_exists_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select dir, key, count(*) as snv_rows from snv_projection_on group by dir, key except select dir, key, count(*) as snv_rows from snv_projection_off group by dir, key) x),
   (select count(*) from (select dir, key, count(*) as snv_rows from snv_projection_off group by dir, key except select dir, key, count(*) as snv_rows from snv_projection_on group by dir, key) y),
   (select count(*) from snv_projection_on) - (select count(*) from snv_projection_off);
@@ -2510,6 +2594,24 @@ set batch_narrow_value_aggregates = true;
 
 statement ok
 insert into snv_fallible_function_on select id, jsonb_array_length(fact->'arr') as n from snv_v;
+
+statement ok
+set batch_narrow_value_aggregates = false;
+
+statement ok
+delete from snv_key_exists_off;
+
+statement ok
+delete from snv_key_exists_on;
+
+statement ok
+insert into snv_key_exists_off select id, fact ? 'dir' as has_dir, fact @> '{"a": "a6"}' as is_a6 from snv_v;
+
+statement ok
+set batch_narrow_value_aggregates = true;
+
+statement ok
+insert into snv_key_exists_on select id, fact ? 'dir' as has_dir, fact @> '{"a": "a6"}' as is_a6 from snv_v;
 
 statement ok
 set batch_narrow_value_aggregates = false;
@@ -2918,6 +3020,14 @@ select
 
 query III
 select
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_off group by id, has_dir, is_a6) x),
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_off group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6) y),
+  (select count(*) from snv_key_exists_on) - (select count(*) from snv_key_exists_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select dir, key, count(*) as snv_rows from snv_projection_on group by dir, key except select dir, key, count(*) as snv_rows from snv_projection_off group by dir, key) x),
   (select count(*) from (select dir, key, count(*) as snv_rows from snv_projection_off group by dir, key except select dir, key, count(*) as snv_rows from snv_projection_on group by dir, key) y),
   (select count(*) from snv_projection_on) - (select count(*) from snv_projection_off);
@@ -3209,6 +3319,24 @@ set batch_narrow_value_aggregates = true;
 
 statement ok
 insert into snv_fallible_function_on select id, jsonb_array_length(fact->'arr') as n from snv_v;
+
+statement ok
+set batch_narrow_value_aggregates = false;
+
+statement ok
+delete from snv_key_exists_off;
+
+statement ok
+delete from snv_key_exists_on;
+
+statement ok
+insert into snv_key_exists_off select id, fact ? 'dir' as has_dir, fact @> '{"a": "a6"}' as is_a6 from snv_v;
+
+statement ok
+set batch_narrow_value_aggregates = true;
+
+statement ok
+insert into snv_key_exists_on select id, fact ? 'dir' as has_dir, fact @> '{"a": "a6"}' as is_a6 from snv_v;
 
 statement ok
 set batch_narrow_value_aggregates = false;
@@ -3617,6 +3745,14 @@ select
 
 query III
 select
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_off group by id, has_dir, is_a6) x),
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_off group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6) y),
+  (select count(*) from snv_key_exists_on) - (select count(*) from snv_key_exists_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select dir, key, count(*) as snv_rows from snv_projection_on group by dir, key except select dir, key, count(*) as snv_rows from snv_projection_off group by dir, key) x),
   (select count(*) from (select dir, key, count(*) as snv_rows from snv_projection_off group by dir, key except select dir, key, count(*) as snv_rows from snv_projection_on group by dir, key) y),
   (select count(*) from snv_projection_on) - (select count(*) from snv_projection_off);
@@ -3911,6 +4047,24 @@ set batch_narrow_value_aggregates = true;
 
 statement ok
 insert into snv_fallible_function_on select id, jsonb_array_length(fact->'arr') as n from snv_v;
+
+statement ok
+set batch_narrow_value_aggregates = false;
+
+statement ok
+delete from snv_key_exists_off;
+
+statement ok
+delete from snv_key_exists_on;
+
+statement ok
+insert into snv_key_exists_off select id, fact ? 'dir' as has_dir, fact @> '{"a": "a6"}' as is_a6 from snv_v;
+
+statement ok
+set batch_narrow_value_aggregates = true;
+
+statement ok
+insert into snv_key_exists_on select id, fact ? 'dir' as has_dir, fact @> '{"a": "a6"}' as is_a6 from snv_v;
 
 statement ok
 set batch_narrow_value_aggregates = false;
@@ -4319,6 +4473,14 @@ select
 
 query III
 select
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_off group by id, has_dir, is_a6) x),
+  (select count(*) from (select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_off group by id, has_dir, is_a6 except select id, has_dir, is_a6, count(*) as snv_rows from snv_key_exists_on group by id, has_dir, is_a6) y),
+  (select count(*) from snv_key_exists_on) - (select count(*) from snv_key_exists_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select dir, key, count(*) as snv_rows from snv_projection_on group by dir, key except select dir, key, count(*) as snv_rows from snv_projection_off group by dir, key) x),
   (select count(*) from (select dir, key, count(*) as snv_rows from snv_projection_off group by dir, key except select dir, key, count(*) as snv_rows from snv_projection_on group by dir, key) y),
   (select count(*) from snv_projection_on) - (select count(*) from snv_projection_off);
@@ -4622,6 +4784,12 @@ drop table snv_projection_on;
 
 statement ok
 drop table snv_projection_off;
+
+statement ok
+drop table snv_key_exists_on;
+
+statement ok
+drop table snv_key_exists_off;
 
 statement ok
 drop table snv_fallible_function_on;

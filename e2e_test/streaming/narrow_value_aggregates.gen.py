@@ -55,6 +55,8 @@ CASES = [
     ('cast_fails_below', 'id int, n int', f"select id, (fact->>'n')::int as n from {P}_v"),
     ('fallible_function', 'id int, n int',
      f"select id, jsonb_array_length(fact->'arr') as n from {P}_v"),
+    ('key_exists', 'id int, has_dir boolean, is_a6 boolean',
+     f"select id, fact ? 'dir' as has_dir, fact @> '{{\"a\": \"a6\"}}' as is_a6 from {P}_v"),
     ('projection', 'dir varchar, key int',
      f"select doc->>'dir' as dir, key from (select id as key, fact as doc from {P}_v) w where key > 1"),
     ('first_value', 'id int, dir varchar', f"select id, fact->>'dir' as dir from {P}_vf"),

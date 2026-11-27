@@ -89,6 +89,11 @@ fn is_narrowing_function(call: &FunctionCall) -> bool {
         | ExprType::JsonbExtractPathText
         | ExprType::JsonbExtractPathTextVariadic
         | ExprType::JsonbTypeof
+        | ExprType::JsonbExists
+        | ExprType::JsonbExistsAny
+        | ExprType::JsonbExistsAll
+        | ExprType::JsonbContains
+        | ExprType::JsonbContained
         | ExprType::Field
         | ExprType::Row
         | ExprType::IsNull
@@ -160,6 +165,11 @@ fn is_null_on_null_function(func_type: ExprType) -> bool {
             | ExprType::JsonbExtractPathText
             | ExprType::JsonbExtractPathTextVariadic
             | ExprType::JsonbTypeof
+            | ExprType::JsonbExists
+            | ExprType::JsonbExistsAny
+            | ExprType::JsonbExistsAll
+            | ExprType::JsonbContains
+            | ExprType::JsonbContained
             | ExprType::Field
             | ExprType::Cast
             | ExprType::Equal
@@ -448,24 +458,14 @@ impl Rule<Logical> for NarrowValueAggRule {
         let mut replacements = HashMap::new();
         for (i, call) in agg.agg_calls().iter().enumerate() {
             let PlanAggCall {
-                agg_type,
                 return_type,
                 inputs,
-                distinct,
                 order_by,
                 filter,
                 direct_args,
+                ..
             } = call;
-            if !matches!(
-                agg_type,
-                AggType::Builtin(
-                    PbAggKind::FirstValue | PbAggKind::LastValue | PbAggKind::InternalLastSeenValue
-                )
-            ) || *distinct
-                || inputs.len() != 1
-                || !direct_args.is_empty()
-                || !is_wide(return_type)
-            {
+            if !is_value_call(call) || !direct_args.is_empty() || !is_wide(return_type) {
                 continue;
             }
             let arg = &inputs[0];
@@ -637,20 +637,117 @@ impl NarrowValuePushRule {
 
 impl Rule<Logical> for NarrowValuePushRule {
     fn apply(&self, plan: PlanRef) -> Option<PlanRef> {
-        let project = plan.as_logical_project()?;
-        let input = project.input();
-        if let Some(union) = input.as_logical_union() {
-            Self::push_into_union(project, union)
-        } else if let Some(join) = input.as_logical_join() {
-            Self::push_into_join(project, join)
+        if let Some(agg) = plan.as_logical_agg() {
+            // The input projection of an aggregation: the columns of the union or join read by
+            // the argument of a value aggregate, or that a value aggregate below outputs.
+            let input = agg.input();
+            let project = input.as_logical_project()?;
+            let value_args: Vec<usize> = agg
+                .agg_calls()
+                .iter()
+                .filter(|call| is_value_call(call))
+                .map(|call| call.inputs[0].index())
+                .collect();
+            if value_args.is_empty() {
+                return None;
+            }
+            let feeds_value = |col: usize| {
+                value_args.iter().any(|&o| {
+                    project.exprs()[o]
+                        .collect_input_refs(project.input().schema().len())
+                        .contains(col)
+                })
+            };
+            let new_input = Self::push(project, &|col| {
+                feeds_value(col) || from_value_agg(&project.input(), col)
+            })?;
+            let mut core = agg.core().clone();
+            core.input = new_input;
+            Some(LogicalAgg::from(core).into())
         } else {
-            None
+            // Any projection: the columns of the union or join that a value aggregate below
+            // outputs.
+            let project = plan.as_logical_project()?;
+            let input = project.input();
+            Self::push(project, &|col| from_value_agg(&input, col))
         }
     }
 }
 
+/// Whether the call is one of the aggregates that keep the value of one row.
+fn is_value_call(call: &PlanAggCall) -> bool {
+    matches!(
+        call.agg_type,
+        AggType::Builtin(
+            PbAggKind::FirstValue | PbAggKind::LastValue | PbAggKind::InternalLastSeenValue
+        )
+    ) && !call.distinct
+        && call.inputs.len() == 1
+}
+
+/// Whether column `col` of `plan` is the result of a value aggregate below, passed through
+/// filters, limits, projections (as it is or through narrowing functions), unions (from one of the
+/// branches) and joins.
+fn from_value_agg(plan: &PlanRef, col: usize) -> bool {
+    if let Some(agg) = plan.as_logical_agg() {
+        let group_len = agg.group_key().len();
+        col >= group_len && is_value_call(&agg.agg_calls()[col - group_len])
+    } else if plan.as_logical_filter().is_some() || plan.as_logical_limit().is_some() {
+        from_value_agg(&plan.inputs()[0], col)
+    } else if let Some(project) = plan.as_logical_project() {
+        // A column passed through, or narrowing functions of one column (a `CASE` over the value,
+        // for example): what they read is still narrowed by the functions above.
+        let input = project.input();
+        let col_num = input.schema().len();
+        let expr = &project.exprs()[col];
+        let read = expr.collect_input_refs(col_num);
+        read.count_ones(..) == 1 && {
+            let input_col = read.ones().next().unwrap();
+            Narrowing {
+                col: input_col,
+                col_num,
+                null_on_null: false,
+            }
+            .only_narrowing(expr)
+                && from_value_agg(&input, input_col)
+        }
+    } else if let Some(union) = plan.as_logical_union() {
+        union
+            .inputs()
+            .iter()
+            .any(|branch| from_value_agg(branch, col))
+    } else if let Some(join) = plan.as_logical_join() {
+        let internal = join.output_indices()[col];
+        let left_len = join.left().schema().len();
+        if internal < left_len {
+            from_value_agg(&join.left(), internal)
+        } else {
+            from_value_agg(&join.right(), internal - left_len)
+        }
+    } else {
+        false
+    }
+}
+
 impl NarrowValuePushRule {
-    fn push_into_union(project: &LogicalProject, union: &LogicalUnion) -> Option<PlanRef> {
+    /// Pushes the narrowing functions that `project` applies to the eligible columns of its input,
+    /// a union or a join.
+    fn push(project: &LogicalProject, eligible: &dyn Fn(usize) -> bool) -> Option<PlanRef> {
+        let input = project.input();
+        if let Some(union) = input.as_logical_union() {
+            Self::push_into_union(project, union, eligible)
+        } else if let Some(join) = input.as_logical_join() {
+            Self::push_into_join(project, join, eligible)
+        } else {
+            None
+        }
+    }
+
+    fn push_into_union(
+        project: &LogicalProject,
+        union: &LogicalUnion,
+        eligible: &dyn Fn(usize) -> bool,
+    ) -> Option<PlanRef> {
         if !union.all() || union.source_col().is_some() {
             return None;
         }
@@ -665,7 +762,7 @@ impl NarrowValuePushRule {
         let col_num = types.len();
         let mut units = vec![];
         for (col, data_type) in types.iter().enumerate() {
-            if !is_wide(data_type) {
+            if !is_wide(data_type) || !eligible(col) {
                 continue;
             }
             let narrowing = Narrowing {
@@ -706,7 +803,11 @@ impl NarrowValuePushRule {
         Some(LogicalProject::create(new_union, exprs))
     }
 
-    fn push_into_join(project: &LogicalProject, join: &LogicalJoin) -> Option<PlanRef> {
+    fn push_into_join(
+        project: &LogicalProject,
+        join: &LogicalJoin,
+        eligible: &dyn Fn(usize) -> bool,
+    ) -> Option<PlanRef> {
         let join_type = join.join_type();
         if !matches!(
             join_type,
@@ -742,6 +843,7 @@ impl NarrowValuePushRule {
             let internal = output_indices[out];
             let on_left = internal < left_len;
             if !is_wide(data_type)
+                || !eligible(out)
                 || condition_cols.contains(internal)
                 || output_indices.iter().filter(|&&i| i == internal).count() > 1
                 || (!on_left && right_may_be_looked_up)

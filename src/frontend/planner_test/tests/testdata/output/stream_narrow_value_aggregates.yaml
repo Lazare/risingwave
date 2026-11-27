@@ -236,6 +236,18 @@
         └─StreamExchange { dist: HashShard($expr2) }
           └─StreamProject { exprs: [t.x, JsonbAccessStr(t.doc, 'ref':Varchar) as $expr2, t.id], noop_update_hint: true }
             └─StreamTableScan { table: t, columns: [t.x, t.doc, t.id], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
+- name: key existence and containment
+  before:
+  - setup
+  sql: |
+    select id, fact ? 'dir' as has_dir, fact @> '{"a": "a1"}' as is_a1 from v;
+  stream_plan: |-
+    StreamMaterialize { columns: [id, has_dir, is_a1], stream_key: [id], pk_columns: [id], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [ev.id, Field(last_value($expr1 order_by(ev.ts ASC)), 0:Int32) as $expr2, Field(last_value($expr1 order_by(ev.ts ASC)), 1:Int32) as $expr3] }
+      └─StreamHashAgg { group_key: [ev.id], aggs: [last_value($expr1 order_by(ev.ts ASC)), count] }
+        └─StreamExchange { dist: HashShard(ev.id) }
+          └─StreamProject { exprs: [ev.id, ev.ts, Row(JsonbExists(ev.fact, 'dir':Varchar), JsonbContains(ev.fact, '{"a": "a1"}':Jsonb)) as $expr1, ev._row_id] }
+            └─StreamTableScan { table: ev, columns: [ev.id, ev.ts, ev.fact, ev._row_id], stream_scan_type: SnapshotBackfill, stream_key: [ev._row_id], pk: [_row_id], dist: UpstreamHashShard(ev._row_id) }
 - name: dbt-like count of a filter on one field
   before:
   - setup

@@ -220,6 +220,18 @@
       └─BatchExchange { order: [], dist: HashShard($expr2) }
         └─BatchProject { exprs: [t.x, JsonbAccessStr(t.doc, 'ref':Varchar) as $expr2] }
           └─BatchScan { table: t, columns: [t.x, t.doc], distribution: SomeShard }
+- name: key existence and containment
+  before:
+  - setup
+  sql: |
+    select id, fact ? 'dir' as has_dir, fact @> '{"a": "a1"}' as is_a1 from v;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchProject { exprs: [ev.id, Field(last_value($expr1 order_by(ev.ts ASC)), 0:Int32) as $expr2, Field(last_value($expr1 order_by(ev.ts ASC)), 1:Int32) as $expr3] }
+      └─BatchHashAgg { group_key: [ev.id], aggs: [last_value($expr1 order_by(ev.ts ASC))] }
+        └─BatchExchange { order: [], dist: HashShard(ev.id) }
+          └─BatchProject { exprs: [ev.id, ev.ts, Row(JsonbExists(ev.fact, 'dir':Varchar), JsonbContains(ev.fact, '{"a": "a1"}':Jsonb)) as $expr1] }
+            └─BatchScan { table: ev, columns: [ev.id, ev.ts, ev.fact], distribution: SomeShard }
 - name: dbt-like count of a filter on one field
   before:
   - setup

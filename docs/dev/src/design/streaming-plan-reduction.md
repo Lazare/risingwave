@@ -711,7 +711,7 @@ Agg(count)                                   Agg(count)
   join once the rules applied to the plan (it would otherwise pull it above again).
 - Allowed functions: deterministic, pure and unable to fail, because they are evaluated on every
   input row instead of the selected one: `->`, `->>`, `#>`, `#>>`, `jsonb_extract_path(_text)`,
-  `jsonb_typeof`, field access, `ROW`, comparisons, `IS [NOT] NULL / TRUE / FALSE / DISTINCT
+  `jsonb_typeof`, `?`, `?|`, `?&`, `@>`, `<@`, field access, `ROW`, comparisons, `IS [NOT] NULL / TRUE / FALSE / DISTINCT
   FROM`, `AND`, `OR`, `NOT`, `CASE`, `COALESCE`, casts to text from scalar types whose text does
   not depend on the session, widening numeric casts. A cast that may fail (`(x->>'n')::int`) or
   `jsonb_array_length` stays above, the field below it is moved.
