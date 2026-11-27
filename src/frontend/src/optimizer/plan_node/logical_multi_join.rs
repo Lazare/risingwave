@@ -324,6 +324,11 @@ impl LogicalMultiJoin {
         &self.on
     }
 
+    /// The output columns, as indices into the columns of all the inputs.
+    pub(crate) fn output_indices(&self) -> &[usize] {
+        &self.output_indices
+    }
+
     /// Clone with new `on` condition
     pub fn clone_with_cond(&self, cond: Condition) -> Self {
         Self::new(self.inputs.clone(), cond, self.output_indices.clone())

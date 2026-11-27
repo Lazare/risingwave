@@ -418,6 +418,7 @@ macro_rules! for_all_rules {
             , { LagDuplicatesRule }
             , { CostBasedJoinOrderingRule }
             , { CostBasedJoinSidesRule }
+            , { CostBasedOuterJoinSidesRule }
             , { UnionScanMergeRule }
             , { StackedAggMergeRule }
             , { LateralTableFunctionRule }
