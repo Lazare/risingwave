@@ -38,6 +38,7 @@ own rules.
 | B | Batch counterparts of 9, 9b, 9c, 7 and US, each behind a `batch_` variable | done (prototype, branch `proto/plan-reduction-batch-unnest`), see "Batch counterparts" |
 | SL | Status ladder: the branches of a top-1 by priority that read the same relation picked with one `CASE` | done (prototype, branch `proto/plan-reduction-union-scans`); default branch rewritten into a join not done |
 | NK | Join on a column known to be `NULL` matches nothing (`batch_simplify_null_join_keys`, `streaming_simplify_null_join_keys`) | done (prototype, branch `proto/plan-reduction-nullkey`), see "NK" below |
+| NV | `first_value` / `last_value` keep only the functions of the value that are read (`batch_narrow_value_aggregates`, `streaming_narrow_value_aggregates`) | done (prototype, branch `proto/plan-reduction-narrow-value`), see "NV" below |
 | BJ | Batch: cost-based ordering of the inner joins from the row counts of the tables (`batch_cost_based_join_ordering`) | first version (prototype, branch `proto/plan-reduction-batch-joinorder`, see "BJ" below); index lookups and column statistics not done |
 | BF | Batch: cardinality feedback, step 1: count the rows of the operators at execution and compare them with the estimates (`batch_cardinality_feedback`) | first version (prototype, branch `proto/batch-cardinality-feedback`, see "BF" below): observation only, no plan changes |
 | BP | Batch: second pass of the reductions on keys after the stages that create aggregations (`batch_reduce_keys_after_conversions`) | done (prototype, branch `proto/plan-reduction-batch-pass2`, see "BP and BT" below) |
@@ -684,6 +685,71 @@ Join(Inner, a.b_ref = b.id)              Values([])
   differential tests `e2e_test/batch/simplify_null_join_keys` and
   `e2e_test/streaming/simplify_null_join_keys` (NULL keys on both sides, duplicates, empty tables,
   updates of keys to and from `NULL`, deletes).
+
+### NV. Narrow values of `first_value` / `last_value` (added on 2026-11-26, done on the branch)
+
+Variables `batch_narrow_value_aggregates` and `streaming_narrow_value_aggregates`, rules
+`NarrowValueAggRule` and `NarrowValuePushRule`. A "latest version per key" relation keeps a whole
+value (a JSONB document, a wide row) per group, but is often read through a few fields only. The
+aggregation keeps the whole value: in memory in batch, in the state table in streaming, and the
+joins, exchanges and unions below it carry it too.
+
+```text
+SELECT count(*) FROM v WHERE fact->>'dir' IS NULL
+-- v: SELECT id, last_value(fact ORDER BY ts) AS fact FROM t GROUP BY id
+
+Agg(count)                                   Agg(count)
+└─Filter((last_value(fact)->>'dir') IS NULL) └─Filter(last_value($1))
+  └─Agg(id; last_value(fact ORDER BY ts)) =>   └─Agg(id; last_value($1 ORDER BY ts))
+    └─Scan(t)                                    └─Project(id, ts, (fact->>'dir') IS NULL AS $1)
+                                                   └─Scan(t)
+```
+
+- `NarrowValueAggRule`: `f(first_value(x ORDER BY k))` becomes `first_value(f(x) ORDER BY k)`, the
+  same for `last_value` and `internal_last_seen_value`, when the result of the call is only read
+  through such functions, by a projection or an aggregation (in its `FILTER` clauses) above it,
+  through filters, limits and projections that only select columns. The largest sub-expressions
+  that read the result only through allowed functions are moved; the rest stays above. Several
+  of them become one aggregate of `ROW(f1(x), f2(x), ...)`, whose fields are read above.
+- `NarrowValuePushRule`: a projection that reads a wide column of a `UNION ALL` only through
+  allowed functions computes them in each branch; one that reads a wide column of one side of a
+  join (not compared by the join) only through them computes them in that side. Only on the paths
+  of value aggregates: the column is the result of a value aggregate below (through filters,
+  column selections, allowed functions, unions and joins), or the projection is the input of an
+  aggregation and the column feeds the argument of a value aggregate. Other projections over
+  joins are left as they are, so that the plans without value aggregates do not change. A lower
+  `first_value(j)` in a branch, under a `CASE` over `j`, is then narrowed in turn, and the join
+  below it carries the narrow value. `JoinProjectTransposeRule` keeps such a projection below the
+  join once the rules applied to the plan (it would otherwise pull it above again).
+- Allowed functions: deterministic, pure and unable to fail, because they are evaluated on every
+  input row instead of the selected one: `->`, `->>`, `#>`, `#>>`, `jsonb_extract_path(_text)`,
+  `jsonb_typeof`, `?`, `?|`, `?&`, `@>`, `<@`, field access, `ROW`, comparisons, `IS [NOT] NULL / TRUE / FALSE / DISTINCT
+  FROM`, `AND`, `OR`, `NOT`, `CASE`, `COALESCE`, casts to text from scalar types whose text does
+  not depend on the session, widening numeric casts. A cast that may fail (`(x->>'n')::int`) or
+  `jsonb_array_length` stays above, the field below it is moved.
+- Valid: the row that the aggregate picks depends on the order key (and on ties on the input
+  order in batch, on the stream key in streaming), never on the value, and `f` of the value of
+  the picked row is `f` applied to the picked row, `NULL` included. All the fields come from one
+  aggregate of a row, so they come from the same row even when the order key ties. An aggregate
+  that may see no row (no group key, or a `FILTER` clause) returns `NULL`, and the query applies
+  `f` to it: then only expressions that are `NULL` on `NULL` are moved (`IS NULL` and `COALESCE`
+  stay above). The same holds for the padded side of an outer join. Retractions are handled by
+  the aggregate as before: it keeps its rows ordered by the order key, with the narrow value.
+- Not rewritten: `DISTINCT` aggregates, a value that is also its order key, a value read as it is
+  (output, grouped by, compared in a join), through a function outside the list, or of a narrow
+  type (only JSONB, text, bytea, structs, lists and maps are narrowed). `IGNORE NULLS` is not
+  allowed in aggregates. A right side of a join that is a scan the join may look up (the first
+  column of its key or of an index is compared) is left alone, so that a lookup join stays
+  possible; a temporal join's right side too.
+- Stage: after the column pruning that precedes `SIMPLIFY_AGG` (so that `UnifyFirstLastValueRule`
+  packs the narrowed calls), in rounds: each round is followed by column pruning and a merge of
+  the projections (`NarrowValueProjectMergeRule`, which also merges when a computed column is
+  read several times, unless it is impure), so that the next round sees one level further down.
+- Tests: planner tests `batch_narrow_value_aggregates.yaml`, `stream_narrow_value_aggregates.yaml`;
+  differential tests `e2e_test/batch/narrow_value_aggregates` and
+  `e2e_test/streaming/narrow_value_aggregates` (NULL values and order keys, missing fields,
+  fields a cast cannot read in older rows, ties, unions, joins, a `CASE` over a lower
+  `first_value`, updates and deletes of the last rows, emptied tables).
 
 ### 5. Aggregation pushed below a join onto the unique side
 

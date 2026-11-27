@@ -460,6 +460,22 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_simplify_null_join_keys: bool,
 
+    // Rules `NarrowValueAggRule` and `NarrowValuePushRule`.
+    /// In the plan of a new streaming job, when the result of `first_value`, `last_value` or
+    /// `internal_last_seen_value` is only read through deterministic functions that cannot fail
+    /// (`->>`, `->`, comparisons, `CASE`...), aggregate those functions of the value instead of the
+    /// whole value (`f(last_value(x ORDER BY k))` becomes `last_value(f(x) ORDER BY k)`, several of
+    /// them packed in one row), and move them into the branches of a `UNION ALL` and into the side
+    /// of a join that the value comes from: the states keep the narrow value only. Defaults to
+    /// false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    streaming_narrow_value_aggregates: bool,
+
+    /// The same as `streaming_narrow_value_aggregates`, for batch queries: the aggregations, joins
+    /// and exchanges carry the narrow value only. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_narrow_value_aggregates: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,
