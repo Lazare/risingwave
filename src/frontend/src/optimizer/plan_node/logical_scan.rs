@@ -35,11 +35,12 @@ use crate::catalog::index_catalog::{IndexType, TableIndex, VectorIndex};
 use crate::error::{ErrorCode, Result};
 use crate::expr::{CorrelatedInputRef, ExprImpl, ExprRewriter, ExprVisitor, InputRef};
 use crate::optimizer::ApplyResult;
+use crate::optimizer::cardinality_learning::leaf_key;
 use crate::optimizer::optimizer_context::OptimizerContextRef;
 use crate::optimizer::plan_node::expr_visitable::ExprVisitable;
 use crate::optimizer::plan_node::plan_node_meta::AnyPlanNodeMeta;
 use crate::optimizer::plan_node::{
-    BatchSeqScan, ColumnPruningContext, LogicalFilter, LogicalProject, LogicalValues,
+    BatchSeqScan, ColumnPruningContext, LearningLeaf, LogicalFilter, LogicalProject, LogicalValues,
     PredicatePushdownContext, RewriteStreamContext, ToStreamContext,
 };
 use crate::optimizer::property::{Cardinality, FunctionalDependencySet, Order, WatermarkColumns};
@@ -524,9 +525,25 @@ impl PredicatePushdown for LogicalScan {
 
 impl LogicalScan {
     fn to_batch_inner_with_required(&self, required_order: &Order) -> Result<BatchPlanRef> {
+        // The relation of this scan for the cardinality feedback learning
+        // (`batch_cardinality_feedback_learning`), keyed as during planning; only computed when
+        // batch queries are observed.
+        let learning_key = {
+            let config = self.base.ctx().session_ctx().config();
+            (config.batch_cardinality_feedback() || config.batch_cardinality_feedback_learning())
+                .then(|| leaf_key(self.table(), self.predicate()))
+        };
         if self.predicate().always_true() {
-            required_order
-                .enforce_if_not_satisfies(BatchSeqScan::new(self.core.clone(), vec![], None).into())
+            let leaf = learning_key.map(|key| LearningLeaf {
+                key,
+                filtered: false,
+                remainder: false,
+            });
+            required_order.enforce_if_not_satisfies(
+                BatchSeqScan::new(self.core.clone(), vec![], None)
+                    .with_learning_leaf(leaf)
+                    .into(),
+            )
         } else {
             let (scan_ranges, predicate) = self.predicate().clone().split_to_scan_ranges(
                 self.table(),
@@ -539,8 +556,15 @@ impl LogicalScan {
                 LogicalValues::create(vec![], scan.core.schema(), scan.core.ctx).to_batch()?
             } else {
                 let (scan, predicate, project_expr) = scan.predicate_pull_up();
+                let leaf = learning_key.map(|key| LearningLeaf {
+                    key,
+                    filtered: true,
+                    remainder: !predicate.always_true(),
+                });
 
-                let mut plan: BatchPlanRef = BatchSeqScan::new(scan, scan_ranges, None).into();
+                let mut plan: BatchPlanRef = BatchSeqScan::new(scan, scan_ranges, None)
+                    .with_learning_leaf(leaf)
+                    .into();
                 if !predicate.always_true() {
                     plan = BatchFilter::new(generic::Filter::new(predicate, plan)).into();
                 }

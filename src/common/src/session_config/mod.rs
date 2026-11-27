@@ -386,6 +386,16 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_cardinality_feedback: bool,
 
+    /// Cardinality feedback learning of batch queries: keep the ratios measured by the
+    /// cardinality feedback (filter selectivity, groups per input row of an aggregation, join
+    /// output per row of its larger input) by sub-plan, and use them in the estimates of the
+    /// cost-based join ordering (`batch_cost_based_join_ordering`) and in the limit of the top-n
+    /// per group (`batch_over_window_to_topn`) instead of fixed guesses. Batch queries are observed
+    /// as with `batch_cardinality_feedback`. A plan changes only when the learned estimates make
+    /// it clearly cheaper. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_cardinality_feedback_learning: bool,
+
     /// In the plan of a new streaming job, read once the table that several branches of a
     /// `UNION ALL` read, each with its own filter and projection: one scan, one copy of each row
     /// per branch, and the filter and projection of each branch applied to its copies. Defaults to

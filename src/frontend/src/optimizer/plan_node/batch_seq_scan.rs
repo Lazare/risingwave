@@ -37,6 +37,24 @@ pub struct BatchSeqScan {
     scan_ranges: Vec<ScanRange>,
     limit: Option<u64>,
     as_of: Option<AsOf>,
+    /// The relation of the logical scan it comes from, for the cardinality feedback learning
+    /// (`optimizer::cardinality_learning`).
+    learning_leaf: Option<LearningLeaf>,
+}
+
+/// The relation of the logical scan that a [`BatchSeqScan`] comes from, for the cardinality
+/// feedback learning (`optimizer::cardinality_learning`): the planner splits the predicate of the
+/// logical scan into key ranges and a filter right above the batch scan, and both are learned as
+/// one relation, keyed as during planning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LearningLeaf {
+    /// The key of the table and predicate of the logical scan (`cardinality_learning::leaf_key`).
+    pub key: u64,
+    /// Whether the logical scan has a predicate.
+    pub filtered: bool,
+    /// Whether a filter right above the batch scan applies the part of the predicate that the
+    /// key ranges do not.
+    pub remainder: bool,
 }
 
 impl BatchSeqScan {
@@ -91,7 +109,19 @@ impl BatchSeqScan {
             scan_ranges,
             limit,
             as_of,
+            learning_leaf: None,
         }
+    }
+
+    /// The same scan, from the logical scan described by `leaf`.
+    pub fn with_learning_leaf(mut self, leaf: Option<LearningLeaf>) -> Self {
+        self.learning_leaf = leaf;
+        self
+    }
+
+    /// The relation of the logical scan it comes from, if known.
+    pub fn learning_leaf(&self) -> Option<LearningLeaf> {
+        self.learning_leaf
     }
 
     pub fn new(core: generic::TableScan, scan_ranges: Vec<ScanRange>, limit: Option<u64>) -> Self {
@@ -136,6 +166,7 @@ impl BatchSeqScan {
             self.scan_ranges.clone(),
             self.limit,
         )
+        .with_learning_leaf(self.learning_leaf)
     }
 
     /// Get a reference to the batch seq scan's logical.
@@ -233,6 +264,7 @@ impl ToLocalBatch for BatchSeqScan {
             self.scan_ranges.clone(),
             self.limit,
         )
+        .with_learning_leaf(self.learning_leaf)
         .into())
     }
 }
@@ -245,7 +277,9 @@ impl ExprRewritable<Batch> for BatchSeqScan {
     fn rewrite_exprs(&self, r: &mut dyn ExprRewriter) -> PlanRef {
         let mut core = self.core.clone();
         core.rewrite_exprs(r);
-        Self::new(core, self.scan_ranges.clone(), self.limit).into()
+        Self::new(core, self.scan_ranges.clone(), self.limit)
+            .with_learning_leaf(self.learning_leaf)
+            .into()
     }
 }
 

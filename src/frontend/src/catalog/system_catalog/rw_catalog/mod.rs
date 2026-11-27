@@ -16,6 +16,8 @@ mod rw_actor_infos;
 mod rw_actors;
 // Cardinality feedback of batch queries (`batch_cardinality_feedback`).
 mod rw_batch_cardinality_feedback;
+// Cardinality feedback learning of batch queries (`batch_cardinality_feedback_learning`).
+mod rw_batch_cardinality_learning;
 mod rw_columns;
 mod rw_connections;
 mod rw_databases;
