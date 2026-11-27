@@ -1136,6 +1136,9 @@ mod logical_iceberg_scan;
 mod logical_postgres_query;
 
 mod batch_vector_search;
+// Batch spool (`batch_share_identical_subplans`).
+mod batch_spool;
+pub use batch_spool::BatchSpool;
 mod logical_mysql_query;
 mod logical_vector_search;
 mod logical_vector_search_lookup_join;
@@ -1380,6 +1383,7 @@ macro_rules! for_all_plan_nodes {
             , { Batch, MySqlQuery }
             , { Batch, GetChannelDeltaStats }
             , { Batch, VectorSearch }
+            , { Batch, Spool }
             , { Stream, Project }
             , { Stream, Filter }
             , { Stream, TableScan }

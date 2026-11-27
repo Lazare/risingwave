@@ -460,6 +460,14 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_simplify_null_join_keys: bool,
 
+    // Batch spool (`share_identical_batch_subplans`).
+    /// In a batch query, compute once per task the identical sub-plans of a stage that aggregate
+    /// or join, keep their rows in memory (spilled to disk when the memory of the query is
+    /// short), and read them again for each other copy. Only deterministic sub-plans that read
+    /// tables. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_share_identical_subplans: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,

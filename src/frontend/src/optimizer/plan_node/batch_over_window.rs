@@ -55,6 +55,11 @@ impl BatchOverWindow {
     fn expected_input_order(&self) -> Order {
         self.order().clone()
     }
+
+    /// The window functions, read by `share_identical_batch_subplans`.
+    pub fn window_functions(&self) -> &[PlanWindowFunction] {
+        self.core.window_functions()
+    }
 }
 
 impl_distill_by_unit!(BatchOverWindow, core, "BatchOverWindow");

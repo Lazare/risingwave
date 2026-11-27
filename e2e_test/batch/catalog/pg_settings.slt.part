@@ -37,6 +37,7 @@ user batch_over_window_to_topn
 user batch_parallelism
 user batch_reduce_keys_after_conversions
 user batch_rewrite_lag_duplicates
+user batch_share_identical_subplans
 user batch_simplify_column_facts
 user batch_simplify_null_join_keys
 user batch_simplify_on_unique_key

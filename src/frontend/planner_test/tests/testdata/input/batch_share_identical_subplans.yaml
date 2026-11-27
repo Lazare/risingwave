@@ -1,0 +1,144 @@
+# Tests for `batch_share_identical_subplans` (batch spool): the identical sub-plans of a stage that
+# aggregate, join, sort or keep a top-n are computed once per task (`BatchSpool`) and read again
+# by the other copies (`BatchSpoolRead`).
+- id: setup_off
+  sql: |
+    create table t (k int, v int, ts int);
+    create table d (k int primary key, name varchar);
+    create view latest as select k, last_value(v order by ts) as v, count(*) as n from t group by k;
+  expected_outputs: []
+- id: setup
+  sql: |
+    set batch_share_identical_subplans = true;
+    create table t (k int, v int, ts int);
+    create table d (k int primary key, name varchar, k2 int);
+    create table r (k int, v int, n bigint);
+    create view latest as select k, last_value(v order by ts) as v, count(*) as n from t group by k;
+  expected_outputs: []
+
+# The variable is off by default: the plans do not change.
+- name: off by default - self join of an aggregating view
+  before: [setup_off]
+  sql: |
+    select a.k, a.v, b.n from latest a join latest b on a.k = b.k;
+  expected_outputs:
+  - batch_plan
+  - batch_local_plan
+
+# Shared.
+
+- name: self join of an aggregating view
+  before: [setup]
+  sql: |
+    select a.k, a.v, b.n from latest a join latest b on a.k = b.k;
+  expected_outputs:
+  - batch_plan
+  - batch_local_plan
+- name: the same aggregation in two join branches
+  before: [setup]
+  sql: |
+    select d.name, a.v, b.n from d join latest a on d.k = a.k left join latest b on d.k = b.k;
+  expected_outputs:
+  - batch_plan
+  - batch_local_plan
+- name: the same aggregation in two join branches on different keys
+  before: [setup]
+  sql: |
+    select d.name, a.v, b.v as v2 from d join latest a on d.k = a.k join latest b on d.k2 = b.k;
+  expected_outputs:
+  - batch_plan
+  - batch_local_plan
+- name: identical branches of a union
+  before: [setup]
+  sql: |
+    select k, v from latest union all select k, v from latest;
+  expected_outputs:
+  - batch_plan
+  - batch_local_plan
+- name: union branches filtering the same aggregation differently
+  before: [setup]
+  sql: |
+    select k, v from latest where v > 0 union all select k, n::int from latest where n > 1;
+  expected_outputs:
+  - batch_plan
+  - batch_local_plan
+- name: filters above the shared aggregation stay with each copy
+  before: [setup]
+  sql: |
+    select a.k, a.v, b.n from latest a join latest b on a.k = b.k where a.v > 0 and b.n > 1;
+  expected_outputs:
+  - batch_plan
+- name: the same scalar subquery twice
+  before: [setup]
+  sql: |
+    select k from t where v > (select avg(v) from t) and ts > (select avg(v) from t);
+  expected_outputs:
+  - batch_plan
+  - batch_local_plan
+- name: an aggregation over a join, read twice
+  before: [setup]
+  sql: |
+    with g as (select d.name, count(*) as c, max(t.v) as m from t join d on t.k = d.k group by d.name)
+    select a.name, a.c, b.m from g a join g b on a.name = b.name;
+  expected_outputs:
+  - batch_plan
+  - batch_local_plan
+- name: an impure projection above the shared aggregation stays with each copy
+  before: [setup]
+  sql: |
+    with x as (select k, sum(v) * random() as r from t group by k)
+    select a.k, a.r, b.r as r2 from x a join x b on a.k = b.k;
+  expected_outputs:
+  - batch_plan
+- name: a top-n read twice
+  before: [setup]
+  sql: |
+    with top as (select k, v from t order by v desc limit 3)
+    select a.k, b.v from top a join top b on a.k = b.k;
+  expected_outputs:
+  - batch_plan
+- name: insert of a self join
+  before: [setup]
+  sql: |
+    insert into r select a.k, a.v, b.n from latest a join latest b on a.k = b.k;
+  expected_outputs:
+  - batch_plan
+- name: three copies, one of them in another stage
+  before: [setup]
+  sql: |
+    select a.k, b.v, c.n from latest a join latest b on a.k = b.k join latest c on a.v = c.k;
+  expected_outputs:
+  - batch_plan
+  - batch_local_plan
+
+# Kept.
+
+- name: kept - an impure expression in the repeated sub-plan
+  before: [setup]
+  sql: |
+    with x as (select k, sum(v * random()) as r from t group by k)
+    select a.k, a.r, b.r as r2 from x a join x b on a.k = b.k;
+  expected_outputs:
+  - batch_plan
+  - batch_local_plan
+- name: kept - copies without aggregation or join
+  before: [setup]
+  sql: |
+    with x as (select k, v from t where v > 0)
+    select a.k, b.v from x a join x b on a.k = b.k;
+  expected_outputs:
+  - batch_plan
+- name: kept - a filter pushed into one copy makes the copies differ
+  before: [setup]
+  sql: |
+    select a.k, a.v, b.n from latest a left join latest b on a.k = b.k and b.k > 5;
+  expected_outputs:
+  - batch_plan
+- name: kept - different aggregations of the same table
+  before: [setup]
+  sql: |
+    select a.k, a.c, b.s
+    from (select k, count(*) as c from t group by k) a
+    join (select k, sum(v) as s from t group by k) b on a.k = b.k;
+  expected_outputs:
+  - batch_plan

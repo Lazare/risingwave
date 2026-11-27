@@ -452,6 +452,14 @@ message GetChannelDeltaStatsNode {
   optional uint64 time_offset = 2;
 }
 
+// A sub-plan computed once per task and read by several nodes of the same plan fragment
+// (`batch_share_identical_subplans`). The node with a child computes the sub-plan; the nodes with
+// the same `spool_id` and no child read the rows it computed.
+message SpoolNode {
+  uint32 spool_id = 1;
+  repeated plan_common.Field schema = 2;
+}
+
 message PlanNode {
   repeated PlanNode children = 1;
   reserved 22;
@@ -495,6 +503,7 @@ message PlanNode {
     VectorIndexNearestNode vector_index_nearest = 44;
     GetChannelDeltaStatsNode get_channel_delta_stats = 45;
     IcebergMetadataScanNode iceberg_metadata_scan = 46;
+    SpoolNode spool = 47;
     // The following nodes are used for testing.
     bool block_executor = 100;
     bool busy_loop_executor = 101;

@@ -42,6 +42,7 @@ own rules.
 | BF | Batch: cardinality feedback, step 1: count the rows of the operators at execution and compare them with the estimates (`batch_cardinality_feedback`) | first version (prototype, branch `proto/batch-cardinality-feedback`, see "BF" below): observation only, no plan changes |
 | BP | Batch: second pass of the reductions on keys after the stages that create aggregations (`batch_reduce_keys_after_conversions`) | done (prototype, branch `proto/plan-reduction-batch-pass2`, see "BP and BT" below) |
 | BT | Batch: `row_number() <= n` per partition becomes a top-n per group, small `n` only (`batch_over_window_to_topn`) | done (prototype, branch `proto/plan-reduction-batch-pass2`, see "BP and BT" below) |
+| BS | Batch: identical sub-plans of a stage computed once per task and read again through a spool (`batch_share_identical_subplans`) | first version (prototype, branch `proto/plan-reduction-batch-spool`, see "BS" below); copies in different stages not shared |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -1152,6 +1153,96 @@ BP).
   ties, more than ten rows per group, after deletes and updates).
 - Not done: the union join factoring, union scan merge, status ladder and empty-relation stages
   are not re-run in the pass.
+
+### BS. Batch: identical sub-plans computed once per task (added on 2026-11-26, first version)
+
+The batch optimizer turns the plan into a tree before anything else (`DAG_TO_TREE`): a view or a
+CTE read twice is planned and executed twice, its scans and its aggregation memory paid each time.
+A batch query has no shared sub-plan at execution: a stage is a tree of executors, each task output
+has one consumer (`take_output` takes the receiver), and the exchanges of a parent stage each read
+their own child stage.
+
+Three designs were weighed:
+
+- (A) A shared child stage whose task outputs are read by several exchanges. It shares copies
+  that sit in different stages, but it changes the stage graph (a child with several parents and
+  exchange infos), the distributed and the local query runners (the local mode embeds the child
+  plan into each exchange source, so a child is run once per reader), and the task outputs (one
+  bounded channel per consumer today). It also brings the deadlock risk: two exchanges of the same
+  parent task reading one shared output, the parent reading the first one to its end (a hash join
+  build) while the producer is blocked on the full channel of the second one. Avoiding it needs an
+  unbounded, spillable buffer per consumer, accounted in the query memory: a spool per output.
+- (B) A spool inside a task: the copies of one stage run in the same tasks, so the task computes
+  the sub-plan once, keeps its rows and replays them. Nothing changes in the stages, the runners
+  or the task outputs; it works the same in local and distributed mode.
+- Sharing only the scans (a shared scan stage) saves the reads but not the aggregation memory.
+
+**BS is (B)**, the most contained and robust; (A) is the follow-up for copies in different stages.
+
+`share_identical_batch_subplans` runs last, on the final distributed or local batch plan. It
+groups the nodes by stage (the position of the exchange that starts the stage) and by structural
+equality (every field of the batch nodes but their ids: distributions and orders included). A
+sub-plan is shared when it has at least two copies in its stage, only nodes that compute the same
+rows each time they run (scans, exchanges, projections, filters, joins, aggregations with builtin
+functions, sorts, top-n, limits, unions, over windows, ...: no source, external query, DML or
+system table), no impure expression, and at least one aggregation, join, sort, top-n or over
+window. The first copy becomes `BatchSpool { spool: n }` above the sub-plan, the others
+`BatchSpoolRead { spool: n }`, a leaf: the exchanges below a reader are gone, so are the stages
+below them. The largest sub-plans win; a smaller one repeated inside the producer and elsewhere is
+shared again.
+
+```sql
+create table t (k int, v int, ts int);
+create view latest as select k, last_value(v order by ts) as v, count(*) as n from t group by k;
+select a.k, a.v, b.n from latest a join latest b on a.k = b.k;
+-- HashJoin(k) <- BatchSpool { spool: 1 } <- HashAgg(k) <- Exchange(hash k) <- Scan(t)
+--             <- BatchSpoolRead { spool: 1 }
+-- one scan stage instead of two, one hash table of the aggregation instead of two
+```
+
+Execution (`SpoolExecutor`, one per node of the spool, all holding the same `Spool` of the plan
+fragment from the `SpoolRegistry` of the executor builder):
+
+- The first node read starts the materialization: the sub-plan runs to its end, its rows are kept,
+  then every node returns all of them, in the order of the sub-plan (any order or distribution of
+  the copy holds).
+- Deadlocks. The materialization is a shared future: any node waiting for it drives it, all of
+  them are woken when it progresses, and no lock is held while it runs. Its sub-plan contains no
+  node of its own spool (a reader is a leaf, a sub-plan cannot contain a copy of itself), and a
+  spool nested in it is strictly smaller, so no wait cycle exists inside a task. A parent that
+  stops reading the node that started it (a hash join reading its build side first) does not
+  block another node: the next one read drives it. Towards other tasks, the materialization is a
+  blocking operator (like a hash aggregation) where the first node of the spool is read; the
+  readers read nothing from other tasks. Unit tests cover a node left aside or dropped in the middle
+  of the materialization, concurrent readers, errors and a missing producer.
+- Memory. The rows are counted in the memory context of a spillable operator of the query (the
+  same pool as hash aggregations, joins and sorts, and counted by the frontend when it fits the
+  parallelism to the memory of the query). When the context refuses more, the rows kept are
+  written to a spill file, released from the context, and the next rows go to the file: the
+  spool then holds no memory. Without spilling the query fails as a hash aggregation would. The
+  rows are released when the last node of the spool is dropped.
+
+- Exactness: a reader gets exactly the rows that its copy would have computed in the same task
+  (same scan partitions, same rows from each exchange). Where a sub-plan may return different
+  rows each time (ties of a limit or top-n, `array_agg` without `ORDER BY`), every copy now gets
+  the same rows, one of the results each copy could have computed. Impure expressions and
+  user-defined aggregates keep their copies.
+- Cost: the first rows of the consumer of the first node wait for the whole sub-plan; the rows
+  are kept until the last node is done (spilled when memory is short).
+- Tests: `batch_share_identical_subplans.yaml` (planner: self join, two join branches on the same
+  or different keys, union branches, repeated scalar subquery, aggregation over a join, top-n,
+  insert, three copies across stages; kept: impure expression, copies without aggregation or join,
+  copies made different by a pushed filter, different aggregations; off by default), unit tests in
+  `spool.rs` (executors) and `spool_registry.rs`, and the differential
+  `e2e_test/batch/share_identical_subplans.gen.py` (every query with the variable off and on, in
+  the local and the distributed query mode, multisets compared on empty tables, NULL keys and
+  values, duplicates, after updates and deletes).
+- Limits: copies in different stages are not shared. In distributed mode every input of a
+  `UNION ALL` goes through its own exchange: copies under different branches are only shared when
+  the whole branch is identical. Joins on different keys put the copies in different stages too.
+  The local mode, where everything above the scans runs in one stage, shares them. Copies that
+  differ by their columns or by a filter pushed into one of them are not shared (the streaming
+  idea 10 widens them; not ported).
 
 ## Not for now: sharing between materialized views
 
