@@ -313,6 +313,44 @@
     └─BatchHashAgg { group_key: [t.k], aggs: [count] }
       └─BatchExchange { order: [], dist: Single }
         └─BatchScan { table: t, columns: [t.k], distribution: SomeShard }
+- name: joins read twice in a union
+  before:
+  - setup
+  sql: |
+    with j as (select t.k, d.name from t join d on t.v = d.k2)
+    select k, name from j union all select k, name from j;
+  batch_local_plan: |-
+    BatchUnion { all: true }
+    ├─BatchSpool { spool: 1 }
+    │ └─BatchHashJoin { type: Inner, predicate: t.v = d.k2, output: [t.k, d.name] }
+    │   ├─BatchExchange { order: [], dist: Single }
+    │   │ └─BatchScan { table: t, columns: [t.k, t.v], distribution: SomeShard }
+    │   └─BatchExchange { order: [], dist: Single }
+    │     └─BatchScan { table: d, columns: [d.name, d.k2], distribution: SomeShard }
+    └─BatchSpoolRead { spool: 1 }
+- name: aggregations read twice below a limit
+  before:
+  - setup
+  sql: |
+    select a.k, a.n, b.n as n2 from latest a join latest b on a.k = b.k limit 5;
+  batch_plan: |-
+    BatchLimit { limit: 5, offset: 0 }
+    └─BatchExchange { order: [], dist: Single, sequential: true }
+      └─BatchLimit { limit: 5, offset: 0 }
+        └─BatchHashJoin { type: Inner, predicate: t.k = t.k, output: [t.k, count, count] }
+          ├─BatchSpool { spool: 1 }
+          │ └─BatchHashAgg { group_key: [t.k], aggs: [count] }
+          │   └─BatchExchange { order: [], dist: HashShard(t.k) }
+          │     └─BatchScan { table: t, columns: [t.k], distribution: SomeShard }
+          └─BatchSpoolRead { spool: 1 }
+  batch_local_plan: |-
+    BatchLimit { limit: 5, offset: 0 }
+    └─BatchHashJoin { type: Inner, predicate: t.k = t.k, output: [t.k, count, count] }
+      ├─BatchSpool { spool: 1 }
+      │ └─BatchHashAgg { group_key: [t.k], aggs: [count] }
+      │   └─BatchExchange { order: [], dist: Single }
+      │     └─BatchScan { table: t, columns: [t.k], distribution: SomeShard }
+      └─BatchSpoolRead { spool: 1 }
 - name: kept - an impure expression in the repeated sub-plan
   before:
   - setup
@@ -387,3 +425,22 @@
       └─BatchHashAgg { group_key: [t.k], aggs: [sum(t.v)] }
         └─BatchExchange { order: [], dist: HashShard(t.k) }
           └─BatchScan { table: t, columns: [t.k, t.v], distribution: SomeShard }
+- name: kept - joins read twice below a limit
+  before:
+  - setup
+  sql: |
+    with j as (select t.k, d.name from t join d on t.v = d.k2)
+    select * from (select k, name from j union all select k, name from j) u limit 5;
+  batch_local_plan: |-
+    BatchLimit { limit: 5, offset: 0 }
+    └─BatchUnion { all: true }
+      ├─BatchHashJoin { type: Inner, predicate: t.v = d.k2, output: [t.k, d.name] }
+      │ ├─BatchExchange { order: [], dist: Single }
+      │ │ └─BatchScan { table: t, columns: [t.k, t.v], distribution: SomeShard }
+      │ └─BatchExchange { order: [], dist: Single }
+      │   └─BatchScan { table: d, columns: [d.name, d.k2], distribution: SomeShard }
+      └─BatchHashJoin { type: Inner, predicate: t.v = d.k2, output: [t.k, d.name] }
+        ├─BatchExchange { order: [], dist: Single }
+        │ └─BatchScan { table: t, columns: [t.k, t.v], distribution: SomeShard }
+        └─BatchExchange { order: [], dist: Single }
+          └─BatchScan { table: d, columns: [d.name, d.k2], distribution: SomeShard }
