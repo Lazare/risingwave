@@ -645,29 +645,37 @@ Join(Inner, a.b_ref = b.id)              Values([])
 - Columns `NULL` in every row of a node: a `c IS NULL` conjunct of a filter or of a scan
   predicate (the predicate of a scan refers to the columns of the table, mapped to the output
   columns of the scan), followed up through filters, shares and projections of input references
-  or of casts of them (streaming computes the cast of a join key in a projection below the join);
-  a `NULL` literal of a projection. Nothing is derived through joins, aggregations or unions.
-- A conjunct `l = r` of the join condition whose operand is such a column, or a cast of it, on a
-  side whose rows must match to be useful: either side of an inner or semi join (the join becomes
-  empty), the right side of a left outer or left anti join (the right side becomes empty, the
-  left rows are padded or all kept), the left side of the right joins. The join is rewritten as
-  A rewrites a never-true condition, then B and C remove what is above it (an aggregation without
+  or of casts of them (streaming computes the cast of a join key in a projection below the join),
+  unions (a column `NULL` in every input), joins (a column of a side keeps the facts of that side:
+  a padded column is `NULL` too), and the operators that output the columns of their input as
+  they are (limit, top-n, dedup, over window); a `NULL` literal of a projection. Nothing is
+  derived through aggregations.
+- A conjunct `l = r` of the join condition whose operand is such a column, or a cast of it, on
+  either side, whatever the type of the join: no pair of rows matches. An inner or semi join
+  becomes empty; a left outer or left anti join keeps its left side, padded with `NULL`s or as it
+  is, and its right side becomes empty, also when the `NULL` column is on the left (preserved)
+  side, whose rows can then match nothing; symmetrically for the right joins. A full join
+  becomes a `UNION ALL` of its two sides, each padded with `NULL`s. The join is rewritten as A
+  rewrites a never-true condition, then B and C remove what is above it (an aggregation without
   `GROUP BY` becomes its constant row).
+- The preserved-side case is the one of a `not_null` test over a view `v = l LEFT JOIN r ON
+  l.k = r.k` filtered on `l.k IS NULL`, where `l` is a union of branches: the filter is pushed
+  into every branch, and the whole right side (aggregations, top-n, joins) is never read.
 - Valid: `NULL = x` is `NULL` for every `x` and every type, so no pair of rows satisfies the
   condition, whatever its other conjuncts, duplicates or empty inputs. The facts are properties
   of the rows a filter or a scan can output: they hold for every row ever produced, under
   retractions, so they are valid for a plan frozen when a streaming job is created.
-- Not rewritten: `IS NOT DISTINCT FROM` (matches `NULL`s), `FULL OUTER JOIN`, as-of joins, an
-  operand that is another expression (`coalesce(c, 0) = x` can match), a `NULL` column of the
-  preserved side of an outer join (the rewrite would be valid, but removes nothing), and a filter
-  `s.k IS NULL` above a left join on its optional side (the anti-join pattern: the filter stays
-  above the join and is not read).
+- Not rewritten: `IS NOT DISTINCT FROM` (matches `NULL`s), as-of joins, an operand that is
+  another expression (`coalesce(c, 0) = x` can match), a union where only some branches have the
+  `NULL` fact, and a filter `s.k IS NULL` above a left join on its optional side (the anti-join
+  pattern: the filter stays above the join and is not read).
 - Streaming and watermarks: the rule leaves the join untouched if a sub-plan it would remove holds
   a scan of a table with a watermark, a source with a watermark or `now()` (the same guard as the
   other rules of A and B in streaming, see the limits of A). Without this, an inner join with a
   temporal join's left side carrying the watermark of `EMIT ON WINDOW CLOSE` would become an
   empty `VALUES` without a watermark, and the job could no longer be planned. A left join whose
-  optional side is removed keeps the watermarks of its preserved side.
+  optional side is removed keeps the watermarks of its preserved side. A full join is left
+  untouched in streaming if either side may carry a watermark.
 - Stages: `STREAM_SIMPLIFY_NULL_JOIN_KEYS` right after `STREAM_PRUNE_EMPTY_RELATION`, and
   `BATCH_SIMPLIFY_NULL_JOIN_KEYS` at the start of `reduce_batch_on_keys` (after the first
   predicate pushdown, before join ordering), each with `EmptyRelationPropagateRule` and

@@ -133,6 +133,156 @@
       └─StreamExchange { dist: HashShard($expr1) }
         └─StreamProject { exprs: [TumbleStart(t.ts, '01:00:00':Interval) as $expr1, null:Varchar, t._row_id], output_watermarks: [[$expr1]] }
           └─StreamTableScan { table: t, columns: [t.ts, t._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }
+- name: left join - the key of the left (preserved) side is null, the right side is not read
+  before:
+  - setup
+  sql: |
+    select a.id, b.label from (select * from a where bk is null) a left join b on a.bk = b.k;
+  stream_plan: |-
+    StreamMaterialize { columns: [id, label], stream_key: [id], pk_columns: [id], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [a.id, null:Varchar] }
+      └─StreamFilter { predicate: IsNull(a.bk) }
+        └─StreamTableScan { table: a, columns: [a.id, a.bk], stream_scan_type: SnapshotBackfill, stream_key: [a.id], pk: [id], dist: UpstreamHashShard(a.id) }
+- name: left join - the preserved side is a union of branches, each with a null key
+  before:
+  - setup
+  sql: |
+    select u.id, r.lab
+    from (select id, bk from a where bk is null union all select id, k from b where k is null) u
+    left join (select k, max(label) as lab from b group by k) r on u.bk = r.k;
+  stream_plan: |-
+    StreamMaterialize { columns: [id, lab, $src(hidden)], stream_key: [id, $src], pk_columns: [id, $src], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [a.id, null:Varchar, $src] }
+      └─StreamUnion { all: true }
+        ├─StreamExchange { dist: HashShard(a.id, 0:Int32) }
+        │ └─StreamProject { exprs: [a.id, 0:Int32] }
+        │   └─StreamFilter { predicate: IsNull(a.bk) }
+        │     └─StreamTableScan { table: a, columns: [a.id, a.bk], stream_scan_type: SnapshotBackfill, stream_key: [a.id], pk: [id], dist: UpstreamHashShard(a.id) }
+        └─StreamExchange { dist: HashShard(b.id, 1:Int32) }
+          └─StreamProject { exprs: [b.id, 1:Int32] }
+            └─StreamFilter { predicate: IsNull(b.k) }
+              └─StreamTableScan { table: b, columns: [b.id, b.k], stream_scan_type: SnapshotBackfill, stream_key: [b.id], pk: [id], dist: UpstreamHashShard(b.id) }
+- name: left join - a union branch with a null literal key
+  before:
+  - setup
+  sql: |
+    select u.id, b.label
+    from (select id, null::int as bk from a union all select id, k from b where k is null) u
+    left join b on u.bk = b.k;
+  stream_plan: |-
+    StreamMaterialize { columns: [id, label, $src(hidden)], stream_key: [id, $src], pk_columns: [id, $src], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [a.id, null:Varchar, $src] }
+      └─StreamUnion { all: true }
+        ├─StreamExchange { dist: HashShard(a.id, 0:Int32) }
+        │ └─StreamProject { exprs: [a.id, 0:Int32] }
+        │   └─StreamTableScan { table: a, columns: [a.id], stream_scan_type: SnapshotBackfill, stream_key: [a.id], pk: [id], dist: UpstreamHashShard(a.id) }
+        └─StreamExchange { dist: HashShard(b.id, 1:Int32) }
+          └─StreamProject { exprs: [b.id, 1:Int32] }
+            └─StreamFilter { predicate: IsNull(b.k) }
+              └─StreamTableScan { table: b, columns: [b.id, b.k], stream_scan_type: SnapshotBackfill, stream_key: [b.id], pk: [id], dist: UpstreamHashShard(b.id) }
+- name: left join - the null key comes through an inner join and a top-n below the preserved side
+  before:
+  - setup
+  sql: |
+    select x.id, c.v
+    from (
+      select id, bk from (
+        select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn
+        from a join b on a.id = b.id where a.bk is null
+      ) t where rn = 1
+    ) x
+    left join c on x.bk = c.kb;
+  stream_plan: |-
+    StreamMaterialize { columns: [id, v], stream_key: [id], pk_columns: [id], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [a.id, null:Int32] }
+      └─StreamGroupTopN { order: [b.id ASC], limit: 1, offset: 0, group_key: [a.id] }
+        └─StreamHashJoin { type: Inner, predicate: a.id = b.id, output: all }
+          ├─StreamExchange { dist: HashShard(a.id) }
+          │ └─StreamProject { exprs: [a.id] }
+          │   └─StreamFilter { predicate: IsNull(a.bk) }
+          │     └─StreamTableScan { table: a, columns: [a.id, a.bk], stream_scan_type: SnapshotBackfill, stream_key: [a.id], pk: [id], dist: UpstreamHashShard(a.id) }
+          └─StreamExchange { dist: HashShard(b.id) }
+            └─StreamTableScan { table: b, columns: [b.id], stream_scan_type: SnapshotBackfill, stream_key: [b.id], pk: [id], dist: UpstreamHashShard(b.id) }
+- name: right join - the key of the right (preserved) side is null
+  before:
+  - setup
+  sql: |
+    select a.x, b.id, b.label from a right join (select * from b where k is null) b on a.bk = b.k;
+  stream_plan: |-
+    StreamMaterialize { columns: [x, id, label], stream_key: [id], pk_columns: [id], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [null:Int32, b.id, b.label] }
+      └─StreamFilter { predicate: IsNull(b.k) }
+        └─StreamTableScan { table: b, columns: [b.id, b.label, b.k], stream_scan_type: SnapshotBackfill, stream_key: [b.id], pk: [id], dist: UpstreamHashShard(b.id) }
+- name: anti join - the key of the left side is null, every left row is kept
+  before:
+  - setup
+  sql: |
+    select a.id from a where a.bk is null and not exists (select 1 from b where b.k = a.bk);
+  stream_plan: |-
+    StreamMaterialize { columns: [id], stream_key: [id], pk_columns: [id], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [a.id] }
+      └─StreamFilter { predicate: IsNull(a.bk) }
+        └─StreamTableScan { table: a, columns: [a.id, a.bk], stream_scan_type: SnapshotBackfill, stream_key: [a.id], pk: [id], dist: UpstreamHashShard(a.id) }
+- name: full join - the key of one side is null, both sides are padded
+  before:
+  - setup
+  sql: |
+    select a.id, b.label from a full join (select * from b where k is null) b on a.bk = b.k;
+  stream_plan: |-
+    StreamMaterialize { columns: [id, label, a.id(hidden), $src(hidden)], stream_key: [a.id, $src], pk_columns: [a.id, $src], pk_conflict: NoCheck }
+    └─StreamUnion { all: true }
+      ├─StreamExchange { dist: HashShard(a.id, 0:Int32) }
+      │ └─StreamProject { exprs: [a.id, null:Varchar, a.id, 0:Int32] }
+      │   └─StreamTableScan { table: a, columns: [a.id], stream_scan_type: SnapshotBackfill, stream_key: [a.id], pk: [id], dist: UpstreamHashShard(a.id) }
+      └─StreamExchange { dist: HashShard(b.id, 1:Int32) }
+        └─StreamProject { exprs: [null:Int32, b.label, b.id, 1:Int32] }
+          └─StreamFilter { predicate: IsNull(b.k) }
+            └─StreamTableScan { table: b, columns: [b.label, b.id, b.k], stream_scan_type: SnapshotBackfill, stream_key: [b.id], pk: [id], dist: UpstreamHashShard(b.id) }
+- name: kept - the null fact is in only one branch of the union
+  before:
+  - setup
+  sql: |
+    select u.id, b.label
+    from (select id, bk from a where bk is null union all select id, k from b) u
+    left join b on u.bk = b.k;
+  stream_plan: |-
+    StreamMaterialize { columns: [id, label, $src(hidden), a.bk(hidden), b.id(hidden)], stream_key: [id, $src, b.id, a.bk], pk_columns: [id, $src, b.id, a.bk], pk_conflict: NoCheck }
+    └─StreamExchange { dist: HashShard(a.id, $src, a.bk, b.id) }
+      └─StreamHashJoin { type: LeftOuter, predicate: a.bk = b.k, output: [a.id, b.label, $src, a.bk, b.id] }
+        ├─StreamExchange { dist: HashShard(a.bk) }
+        │ └─StreamUnion { all: true }
+        │   ├─StreamExchange { dist: HashShard(a.id, 0:Int32) }
+        │   │ └─StreamProject { exprs: [a.id, a.bk, 0:Int32] }
+        │   │   └─StreamFilter { predicate: IsNull(a.bk) }
+        │   │     └─StreamTableScan { table: a, columns: [a.id, a.bk], stream_scan_type: SnapshotBackfill, stream_key: [a.id], pk: [id], dist: UpstreamHashShard(a.id) }
+        │   └─StreamExchange { dist: HashShard(b.id, 1:Int32) }
+        │     └─StreamProject { exprs: [b.id, b.k, 1:Int32] }
+        │       └─StreamTableScan { table: b, columns: [b.id, b.k], stream_scan_type: SnapshotBackfill, stream_key: [b.id], pk: [id], dist: UpstreamHashShard(b.id) }
+        └─StreamExchange { dist: HashShard(b.k) }
+          └─StreamTableScan { table: b, columns: [b.k, b.label, b.id], stream_scan_type: SnapshotBackfill, stream_key: [b.id], pk: [id], dist: UpstreamHashShard(b.id) }
+- name: kept - is not distinct from with a null key on the preserved side
+  before:
+  - setup
+  sql: |
+    select u.id, b.label
+    from (select id, bk from a where bk is null union all select id, k from b where k is null) u
+    left join b on u.bk is not distinct from b.k;
+  stream_plan: |-
+    StreamMaterialize { columns: [id, label, $src(hidden), a.bk(hidden), b.id(hidden)], stream_key: [id, $src, b.id, a.bk], pk_columns: [id, $src, b.id, a.bk], pk_conflict: NoCheck }
+    └─StreamExchange { dist: HashShard(a.id, $src, a.bk, b.id) }
+      └─StreamHashJoin { type: LeftOuter, predicate: a.bk IS NOT DISTINCT FROM b.k, output: [a.id, b.label, $src, a.bk, b.id] }
+        ├─StreamExchange { dist: HashShard(a.bk) }
+        │ └─StreamUnion { all: true }
+        │   ├─StreamExchange { dist: HashShard(a.id, 0:Int32) }
+        │   │ └─StreamProject { exprs: [a.id, a.bk, 0:Int32] }
+        │   │   └─StreamFilter { predicate: IsNull(a.bk) }
+        │   │     └─StreamTableScan { table: a, columns: [a.id, a.bk], stream_scan_type: SnapshotBackfill, stream_key: [a.id], pk: [id], dist: UpstreamHashShard(a.id) }
+        │   └─StreamExchange { dist: HashShard(b.id, 1:Int32) }
+        │     └─StreamProject { exprs: [b.id, b.k, 1:Int32] }
+        │       └─StreamFilter { predicate: IsNull(b.k) }
+        │         └─StreamTableScan { table: b, columns: [b.id, b.k], stream_scan_type: SnapshotBackfill, stream_key: [b.id], pk: [id], dist: UpstreamHashShard(b.id) }
+        └─StreamExchange { dist: HashShard(b.k) }
+          └─StreamTableScan { table: b, columns: [b.k, b.label, b.id], stream_scan_type: SnapshotBackfill, stream_key: [b.id], pk: [id], dist: UpstreamHashShard(b.id) }
 - name: kept - is not distinct from matches nulls
   before:
   - setup
@@ -148,21 +298,6 @@
         └─StreamExchange { dist: HashShard(b.k) }
           └─StreamFilter { predicate: IsNull(b.k) }
             └─StreamTableScan { table: b, columns: [b.k, b.label, b.id], stream_scan_type: SnapshotBackfill, stream_key: [b.id], pk: [id], dist: UpstreamHashShard(b.id) }
-- name: kept - full join
-  before:
-  - setup
-  sql: |
-    select a.id, b.label from a full join (select * from b where k is null) b on a.bk = b.k;
-  stream_plan: |-
-    StreamMaterialize { columns: [id, label, a.bk(hidden), b.id(hidden), b.k(hidden)], stream_key: [id, b.id, a.bk, b.k], pk_columns: [id, b.id, a.bk, b.k], pk_conflict: NoCheck }
-    └─StreamExchange { dist: HashShard(a.id, a.bk, b.id, b.k) }
-      └─StreamFilter { predicate: ((IsNotNull(a.id) OR IsNotNull(b.id)) OR (IsNotNull(a.bk) OR IsNotNull(b.k))) }
-        └─StreamHashJoin { type: FullOuter, predicate: a.bk = b.k, output: [a.id, b.label, a.bk, b.id, b.k] }
-          ├─StreamExchange { dist: HashShard(a.bk) }
-          │ └─StreamTableScan { table: a, columns: [a.id, a.bk], stream_scan_type: SnapshotBackfill, stream_key: [a.id], pk: [id], dist: UpstreamHashShard(a.id) }
-          └─StreamExchange { dist: HashShard(b.k) }
-            └─StreamFilter { predicate: IsNull(b.k) }
-              └─StreamTableScan { table: b, columns: [b.k, b.label, b.id], stream_scan_type: SnapshotBackfill, stream_key: [b.id], pk: [id], dist: UpstreamHashShard(b.id) }
 - name: kept - the null column is not in the condition
   before:
   - setup
@@ -206,20 +341,6 @@
           │ └─StreamTableScan { table: a, columns: [a.id, a.bk], stream_scan_type: SnapshotBackfill, stream_key: [a.id], pk: [id], dist: UpstreamHashShard(a.id) }
           └─StreamExchange { dist: HashShard(b.k) }
             └─StreamTableScan { table: b, columns: [b.k, b.id], stream_scan_type: SnapshotBackfill, stream_key: [b.id], pk: [id], dist: UpstreamHashShard(b.id) }
-- name: kept - left join, the null key is on the preserved side
-  before:
-  - setup
-  sql: |
-    select a.id, b.label from (select * from a where bk is null) a left join b on a.bk = b.k;
-  stream_plan: |-
-    StreamMaterialize { columns: [id, label, a.bk(hidden), b.id(hidden)], stream_key: [id, b.id, a.bk], pk_columns: [id, b.id, a.bk], pk_conflict: NoCheck }
-    └─StreamExchange { dist: HashShard(a.id, a.bk, b.id) }
-      └─StreamHashJoin { type: LeftOuter, predicate: a.bk = b.k, output: [a.id, b.label, a.bk, b.id] }
-        ├─StreamExchange { dist: HashShard(a.bk) }
-        │ └─StreamFilter { predicate: IsNull(a.bk) }
-        │   └─StreamTableScan { table: a, columns: [a.id, a.bk], stream_scan_type: SnapshotBackfill, stream_key: [a.id], pk: [id], dist: UpstreamHashShard(a.id) }
-        └─StreamExchange { dist: HashShard(b.k) }
-          └─StreamTableScan { table: b, columns: [b.k, b.label, b.id], stream_scan_type: SnapshotBackfill, stream_key: [b.id], pk: [id], dist: UpstreamHashShard(b.id) }
 - name: kept - a removed side may carry a watermark (table with a watermark)
   before:
   - setup
@@ -254,3 +375,32 @@
             │   └─StreamTableScan { table: t, columns: [t.k, t.ts, t._row_id], stream_scan_type: ArrangementBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }
             └─StreamExchange [no_shuffle] { dist: UpstreamHashShard(b.id) }
               └─StreamTableScan { table: b, columns: [b.id], stream_scan_type: UpstreamOnly, stream_key: [b.id], pk: [id], dist: UpstreamHashShard(b.id) }
+- name: kept - null key on the preserved side, the optional side may carry a watermark
+  before:
+  - setup
+  sql: |
+    select a.id, t.ts from (select * from a where bk is null) a left join t on a.bk = t.k;
+  stream_plan: |-
+    StreamMaterialize { columns: [id, ts, a.bk(hidden), t._row_id(hidden)], stream_key: [id, t._row_id, a.bk], pk_columns: [id, t._row_id, a.bk], pk_conflict: NoCheck }
+    └─StreamExchange { dist: HashShard(a.id, a.bk, t._row_id) }
+      └─StreamHashJoin { type: LeftOuter, predicate: a.bk = t.k, output: [a.id, t.ts, a.bk, t._row_id] }
+        ├─StreamExchange { dist: HashShard(a.bk) }
+        │ └─StreamFilter { predicate: IsNull(a.bk) }
+        │   └─StreamTableScan { table: a, columns: [a.id, a.bk], stream_scan_type: SnapshotBackfill, stream_key: [a.id], pk: [id], dist: UpstreamHashShard(a.id) }
+        └─StreamExchange { dist: HashShard(t.k) }
+          └─StreamTableScan { table: t, columns: [t.k, t.ts, t._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }
+- name: kept - full join with a side that may carry a watermark
+  before:
+  - setup
+  sql: |
+    select w.ts, b.label from t w full join (select * from b where k is null) b on w.k = b.k;
+  stream_plan: |-
+    StreamMaterialize { columns: [ts, label, t._row_id(hidden), t.k(hidden), b.id(hidden), b.k(hidden)], stream_key: [t._row_id, b.id, t.k, b.k], pk_columns: [t._row_id, b.id, t.k, b.k], pk_conflict: NoCheck }
+    └─StreamExchange { dist: HashShard(t._row_id, t.k, b.id, b.k) }
+      └─StreamFilter { predicate: ((IsNotNull(t._row_id) OR IsNotNull(b.id)) OR (IsNotNull(t.k) OR IsNotNull(b.k))) }
+        └─StreamHashJoin { type: FullOuter, predicate: t.k = b.k, output: [t.ts, b.label, t._row_id, t.k, b.id, b.k] }
+          ├─StreamExchange { dist: HashShard(t.k) }
+          │ └─StreamTableScan { table: t, columns: [t.k, t.ts, t._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }
+          └─StreamExchange { dist: HashShard(b.k) }
+            └─StreamFilter { predicate: IsNull(b.k) }
+              └─StreamTableScan { table: b, columns: [b.k, b.label, b.id], stream_scan_type: SnapshotBackfill, stream_key: [b.id], pk: [id], dist: UpstreamHashShard(b.id) }

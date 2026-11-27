@@ -42,10 +42,34 @@ CASES = [
     ('group_over_left', 'v, n, m',
      f"select n.v, count(*) as n, count(b.id) as m from {N} n left join (select * from {B} where k is null) b "
      f"on n.k = b.k group by n.v"),
+    # The null key on the preserved side of an outer join, through unions and joins.
+    ('preserved_union_agg', 'id, lab',
+     f"select u.id, r.lab from (select id, bk from {A} where bk is null union all "
+     f"select id, k from {B} where k is null) u "
+     f"left join (select k, max(label) as lab from {B} group by k) r on u.bk = r.k"),
+    ('preserved_union_literal', 'id, label',
+     f"select u.id, b.label from (select id, null::int as bk from {A} union all "
+     f"select id, k from {B} where k is null) u left join {B} b on u.bk = b.k"),
+    ('preserved_topn_join', 'id, v',
+     f"select x.id, c.v from (select id, bk from (select a.id, a.bk, "
+     f"row_number() over (partition by a.id order by b.id) as rn from {A} a join {B} b on a.id = b.id "
+     f"where a.bk is null) t where rn = 1) x left join {C} c on x.bk = c.kb"),
+    ('preserved_right', 'x, id, label',
+     f"select a.x, b.id, b.label from {A} a right join (select * from {B} where k is null) b on a.bk = b.k"),
+    ('preserved_anti', 'id',
+     f"select a.id from {A} a where a.bk is null and not exists (select 1 from {B} b where b.k = a.bk)"),
+    ('full_left_null', 'id, x, label',
+     f"select a.id, a.x, b.label from (select * from {A} where bk is null) a full join {B} b on a.bk = b.k"),
     # Left as they are by the rule.
+    ('kept_one_branch', 'id, label',
+     f"select u.id, b.label from (select id, bk from {A} where bk is null union all "
+     f"select id, k from {B}) u left join {B} b on u.bk = b.k"),
+    ('kept_union_indf', 'id, label',
+     f"select u.id, b.label from (select id, bk from {A} where bk is null union all "
+     f"select id, k from {B} where k is null) u left join {B} b on u.bk is not distinct from b.k"),
     ('kept_indf', 'id, label',
      f"select a.id, b.label from {A} a join {B} b on a.bk is not distinct from b.k where b.k is null"),
-    ('kept_full', 'id, label',
+    ('full_padded', 'id, label',
      f"select a.id, b.label from {A} a full join (select * from {B} where k is null) b on a.bk = b.k"),
     ('kept_label', 'id, label',
      f"select a.id, b.label from {A} a join {B} b on a.bk = b.k where b.label is null"),
@@ -53,7 +77,7 @@ CASES = [
      f"select a.id, e.p from {A} a join {E} e on a.bk = e.w where e.u is null"),
     ('kept_anti_pattern', 'id',
      f"select a.id from {A} a left join {B} b on a.bk = b.k where b.k is null"),
-    ('kept_preserved', 'id, label',
+    ('preserved_left', 'id, label',
      f"select a.id, b.label from (select * from {A} where bk is null) a left join {B} b on a.bk = b.k"),
     ('kept_coalesce', 'id, label',
      f"select a.id, b.label from {A} a join {B} b on coalesce(a.bk, 0) = b.k where a.bk is null"),

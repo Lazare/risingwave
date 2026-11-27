@@ -83,10 +83,34 @@ statement ok
 create materialized view snk_group_over_left_off as select n.v, count(*) as n, count(b.id) as m from snk_n n left join (select * from snk_b where k is null) b on n.k = b.k group by n.v;
 
 statement ok
+create materialized view snk_preserved_union_agg_off as select u.id, r.lab from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join (select k, max(label) as lab from snk_b group by k) r on u.bk = r.k;
+
+statement ok
+create materialized view snk_preserved_union_literal_off as select u.id, b.label from (select id, null::int as bk from snk_a union all select id, k from snk_b where k is null) u left join snk_b b on u.bk = b.k;
+
+statement ok
+create materialized view snk_preserved_topn_join_off as select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from snk_a a join snk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join snk_c c on x.bk = c.kb;
+
+statement ok
+create materialized view snk_preserved_right_off as select a.x, b.id, b.label from snk_a a right join (select * from snk_b where k is null) b on a.bk = b.k;
+
+statement ok
+create materialized view snk_preserved_anti_off as select a.id from snk_a a where a.bk is null and not exists (select 1 from snk_b b where b.k = a.bk);
+
+statement ok
+create materialized view snk_full_left_null_off as select a.id, a.x, b.label from (select * from snk_a where bk is null) a full join snk_b b on a.bk = b.k;
+
+statement ok
+create materialized view snk_kept_one_branch_off as select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b) u left join snk_b b on u.bk = b.k;
+
+statement ok
+create materialized view snk_kept_union_indf_off as select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join snk_b b on u.bk is not distinct from b.k;
+
+statement ok
 create materialized view snk_kept_indf_off as select a.id, b.label from snk_a a join snk_b b on a.bk is not distinct from b.k where b.k is null;
 
 statement ok
-create materialized view snk_kept_full_off as select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k;
+create materialized view snk_full_padded_off as select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k;
 
 statement ok
 create materialized view snk_kept_label_off as select a.id, b.label from snk_a a join snk_b b on a.bk = b.k where b.label is null;
@@ -98,7 +122,7 @@ statement ok
 create materialized view snk_kept_anti_pattern_off as select a.id from snk_a a left join snk_b b on a.bk = b.k where b.k is null;
 
 statement ok
-create materialized view snk_kept_preserved_off as select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k;
+create materialized view snk_preserved_left_off as select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k;
 
 statement ok
 create materialized view snk_kept_coalesce_off as select a.id, b.label from snk_a a join snk_b b on coalesce(a.bk, 0) = b.k where a.bk is null;
@@ -143,10 +167,34 @@ statement ok
 create materialized view snk_group_over_left_on as select n.v, count(*) as n, count(b.id) as m from snk_n n left join (select * from snk_b where k is null) b on n.k = b.k group by n.v;
 
 statement ok
+create materialized view snk_preserved_union_agg_on as select u.id, r.lab from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join (select k, max(label) as lab from snk_b group by k) r on u.bk = r.k;
+
+statement ok
+create materialized view snk_preserved_union_literal_on as select u.id, b.label from (select id, null::int as bk from snk_a union all select id, k from snk_b where k is null) u left join snk_b b on u.bk = b.k;
+
+statement ok
+create materialized view snk_preserved_topn_join_on as select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from snk_a a join snk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join snk_c c on x.bk = c.kb;
+
+statement ok
+create materialized view snk_preserved_right_on as select a.x, b.id, b.label from snk_a a right join (select * from snk_b where k is null) b on a.bk = b.k;
+
+statement ok
+create materialized view snk_preserved_anti_on as select a.id from snk_a a where a.bk is null and not exists (select 1 from snk_b b where b.k = a.bk);
+
+statement ok
+create materialized view snk_full_left_null_on as select a.id, a.x, b.label from (select * from snk_a where bk is null) a full join snk_b b on a.bk = b.k;
+
+statement ok
+create materialized view snk_kept_one_branch_on as select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b) u left join snk_b b on u.bk = b.k;
+
+statement ok
+create materialized view snk_kept_union_indf_on as select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join snk_b b on u.bk is not distinct from b.k;
+
+statement ok
 create materialized view snk_kept_indf_on as select a.id, b.label from snk_a a join snk_b b on a.bk is not distinct from b.k where b.k is null;
 
 statement ok
-create materialized view snk_kept_full_on as select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k;
+create materialized view snk_full_padded_on as select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k;
 
 statement ok
 create materialized view snk_kept_label_on as select a.id, b.label from snk_a a join snk_b b on a.bk = b.k where b.label is null;
@@ -158,7 +206,7 @@ statement ok
 create materialized view snk_kept_anti_pattern_on as select a.id from snk_a a left join snk_b b on a.bk = b.k where b.k is null;
 
 statement ok
-create materialized view snk_kept_preserved_on as select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k;
+create materialized view snk_preserved_left_on as select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k;
 
 statement ok
 create materialized view snk_kept_coalesce_on as select a.id, b.label from snk_a a join snk_b b on coalesce(a.bk, 0) = b.k where a.bk is null;
@@ -362,6 +410,134 @@ select
 
 query III
 select
+  (select count(*) from (select id, lab, count(*) as snk_rows from snk_preserved_union_agg_on group by id, lab except select id, lab, count(*) as snk_rows from snk_preserved_union_agg_off group by id, lab) x),
+  (select count(*) from (select id, lab, count(*) as snk_rows from snk_preserved_union_agg_off group by id, lab except select id, lab, count(*) as snk_rows from snk_preserved_union_agg_on group by id, lab) y),
+  (select count(*) from snk_preserved_union_agg_on) - (select count(*) from snk_preserved_union_agg_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, lab, count(*) as snk_rows from snk_preserved_union_agg_on group by id, lab except select id, lab, count(*) as snk_rows from (select u.id, r.lab from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join (select k, max(label) as lab from snk_b group by k) r on u.bk = r.k) q group by id, lab) x),
+  (select count(*) from (select id, lab, count(*) as snk_rows from (select u.id, r.lab from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join (select k, max(label) as lab from snk_b group by k) r on u.bk = r.k) q group by id, lab except select id, lab, count(*) as snk_rows from snk_preserved_union_agg_on group by id, lab) y),
+  (select count(*) from snk_preserved_union_agg_on) - (select count(*) from (select u.id, r.lab from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join (select k, max(label) as lab from snk_b group by k) r on u.bk = r.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_union_literal_on group by id, label except select id, label, count(*) as snk_rows from snk_preserved_union_literal_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_union_literal_off group by id, label except select id, label, count(*) as snk_rows from snk_preserved_union_literal_on group by id, label) y),
+  (select count(*) from snk_preserved_union_literal_on) - (select count(*) from snk_preserved_union_literal_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_union_literal_on group by id, label except select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, null::int as bk from snk_a union all select id, k from snk_b where k is null) u left join snk_b b on u.bk = b.k) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, null::int as bk from snk_a union all select id, k from snk_b where k is null) u left join snk_b b on u.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_preserved_union_literal_on group by id, label) y),
+  (select count(*) from snk_preserved_union_literal_on) - (select count(*) from (select u.id, b.label from (select id, null::int as bk from snk_a union all select id, k from snk_b where k is null) u left join snk_b b on u.bk = b.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as snk_rows from snk_preserved_topn_join_on group by id, v except select id, v, count(*) as snk_rows from snk_preserved_topn_join_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as snk_rows from snk_preserved_topn_join_off group by id, v except select id, v, count(*) as snk_rows from snk_preserved_topn_join_on group by id, v) y),
+  (select count(*) from snk_preserved_topn_join_on) - (select count(*) from snk_preserved_topn_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as snk_rows from snk_preserved_topn_join_on group by id, v except select id, v, count(*) as snk_rows from (select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from snk_a a join snk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join snk_c c on x.bk = c.kb) q group by id, v) x),
+  (select count(*) from (select id, v, count(*) as snk_rows from (select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from snk_a a join snk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join snk_c c on x.bk = c.kb) q group by id, v except select id, v, count(*) as snk_rows from snk_preserved_topn_join_on group by id, v) y),
+  (select count(*) from snk_preserved_topn_join_on) - (select count(*) from (select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from snk_a a join snk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join snk_c c on x.bk = c.kb) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, id, label, count(*) as snk_rows from snk_preserved_right_on group by x, id, label except select x, id, label, count(*) as snk_rows from snk_preserved_right_off group by x, id, label) x),
+  (select count(*) from (select x, id, label, count(*) as snk_rows from snk_preserved_right_off group by x, id, label except select x, id, label, count(*) as snk_rows from snk_preserved_right_on group by x, id, label) y),
+  (select count(*) from snk_preserved_right_on) - (select count(*) from snk_preserved_right_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, id, label, count(*) as snk_rows from snk_preserved_right_on group by x, id, label except select x, id, label, count(*) as snk_rows from (select a.x, b.id, b.label from snk_a a right join (select * from snk_b where k is null) b on a.bk = b.k) q group by x, id, label) x),
+  (select count(*) from (select x, id, label, count(*) as snk_rows from (select a.x, b.id, b.label from snk_a a right join (select * from snk_b where k is null) b on a.bk = b.k) q group by x, id, label except select x, id, label, count(*) as snk_rows from snk_preserved_right_on group by x, id, label) y),
+  (select count(*) from snk_preserved_right_on) - (select count(*) from (select a.x, b.id, b.label from snk_a a right join (select * from snk_b where k is null) b on a.bk = b.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, count(*) as snk_rows from snk_preserved_anti_on group by id except select id, count(*) as snk_rows from snk_preserved_anti_off group by id) x),
+  (select count(*) from (select id, count(*) as snk_rows from snk_preserved_anti_off group by id except select id, count(*) as snk_rows from snk_preserved_anti_on group by id) y),
+  (select count(*) from snk_preserved_anti_on) - (select count(*) from snk_preserved_anti_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, count(*) as snk_rows from snk_preserved_anti_on group by id except select id, count(*) as snk_rows from (select a.id from snk_a a where a.bk is null and not exists (select 1 from snk_b b where b.k = a.bk)) q group by id) x),
+  (select count(*) from (select id, count(*) as snk_rows from (select a.id from snk_a a where a.bk is null and not exists (select 1 from snk_b b where b.k = a.bk)) q group by id except select id, count(*) as snk_rows from snk_preserved_anti_on group by id) y),
+  (select count(*) from snk_preserved_anti_on) - (select count(*) from (select a.id from snk_a a where a.bk is null and not exists (select 1 from snk_b b where b.k = a.bk)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, x, label, count(*) as snk_rows from snk_full_left_null_on group by id, x, label except select id, x, label, count(*) as snk_rows from snk_full_left_null_off group by id, x, label) x),
+  (select count(*) from (select id, x, label, count(*) as snk_rows from snk_full_left_null_off group by id, x, label except select id, x, label, count(*) as snk_rows from snk_full_left_null_on group by id, x, label) y),
+  (select count(*) from snk_full_left_null_on) - (select count(*) from snk_full_left_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, x, label, count(*) as snk_rows from snk_full_left_null_on group by id, x, label except select id, x, label, count(*) as snk_rows from (select a.id, a.x, b.label from (select * from snk_a where bk is null) a full join snk_b b on a.bk = b.k) q group by id, x, label) x),
+  (select count(*) from (select id, x, label, count(*) as snk_rows from (select a.id, a.x, b.label from (select * from snk_a where bk is null) a full join snk_b b on a.bk = b.k) q group by id, x, label except select id, x, label, count(*) as snk_rows from snk_full_left_null_on group by id, x, label) y),
+  (select count(*) from snk_full_left_null_on) - (select count(*) from (select a.id, a.x, b.label from (select * from snk_a where bk is null) a full join snk_b b on a.bk = b.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_one_branch_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_one_branch_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_one_branch_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_one_branch_on group by id, label) y),
+  (select count(*) from snk_kept_one_branch_on) - (select count(*) from snk_kept_one_branch_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_one_branch_on group by id, label except select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b) u left join snk_b b on u.bk = b.k) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b) u left join snk_b b on u.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_one_branch_on group by id, label) y),
+  (select count(*) from snk_kept_one_branch_on) - (select count(*) from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b) u left join snk_b b on u.bk = b.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_union_indf_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_union_indf_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_union_indf_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_union_indf_on group by id, label) y),
+  (select count(*) from snk_kept_union_indf_on) - (select count(*) from snk_kept_union_indf_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_union_indf_on group by id, label except select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join snk_b b on u.bk is not distinct from b.k) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join snk_b b on u.bk is not distinct from b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_union_indf_on group by id, label) y),
+  (select count(*) from snk_kept_union_indf_on) - (select count(*) from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join snk_b b on u.bk is not distinct from b.k) q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_indf_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_indf_off group by id, label) x),
   (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_indf_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_indf_on group by id, label) y),
   (select count(*) from snk_kept_indf_on) - (select count(*) from snk_kept_indf_off);
@@ -378,17 +554,17 @@ select
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_full_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_full_off group by id, label) x),
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_full_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_full_on group by id, label) y),
-  (select count(*) from snk_kept_full_on) - (select count(*) from snk_kept_full_off);
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_full_padded_on group by id, label except select id, label, count(*) as snk_rows from snk_full_padded_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_full_padded_off group by id, label except select id, label, count(*) as snk_rows from snk_full_padded_on group by id, label) y),
+  (select count(*) from snk_full_padded_on) - (select count(*) from snk_full_padded_off);
 ----
 0 0 0
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_full_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q group by id, label) x),
-  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_full_on group by id, label) y),
-  (select count(*) from snk_kept_full_on) - (select count(*) from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q);
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_full_padded_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_full_padded_on group by id, label) y),
+  (select count(*) from snk_full_padded_on) - (select count(*) from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q);
 ----
 0 0 0
 
@@ -442,17 +618,17 @@ select
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_preserved_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_preserved_off group by id, label) x),
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_preserved_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_preserved_on group by id, label) y),
-  (select count(*) from snk_kept_preserved_on) - (select count(*) from snk_kept_preserved_off);
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_left_on group by id, label except select id, label, count(*) as snk_rows from snk_preserved_left_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_left_off group by id, label except select id, label, count(*) as snk_rows from snk_preserved_left_on group by id, label) y),
+  (select count(*) from snk_preserved_left_on) - (select count(*) from snk_preserved_left_off);
 ----
 0 0 0
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_preserved_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q group by id, label) x),
-  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_preserved_on group by id, label) y),
-  (select count(*) from snk_kept_preserved_on) - (select count(*) from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q);
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_left_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_preserved_left_on group by id, label) y),
+  (select count(*) from snk_preserved_left_on) - (select count(*) from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q);
 ----
 0 0 0
 
@@ -715,6 +891,134 @@ select
 
 query III
 select
+  (select count(*) from (select id, lab, count(*) as snk_rows from snk_preserved_union_agg_on group by id, lab except select id, lab, count(*) as snk_rows from snk_preserved_union_agg_off group by id, lab) x),
+  (select count(*) from (select id, lab, count(*) as snk_rows from snk_preserved_union_agg_off group by id, lab except select id, lab, count(*) as snk_rows from snk_preserved_union_agg_on group by id, lab) y),
+  (select count(*) from snk_preserved_union_agg_on) - (select count(*) from snk_preserved_union_agg_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, lab, count(*) as snk_rows from snk_preserved_union_agg_on group by id, lab except select id, lab, count(*) as snk_rows from (select u.id, r.lab from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join (select k, max(label) as lab from snk_b group by k) r on u.bk = r.k) q group by id, lab) x),
+  (select count(*) from (select id, lab, count(*) as snk_rows from (select u.id, r.lab from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join (select k, max(label) as lab from snk_b group by k) r on u.bk = r.k) q group by id, lab except select id, lab, count(*) as snk_rows from snk_preserved_union_agg_on group by id, lab) y),
+  (select count(*) from snk_preserved_union_agg_on) - (select count(*) from (select u.id, r.lab from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join (select k, max(label) as lab from snk_b group by k) r on u.bk = r.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_union_literal_on group by id, label except select id, label, count(*) as snk_rows from snk_preserved_union_literal_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_union_literal_off group by id, label except select id, label, count(*) as snk_rows from snk_preserved_union_literal_on group by id, label) y),
+  (select count(*) from snk_preserved_union_literal_on) - (select count(*) from snk_preserved_union_literal_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_union_literal_on group by id, label except select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, null::int as bk from snk_a union all select id, k from snk_b where k is null) u left join snk_b b on u.bk = b.k) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, null::int as bk from snk_a union all select id, k from snk_b where k is null) u left join snk_b b on u.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_preserved_union_literal_on group by id, label) y),
+  (select count(*) from snk_preserved_union_literal_on) - (select count(*) from (select u.id, b.label from (select id, null::int as bk from snk_a union all select id, k from snk_b where k is null) u left join snk_b b on u.bk = b.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as snk_rows from snk_preserved_topn_join_on group by id, v except select id, v, count(*) as snk_rows from snk_preserved_topn_join_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as snk_rows from snk_preserved_topn_join_off group by id, v except select id, v, count(*) as snk_rows from snk_preserved_topn_join_on group by id, v) y),
+  (select count(*) from snk_preserved_topn_join_on) - (select count(*) from snk_preserved_topn_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as snk_rows from snk_preserved_topn_join_on group by id, v except select id, v, count(*) as snk_rows from (select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from snk_a a join snk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join snk_c c on x.bk = c.kb) q group by id, v) x),
+  (select count(*) from (select id, v, count(*) as snk_rows from (select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from snk_a a join snk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join snk_c c on x.bk = c.kb) q group by id, v except select id, v, count(*) as snk_rows from snk_preserved_topn_join_on group by id, v) y),
+  (select count(*) from snk_preserved_topn_join_on) - (select count(*) from (select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from snk_a a join snk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join snk_c c on x.bk = c.kb) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, id, label, count(*) as snk_rows from snk_preserved_right_on group by x, id, label except select x, id, label, count(*) as snk_rows from snk_preserved_right_off group by x, id, label) x),
+  (select count(*) from (select x, id, label, count(*) as snk_rows from snk_preserved_right_off group by x, id, label except select x, id, label, count(*) as snk_rows from snk_preserved_right_on group by x, id, label) y),
+  (select count(*) from snk_preserved_right_on) - (select count(*) from snk_preserved_right_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, id, label, count(*) as snk_rows from snk_preserved_right_on group by x, id, label except select x, id, label, count(*) as snk_rows from (select a.x, b.id, b.label from snk_a a right join (select * from snk_b where k is null) b on a.bk = b.k) q group by x, id, label) x),
+  (select count(*) from (select x, id, label, count(*) as snk_rows from (select a.x, b.id, b.label from snk_a a right join (select * from snk_b where k is null) b on a.bk = b.k) q group by x, id, label except select x, id, label, count(*) as snk_rows from snk_preserved_right_on group by x, id, label) y),
+  (select count(*) from snk_preserved_right_on) - (select count(*) from (select a.x, b.id, b.label from snk_a a right join (select * from snk_b where k is null) b on a.bk = b.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, count(*) as snk_rows from snk_preserved_anti_on group by id except select id, count(*) as snk_rows from snk_preserved_anti_off group by id) x),
+  (select count(*) from (select id, count(*) as snk_rows from snk_preserved_anti_off group by id except select id, count(*) as snk_rows from snk_preserved_anti_on group by id) y),
+  (select count(*) from snk_preserved_anti_on) - (select count(*) from snk_preserved_anti_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, count(*) as snk_rows from snk_preserved_anti_on group by id except select id, count(*) as snk_rows from (select a.id from snk_a a where a.bk is null and not exists (select 1 from snk_b b where b.k = a.bk)) q group by id) x),
+  (select count(*) from (select id, count(*) as snk_rows from (select a.id from snk_a a where a.bk is null and not exists (select 1 from snk_b b where b.k = a.bk)) q group by id except select id, count(*) as snk_rows from snk_preserved_anti_on group by id) y),
+  (select count(*) from snk_preserved_anti_on) - (select count(*) from (select a.id from snk_a a where a.bk is null and not exists (select 1 from snk_b b where b.k = a.bk)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, x, label, count(*) as snk_rows from snk_full_left_null_on group by id, x, label except select id, x, label, count(*) as snk_rows from snk_full_left_null_off group by id, x, label) x),
+  (select count(*) from (select id, x, label, count(*) as snk_rows from snk_full_left_null_off group by id, x, label except select id, x, label, count(*) as snk_rows from snk_full_left_null_on group by id, x, label) y),
+  (select count(*) from snk_full_left_null_on) - (select count(*) from snk_full_left_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, x, label, count(*) as snk_rows from snk_full_left_null_on group by id, x, label except select id, x, label, count(*) as snk_rows from (select a.id, a.x, b.label from (select * from snk_a where bk is null) a full join snk_b b on a.bk = b.k) q group by id, x, label) x),
+  (select count(*) from (select id, x, label, count(*) as snk_rows from (select a.id, a.x, b.label from (select * from snk_a where bk is null) a full join snk_b b on a.bk = b.k) q group by id, x, label except select id, x, label, count(*) as snk_rows from snk_full_left_null_on group by id, x, label) y),
+  (select count(*) from snk_full_left_null_on) - (select count(*) from (select a.id, a.x, b.label from (select * from snk_a where bk is null) a full join snk_b b on a.bk = b.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_one_branch_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_one_branch_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_one_branch_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_one_branch_on group by id, label) y),
+  (select count(*) from snk_kept_one_branch_on) - (select count(*) from snk_kept_one_branch_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_one_branch_on group by id, label except select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b) u left join snk_b b on u.bk = b.k) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b) u left join snk_b b on u.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_one_branch_on group by id, label) y),
+  (select count(*) from snk_kept_one_branch_on) - (select count(*) from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b) u left join snk_b b on u.bk = b.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_union_indf_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_union_indf_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_union_indf_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_union_indf_on group by id, label) y),
+  (select count(*) from snk_kept_union_indf_on) - (select count(*) from snk_kept_union_indf_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_union_indf_on group by id, label except select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join snk_b b on u.bk is not distinct from b.k) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join snk_b b on u.bk is not distinct from b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_union_indf_on group by id, label) y),
+  (select count(*) from snk_kept_union_indf_on) - (select count(*) from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join snk_b b on u.bk is not distinct from b.k) q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_indf_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_indf_off group by id, label) x),
   (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_indf_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_indf_on group by id, label) y),
   (select count(*) from snk_kept_indf_on) - (select count(*) from snk_kept_indf_off);
@@ -731,17 +1035,17 @@ select
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_full_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_full_off group by id, label) x),
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_full_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_full_on group by id, label) y),
-  (select count(*) from snk_kept_full_on) - (select count(*) from snk_kept_full_off);
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_full_padded_on group by id, label except select id, label, count(*) as snk_rows from snk_full_padded_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_full_padded_off group by id, label except select id, label, count(*) as snk_rows from snk_full_padded_on group by id, label) y),
+  (select count(*) from snk_full_padded_on) - (select count(*) from snk_full_padded_off);
 ----
 0 0 0
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_full_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q group by id, label) x),
-  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_full_on group by id, label) y),
-  (select count(*) from snk_kept_full_on) - (select count(*) from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q);
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_full_padded_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_full_padded_on group by id, label) y),
+  (select count(*) from snk_full_padded_on) - (select count(*) from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q);
 ----
 0 0 0
 
@@ -795,17 +1099,17 @@ select
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_preserved_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_preserved_off group by id, label) x),
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_preserved_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_preserved_on group by id, label) y),
-  (select count(*) from snk_kept_preserved_on) - (select count(*) from snk_kept_preserved_off);
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_left_on group by id, label except select id, label, count(*) as snk_rows from snk_preserved_left_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_left_off group by id, label except select id, label, count(*) as snk_rows from snk_preserved_left_on group by id, label) y),
+  (select count(*) from snk_preserved_left_on) - (select count(*) from snk_preserved_left_off);
 ----
 0 0 0
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_preserved_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q group by id, label) x),
-  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_preserved_on group by id, label) y),
-  (select count(*) from snk_kept_preserved_on) - (select count(*) from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q);
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_left_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_preserved_left_on group by id, label) y),
+  (select count(*) from snk_preserved_left_on) - (select count(*) from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q);
 ----
 0 0 0
 
@@ -1050,6 +1354,134 @@ select
 
 query III
 select
+  (select count(*) from (select id, lab, count(*) as snk_rows from snk_preserved_union_agg_on group by id, lab except select id, lab, count(*) as snk_rows from snk_preserved_union_agg_off group by id, lab) x),
+  (select count(*) from (select id, lab, count(*) as snk_rows from snk_preserved_union_agg_off group by id, lab except select id, lab, count(*) as snk_rows from snk_preserved_union_agg_on group by id, lab) y),
+  (select count(*) from snk_preserved_union_agg_on) - (select count(*) from snk_preserved_union_agg_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, lab, count(*) as snk_rows from snk_preserved_union_agg_on group by id, lab except select id, lab, count(*) as snk_rows from (select u.id, r.lab from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join (select k, max(label) as lab from snk_b group by k) r on u.bk = r.k) q group by id, lab) x),
+  (select count(*) from (select id, lab, count(*) as snk_rows from (select u.id, r.lab from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join (select k, max(label) as lab from snk_b group by k) r on u.bk = r.k) q group by id, lab except select id, lab, count(*) as snk_rows from snk_preserved_union_agg_on group by id, lab) y),
+  (select count(*) from snk_preserved_union_agg_on) - (select count(*) from (select u.id, r.lab from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join (select k, max(label) as lab from snk_b group by k) r on u.bk = r.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_union_literal_on group by id, label except select id, label, count(*) as snk_rows from snk_preserved_union_literal_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_union_literal_off group by id, label except select id, label, count(*) as snk_rows from snk_preserved_union_literal_on group by id, label) y),
+  (select count(*) from snk_preserved_union_literal_on) - (select count(*) from snk_preserved_union_literal_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_union_literal_on group by id, label except select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, null::int as bk from snk_a union all select id, k from snk_b where k is null) u left join snk_b b on u.bk = b.k) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, null::int as bk from snk_a union all select id, k from snk_b where k is null) u left join snk_b b on u.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_preserved_union_literal_on group by id, label) y),
+  (select count(*) from snk_preserved_union_literal_on) - (select count(*) from (select u.id, b.label from (select id, null::int as bk from snk_a union all select id, k from snk_b where k is null) u left join snk_b b on u.bk = b.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as snk_rows from snk_preserved_topn_join_on group by id, v except select id, v, count(*) as snk_rows from snk_preserved_topn_join_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as snk_rows from snk_preserved_topn_join_off group by id, v except select id, v, count(*) as snk_rows from snk_preserved_topn_join_on group by id, v) y),
+  (select count(*) from snk_preserved_topn_join_on) - (select count(*) from snk_preserved_topn_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as snk_rows from snk_preserved_topn_join_on group by id, v except select id, v, count(*) as snk_rows from (select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from snk_a a join snk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join snk_c c on x.bk = c.kb) q group by id, v) x),
+  (select count(*) from (select id, v, count(*) as snk_rows from (select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from snk_a a join snk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join snk_c c on x.bk = c.kb) q group by id, v except select id, v, count(*) as snk_rows from snk_preserved_topn_join_on group by id, v) y),
+  (select count(*) from snk_preserved_topn_join_on) - (select count(*) from (select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from snk_a a join snk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join snk_c c on x.bk = c.kb) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, id, label, count(*) as snk_rows from snk_preserved_right_on group by x, id, label except select x, id, label, count(*) as snk_rows from snk_preserved_right_off group by x, id, label) x),
+  (select count(*) from (select x, id, label, count(*) as snk_rows from snk_preserved_right_off group by x, id, label except select x, id, label, count(*) as snk_rows from snk_preserved_right_on group by x, id, label) y),
+  (select count(*) from snk_preserved_right_on) - (select count(*) from snk_preserved_right_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, id, label, count(*) as snk_rows from snk_preserved_right_on group by x, id, label except select x, id, label, count(*) as snk_rows from (select a.x, b.id, b.label from snk_a a right join (select * from snk_b where k is null) b on a.bk = b.k) q group by x, id, label) x),
+  (select count(*) from (select x, id, label, count(*) as snk_rows from (select a.x, b.id, b.label from snk_a a right join (select * from snk_b where k is null) b on a.bk = b.k) q group by x, id, label except select x, id, label, count(*) as snk_rows from snk_preserved_right_on group by x, id, label) y),
+  (select count(*) from snk_preserved_right_on) - (select count(*) from (select a.x, b.id, b.label from snk_a a right join (select * from snk_b where k is null) b on a.bk = b.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, count(*) as snk_rows from snk_preserved_anti_on group by id except select id, count(*) as snk_rows from snk_preserved_anti_off group by id) x),
+  (select count(*) from (select id, count(*) as snk_rows from snk_preserved_anti_off group by id except select id, count(*) as snk_rows from snk_preserved_anti_on group by id) y),
+  (select count(*) from snk_preserved_anti_on) - (select count(*) from snk_preserved_anti_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, count(*) as snk_rows from snk_preserved_anti_on group by id except select id, count(*) as snk_rows from (select a.id from snk_a a where a.bk is null and not exists (select 1 from snk_b b where b.k = a.bk)) q group by id) x),
+  (select count(*) from (select id, count(*) as snk_rows from (select a.id from snk_a a where a.bk is null and not exists (select 1 from snk_b b where b.k = a.bk)) q group by id except select id, count(*) as snk_rows from snk_preserved_anti_on group by id) y),
+  (select count(*) from snk_preserved_anti_on) - (select count(*) from (select a.id from snk_a a where a.bk is null and not exists (select 1 from snk_b b where b.k = a.bk)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, x, label, count(*) as snk_rows from snk_full_left_null_on group by id, x, label except select id, x, label, count(*) as snk_rows from snk_full_left_null_off group by id, x, label) x),
+  (select count(*) from (select id, x, label, count(*) as snk_rows from snk_full_left_null_off group by id, x, label except select id, x, label, count(*) as snk_rows from snk_full_left_null_on group by id, x, label) y),
+  (select count(*) from snk_full_left_null_on) - (select count(*) from snk_full_left_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, x, label, count(*) as snk_rows from snk_full_left_null_on group by id, x, label except select id, x, label, count(*) as snk_rows from (select a.id, a.x, b.label from (select * from snk_a where bk is null) a full join snk_b b on a.bk = b.k) q group by id, x, label) x),
+  (select count(*) from (select id, x, label, count(*) as snk_rows from (select a.id, a.x, b.label from (select * from snk_a where bk is null) a full join snk_b b on a.bk = b.k) q group by id, x, label except select id, x, label, count(*) as snk_rows from snk_full_left_null_on group by id, x, label) y),
+  (select count(*) from snk_full_left_null_on) - (select count(*) from (select a.id, a.x, b.label from (select * from snk_a where bk is null) a full join snk_b b on a.bk = b.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_one_branch_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_one_branch_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_one_branch_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_one_branch_on group by id, label) y),
+  (select count(*) from snk_kept_one_branch_on) - (select count(*) from snk_kept_one_branch_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_one_branch_on group by id, label except select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b) u left join snk_b b on u.bk = b.k) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b) u left join snk_b b on u.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_one_branch_on group by id, label) y),
+  (select count(*) from snk_kept_one_branch_on) - (select count(*) from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b) u left join snk_b b on u.bk = b.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_union_indf_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_union_indf_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_union_indf_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_union_indf_on group by id, label) y),
+  (select count(*) from snk_kept_union_indf_on) - (select count(*) from snk_kept_union_indf_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_union_indf_on group by id, label except select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join snk_b b on u.bk is not distinct from b.k) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join snk_b b on u.bk is not distinct from b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_union_indf_on group by id, label) y),
+  (select count(*) from snk_kept_union_indf_on) - (select count(*) from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join snk_b b on u.bk is not distinct from b.k) q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_indf_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_indf_off group by id, label) x),
   (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_indf_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_indf_on group by id, label) y),
   (select count(*) from snk_kept_indf_on) - (select count(*) from snk_kept_indf_off);
@@ -1066,17 +1498,17 @@ select
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_full_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_full_off group by id, label) x),
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_full_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_full_on group by id, label) y),
-  (select count(*) from snk_kept_full_on) - (select count(*) from snk_kept_full_off);
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_full_padded_on group by id, label except select id, label, count(*) as snk_rows from snk_full_padded_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_full_padded_off group by id, label except select id, label, count(*) as snk_rows from snk_full_padded_on group by id, label) y),
+  (select count(*) from snk_full_padded_on) - (select count(*) from snk_full_padded_off);
 ----
 0 0 0
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_full_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q group by id, label) x),
-  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_full_on group by id, label) y),
-  (select count(*) from snk_kept_full_on) - (select count(*) from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q);
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_full_padded_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_full_padded_on group by id, label) y),
+  (select count(*) from snk_full_padded_on) - (select count(*) from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q);
 ----
 0 0 0
 
@@ -1130,17 +1562,17 @@ select
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_preserved_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_preserved_off group by id, label) x),
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_preserved_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_preserved_on group by id, label) y),
-  (select count(*) from snk_kept_preserved_on) - (select count(*) from snk_kept_preserved_off);
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_left_on group by id, label except select id, label, count(*) as snk_rows from snk_preserved_left_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_left_off group by id, label except select id, label, count(*) as snk_rows from snk_preserved_left_on group by id, label) y),
+  (select count(*) from snk_preserved_left_on) - (select count(*) from snk_preserved_left_off);
 ----
 0 0 0
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_preserved_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q group by id, label) x),
-  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_preserved_on group by id, label) y),
-  (select count(*) from snk_kept_preserved_on) - (select count(*) from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q);
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_left_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_preserved_left_on group by id, label) y),
+  (select count(*) from snk_preserved_left_on) - (select count(*) from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q);
 ----
 0 0 0
 
@@ -1361,6 +1793,134 @@ select
 
 query III
 select
+  (select count(*) from (select id, lab, count(*) as snk_rows from snk_preserved_union_agg_on group by id, lab except select id, lab, count(*) as snk_rows from snk_preserved_union_agg_off group by id, lab) x),
+  (select count(*) from (select id, lab, count(*) as snk_rows from snk_preserved_union_agg_off group by id, lab except select id, lab, count(*) as snk_rows from snk_preserved_union_agg_on group by id, lab) y),
+  (select count(*) from snk_preserved_union_agg_on) - (select count(*) from snk_preserved_union_agg_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, lab, count(*) as snk_rows from snk_preserved_union_agg_on group by id, lab except select id, lab, count(*) as snk_rows from (select u.id, r.lab from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join (select k, max(label) as lab from snk_b group by k) r on u.bk = r.k) q group by id, lab) x),
+  (select count(*) from (select id, lab, count(*) as snk_rows from (select u.id, r.lab from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join (select k, max(label) as lab from snk_b group by k) r on u.bk = r.k) q group by id, lab except select id, lab, count(*) as snk_rows from snk_preserved_union_agg_on group by id, lab) y),
+  (select count(*) from snk_preserved_union_agg_on) - (select count(*) from (select u.id, r.lab from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join (select k, max(label) as lab from snk_b group by k) r on u.bk = r.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_union_literal_on group by id, label except select id, label, count(*) as snk_rows from snk_preserved_union_literal_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_union_literal_off group by id, label except select id, label, count(*) as snk_rows from snk_preserved_union_literal_on group by id, label) y),
+  (select count(*) from snk_preserved_union_literal_on) - (select count(*) from snk_preserved_union_literal_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_union_literal_on group by id, label except select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, null::int as bk from snk_a union all select id, k from snk_b where k is null) u left join snk_b b on u.bk = b.k) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, null::int as bk from snk_a union all select id, k from snk_b where k is null) u left join snk_b b on u.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_preserved_union_literal_on group by id, label) y),
+  (select count(*) from snk_preserved_union_literal_on) - (select count(*) from (select u.id, b.label from (select id, null::int as bk from snk_a union all select id, k from snk_b where k is null) u left join snk_b b on u.bk = b.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as snk_rows from snk_preserved_topn_join_on group by id, v except select id, v, count(*) as snk_rows from snk_preserved_topn_join_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as snk_rows from snk_preserved_topn_join_off group by id, v except select id, v, count(*) as snk_rows from snk_preserved_topn_join_on group by id, v) y),
+  (select count(*) from snk_preserved_topn_join_on) - (select count(*) from snk_preserved_topn_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as snk_rows from snk_preserved_topn_join_on group by id, v except select id, v, count(*) as snk_rows from (select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from snk_a a join snk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join snk_c c on x.bk = c.kb) q group by id, v) x),
+  (select count(*) from (select id, v, count(*) as snk_rows from (select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from snk_a a join snk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join snk_c c on x.bk = c.kb) q group by id, v except select id, v, count(*) as snk_rows from snk_preserved_topn_join_on group by id, v) y),
+  (select count(*) from snk_preserved_topn_join_on) - (select count(*) from (select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from snk_a a join snk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join snk_c c on x.bk = c.kb) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, id, label, count(*) as snk_rows from snk_preserved_right_on group by x, id, label except select x, id, label, count(*) as snk_rows from snk_preserved_right_off group by x, id, label) x),
+  (select count(*) from (select x, id, label, count(*) as snk_rows from snk_preserved_right_off group by x, id, label except select x, id, label, count(*) as snk_rows from snk_preserved_right_on group by x, id, label) y),
+  (select count(*) from snk_preserved_right_on) - (select count(*) from snk_preserved_right_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, id, label, count(*) as snk_rows from snk_preserved_right_on group by x, id, label except select x, id, label, count(*) as snk_rows from (select a.x, b.id, b.label from snk_a a right join (select * from snk_b where k is null) b on a.bk = b.k) q group by x, id, label) x),
+  (select count(*) from (select x, id, label, count(*) as snk_rows from (select a.x, b.id, b.label from snk_a a right join (select * from snk_b where k is null) b on a.bk = b.k) q group by x, id, label except select x, id, label, count(*) as snk_rows from snk_preserved_right_on group by x, id, label) y),
+  (select count(*) from snk_preserved_right_on) - (select count(*) from (select a.x, b.id, b.label from snk_a a right join (select * from snk_b where k is null) b on a.bk = b.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, count(*) as snk_rows from snk_preserved_anti_on group by id except select id, count(*) as snk_rows from snk_preserved_anti_off group by id) x),
+  (select count(*) from (select id, count(*) as snk_rows from snk_preserved_anti_off group by id except select id, count(*) as snk_rows from snk_preserved_anti_on group by id) y),
+  (select count(*) from snk_preserved_anti_on) - (select count(*) from snk_preserved_anti_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, count(*) as snk_rows from snk_preserved_anti_on group by id except select id, count(*) as snk_rows from (select a.id from snk_a a where a.bk is null and not exists (select 1 from snk_b b where b.k = a.bk)) q group by id) x),
+  (select count(*) from (select id, count(*) as snk_rows from (select a.id from snk_a a where a.bk is null and not exists (select 1 from snk_b b where b.k = a.bk)) q group by id except select id, count(*) as snk_rows from snk_preserved_anti_on group by id) y),
+  (select count(*) from snk_preserved_anti_on) - (select count(*) from (select a.id from snk_a a where a.bk is null and not exists (select 1 from snk_b b where b.k = a.bk)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, x, label, count(*) as snk_rows from snk_full_left_null_on group by id, x, label except select id, x, label, count(*) as snk_rows from snk_full_left_null_off group by id, x, label) x),
+  (select count(*) from (select id, x, label, count(*) as snk_rows from snk_full_left_null_off group by id, x, label except select id, x, label, count(*) as snk_rows from snk_full_left_null_on group by id, x, label) y),
+  (select count(*) from snk_full_left_null_on) - (select count(*) from snk_full_left_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, x, label, count(*) as snk_rows from snk_full_left_null_on group by id, x, label except select id, x, label, count(*) as snk_rows from (select a.id, a.x, b.label from (select * from snk_a where bk is null) a full join snk_b b on a.bk = b.k) q group by id, x, label) x),
+  (select count(*) from (select id, x, label, count(*) as snk_rows from (select a.id, a.x, b.label from (select * from snk_a where bk is null) a full join snk_b b on a.bk = b.k) q group by id, x, label except select id, x, label, count(*) as snk_rows from snk_full_left_null_on group by id, x, label) y),
+  (select count(*) from snk_full_left_null_on) - (select count(*) from (select a.id, a.x, b.label from (select * from snk_a where bk is null) a full join snk_b b on a.bk = b.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_one_branch_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_one_branch_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_one_branch_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_one_branch_on group by id, label) y),
+  (select count(*) from snk_kept_one_branch_on) - (select count(*) from snk_kept_one_branch_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_one_branch_on group by id, label except select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b) u left join snk_b b on u.bk = b.k) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b) u left join snk_b b on u.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_one_branch_on group by id, label) y),
+  (select count(*) from snk_kept_one_branch_on) - (select count(*) from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b) u left join snk_b b on u.bk = b.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_union_indf_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_union_indf_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_union_indf_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_union_indf_on group by id, label) y),
+  (select count(*) from snk_kept_union_indf_on) - (select count(*) from snk_kept_union_indf_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_union_indf_on group by id, label except select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join snk_b b on u.bk is not distinct from b.k) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join snk_b b on u.bk is not distinct from b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_union_indf_on group by id, label) y),
+  (select count(*) from snk_kept_union_indf_on) - (select count(*) from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join snk_b b on u.bk is not distinct from b.k) q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_indf_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_indf_off group by id, label) x),
   (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_indf_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_indf_on group by id, label) y),
   (select count(*) from snk_kept_indf_on) - (select count(*) from snk_kept_indf_off);
@@ -1377,17 +1937,17 @@ select
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_full_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_full_off group by id, label) x),
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_full_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_full_on group by id, label) y),
-  (select count(*) from snk_kept_full_on) - (select count(*) from snk_kept_full_off);
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_full_padded_on group by id, label except select id, label, count(*) as snk_rows from snk_full_padded_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_full_padded_off group by id, label except select id, label, count(*) as snk_rows from snk_full_padded_on group by id, label) y),
+  (select count(*) from snk_full_padded_on) - (select count(*) from snk_full_padded_off);
 ----
 0 0 0
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_full_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q group by id, label) x),
-  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_full_on group by id, label) y),
-  (select count(*) from snk_kept_full_on) - (select count(*) from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q);
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_full_padded_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_full_padded_on group by id, label) y),
+  (select count(*) from snk_full_padded_on) - (select count(*) from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q);
 ----
 0 0 0
 
@@ -1441,17 +2001,17 @@ select
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_preserved_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_preserved_off group by id, label) x),
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_preserved_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_preserved_on group by id, label) y),
-  (select count(*) from snk_kept_preserved_on) - (select count(*) from snk_kept_preserved_off);
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_left_on group by id, label except select id, label, count(*) as snk_rows from snk_preserved_left_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_left_off group by id, label except select id, label, count(*) as snk_rows from snk_preserved_left_on group by id, label) y),
+  (select count(*) from snk_preserved_left_on) - (select count(*) from snk_preserved_left_off);
 ----
 0 0 0
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_preserved_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q group by id, label) x),
-  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_preserved_on group by id, label) y),
-  (select count(*) from snk_kept_preserved_on) - (select count(*) from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q);
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_left_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_preserved_left_on group by id, label) y),
+  (select count(*) from snk_preserved_left_on) - (select count(*) from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q);
 ----
 0 0 0
 
@@ -1670,6 +2230,134 @@ select
 
 query III
 select
+  (select count(*) from (select id, lab, count(*) as snk_rows from snk_preserved_union_agg_on group by id, lab except select id, lab, count(*) as snk_rows from snk_preserved_union_agg_off group by id, lab) x),
+  (select count(*) from (select id, lab, count(*) as snk_rows from snk_preserved_union_agg_off group by id, lab except select id, lab, count(*) as snk_rows from snk_preserved_union_agg_on group by id, lab) y),
+  (select count(*) from snk_preserved_union_agg_on) - (select count(*) from snk_preserved_union_agg_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, lab, count(*) as snk_rows from snk_preserved_union_agg_on group by id, lab except select id, lab, count(*) as snk_rows from (select u.id, r.lab from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join (select k, max(label) as lab from snk_b group by k) r on u.bk = r.k) q group by id, lab) x),
+  (select count(*) from (select id, lab, count(*) as snk_rows from (select u.id, r.lab from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join (select k, max(label) as lab from snk_b group by k) r on u.bk = r.k) q group by id, lab except select id, lab, count(*) as snk_rows from snk_preserved_union_agg_on group by id, lab) y),
+  (select count(*) from snk_preserved_union_agg_on) - (select count(*) from (select u.id, r.lab from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join (select k, max(label) as lab from snk_b group by k) r on u.bk = r.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_union_literal_on group by id, label except select id, label, count(*) as snk_rows from snk_preserved_union_literal_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_union_literal_off group by id, label except select id, label, count(*) as snk_rows from snk_preserved_union_literal_on group by id, label) y),
+  (select count(*) from snk_preserved_union_literal_on) - (select count(*) from snk_preserved_union_literal_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_union_literal_on group by id, label except select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, null::int as bk from snk_a union all select id, k from snk_b where k is null) u left join snk_b b on u.bk = b.k) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, null::int as bk from snk_a union all select id, k from snk_b where k is null) u left join snk_b b on u.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_preserved_union_literal_on group by id, label) y),
+  (select count(*) from snk_preserved_union_literal_on) - (select count(*) from (select u.id, b.label from (select id, null::int as bk from snk_a union all select id, k from snk_b where k is null) u left join snk_b b on u.bk = b.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as snk_rows from snk_preserved_topn_join_on group by id, v except select id, v, count(*) as snk_rows from snk_preserved_topn_join_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as snk_rows from snk_preserved_topn_join_off group by id, v except select id, v, count(*) as snk_rows from snk_preserved_topn_join_on group by id, v) y),
+  (select count(*) from snk_preserved_topn_join_on) - (select count(*) from snk_preserved_topn_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as snk_rows from snk_preserved_topn_join_on group by id, v except select id, v, count(*) as snk_rows from (select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from snk_a a join snk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join snk_c c on x.bk = c.kb) q group by id, v) x),
+  (select count(*) from (select id, v, count(*) as snk_rows from (select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from snk_a a join snk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join snk_c c on x.bk = c.kb) q group by id, v except select id, v, count(*) as snk_rows from snk_preserved_topn_join_on group by id, v) y),
+  (select count(*) from snk_preserved_topn_join_on) - (select count(*) from (select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from snk_a a join snk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join snk_c c on x.bk = c.kb) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, id, label, count(*) as snk_rows from snk_preserved_right_on group by x, id, label except select x, id, label, count(*) as snk_rows from snk_preserved_right_off group by x, id, label) x),
+  (select count(*) from (select x, id, label, count(*) as snk_rows from snk_preserved_right_off group by x, id, label except select x, id, label, count(*) as snk_rows from snk_preserved_right_on group by x, id, label) y),
+  (select count(*) from snk_preserved_right_on) - (select count(*) from snk_preserved_right_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, id, label, count(*) as snk_rows from snk_preserved_right_on group by x, id, label except select x, id, label, count(*) as snk_rows from (select a.x, b.id, b.label from snk_a a right join (select * from snk_b where k is null) b on a.bk = b.k) q group by x, id, label) x),
+  (select count(*) from (select x, id, label, count(*) as snk_rows from (select a.x, b.id, b.label from snk_a a right join (select * from snk_b where k is null) b on a.bk = b.k) q group by x, id, label except select x, id, label, count(*) as snk_rows from snk_preserved_right_on group by x, id, label) y),
+  (select count(*) from snk_preserved_right_on) - (select count(*) from (select a.x, b.id, b.label from snk_a a right join (select * from snk_b where k is null) b on a.bk = b.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, count(*) as snk_rows from snk_preserved_anti_on group by id except select id, count(*) as snk_rows from snk_preserved_anti_off group by id) x),
+  (select count(*) from (select id, count(*) as snk_rows from snk_preserved_anti_off group by id except select id, count(*) as snk_rows from snk_preserved_anti_on group by id) y),
+  (select count(*) from snk_preserved_anti_on) - (select count(*) from snk_preserved_anti_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, count(*) as snk_rows from snk_preserved_anti_on group by id except select id, count(*) as snk_rows from (select a.id from snk_a a where a.bk is null and not exists (select 1 from snk_b b where b.k = a.bk)) q group by id) x),
+  (select count(*) from (select id, count(*) as snk_rows from (select a.id from snk_a a where a.bk is null and not exists (select 1 from snk_b b where b.k = a.bk)) q group by id except select id, count(*) as snk_rows from snk_preserved_anti_on group by id) y),
+  (select count(*) from snk_preserved_anti_on) - (select count(*) from (select a.id from snk_a a where a.bk is null and not exists (select 1 from snk_b b where b.k = a.bk)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, x, label, count(*) as snk_rows from snk_full_left_null_on group by id, x, label except select id, x, label, count(*) as snk_rows from snk_full_left_null_off group by id, x, label) x),
+  (select count(*) from (select id, x, label, count(*) as snk_rows from snk_full_left_null_off group by id, x, label except select id, x, label, count(*) as snk_rows from snk_full_left_null_on group by id, x, label) y),
+  (select count(*) from snk_full_left_null_on) - (select count(*) from snk_full_left_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, x, label, count(*) as snk_rows from snk_full_left_null_on group by id, x, label except select id, x, label, count(*) as snk_rows from (select a.id, a.x, b.label from (select * from snk_a where bk is null) a full join snk_b b on a.bk = b.k) q group by id, x, label) x),
+  (select count(*) from (select id, x, label, count(*) as snk_rows from (select a.id, a.x, b.label from (select * from snk_a where bk is null) a full join snk_b b on a.bk = b.k) q group by id, x, label except select id, x, label, count(*) as snk_rows from snk_full_left_null_on group by id, x, label) y),
+  (select count(*) from snk_full_left_null_on) - (select count(*) from (select a.id, a.x, b.label from (select * from snk_a where bk is null) a full join snk_b b on a.bk = b.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_one_branch_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_one_branch_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_one_branch_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_one_branch_on group by id, label) y),
+  (select count(*) from snk_kept_one_branch_on) - (select count(*) from snk_kept_one_branch_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_one_branch_on group by id, label except select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b) u left join snk_b b on u.bk = b.k) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b) u left join snk_b b on u.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_one_branch_on group by id, label) y),
+  (select count(*) from snk_kept_one_branch_on) - (select count(*) from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b) u left join snk_b b on u.bk = b.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_union_indf_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_union_indf_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_union_indf_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_union_indf_on group by id, label) y),
+  (select count(*) from snk_kept_union_indf_on) - (select count(*) from snk_kept_union_indf_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_union_indf_on group by id, label except select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join snk_b b on u.bk is not distinct from b.k) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join snk_b b on u.bk is not distinct from b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_union_indf_on group by id, label) y),
+  (select count(*) from snk_kept_union_indf_on) - (select count(*) from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join snk_b b on u.bk is not distinct from b.k) q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_indf_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_indf_off group by id, label) x),
   (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_indf_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_indf_on group by id, label) y),
   (select count(*) from snk_kept_indf_on) - (select count(*) from snk_kept_indf_off);
@@ -1686,17 +2374,17 @@ select
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_full_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_full_off group by id, label) x),
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_full_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_full_on group by id, label) y),
-  (select count(*) from snk_kept_full_on) - (select count(*) from snk_kept_full_off);
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_full_padded_on group by id, label except select id, label, count(*) as snk_rows from snk_full_padded_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_full_padded_off group by id, label except select id, label, count(*) as snk_rows from snk_full_padded_on group by id, label) y),
+  (select count(*) from snk_full_padded_on) - (select count(*) from snk_full_padded_off);
 ----
 0 0 0
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_full_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q group by id, label) x),
-  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_full_on group by id, label) y),
-  (select count(*) from snk_kept_full_on) - (select count(*) from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q);
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_full_padded_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_full_padded_on group by id, label) y),
+  (select count(*) from snk_full_padded_on) - (select count(*) from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q);
 ----
 0 0 0
 
@@ -1750,17 +2438,17 @@ select
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_preserved_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_preserved_off group by id, label) x),
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_preserved_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_preserved_on group by id, label) y),
-  (select count(*) from snk_kept_preserved_on) - (select count(*) from snk_kept_preserved_off);
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_left_on group by id, label except select id, label, count(*) as snk_rows from snk_preserved_left_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_left_off group by id, label except select id, label, count(*) as snk_rows from snk_preserved_left_on group by id, label) y),
+  (select count(*) from snk_preserved_left_on) - (select count(*) from snk_preserved_left_off);
 ----
 0 0 0
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_preserved_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q group by id, label) x),
-  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_preserved_on group by id, label) y),
-  (select count(*) from snk_kept_preserved_on) - (select count(*) from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q);
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_left_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_preserved_left_on group by id, label) y),
+  (select count(*) from snk_preserved_left_on) - (select count(*) from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q);
 ----
 0 0 0
 
@@ -1982,6 +2670,134 @@ select
 
 query III
 select
+  (select count(*) from (select id, lab, count(*) as snk_rows from snk_preserved_union_agg_on group by id, lab except select id, lab, count(*) as snk_rows from snk_preserved_union_agg_off group by id, lab) x),
+  (select count(*) from (select id, lab, count(*) as snk_rows from snk_preserved_union_agg_off group by id, lab except select id, lab, count(*) as snk_rows from snk_preserved_union_agg_on group by id, lab) y),
+  (select count(*) from snk_preserved_union_agg_on) - (select count(*) from snk_preserved_union_agg_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, lab, count(*) as snk_rows from snk_preserved_union_agg_on group by id, lab except select id, lab, count(*) as snk_rows from (select u.id, r.lab from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join (select k, max(label) as lab from snk_b group by k) r on u.bk = r.k) q group by id, lab) x),
+  (select count(*) from (select id, lab, count(*) as snk_rows from (select u.id, r.lab from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join (select k, max(label) as lab from snk_b group by k) r on u.bk = r.k) q group by id, lab except select id, lab, count(*) as snk_rows from snk_preserved_union_agg_on group by id, lab) y),
+  (select count(*) from snk_preserved_union_agg_on) - (select count(*) from (select u.id, r.lab from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join (select k, max(label) as lab from snk_b group by k) r on u.bk = r.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_union_literal_on group by id, label except select id, label, count(*) as snk_rows from snk_preserved_union_literal_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_union_literal_off group by id, label except select id, label, count(*) as snk_rows from snk_preserved_union_literal_on group by id, label) y),
+  (select count(*) from snk_preserved_union_literal_on) - (select count(*) from snk_preserved_union_literal_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_union_literal_on group by id, label except select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, null::int as bk from snk_a union all select id, k from snk_b where k is null) u left join snk_b b on u.bk = b.k) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, null::int as bk from snk_a union all select id, k from snk_b where k is null) u left join snk_b b on u.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_preserved_union_literal_on group by id, label) y),
+  (select count(*) from snk_preserved_union_literal_on) - (select count(*) from (select u.id, b.label from (select id, null::int as bk from snk_a union all select id, k from snk_b where k is null) u left join snk_b b on u.bk = b.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as snk_rows from snk_preserved_topn_join_on group by id, v except select id, v, count(*) as snk_rows from snk_preserved_topn_join_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as snk_rows from snk_preserved_topn_join_off group by id, v except select id, v, count(*) as snk_rows from snk_preserved_topn_join_on group by id, v) y),
+  (select count(*) from snk_preserved_topn_join_on) - (select count(*) from snk_preserved_topn_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as snk_rows from snk_preserved_topn_join_on group by id, v except select id, v, count(*) as snk_rows from (select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from snk_a a join snk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join snk_c c on x.bk = c.kb) q group by id, v) x),
+  (select count(*) from (select id, v, count(*) as snk_rows from (select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from snk_a a join snk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join snk_c c on x.bk = c.kb) q group by id, v except select id, v, count(*) as snk_rows from snk_preserved_topn_join_on group by id, v) y),
+  (select count(*) from snk_preserved_topn_join_on) - (select count(*) from (select x.id, c.v from (select id, bk from (select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn from snk_a a join snk_b b on a.id = b.id where a.bk is null) t where rn = 1) x left join snk_c c on x.bk = c.kb) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, id, label, count(*) as snk_rows from snk_preserved_right_on group by x, id, label except select x, id, label, count(*) as snk_rows from snk_preserved_right_off group by x, id, label) x),
+  (select count(*) from (select x, id, label, count(*) as snk_rows from snk_preserved_right_off group by x, id, label except select x, id, label, count(*) as snk_rows from snk_preserved_right_on group by x, id, label) y),
+  (select count(*) from snk_preserved_right_on) - (select count(*) from snk_preserved_right_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, id, label, count(*) as snk_rows from snk_preserved_right_on group by x, id, label except select x, id, label, count(*) as snk_rows from (select a.x, b.id, b.label from snk_a a right join (select * from snk_b where k is null) b on a.bk = b.k) q group by x, id, label) x),
+  (select count(*) from (select x, id, label, count(*) as snk_rows from (select a.x, b.id, b.label from snk_a a right join (select * from snk_b where k is null) b on a.bk = b.k) q group by x, id, label except select x, id, label, count(*) as snk_rows from snk_preserved_right_on group by x, id, label) y),
+  (select count(*) from snk_preserved_right_on) - (select count(*) from (select a.x, b.id, b.label from snk_a a right join (select * from snk_b where k is null) b on a.bk = b.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, count(*) as snk_rows from snk_preserved_anti_on group by id except select id, count(*) as snk_rows from snk_preserved_anti_off group by id) x),
+  (select count(*) from (select id, count(*) as snk_rows from snk_preserved_anti_off group by id except select id, count(*) as snk_rows from snk_preserved_anti_on group by id) y),
+  (select count(*) from snk_preserved_anti_on) - (select count(*) from snk_preserved_anti_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, count(*) as snk_rows from snk_preserved_anti_on group by id except select id, count(*) as snk_rows from (select a.id from snk_a a where a.bk is null and not exists (select 1 from snk_b b where b.k = a.bk)) q group by id) x),
+  (select count(*) from (select id, count(*) as snk_rows from (select a.id from snk_a a where a.bk is null and not exists (select 1 from snk_b b where b.k = a.bk)) q group by id except select id, count(*) as snk_rows from snk_preserved_anti_on group by id) y),
+  (select count(*) from snk_preserved_anti_on) - (select count(*) from (select a.id from snk_a a where a.bk is null and not exists (select 1 from snk_b b where b.k = a.bk)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, x, label, count(*) as snk_rows from snk_full_left_null_on group by id, x, label except select id, x, label, count(*) as snk_rows from snk_full_left_null_off group by id, x, label) x),
+  (select count(*) from (select id, x, label, count(*) as snk_rows from snk_full_left_null_off group by id, x, label except select id, x, label, count(*) as snk_rows from snk_full_left_null_on group by id, x, label) y),
+  (select count(*) from snk_full_left_null_on) - (select count(*) from snk_full_left_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, x, label, count(*) as snk_rows from snk_full_left_null_on group by id, x, label except select id, x, label, count(*) as snk_rows from (select a.id, a.x, b.label from (select * from snk_a where bk is null) a full join snk_b b on a.bk = b.k) q group by id, x, label) x),
+  (select count(*) from (select id, x, label, count(*) as snk_rows from (select a.id, a.x, b.label from (select * from snk_a where bk is null) a full join snk_b b on a.bk = b.k) q group by id, x, label except select id, x, label, count(*) as snk_rows from snk_full_left_null_on group by id, x, label) y),
+  (select count(*) from snk_full_left_null_on) - (select count(*) from (select a.id, a.x, b.label from (select * from snk_a where bk is null) a full join snk_b b on a.bk = b.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_one_branch_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_one_branch_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_one_branch_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_one_branch_on group by id, label) y),
+  (select count(*) from snk_kept_one_branch_on) - (select count(*) from snk_kept_one_branch_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_one_branch_on group by id, label except select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b) u left join snk_b b on u.bk = b.k) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b) u left join snk_b b on u.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_one_branch_on group by id, label) y),
+  (select count(*) from snk_kept_one_branch_on) - (select count(*) from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b) u left join snk_b b on u.bk = b.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_union_indf_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_union_indf_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_union_indf_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_union_indf_on group by id, label) y),
+  (select count(*) from snk_kept_union_indf_on) - (select count(*) from snk_kept_union_indf_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_union_indf_on group by id, label except select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join snk_b b on u.bk is not distinct from b.k) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join snk_b b on u.bk is not distinct from b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_union_indf_on group by id, label) y),
+  (select count(*) from snk_kept_union_indf_on) - (select count(*) from (select u.id, b.label from (select id, bk from snk_a where bk is null union all select id, k from snk_b where k is null) u left join snk_b b on u.bk is not distinct from b.k) q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_indf_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_indf_off group by id, label) x),
   (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_indf_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_indf_on group by id, label) y),
   (select count(*) from snk_kept_indf_on) - (select count(*) from snk_kept_indf_off);
@@ -1998,17 +2814,17 @@ select
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_full_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_full_off group by id, label) x),
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_full_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_full_on group by id, label) y),
-  (select count(*) from snk_kept_full_on) - (select count(*) from snk_kept_full_off);
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_full_padded_on group by id, label except select id, label, count(*) as snk_rows from snk_full_padded_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_full_padded_off group by id, label except select id, label, count(*) as snk_rows from snk_full_padded_on group by id, label) y),
+  (select count(*) from snk_full_padded_on) - (select count(*) from snk_full_padded_off);
 ----
 0 0 0
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_full_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q group by id, label) x),
-  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_full_on group by id, label) y),
-  (select count(*) from snk_kept_full_on) - (select count(*) from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q);
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_full_padded_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_full_padded_on group by id, label) y),
+  (select count(*) from snk_full_padded_on) - (select count(*) from (select a.id, b.label from snk_a a full join (select * from snk_b where k is null) b on a.bk = b.k) q);
 ----
 0 0 0
 
@@ -2062,17 +2878,17 @@ select
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_preserved_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_preserved_off group by id, label) x),
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_preserved_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_preserved_on group by id, label) y),
-  (select count(*) from snk_kept_preserved_on) - (select count(*) from snk_kept_preserved_off);
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_left_on group by id, label except select id, label, count(*) as snk_rows from snk_preserved_left_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_left_off group by id, label except select id, label, count(*) as snk_rows from snk_preserved_left_on group by id, label) y),
+  (select count(*) from snk_preserved_left_on) - (select count(*) from snk_preserved_left_off);
 ----
 0 0 0
 
 query III
 select
-  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_preserved_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q group by id, label) x),
-  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_preserved_on group by id, label) y),
-  (select count(*) from snk_kept_preserved_on) - (select count(*) from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q);
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_preserved_left_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q group by id, label except select id, label, count(*) as snk_rows from snk_preserved_left_on group by id, label) y),
+  (select count(*) from snk_preserved_left_on) - (select count(*) from (select a.id, b.label from (select * from snk_a where bk is null) a left join snk_b b on a.bk = b.k) q);
 ----
 0 0 0
 
@@ -2162,7 +2978,7 @@ statement ok
 drop materialized view snk_kept_coalesce_on;
 
 statement ok
-drop materialized view snk_kept_preserved_on;
+drop materialized view snk_preserved_left_on;
 
 statement ok
 drop materialized view snk_kept_anti_pattern_on;
@@ -2174,10 +2990,34 @@ statement ok
 drop materialized view snk_kept_label_on;
 
 statement ok
-drop materialized view snk_kept_full_on;
+drop materialized view snk_full_padded_on;
 
 statement ok
 drop materialized view snk_kept_indf_on;
+
+statement ok
+drop materialized view snk_kept_union_indf_on;
+
+statement ok
+drop materialized view snk_kept_one_branch_on;
+
+statement ok
+drop materialized view snk_full_left_null_on;
+
+statement ok
+drop materialized view snk_preserved_anti_on;
+
+statement ok
+drop materialized view snk_preserved_right_on;
+
+statement ok
+drop materialized view snk_preserved_topn_join_on;
+
+statement ok
+drop materialized view snk_preserved_union_literal_on;
+
+statement ok
+drop materialized view snk_preserved_union_agg_on;
 
 statement ok
 drop materialized view snk_group_over_left_on;
@@ -2219,7 +3059,7 @@ statement ok
 drop materialized view snk_kept_coalesce_off;
 
 statement ok
-drop materialized view snk_kept_preserved_off;
+drop materialized view snk_preserved_left_off;
 
 statement ok
 drop materialized view snk_kept_anti_pattern_off;
@@ -2231,10 +3071,34 @@ statement ok
 drop materialized view snk_kept_label_off;
 
 statement ok
-drop materialized view snk_kept_full_off;
+drop materialized view snk_full_padded_off;
 
 statement ok
 drop materialized view snk_kept_indf_off;
+
+statement ok
+drop materialized view snk_kept_union_indf_off;
+
+statement ok
+drop materialized view snk_kept_one_branch_off;
+
+statement ok
+drop materialized view snk_full_left_null_off;
+
+statement ok
+drop materialized view snk_preserved_anti_off;
+
+statement ok
+drop materialized view snk_preserved_right_off;
+
+statement ok
+drop materialized view snk_preserved_topn_join_off;
+
+statement ok
+drop materialized view snk_preserved_union_literal_off;
+
+statement ok
+drop materialized view snk_preserved_union_agg_off;
 
 statement ok
 drop materialized view snk_group_over_left_off;
