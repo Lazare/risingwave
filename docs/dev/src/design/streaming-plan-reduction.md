@@ -523,6 +523,7 @@ priority DESC) = 1` above a union of constant-priority branches):
   rewrites a join above the top-1 from a fact about a branch below it, and only holds when the
   joined relation is exactly the scan of that branch (same filters, `k` not `NULL`). Both are
   left for a dedicated rule after the prototype.
+
 ### 9b. Subqueries over set-returning functions of the outer row (added on 2026-11-25, done)
 
 Variable `streaming_unnest_lateral_functions`, rules `LateralTableFunctionRule` and
@@ -1288,6 +1289,7 @@ aggregate of a constant of idea 8), `batch_simplify_on_unique_key` (ideas 1 and 
 - Tests: planner `batch_plan_reduction_keys.yaml`; differential `e2e_test/batch/plan_reduction_keys`
   (generator `plan_reduction_keys.gen.py`): every query runs through `INSERT ... SELECT` with and
   without its variables, after each of four rounds of changes of the data.
+
 ### BL. Batch: duplicates found with `lag` (added on 2026-11-26, done on the branch)
 
 A uniqueness check is often written by comparing each value with the previous one in sorted
@@ -1338,6 +1340,7 @@ that the unused window functions sharing the window go away with it.
   `e2e_test/batch/rewrite_lag_duplicates.gen.py` (every query inserted into a table with and
   without the variable, multisets compared after inserts, deletes, updates, NULLs, no duplicates
   and an empty table).
+
 ## Batch counterparts (added on 2026-11-26, done on the branch `proto/plan-reduction-batch-unnest`)
 
 Four batch variables, off by default, run the same rules in the batch optimizer
@@ -1381,6 +1384,7 @@ side again for the domain.
 - Tests: planner cases in `batch_plan_reduction_unnest.yaml`, the differential batch test
   `e2e_test/batch/plan_reduction_unnest.gen.py` (every query run as an `INSERT ... SELECT` with and
   without its variable, the two results compared as multisets after each round of changes).
+
 ### BJ. Batch: cost-based join ordering (added on 2026-11-26, first version)
 
 The batch planner orders the inner joins with a heuristic (`LeftDeepTreeJoinOrderingRule`): the
@@ -1729,6 +1733,7 @@ projection; without the variable, or without a union below, they convert their i
   empty branches, after updates and deletes, and with a single branch left).
 - Not done: a round-robin exchange, which would let a union with no requirement keep its inputs
   in their stages without hashing; a partial aggregation pushed into each branch.
+
 ### BS. Batch: identical sub-plans computed once per task (added on 2026-11-26, first version)
 
 The batch optimizer turns the plan into a tree before anything else (`DAG_TO_TREE`): a view or a
@@ -2850,6 +2855,7 @@ The fix, behind the variable:
   the operators still removed, batch lookup joins and streaming joins on the views); differential
   test `e2e_test/streaming/preserve_mv_key` (views with and without the variable, views joined on
   their key, join keys moved between actors, deletes, emptied tables).
+
 ### NC. Contradictory `IS NULL` on any expression (added on 2026-11-28, done on the branch)
 
 `NeverTruePredicateRule` (A) and `ContradictoryNullFilterRule` already empty a filter or a scan
@@ -3041,6 +3047,7 @@ join; the join on a constant stays on one vnode). Local execution keeps both inp
 
 - Tests: planner test `batch_broadcast_cross_join.yaml`; differential test
   `e2e_test/batch/broadcast_cross_join` (distributed mode).
+
 ### RK. Unique key of `row_number() = n` (added on 2026-11-28, done on the branch)
 
 A filter `row_number() OVER (PARTITION BY k ORDER BY ...) = 1` over a window keeps at most one row
