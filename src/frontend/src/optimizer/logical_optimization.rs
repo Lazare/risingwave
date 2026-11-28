@@ -972,10 +972,18 @@ static STREAM_SIMPLIFY_ON_UNIQUE_KEY: LazyLock<OptimizationStage> = LazyLock::ne
 // the predicates that hold on every row of a side of a join are copied to its other side through
 // the equalities of the join. Bottom-up, so that a join sees the filters that the rule added below
 // it; the caller pushes the new filters down.
-static TRANSITIVE_PREDICATES: LazyLock<OptimizationStage> = LazyLock::new(|| {
+static STREAM_TRANSITIVE_PREDICATES: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Transitive Predicates",
-        vec![TransitivePredicateRule::create()],
+        vec![TransitivePredicateRule::create_for_stream()],
+        ApplyOrder::BottomUp,
+    )
+});
+
+static BATCH_TRANSITIVE_PREDICATES: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Transitive Predicates",
+        vec![TransitivePredicateRule::create_for_batch()],
         ApplyOrder::BottomUp,
     )
 });
@@ -1531,7 +1539,7 @@ impl LogicalOptimizer {
         {
             for _ in 0..2 {
                 let applied_before = ctx.total_rule_applied();
-                plan = plan.optimize_by_rules(&TRANSITIVE_PREDICATES)?;
+                plan = plan.optimize_by_rules(&STREAM_TRANSITIVE_PREDICATES)?;
                 let applied = ctx.total_rule_applied() - applied_before;
                 if applied == 0 {
                     break;
@@ -2222,7 +2230,7 @@ impl LogicalOptimizer {
         if ctx.session_ctx().config().batch_transitive_predicates() {
             for _ in 0..2 {
                 let applied_before = ctx.total_rule_applied();
-                plan = plan.optimize_by_rules(&TRANSITIVE_PREDICATES)?;
+                plan = plan.optimize_by_rules(&BATCH_TRANSITIVE_PREDICATES)?;
                 if ctx.total_rule_applied() == applied_before {
                     break;
                 }

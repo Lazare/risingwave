@@ -176,3 +176,25 @@
     join o for system_time as of proctime() on s.order_id = o.id;
   expected_outputs:
   - stream_plan
+# An IN list is not copied onto a column that reaches a key of a scanned table: the scan would
+# become one scan per value under a union (each one subscribing to the whole table). A single
+# value is copied: one range scan replaces the full scan.
+- name: kept - an IN list is not copied onto the primary key of a hop window input
+  before: [setup]
+  sql: |
+    select * from (select 1 as col union select 2) u,
+      lateral(select * from hop(h, ts, interval '10' minute, interval '30' minute) where col = id);
+  expected_outputs:
+  - stream_plan
+- name: kept - an IN list of constant rows is not copied onto a primary key
+  before: [setup]
+  sql: |
+    select v.x, o.amount from (values (1), (2), (3)) v(x) join o on o.id = v.x;
+  expected_outputs:
+  - stream_plan
+- name: a single constant is copied onto a primary key
+  before: [setup]
+  sql: |
+    select v.x, o.amount from (values (1), (1)) v(x) join o on o.id = v.x;
+  expected_outputs:
+  - stream_plan

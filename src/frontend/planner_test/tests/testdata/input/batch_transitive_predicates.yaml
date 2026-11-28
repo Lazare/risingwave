@@ -161,3 +161,12 @@
     select ta.p, tb.q, tc.r from ta join tb on ta.x = tb.y join tc on tb.y = tc.z;
   expected_outputs:
   - batch_plan
+# Batch reads the ranges of an IN list on a primary key in one scan: the list is copied.
+- name: an IN list of constant rows is copied onto a primary key (one scan with ranges)
+  before: [setup]
+  sql: |
+    set batch_transitive_predicates = true;
+    set batch_enable_lookup_join = false;
+    select v.x, o.amount from (values (1), (2), (3)) v(x) join o on o.id = v.x;
+  expected_outputs:
+  - batch_plan

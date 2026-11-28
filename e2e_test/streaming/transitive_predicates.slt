@@ -76,6 +76,12 @@ statement ok
 create materialized view tp_values_off as select v.x, s.sid from (values (11), (12), (12), (40)) v(x) join tp_s s on s.order_id = v.x;
 
 statement ok
+create materialized view tp_values_pk_off as select v.x, o.amount from (values (11), (12), (12), (40)) v(x) join tp_o o on o.id = v.x;
+
+statement ok
+create materialized view tp_union_pk_hop_off as select u.col, h.id, h.v, h.window_start from (select 1 as col union select 2) u, lateral (select * from hop(tp_h, ts, interval '10' minute, interval '30' minute) where col = id) h;
+
+statement ok
 create materialized view tp_agg_key_off as select g.region, g.n, s.sid from (select region, count(*) as n from tp_o where region in ('EU', 'US') group by region) g join tp_s s on s.region = g.region;
 
 statement ok
@@ -149,6 +155,12 @@ create materialized view tp_union_tags_on as select u.tag, u.id, s.sid from (sel
 
 statement ok
 create materialized view tp_values_on as select v.x, s.sid from (values (11), (12), (12), (40)) v(x) join tp_s s on s.order_id = v.x;
+
+statement ok
+create materialized view tp_values_pk_on as select v.x, o.amount from (values (11), (12), (12), (40)) v(x) join tp_o o on o.id = v.x;
+
+statement ok
+create materialized view tp_union_pk_hop_on as select u.col, h.id, h.v, h.window_start from (select 1 as col union select 2) u, lateral (select * from hop(tp_h, ts, interval '10' minute, interval '30' minute) where col = id) h;
 
 statement ok
 create materialized view tp_agg_key_on as select g.region, g.n, s.sid from (select region, count(*) as n from tp_o where region in ('EU', 'US') group by region) g join tp_s s on s.region = g.region;
@@ -315,6 +327,38 @@ select
   (select count(*) from (select x, sid, count(*) as tp_rows from tp_values_on group by x, sid except select x, sid, count(*) as tp_rows from (select v.x, s.sid from (values (11), (12), (12), (40)) v(x) join tp_s s on s.order_id = v.x) q group by x, sid) x),
   (select count(*) from (select x, sid, count(*) as tp_rows from (select v.x, s.sid from (values (11), (12), (12), (40)) v(x) join tp_s s on s.order_id = v.x) q group by x, sid except select x, sid, count(*) as tp_rows from tp_values_on group by x, sid) y),
   (select count(*) from tp_values_on) - (select count(*) from (select v.x, s.sid from (values (11), (12), (12), (40)) v(x) join tp_s s on s.order_id = v.x) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, amount, count(*) as tp_rows from tp_values_pk_on group by x, amount except select x, amount, count(*) as tp_rows from tp_values_pk_off group by x, amount) x),
+  (select count(*) from (select x, amount, count(*) as tp_rows from tp_values_pk_off group by x, amount except select x, amount, count(*) as tp_rows from tp_values_pk_on group by x, amount) y),
+  (select count(*) from tp_values_pk_on) - (select count(*) from tp_values_pk_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, amount, count(*) as tp_rows from tp_values_pk_on group by x, amount except select x, amount, count(*) as tp_rows from (select v.x, o.amount from (values (11), (12), (12), (40)) v(x) join tp_o o on o.id = v.x) q group by x, amount) x),
+  (select count(*) from (select x, amount, count(*) as tp_rows from (select v.x, o.amount from (values (11), (12), (12), (40)) v(x) join tp_o o on o.id = v.x) q group by x, amount except select x, amount, count(*) as tp_rows from tp_values_pk_on group by x, amount) y),
+  (select count(*) from tp_values_pk_on) - (select count(*) from (select v.x, o.amount from (values (11), (12), (12), (40)) v(x) join tp_o o on o.id = v.x) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_on group by col, id, v, window_start except select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_off group by col, id, v, window_start) x),
+  (select count(*) from (select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_off group by col, id, v, window_start except select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_on group by col, id, v, window_start) y),
+  (select count(*) from tp_union_pk_hop_on) - (select count(*) from tp_union_pk_hop_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_on group by col, id, v, window_start except select col, id, v, window_start, count(*) as tp_rows from (select u.col, h.id, h.v, h.window_start from (select 1 as col union select 2) u, lateral (select * from hop(tp_h, ts, interval '10' minute, interval '30' minute) where col = id) h) q group by col, id, v, window_start) x),
+  (select count(*) from (select col, id, v, window_start, count(*) as tp_rows from (select u.col, h.id, h.v, h.window_start from (select 1 as col union select 2) u, lateral (select * from hop(tp_h, ts, interval '10' minute, interval '30' minute) where col = id) h) q group by col, id, v, window_start except select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_on group by col, id, v, window_start) y),
+  (select count(*) from tp_union_pk_hop_on) - (select count(*) from (select u.col, h.id, h.v, h.window_start from (select 1 as col union select 2) u, lateral (select * from hop(tp_h, ts, interval '10' minute, interval '30' minute) where col = id) h) q);
 ----
 0 0 0
 
@@ -746,6 +790,38 @@ select
 
 query III
 select
+  (select count(*) from (select x, amount, count(*) as tp_rows from tp_values_pk_on group by x, amount except select x, amount, count(*) as tp_rows from tp_values_pk_off group by x, amount) x),
+  (select count(*) from (select x, amount, count(*) as tp_rows from tp_values_pk_off group by x, amount except select x, amount, count(*) as tp_rows from tp_values_pk_on group by x, amount) y),
+  (select count(*) from tp_values_pk_on) - (select count(*) from tp_values_pk_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, amount, count(*) as tp_rows from tp_values_pk_on group by x, amount except select x, amount, count(*) as tp_rows from (select v.x, o.amount from (values (11), (12), (12), (40)) v(x) join tp_o o on o.id = v.x) q group by x, amount) x),
+  (select count(*) from (select x, amount, count(*) as tp_rows from (select v.x, o.amount from (values (11), (12), (12), (40)) v(x) join tp_o o on o.id = v.x) q group by x, amount except select x, amount, count(*) as tp_rows from tp_values_pk_on group by x, amount) y),
+  (select count(*) from tp_values_pk_on) - (select count(*) from (select v.x, o.amount from (values (11), (12), (12), (40)) v(x) join tp_o o on o.id = v.x) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_on group by col, id, v, window_start except select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_off group by col, id, v, window_start) x),
+  (select count(*) from (select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_off group by col, id, v, window_start except select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_on group by col, id, v, window_start) y),
+  (select count(*) from tp_union_pk_hop_on) - (select count(*) from tp_union_pk_hop_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_on group by col, id, v, window_start except select col, id, v, window_start, count(*) as tp_rows from (select u.col, h.id, h.v, h.window_start from (select 1 as col union select 2) u, lateral (select * from hop(tp_h, ts, interval '10' minute, interval '30' minute) where col = id) h) q group by col, id, v, window_start) x),
+  (select count(*) from (select col, id, v, window_start, count(*) as tp_rows from (select u.col, h.id, h.v, h.window_start from (select 1 as col union select 2) u, lateral (select * from hop(tp_h, ts, interval '10' minute, interval '30' minute) where col = id) h) q group by col, id, v, window_start except select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_on group by col, id, v, window_start) y),
+  (select count(*) from tp_union_pk_hop_on) - (select count(*) from (select u.col, h.id, h.v, h.window_start from (select 1 as col union select 2) u, lateral (select * from hop(tp_h, ts, interval '10' minute, interval '30' minute) where col = id) h) q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select region, n, sid, count(*) as tp_rows from tp_agg_key_on group by region, n, sid except select region, n, sid, count(*) as tp_rows from tp_agg_key_off group by region, n, sid) x),
   (select count(*) from (select region, n, sid, count(*) as tp_rows from tp_agg_key_off group by region, n, sid except select region, n, sid, count(*) as tp_rows from tp_agg_key_on group by region, n, sid) y),
   (select count(*) from tp_agg_key_on) - (select count(*) from tp_agg_key_off);
@@ -1167,6 +1243,38 @@ select
 
 query III
 select
+  (select count(*) from (select x, amount, count(*) as tp_rows from tp_values_pk_on group by x, amount except select x, amount, count(*) as tp_rows from tp_values_pk_off group by x, amount) x),
+  (select count(*) from (select x, amount, count(*) as tp_rows from tp_values_pk_off group by x, amount except select x, amount, count(*) as tp_rows from tp_values_pk_on group by x, amount) y),
+  (select count(*) from tp_values_pk_on) - (select count(*) from tp_values_pk_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, amount, count(*) as tp_rows from tp_values_pk_on group by x, amount except select x, amount, count(*) as tp_rows from (select v.x, o.amount from (values (11), (12), (12), (40)) v(x) join tp_o o on o.id = v.x) q group by x, amount) x),
+  (select count(*) from (select x, amount, count(*) as tp_rows from (select v.x, o.amount from (values (11), (12), (12), (40)) v(x) join tp_o o on o.id = v.x) q group by x, amount except select x, amount, count(*) as tp_rows from tp_values_pk_on group by x, amount) y),
+  (select count(*) from tp_values_pk_on) - (select count(*) from (select v.x, o.amount from (values (11), (12), (12), (40)) v(x) join tp_o o on o.id = v.x) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_on group by col, id, v, window_start except select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_off group by col, id, v, window_start) x),
+  (select count(*) from (select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_off group by col, id, v, window_start except select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_on group by col, id, v, window_start) y),
+  (select count(*) from tp_union_pk_hop_on) - (select count(*) from tp_union_pk_hop_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_on group by col, id, v, window_start except select col, id, v, window_start, count(*) as tp_rows from (select u.col, h.id, h.v, h.window_start from (select 1 as col union select 2) u, lateral (select * from hop(tp_h, ts, interval '10' minute, interval '30' minute) where col = id) h) q group by col, id, v, window_start) x),
+  (select count(*) from (select col, id, v, window_start, count(*) as tp_rows from (select u.col, h.id, h.v, h.window_start from (select 1 as col union select 2) u, lateral (select * from hop(tp_h, ts, interval '10' minute, interval '30' minute) where col = id) h) q group by col, id, v, window_start except select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_on group by col, id, v, window_start) y),
+  (select count(*) from tp_union_pk_hop_on) - (select count(*) from (select u.col, h.id, h.v, h.window_start from (select 1 as col union select 2) u, lateral (select * from hop(tp_h, ts, interval '10' minute, interval '30' minute) where col = id) h) q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select region, n, sid, count(*) as tp_rows from tp_agg_key_on group by region, n, sid except select region, n, sid, count(*) as tp_rows from tp_agg_key_off group by region, n, sid) x),
   (select count(*) from (select region, n, sid, count(*) as tp_rows from tp_agg_key_off group by region, n, sid except select region, n, sid, count(*) as tp_rows from tp_agg_key_on group by region, n, sid) y),
   (select count(*) from tp_agg_key_on) - (select count(*) from tp_agg_key_off);
@@ -1553,6 +1661,38 @@ select
   (select count(*) from (select x, sid, count(*) as tp_rows from tp_values_on group by x, sid except select x, sid, count(*) as tp_rows from (select v.x, s.sid from (values (11), (12), (12), (40)) v(x) join tp_s s on s.order_id = v.x) q group by x, sid) x),
   (select count(*) from (select x, sid, count(*) as tp_rows from (select v.x, s.sid from (values (11), (12), (12), (40)) v(x) join tp_s s on s.order_id = v.x) q group by x, sid except select x, sid, count(*) as tp_rows from tp_values_on group by x, sid) y),
   (select count(*) from tp_values_on) - (select count(*) from (select v.x, s.sid from (values (11), (12), (12), (40)) v(x) join tp_s s on s.order_id = v.x) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, amount, count(*) as tp_rows from tp_values_pk_on group by x, amount except select x, amount, count(*) as tp_rows from tp_values_pk_off group by x, amount) x),
+  (select count(*) from (select x, amount, count(*) as tp_rows from tp_values_pk_off group by x, amount except select x, amount, count(*) as tp_rows from tp_values_pk_on group by x, amount) y),
+  (select count(*) from tp_values_pk_on) - (select count(*) from tp_values_pk_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, amount, count(*) as tp_rows from tp_values_pk_on group by x, amount except select x, amount, count(*) as tp_rows from (select v.x, o.amount from (values (11), (12), (12), (40)) v(x) join tp_o o on o.id = v.x) q group by x, amount) x),
+  (select count(*) from (select x, amount, count(*) as tp_rows from (select v.x, o.amount from (values (11), (12), (12), (40)) v(x) join tp_o o on o.id = v.x) q group by x, amount except select x, amount, count(*) as tp_rows from tp_values_pk_on group by x, amount) y),
+  (select count(*) from tp_values_pk_on) - (select count(*) from (select v.x, o.amount from (values (11), (12), (12), (40)) v(x) join tp_o o on o.id = v.x) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_on group by col, id, v, window_start except select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_off group by col, id, v, window_start) x),
+  (select count(*) from (select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_off group by col, id, v, window_start except select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_on group by col, id, v, window_start) y),
+  (select count(*) from tp_union_pk_hop_on) - (select count(*) from tp_union_pk_hop_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_on group by col, id, v, window_start except select col, id, v, window_start, count(*) as tp_rows from (select u.col, h.id, h.v, h.window_start from (select 1 as col union select 2) u, lateral (select * from hop(tp_h, ts, interval '10' minute, interval '30' minute) where col = id) h) q group by col, id, v, window_start) x),
+  (select count(*) from (select col, id, v, window_start, count(*) as tp_rows from (select u.col, h.id, h.v, h.window_start from (select 1 as col union select 2) u, lateral (select * from hop(tp_h, ts, interval '10' minute, interval '30' minute) where col = id) h) q group by col, id, v, window_start except select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_on group by col, id, v, window_start) y),
+  (select count(*) from tp_union_pk_hop_on) - (select count(*) from (select u.col, h.id, h.v, h.window_start from (select 1 as col union select 2) u, lateral (select * from hop(tp_h, ts, interval '10' minute, interval '30' minute) where col = id) h) q);
 ----
 0 0 0
 
@@ -1947,6 +2087,38 @@ select
 
 query III
 select
+  (select count(*) from (select x, amount, count(*) as tp_rows from tp_values_pk_on group by x, amount except select x, amount, count(*) as tp_rows from tp_values_pk_off group by x, amount) x),
+  (select count(*) from (select x, amount, count(*) as tp_rows from tp_values_pk_off group by x, amount except select x, amount, count(*) as tp_rows from tp_values_pk_on group by x, amount) y),
+  (select count(*) from tp_values_pk_on) - (select count(*) from tp_values_pk_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, amount, count(*) as tp_rows from tp_values_pk_on group by x, amount except select x, amount, count(*) as tp_rows from (select v.x, o.amount from (values (11), (12), (12), (40)) v(x) join tp_o o on o.id = v.x) q group by x, amount) x),
+  (select count(*) from (select x, amount, count(*) as tp_rows from (select v.x, o.amount from (values (11), (12), (12), (40)) v(x) join tp_o o on o.id = v.x) q group by x, amount except select x, amount, count(*) as tp_rows from tp_values_pk_on group by x, amount) y),
+  (select count(*) from tp_values_pk_on) - (select count(*) from (select v.x, o.amount from (values (11), (12), (12), (40)) v(x) join tp_o o on o.id = v.x) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_on group by col, id, v, window_start except select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_off group by col, id, v, window_start) x),
+  (select count(*) from (select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_off group by col, id, v, window_start except select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_on group by col, id, v, window_start) y),
+  (select count(*) from tp_union_pk_hop_on) - (select count(*) from tp_union_pk_hop_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_on group by col, id, v, window_start except select col, id, v, window_start, count(*) as tp_rows from (select u.col, h.id, h.v, h.window_start from (select 1 as col union select 2) u, lateral (select * from hop(tp_h, ts, interval '10' minute, interval '30' minute) where col = id) h) q group by col, id, v, window_start) x),
+  (select count(*) from (select col, id, v, window_start, count(*) as tp_rows from (select u.col, h.id, h.v, h.window_start from (select 1 as col union select 2) u, lateral (select * from hop(tp_h, ts, interval '10' minute, interval '30' minute) where col = id) h) q group by col, id, v, window_start except select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_on group by col, id, v, window_start) y),
+  (select count(*) from tp_union_pk_hop_on) - (select count(*) from (select u.col, h.id, h.v, h.window_start from (select 1 as col union select 2) u, lateral (select * from hop(tp_h, ts, interval '10' minute, interval '30' minute) where col = id) h) q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select region, n, sid, count(*) as tp_rows from tp_agg_key_on group by region, n, sid except select region, n, sid, count(*) as tp_rows from tp_agg_key_off group by region, n, sid) x),
   (select count(*) from (select region, n, sid, count(*) as tp_rows from tp_agg_key_off group by region, n, sid except select region, n, sid, count(*) as tp_rows from tp_agg_key_on group by region, n, sid) y),
   (select count(*) from tp_agg_key_on) - (select count(*) from tp_agg_key_off);
@@ -2336,6 +2508,38 @@ select
 
 query III
 select
+  (select count(*) from (select x, amount, count(*) as tp_rows from tp_values_pk_on group by x, amount except select x, amount, count(*) as tp_rows from tp_values_pk_off group by x, amount) x),
+  (select count(*) from (select x, amount, count(*) as tp_rows from tp_values_pk_off group by x, amount except select x, amount, count(*) as tp_rows from tp_values_pk_on group by x, amount) y),
+  (select count(*) from tp_values_pk_on) - (select count(*) from tp_values_pk_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, amount, count(*) as tp_rows from tp_values_pk_on group by x, amount except select x, amount, count(*) as tp_rows from (select v.x, o.amount from (values (11), (12), (12), (40)) v(x) join tp_o o on o.id = v.x) q group by x, amount) x),
+  (select count(*) from (select x, amount, count(*) as tp_rows from (select v.x, o.amount from (values (11), (12), (12), (40)) v(x) join tp_o o on o.id = v.x) q group by x, amount except select x, amount, count(*) as tp_rows from tp_values_pk_on group by x, amount) y),
+  (select count(*) from tp_values_pk_on) - (select count(*) from (select v.x, o.amount from (values (11), (12), (12), (40)) v(x) join tp_o o on o.id = v.x) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_on group by col, id, v, window_start except select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_off group by col, id, v, window_start) x),
+  (select count(*) from (select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_off group by col, id, v, window_start except select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_on group by col, id, v, window_start) y),
+  (select count(*) from tp_union_pk_hop_on) - (select count(*) from tp_union_pk_hop_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_on group by col, id, v, window_start except select col, id, v, window_start, count(*) as tp_rows from (select u.col, h.id, h.v, h.window_start from (select 1 as col union select 2) u, lateral (select * from hop(tp_h, ts, interval '10' minute, interval '30' minute) where col = id) h) q group by col, id, v, window_start) x),
+  (select count(*) from (select col, id, v, window_start, count(*) as tp_rows from (select u.col, h.id, h.v, h.window_start from (select 1 as col union select 2) u, lateral (select * from hop(tp_h, ts, interval '10' minute, interval '30' minute) where col = id) h) q group by col, id, v, window_start except select col, id, v, window_start, count(*) as tp_rows from tp_union_pk_hop_on group by col, id, v, window_start) y),
+  (select count(*) from tp_union_pk_hop_on) - (select count(*) from (select u.col, h.id, h.v, h.window_start from (select 1 as col union select 2) u, lateral (select * from hop(tp_h, ts, interval '10' minute, interval '30' minute) where col = id) h) q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select region, n, sid, count(*) as tp_rows from tp_agg_key_on group by region, n, sid except select region, n, sid, count(*) as tp_rows from tp_agg_key_off group by region, n, sid) x),
   (select count(*) from (select region, n, sid, count(*) as tp_rows from tp_agg_key_off group by region, n, sid except select region, n, sid, count(*) as tp_rows from tp_agg_key_on group by region, n, sid) y),
   (select count(*) from tp_agg_key_on) - (select count(*) from tp_agg_key_off);
@@ -2660,6 +2864,12 @@ statement ok
 drop materialized view tp_agg_key_on;
 
 statement ok
+drop materialized view tp_union_pk_hop_on;
+
+statement ok
+drop materialized view tp_values_pk_on;
+
+statement ok
 drop materialized view tp_values_on;
 
 statement ok
@@ -2730,6 +2940,12 @@ drop materialized view tp_left_off;
 
 statement ok
 drop materialized view tp_agg_key_off;
+
+statement ok
+drop materialized view tp_union_pk_hop_off;
+
+statement ok
+drop materialized view tp_values_pk_off;
 
 statement ok
 drop materialized view tp_values_off;

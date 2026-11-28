@@ -2222,6 +2222,13 @@ Join(o.region = s.region AND o.id = s.order_id)       Join(...)
 - Risk: the batch estimates count a copied filter on both sides of a join whose selectivity
   already accounts for it (PostgreSQL documents the same problem); the learned selectivities of
   `batch_cardinality_feedback_learning` correct it once observed.
+- Streaming: an `IN` list or an `OR` is not copied onto a column that may reach a column of the
+  primary key or of an index of a scanned table (followed through projections, filters, joins,
+  unions, group keys, hop windows and the operators that keep their input columns): the scan would
+  become one scan per value under a `UNION ALL` (`StreamingIndexSelectionRule`), each subscribing
+  to all the changes of the table and backfilling it (upstream case "test hop window subquery 1").
+  A single value is copied (one range scan replaces the full scan). Batch reads the ranges in one
+  scan and copies them all.
 - Stages: `TRANSITIVE_PREDICATES` (bottom-up) after the first predicate pushdown and before join
   ordering, in both pipelines, each round followed by predicate pushdown.
 - Tests: planner tests `stream_transitive_predicates.yaml`, `batch_transitive_predicates.yaml`;
