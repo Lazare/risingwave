@@ -140,8 +140,8 @@ impl Rule<Logical> for SemiJoinPlacementRule {
                     mapping[column] = Some(local);
                 }
             }
-            for column in 0..right_len {
-                mapping[left_len + column] = Some(input_len + column);
+            for (column, target) in mapping[left_len..].iter_mut().enumerate() {
+                *target = Some(input_len + column);
             }
             let pushed_on = on
                 .clone()
