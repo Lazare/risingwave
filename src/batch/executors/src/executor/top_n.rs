@@ -222,6 +222,13 @@ impl TopNHeap {
         }
     }
 
+    /// All the elements that the heap keeps, those of the offset included, in no particular
+    /// order: pushed into another heap with the same limit, offset and ties, they give the same
+    /// result as this heap.
+    pub fn into_elems(self) -> impl Iterator<Item = HeapElem> {
+        self.heap.into_sorted_vec().into_iter()
+    }
+
     /// Returns the elements in the range `[offset, offset+limit)`.
     pub fn dump(self) -> impl Iterator<Item = HeapElem> {
         self.heap

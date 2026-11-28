@@ -159,6 +159,15 @@ pub enum BatchError {
     NoMemoryLeft(String, u64),
 
     #[error(
+        "Not enough memory to run this query: an operator that cannot spill to disk ({0}) needs \
+         {1} MB and the batch memory of the node is exhausted. Every running query of the node \
+         was waiting for memory that only another waiting query could release: this query, the \
+         most recently started of them, was chosen to fail so that the others can proceed. Run \
+         it again when the node is less busy."
+    )]
+    MemoryWaitVictim(String, u64),
+
+    #[error(
         "Not enough spill files to run this query: {needed} more needed, \
          {limit} allowed for all batch queries on this node"
     )]

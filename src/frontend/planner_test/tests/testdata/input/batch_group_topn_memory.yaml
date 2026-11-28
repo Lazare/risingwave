@@ -1,0 +1,136 @@
+# Tests for the batch top-n per group (batch only).
+# - `batch_streaming_unordered_group_topn`: the order columns that belong to the group key are
+#   dropped from the order of a `BatchGroupTopN` (they are equal within a group); a top-n per group
+#   left without order, `WITH TIES` and offset is run by its executor without keeping rows.
+# - `batch_spill_group_topn`: a `BatchGroupTopN` with an order spills (`spill: true`), and counts as
+#   a spillable operator of its query. Not when it is unordered.
+- id: setup_off
+  sql: |
+    create table t (k int, v int, w varchar, j jsonb);
+  expected_outputs: []
+- id: setup
+  sql: |
+    set batch_streaming_unordered_group_topn = true;
+    set batch_over_window_to_topn = true;
+    create table t (k int, v int, w varchar, j jsonb);
+  expected_outputs: []
+- id: setup_spill
+  sql: |
+    set batch_spill_group_topn = true;
+    set batch_over_window_to_topn = true;
+    create table t (k int, v int, w varchar, j jsonb);
+  expected_outputs: []
+
+- name: off by default - distinct on ordered by its key
+  before: [setup_off]
+  sql: |
+    select distinct on (k) k, v from t order by k;
+  expected_outputs:
+  - batch_plan
+- name: off by default - window ordered by its partition key
+  before: [setup_off]
+  sql: |
+    set batch_over_window_to_topn = true;
+    select k, v from (select k, v, row_number() over (partition by k order by k) as rn from t) s where rn = 1;
+  expected_outputs:
+  - batch_plan
+
+# Rewritten: the order columns that belong to the group key are dropped.
+- name: distinct on ordered by its key only
+  before: [setup]
+  sql: |
+    select distinct on (k) k, v from t order by k;
+  expected_outputs:
+  - batch_plan
+- name: distinct on ordered by its key, then another column
+  before: [setup]
+  sql: |
+    select distinct on (k) k, v from t order by k, v desc;
+  expected_outputs:
+  - batch_plan
+- name: distinct on two columns ordered by both
+  before: [setup]
+  sql: |
+    select distinct on (k, w) k, w, v from t order by w, k;
+  expected_outputs:
+  - batch_plan
+- name: window ordered by its partition key, first row
+  before: [setup]
+  sql: |
+    select k, v from (select k, v, row_number() over (partition by k order by k) as rn from t) s where rn = 1;
+  expected_outputs:
+  - batch_plan
+- name: window ordered by its partition key, three first rows
+  before: [setup]
+  sql: |
+    select k, v from (select k, v, row_number() over (partition by k order by k) as rn from t) s where rn <= 3;
+  expected_outputs:
+  - batch_plan
+- name: window with an offset, ordered by its partition key (order dropped, still not unordered)
+  before: [setup]
+  sql: |
+    select k, v from (select k, v, row_number() over (partition by k order by k) as rn from t) s where rn between 2 and 3;
+  expected_outputs:
+  - batch_plan
+- name: unordered top-n per group under a limit
+  before: [setup]
+  sql: |
+    select * from (select distinct on (k) k, v from t order by k) s limit 3;
+  expected_outputs:
+  - batch_plan
+- name: distinct on over a union of aggregations
+  before: [setup]
+  sql: |
+    select distinct on (k) k, j from (
+      select k, jsonb_agg(j) as j from t group by k
+      union all
+      select v as k, jsonb_agg(j) as j from t group by v
+    ) u;
+  expected_outputs:
+  - batch_plan
+
+# Kept: the order has no column of the group key.
+- name: distinct on ordered by another column
+  before: [setup]
+  sql: |
+    select distinct on (k) k, v from t order by k, v;
+  expected_outputs:
+  - batch_plan
+- name: window ordered by another column
+  before: [setup]
+  sql: |
+    select k, v from (select k, v, row_number() over (partition by k order by v desc) as rn from t) s where rn <= 2;
+  expected_outputs:
+  - batch_plan
+- name: streaming plans are not changed
+  before: [setup]
+  sql: |
+    select distinct on (k) k, v from t order by k;
+  expected_outputs:
+  - stream_plan
+
+# `batch_spill_group_topn`.
+- name: spill - ordered top-n per group
+  before: [setup_spill]
+  sql: |
+    select k, v from (select k, v, row_number() over (partition by k order by v desc) as rn from t) s where rn <= 2;
+  expected_outputs:
+  - batch_plan
+- name: spill - distinct on ordered by another column
+  before: [setup_spill]
+  sql: |
+    select distinct on (k) k, v from t order by k, v;
+  expected_outputs:
+  - batch_plan
+- name: spill - not for an unordered top-n per group
+  before: [setup_spill]
+  sql: |
+    select distinct on (k) k, v from t;
+  expected_outputs:
+  - batch_plan
+- name: spill - off by default
+  before: [setup_off]
+  sql: |
+    select distinct on (k) k, v from t order by k, v;
+  expected_outputs:
+  - batch_plan
