@@ -53,6 +53,7 @@
 - [Data Model and Encoding](./design/data-model-and-encoding.md)
 - [Batch Local Execution Mode](./design/batch-local-execution-mode.md)
 - [Batch Memory Safety](./design/batch-memory-safety.md)
+- [Streaming and Batch Plan Reduction](./design/streaming-plan-reduction.md)
 - [Consistent Hash](./design/consistent-hash.md)
 - [Keys](./design/keys.md)
 <!--
