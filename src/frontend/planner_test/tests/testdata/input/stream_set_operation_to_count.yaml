@@ -1,0 +1,101 @@
+# Tests for `streaming_set_operation_to_count` and `batch_set_operation_to_count`
+# (`SetOperationToCountRule`): `INTERSECT` and `EXCEPT` computed by one aggregation that counts
+# the copies of each distinct row in each input, over a `UNION ALL` of the inputs.
+- id: setup_off
+  sql: |
+    create table t (k int primary key, a int, b varchar, d decimal);
+    create table u (k int primary key, a int, b varchar, d decimal);
+    create table w (a int, b varchar);
+    create table x (id int primary key, a int);
+  expected_outputs: []
+- id: setup
+  sql: |
+    set streaming_set_operation_to_count = true;
+    set batch_set_operation_to_count = true;
+    create table t (k int primary key, a int, b varchar, d decimal);
+    create table u (k int primary key, a int, b varchar, d decimal);
+    create table w (a int, b varchar);
+    create table x (id int primary key, a int);
+  expected_outputs: []
+
+# The variables are off by default: semi and anti joins.
+- name: off by default - intersect
+  before: [setup_off]
+  sql: |
+    select a, b from t intersect select a, b from u;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+
+# Rewritten.
+- name: intersect of two tables
+  before: [setup]
+  sql: |
+    select a, b from t intersect select a, b from u;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: except of two tables
+  before: [setup]
+  sql: |
+    select a, b from t except select a, b from u;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: intersect of three inputs, one without a key
+  before: [setup]
+  sql: |
+    select a, b from t intersect select a, b from u intersect select a, b from w;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: except of three inputs
+  before: [setup]
+  sql: |
+    select a, b from t except select a, b from u except select a, b from w;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: except then intersect
+  before: [setup]
+  sql: |
+    (select a, b from t except select a, b from u) intersect select a, b from w;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: intersect in an IN subquery
+  before: [setup]
+  sql: |
+    select id from x where a in (select a from t intersect select a from u);
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: intersect of expressions
+  before: [setup]
+  sql: |
+    select a + 1 as a1, upper(b) as ub from t intersect select a, b from u;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+
+# Left as they are.
+- name: a numeric column - equal values may differ
+  before: [setup]
+  sql: |
+    select a, d from t intersect select a, d from u;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: except with a numeric column
+  before: [setup]
+  sql: |
+    select d from t except select d from u;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: union is not touched
+  before: [setup]
+  sql: |
+    select a, b from t union select a, b from u;
+  expected_outputs:
+  - batch_plan

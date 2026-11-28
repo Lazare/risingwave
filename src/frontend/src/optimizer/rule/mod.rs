@@ -289,6 +289,18 @@ mod agg_join_transpose_rule;
 pub use agg_join_transpose_rule::*;
 mod agg_union_transpose_rule;
 pub use agg_union_transpose_rule::*;
+// Rule `SetOperationToCountRule` (`*_set_operation_to_count`).
+mod set_operation_to_count_rule;
+pub use set_operation_to_count_rule::*;
+// Rule `SetOperationFilterMergeRule` (`*_merge_set_operation_filters`).
+mod set_operation_filter_merge_rule;
+pub use set_operation_filter_merge_rule::*;
+// Rule `AggGroupKeyReduceRule` (`*_reduce_group_keys`).
+mod agg_group_key_reduce_rule;
+pub use agg_group_key_reduce_rule::*;
+// Rule `AggUnionNullBranchRule` (`*_prune_null_union_branches`).
+mod agg_union_null_branch_rule;
+pub use agg_union_null_branch_rule::*;
 mod join_project_transpose_rule;
 pub use join_project_transpose_rule::*;
 mod limit_push_down_rule;
@@ -518,6 +530,10 @@ macro_rules! for_all_rules {
             , { TopNToVectorSearchRule }
             , { CorrelatedTopNToVectorSearchRule }
             , { MvSelectionRule }
+            , { SetOperationToCountRule }
+            , { SetOperationFilterMergeRule }
+            , { AggGroupKeyReduceRule }
+            , { AggUnionNullBranchRule }
         }
     };
 }

@@ -1,0 +1,137 @@
+# Tests for `streaming_reduce_group_keys` and `batch_reduce_group_keys`
+# (`AggGroupKeyReduceRule`): the group key columns that the other ones determine are removed,
+# and `min`, `max`, `first_value`, `last_value` of a value of the group are replaced.
+- id: setup_off
+  sql: |
+    create table o (id int primary key, placed date, cust int);
+    create table i (iid int primary key, o_id int, qty int);
+    create table t (k int primary key, a int, b int, c int);
+    create table w (k int, v int, ts timestamp, watermark for ts as ts - interval '1' second) append only;
+  expected_outputs: []
+- id: setup
+  sql: |
+    set streaming_reduce_group_keys = true;
+    set batch_reduce_group_keys = true;
+    create table o (id int primary key, placed date, cust int);
+    create table i (iid int primary key, o_id int, qty int);
+    create table t (k int primary key, a int, b int, c int);
+    create table w (k int, v int, ts timestamp, watermark for ts as ts - interval '1' second) append only;
+  expected_outputs: []
+
+# The variables are off by default.
+- name: off by default - a key that the key of a join side determines
+  before: [setup_off]
+  sql: |
+    select o.id, o.placed, sum(i.qty) from o join i on i.o_id = o.id group by o.id, o.placed;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+
+# Rewritten.
+- name: a key that the key of a join side determines
+  before: [setup]
+  sql: |
+    select o.id, o.placed, sum(i.qty) from o join i on i.o_id = o.id group by o.id, o.placed;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: a key equal to another one
+  before: [setup]
+  sql: |
+    select o.id, i.o_id, sum(i.qty) from o join i on i.o_id = o.id group by o.id, i.o_id;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: a constant key
+  before: [setup]
+  sql: |
+    select a, b, count(*) from t where b = 3 group by a, b;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: only constant keys - one is kept
+  before: [setup]
+  sql: |
+    select a, b, count(*) from t where a = 1 and b = 3 group by a, b;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: a literal key
+  before: [setup]
+  sql: |
+    select a, 'x' as tag, count(*) from t group by a, tag;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: max and min of a group key
+  before: [setup]
+  sql: |
+    select a, max(a) as mx, min(a) as mn, count(*) from t group by a;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: max of a value that the group key determines
+  before: [setup]
+  sql: |
+    select o.id, max(o.placed) as p, sum(i.qty) from o join i on i.o_id = o.id group by o.id;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: first_value of a group key
+  before: [setup]
+  sql: |
+    select a, first_value(a order by b) as f, sum(c) from t group by a;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: a key determined by the key of a sub-aggregation
+  before: [setup]
+  sql: |
+    select a, mb, count(*) from (select a, max(b) as mb from t group by a) x group by a, mb;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: batch only - a table with a watermark
+  before: [setup]
+  sql: |
+    select k, v, count(*) from w where v = 1 group by k, v;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+
+# Left as they are.
+- name: a key of the padded side of a left join
+  before: [setup]
+  sql: |
+    select i.iid, o.placed, count(*) from i left join o on i.o_id = o.id group by i.iid, o.placed;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: max with a filter
+  before: [setup]
+  sql: |
+    select a, max(a) filter (where b > 0) as mx from t group by a;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: max of a column that the group key does not determine
+  before: [setup]
+  sql: |
+    select a, max(b) as mb from t group by a;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: keys that determine nothing
+  before: [setup]
+  sql: |
+    select a, b, count(*) from t group by a, b;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: no group key - max of a constant is kept (a row with no input)
+  before: [setup]
+  sql: |
+    select max(b) as mb, count(*) from t where b = 3;
+  expected_outputs:
+  - batch_plan
+  - stream_plan

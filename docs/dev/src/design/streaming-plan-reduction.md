@@ -57,6 +57,10 @@ own rules.
 | OR | Restrictions of each side derived from an `OR` of a join condition (`batch_derive_or_restrictions`, `streaming_derive_or_restrictions`; survey rule 6) | done (prototype, branch `proto/plan-reduction-or-values`), see "OR" below |
 | OU | Join on an `OR` of equi-conditions as equi-joins combined with `UNION ALL` or anti joins (`batch_or_join_to_union`, `streaming_or_join_to_union`; survey rule 7) | done (prototype, branch `proto/plan-reduction-or-values`), see "OU" below |
 | TP | Predicates copied to the other side of a join through its equalities, transitively; implied equalities in the batch cost-based join ordering (`streaming_transitive_predicates`, `batch_transitive_predicates`) | done (prototype, branch `proto/plan-reduction-transitive-preds`, see "TP" below) |
+| S12 | `INTERSECT` / `EXCEPT` computed by one counting aggregation over a `UNION ALL` of the inputs (`streaming_set_operation_to_count`, `batch_set_operation_to_count`) | done (prototype, branch `proto/plan-reduction-setop-keys`), see "S12" below; `ALL` variants not supported by the binder |
+| S13 | `UNION` / `INTERSECT` / `EXCEPT` of filters over the same input become one filter (`streaming_merge_set_operation_filters`, `batch_merge_set_operation_filters`) | done (prototype, branch `proto/plan-reduction-setop-keys`), see "S13" below |
+| S9 | Group key columns that the other ones determine removed, `min` / `max` / `first_value` / `last_value` of a value of the group replaced (`streaming_reduce_group_keys`, `batch_reduce_group_keys`) | done for aggregations (prototype, branch `proto/plan-reduction-setop-keys`), see "S9" below; partition and order keys of windows and top-n not done |
+| S10 | Branches of a `UNION ALL` that only feed `NULL` to the aggregation above removed (`streaming_prune_null_union_branches`, `batch_prune_null_union_branches`) | done (prototype, branch `proto/plan-reduction-setop-keys`), see "S10" below |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -2167,6 +2171,171 @@ Agg(group k: count(*), sum(x))           Agg(group k: sum0(n), sum(s))
   `e2e_test/batch/push_agg_below_join.gen.py` (all three batch variables off, then on, with the
   group ratios learned from plain aggregations of the tables; empty tables, NULL keys,
   duplicates, rows without match, updates and deletes, emptied sides).
+
+### S12. `INTERSECT` / `EXCEPT` as a counting aggregation (added on 2026-11-28, done on the branch)
+
+Variables `streaming_set_operation_to_count` and `batch_set_operation_to_count`, rule
+`SetOperationToCountRule` (Calcite `IntersectToDistinctRule`, `MinusToDistinctRule`). Without it,
+`INTERSECT` and `EXCEPT` (distinct) become left semi or anti joins on `IS NOT DISTINCT FROM` of
+every column, followed by a `DISTINCT` (`IntersectToSemiJoinRule`, `ExceptToAntiJoinRule`).
+
+```text
+SELECT a, b FROM t INTERSECT SELECT a, b FROM u
+
+Project(a, b)
+└─Filter(c0 > 0 AND c1 > 0)                  -- EXCEPT: c0 > 0 AND c1 = 0
+  └─Agg(group by a, b: count(m0) AS c0, count(m1) AS c1)
+    └─Union(all)
+      ├─Project(a, b, m0 = 1, m1 = NULL) <- t
+      └─Project(a, b, m0 = NULL, m1 = 1) <- u
+```
+
+- A group is a distinct row of the inputs (grouping treats `NULL`s as equal, as the set
+  operations do); `c i` counts its copies in input `i`. The row is output once when it is in every
+  input (`INTERSECT`), or in the first one and in no other one (`EXCEPT`). More than two inputs
+  (after the merge of stacked set operations) get one count each.
+- Only when every column has a type in which equal values are identical (integers, `varchar`,
+  `bytea`, `boolean`, dates and times): the value that a group outputs is that of one of its rows,
+  possibly from another input than the first one (in streaming, the row that created the group).
+  With `numeric` (`1.0` and `1.00`), floats (`0.0` and `-0.0`) or intervals, the joins output the
+  value of the first input; the aggregation may not, so the rule is not applied.
+- Streaming: one aggregation state with each distinct row of the inputs once, instead of the two
+  join states (every row of each input), the degree table and the state of the `DISTINCT`. The
+  counts are value states (`count`), retractable. Batch: one hash aggregation instead of a hash
+  join and a hash aggregation. Without `batch_distributed_union` the `UNION ALL` gathers both
+  inputs on one node before the exchange to the aggregation, which is worse than the distributed
+  hash join: use the batch variable only together with `batch_distributed_union`.
+- Stage: `SET_OPERATION_TO_COUNT`, right after `SET_OPERATION_MERGE` and before
+  `SET_OPERATION_TO_JOIN`, in both pipelines.
+- `INTERSECT ALL` and `EXCEPT ALL` are rejected by the binder ("not implemented"); their rewrite
+  (a `generate_series` over the smallest count or the difference) is not done.
+- Tests: planner tests `stream_set_operation_to_count.yaml` (batch and streaming plans);
+  differential tests `e2e_test/streaming/set_operation_to_count` and
+  `e2e_test/batch/set_operation_to_count` (NULLs, duplicates, three inputs, `EXCEPT` then
+  `INTERSECT`, under `IN`, inputs emptied and filled again, a `numeric` case left as it is).
+
+### S13. Set operations of filters over the same input (added on 2026-11-28, done on the branch)
+
+Variables `streaming_merge_set_operation_filters` and `batch_merge_set_operation_filters`, rule
+`SetOperationFilterMergeRule` (Calcite `SetOpToFilterRule`). Extends US (`UnionScanMergeRule`,
+which reads once the table of the branches of a `UNION ALL`) to the distinct set operations.
+
+```text
+SELECT k, a FROM t WHERE p0  UNION      SELECT k, a FROM t WHERE p1   =>  DISTINCT .. WHERE p0 OR p1
+                             INTERSECT                                =>  DISTINCT .. WHERE p0 AND p1
+                             EXCEPT                                   =>  DISTINCT .. WHERE p0 AND (p1) IS NOT TRUE
+```
+
+- Branches: the form `(Project | Filter)* base` of US (`branch_of`), the base a scan of a table
+  (not in the past) or a shared sub-plan; the merged branches read the same base with the same
+  output expressions `π`, pure and without correlated references.
+- `UNION`: `{π(x) | p0(x)} ∪ {π(x) | p1(x)} = {π(x) | p0(x) OR p1(x)}` holds for any `π`.
+- `INTERSECT` / `EXCEPT`: two rows `x`, `y` of the base with `π(x) = π(y)` may pass different
+  filters. Exact when the conjuncts of each branch but the first, besides those common to all,
+  have the same value on such rows: they read only columns that `π` outputs as they are, of a type
+  in which equal values are identical, or `π` outputs the whole key of the table (two rows with the
+  same output are then the same row). `NULL`s compare equal in set operations, so an output column
+  has the same value, `NULL` included. Proof sketch in the rule's documentation.
+- `UNION` and `INTERSECT` merge any group of branches over the same base and keep the others;
+  `EXCEPT` merges into its first input the later inputs over the same base (`AND .. IS NOT TRUE`)
+  and merges with `OR` the later inputs over another common base (their union is subtracted). A
+  single input left becomes a `DISTINCT`.
+- Streaming: an `INTERSECT` or `EXCEPT` loses its join (two states holding every row of the base)
+  and the base is read once; a `UNION` reads once without the `Expand` copies of US. A table with a
+  watermark is left alone in streaming (as in US). After the rule, a shared scan that only the
+  merged branches read is unshared (`prune_share`).
+- Stage: `STREAM_MERGE_SET_OPERATION_FILTERS` / `BATCH_MERGE_SET_OPERATION_FILTERS`, right after
+  `SET_OPERATION_MERGE`, before S12 and `SET_OPERATION_TO_JOIN`.
+- Not done: branches that differ by their projection (`INTERSECT` would need the inverse of the
+  projection), `INTERSECT` / `EXCEPT` whose filters read columns that are not output without the
+  key of the table.
+- Tests: planner tests `stream_merge_set_operation_filters.yaml` (batch and streaming plans);
+  differential tests `e2e_test/streaming/merge_set_operation_filters` and
+  `e2e_test/batch/merge_set_operation_filters` (filters with NULLs, values moved across the
+  filters by updates, three branches over two tables, kept cases: a filter on a column not output,
+  a `numeric` column, different projections, different tables).
+
+### S9. Group keys and aggregates of values of the group (added on 2026-11-28, done on the branch)
+
+Variables `streaming_reduce_group_keys` and `batch_reduce_group_keys`, rule
+`AggGroupKeyReduceRule` (Calcite `AggregateRemoveDuplicateKeysRule`,
+`AggregateReduceFunctionsOnGroupKeysRule`, `AggregateProjectPullUpConstantsRule`; PostgreSQL
+`remove_useless_groupby_columns`). `AggGroupBySimplifyRule` (always on) only narrows a group key
+that is a key of the whole input, which column pruning makes rare once an aggregate reads another
+column.
+
+```text
+SELECT o.id, o.placed, sum(i.qty) FROM o JOIN i ON i.o_id = o.id GROUP BY o.id, o.placed
+  => GROUP BY o.id, internal_last_seen_value(o.placed)
+SELECT a, b, count(*) FROM t WHERE b = 3 GROUP BY a, b    => GROUP BY a, last seen value of b
+SELECT k, max(k), min(k) FROM t GROUP BY k                => GROUP BY k, projected three times
+```
+
+- The functional dependencies of the input (keys of tables and of aggregations, `a = b` and
+  `a = literal` conjuncts of filters and inner joins, the left side of a left join) and the
+  literal columns of a projection right below. A group key column that the other kept ones
+  determine is removed, from the last one; at least one column is kept (an aggregation without
+  group key returns a row on an empty input). Its value is that of any row of the group
+  (`internal_last_seen_value`, which takes `NULL` as a value and keeps its state on retractions).
+- `min`, `max`, `first_value`, `last_value`, `internal_last_seen_value` without `FILTER` of a column
+  that the kept group key determines: a kept group key column is read from the group key, another
+  one from a single `internal_last_seen_value` call. Valid with `NULL`s: the dependencies hold
+  with `NULL` as a value, and `min` of `NULL`s is `NULL`.
+- Streaming: a narrower state key (and primary key of a materialized view); a `min` / `max` over an
+  input that retracts rows keeps every value of the group (materialized input state), replaced by
+  one value. Not under a source, `now()` or a table with a watermark: a column with a watermark
+  must stay in the group key (state cleaning, `EMIT ON WINDOW CLOSE`).
+- Not for an aggregation without group key: it has a row when no row is left (empty input, all
+  rows retracted in streaming, a partition without rows in the first phase of a two-phase batch
+  aggregation), where `max` is `NULL` but `internal_last_seen_value` keeps the last value seen.
+  The differential tests found this on a first version (`max(b) ... WHERE b = 3` without
+  `GROUP BY`, wrong in both batch and streaming).
+- Stage: `STREAM_REDUCE_GROUP_KEYS` after the last stages of the prototype (after the final column
+  pruning, so that the dependencies are those of the columns read), then column pruning;
+  `BATCH_REDUCE_GROUP_KEYS` after the status ladder stage.
+- Not done: partition keys of windows, group keys and order keys of top-n (the same reduction
+  applies; smaller gains), keys made constant by an equivalence class (only direct `= literal`
+  conjuncts and literals are seen).
+- Tests: planner tests `stream_reduce_group_keys.yaml` (batch and streaming plans); differential
+  tests `e2e_test/streaming/reduce_group_keys` and `e2e_test/batch/reduce_group_keys`
+  (determined columns updated, set to and from `NULL`, orders without items, left joins, keys of a
+  sub-aggregation, kept cases).
+
+### S10. Branches of a `UNION ALL` that only feed `NULL` to an aggregation (added on 2026-11-28, done on the branch)
+
+Variables `streaming_prune_null_union_branches` and `batch_prune_null_union_branches`, rule
+`AggUnionNullBranchRule` (Calcite `AggregateUnionNullBranchRule`). "Metrics" views union per-kind
+branches that each fill one measure and leave the others `NULL`.
+
+```text
+SELECT sum(m) FROM (SELECT x AS m FROM a UNION ALL SELECT NULL::int FROM b) v
+  => SELECT sum(m) FROM (SELECT x AS m FROM a) v
+SELECT k, sum(m) FROM (... UNION ALL SELECT k, NULL FROM b GROUP BY k) v GROUP BY k
+  => the GROUP BY of the second branch becomes a projection
+```
+
+- A branch is irrelevant when every aggregate call ignores rows whose argument is `NULL` (`sum`,
+  `sum0`, `min`, `max`, `count(x)`, `avg`, `stddev_*`, `var_*`, `bit_*`, `bool_*`) and the argument
+  of every call is `NULL` in every row of the branch (`NULL` literals, `x IS NULL` filters, the
+  analysis of NK; the group key columns of a `DISTINCT` at the top of the branch). One `count(*)`,
+  `array_agg`, `string_agg`, `first_value`... keeps every branch, as does a branch that is `NULL`
+  for some calls only.
+- Without group key: irrelevant branches are removed; if none is left, the aggregation reads an
+  empty `VALUES` and returns its row over no input (`count` 0, the others `NULL`), the same values
+  as over rows whose arguments are all `NULL`.
+- With a group key, an irrelevant branch still creates groups and stays; the number of copies of
+  its rows does not matter (no call counts them), so an aggregation without calls at its top (a
+  `GROUP BY` or `DISTINCT`, under a projection or not) becomes a projection of its group key.
+- Streaming: a removed branch no longer scans, backfills or keeps state; a removed `DISTINCT` no
+  longer keeps its state, and its duplicates do not grow the state above (`min` and `max` skip
+  `NULL` arguments in their materialized input, the others keep a value per group).
+- Stage: `PRUNE_NULL_UNION_BRANCHES`, right before S9 in both pipelines, then column pruning.
+- Tests: planner tests `stream_prune_null_union_branches.yaml` (batch and streaming plans);
+  differential tests `e2e_test/streaming/prune_null_union_branches` and
+  `e2e_test/batch/prune_null_union_branches` (no group key, all branches `NULL`, a branch `NULL` by
+  its filter, a `GROUP BY` and a `DISTINCT` removed, kept cases with `count(*)`, `array_agg`, a
+  call per branch). Streaming sums are wrapped in `coalesce(.., 0)` (see the known quirk of a
+  streaming `sum` whose values were all retracted).
 
 ## Not for now: sharing between materialized views
 

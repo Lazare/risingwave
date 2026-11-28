@@ -217,7 +217,7 @@ fn is_null_conjuncts(condition: &Condition) -> impl Iterator<Item = usize> + '_ 
 /// - `Union`: the columns that are `NULL` in every input.
 /// - `Join`: the columns of either side that are `NULL` in that side: a row of the output holds
 ///   the values of a row of that side, or `NULL`s for the padded side of an outer join.
-fn always_null_columns(plan: &PlanRef) -> BTreeSet<usize> {
+pub(super) fn always_null_columns(plan: &PlanRef) -> BTreeSet<usize> {
     null_columns(plan, &mut HashMap::new())
 }
 

@@ -484,6 +484,58 @@ static STATUS_LADDER_CASE: LazyLock<OptimizationStage> = LazyLock::new(|| {
     )
 });
 
+// Rule `SetOperationToCountRule` (`*_set_operation_to_count`).
+static SET_OPERATION_TO_COUNT: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Set Operation To Count",
+        vec![SetOperationToCountRule::create()],
+        ApplyOrder::BottomUp,
+    )
+});
+
+// Rule `SetOperationFilterMergeRule` (`*_merge_set_operation_filters`).
+static STREAM_MERGE_SET_OPERATION_FILTERS: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Merge Set Operation Filters",
+        vec![SetOperationFilterMergeRule::create()],
+        ApplyOrder::BottomUp,
+    )
+});
+
+static BATCH_MERGE_SET_OPERATION_FILTERS: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Merge Set Operation Filters",
+        vec![SetOperationFilterMergeRule::create_for_batch()],
+        ApplyOrder::BottomUp,
+    )
+});
+
+// Rule `AggGroupKeyReduceRule` (`*_reduce_group_keys`).
+static STREAM_REDUCE_GROUP_KEYS: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Reduce Group Keys",
+        vec![AggGroupKeyReduceRule::create_for_stream()],
+        ApplyOrder::TopDown,
+    )
+});
+
+static BATCH_REDUCE_GROUP_KEYS: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Reduce Group Keys",
+        vec![AggGroupKeyReduceRule::create_for_batch()],
+        ApplyOrder::TopDown,
+    )
+});
+
+// Rule `AggUnionNullBranchRule` (`*_prune_null_union_branches`).
+static PRUNE_NULL_UNION_BRANCHES: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Prune Null Union Branches",
+        vec![AggUnionNullBranchRule::create()],
+        ApplyOrder::TopDown,
+    )
+});
+
 static SET_OPERATION_MERGE: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Set Operation Merge",
@@ -1271,6 +1323,42 @@ impl LogicalOptimizer {
             }
         }
         plan = plan.optimize_by_rules(&SET_OPERATION_MERGE)?;
+        // Rule `SetOperationFilterMergeRule` (`streaming_merge_set_operation_filters`): a `UNION`,
+        // `INTERSECT` or `EXCEPT` of filters over the same input becomes one filter, before the
+        // set operations become joins or aggregations (`SetOperationToCountRule` below). On demand
+        // only. A shared scan that only the merged branches read is no longer shared.
+        if ctx
+            .session_ctx()
+            .config()
+            .streaming_merge_set_operation_filters()
+            && !ctx.is_stream_prune_baseline()
+        {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&STREAM_MERGE_SET_OPERATION_FILTERS)?;
+            let applied = ctx.total_rule_applied() - applied_before;
+            if applied > 0 {
+                ctx.add_stream_prune_rule_applied(applied);
+                if enable_share_plan {
+                    plan = plan.prune_share();
+                }
+            }
+        }
+        // Rule `SetOperationToCountRule` (`streaming_set_operation_to_count`): `INTERSECT` and
+        // `EXCEPT` become one counting aggregation before they become semi and anti joins. On
+        // demand only: the plan of a streaming job is frozen when the job is created.
+        if ctx
+            .session_ctx()
+            .config()
+            .streaming_set_operation_to_count()
+            && !ctx.is_stream_prune_baseline()
+        {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&SET_OPERATION_TO_COUNT)?;
+            let applied = ctx.total_rule_applied() - applied_before;
+            if applied > 0 {
+                ctx.add_stream_prune_rule_applied(applied);
+            }
+        }
         plan = plan.optimize_by_rules(&SET_OPERATION_TO_JOIN)?;
         // Convert `generate_series` ends with `now()` to a `Now` source. Only for streaming mode.
         // Should be applied before converting table function to project set.
@@ -1740,6 +1828,41 @@ impl LogicalOptimizer {
                 }
             }
         }
+        // Rule `AggUnionNullBranchRule` (`streaming_prune_null_union_branches`): after the final
+        // column pruning, which leaves in the branches of a union only the columns that the
+        // aggregation above reads, and before `AggGroupKeyReduceRule`. On demand only. The scans
+        // of a removed branch, and the columns that a removed `GROUP BY` read, are then pruned.
+        if ctx
+            .session_ctx()
+            .config()
+            .streaming_prune_null_union_branches()
+            && !ctx.is_stream_prune_baseline()
+        {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&PRUNE_NULL_UNION_BRANCHES)?;
+            let applied = ctx.total_rule_applied() - applied_before;
+            if applied > 0 {
+                ctx.add_stream_prune_rule_applied(applied);
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
+            }
+        }
+        // Rule `AggGroupKeyReduceRule` (`streaming_reduce_group_keys`): after the final column
+        // pruning, which leaves in the input of an aggregation only the columns that it reads, so
+        // that the functional dependencies of the input are those of the columns read. On demand
+        // only. The columns that a replaced aggregate read may no longer be needed.
+        if ctx.session_ctx().config().streaming_reduce_group_keys()
+            && !ctx.is_stream_prune_baseline()
+        {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&STREAM_REDUCE_GROUP_KEYS)?;
+            let applied = ctx.total_rule_applied() - applied_before;
+            if applied > 0 {
+                ctx.add_stream_prune_rule_applied(applied);
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
+            }
+        }
         crate::optimizer::rule::diagnose_repeated_reads(&plan);
 
         plan = plan.optimize_by_rules(&CONSTANT_OUTPUT_REMOVE)?;
@@ -1879,6 +2002,21 @@ impl LogicalOptimizer {
         plan = plan.optimize_by_rules(&GROUPING_SETS)?;
         plan = plan.optimize_by_rules(&REWRITE_LIKE_EXPR)?;
         plan = plan.optimize_by_rules(&SET_OPERATION_MERGE)?;
+        // Rule `SetOperationFilterMergeRule` (`batch_merge_set_operation_filters`): a set operation
+        // of filters over the same input becomes one filter, before the set operations become
+        // joins or aggregations. On demand.
+        if ctx
+            .session_ctx()
+            .config()
+            .batch_merge_set_operation_filters()
+        {
+            plan = plan.optimize_by_rules(&BATCH_MERGE_SET_OPERATION_FILTERS)?;
+        }
+        // Rule `SetOperationToCountRule` (`batch_set_operation_to_count`): `INTERSECT` and `EXCEPT`
+        // become one counting aggregation before they become semi and anti joins. On demand.
+        if ctx.session_ctx().config().batch_set_operation_to_count() {
+            plan = plan.optimize_by_rules(&SET_OPERATION_TO_COUNT)?;
+        }
         plan = plan.optimize_by_rules(&SET_OPERATION_TO_JOIN)?;
         plan = plan.optimize_by_rules(&ALWAYS_FALSE_FILTER)?;
         // Table function should be converted into `file_scan` before `project_set`.
@@ -2209,6 +2347,27 @@ impl LogicalOptimizer {
             if ctx.total_rule_applied() != applied_before {
                 plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
                 plan = Self::column_pruning(plan, explain_trace, &ctx);
+            }
+        }
+
+        // Rule `AggUnionNullBranchRule` (`batch_prune_null_union_branches`): after the final column
+        // pruning, as for streaming. On demand.
+        if ctx.session_ctx().config().batch_prune_null_union_branches() {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&PRUNE_NULL_UNION_BRANCHES)?;
+            if ctx.total_rule_applied() != applied_before {
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
+            }
+        }
+        // Rule `AggGroupKeyReduceRule` (`batch_reduce_group_keys`): after the final column pruning,
+        // as for streaming. On demand.
+        if ctx.session_ctx().config().batch_reduce_group_keys() {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&BATCH_REDUCE_GROUP_KEYS)?;
+            if ctx.total_rule_applied() != applied_before {
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
             }
         }
 

@@ -681,6 +681,54 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_partial_agg_into_union: bool,
 
+    // Rule `SetOperationToCountRule` (`*_set_operation_to_count`).
+    /// In the plan of a new streaming job, compute `INTERSECT` and `EXCEPT` with one aggregation
+    /// that counts the copies of each distinct row in each input, over a `UNION ALL` of the inputs,
+    /// instead of semi or anti joins and a `DISTINCT`: one state keeps each distinct row once. Only
+    /// when every column has a type whose equal values are identical. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    streaming_set_operation_to_count: bool,
+
+    /// The same as `streaming_set_operation_to_count`, for batch queries. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_set_operation_to_count: bool,
+
+    // Rule `SetOperationFilterMergeRule` (`*_merge_set_operation_filters`).
+    /// In the plan of a new streaming job, turn a `UNION`, `INTERSECT` or `EXCEPT` of branches that
+    /// filter the same table (or shared sub-plan) and output the same columns into one filter of it
+    /// (`OR`, `AND`, `AND .. IS NOT TRUE`) and a `DISTINCT`. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    streaming_merge_set_operation_filters: bool,
+
+    /// The same as `streaming_merge_set_operation_filters`, for batch queries. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_merge_set_operation_filters: bool,
+
+    // Rule `AggGroupKeyReduceRule` (`*_reduce_group_keys`).
+    /// In the plan of a new streaming job, remove from the group key of an aggregation the columns
+    /// that the other group key columns determine (a key of a table, a constant), and replace
+    /// `min`, `max`, `first_value` and `last_value` of such a column by its value: the state is
+    /// keyed by fewer columns and keeps one value per group instead of every value. Not below a
+    /// source, `now()` or a table with a watermark. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    streaming_reduce_group_keys: bool,
+
+    /// The same as `streaming_reduce_group_keys`, for batch queries. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_reduce_group_keys: bool,
+
+    // Rule `AggUnionNullBranchRule` (`*_prune_null_union_branches`).
+    /// In the plan of a new streaming job, remove the branches of a `UNION ALL` that only feed
+    /// `NULL` to the aggregation above (`sum`, `min`, `max`, `count(x)`... ignore them, no
+    /// `count(*)`), or with a group key the `GROUP BY` or `DISTINCT` at the top of such a branch.
+    /// Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    streaming_prune_null_union_branches: bool,
+
+    /// The same as `streaming_prune_null_union_branches`, for batch queries. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_prune_null_union_branches: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,

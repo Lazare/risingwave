@@ -403,6 +403,14 @@ pub(crate) fn gen_create_mv_graph(
             || config.streaming_transitive_predicates()
             // Rule `AggJoinTransposeRule`.
             || config.streaming_push_agg_below_join()
+            // Rule `SetOperationToCountRule`.
+            || config.streaming_set_operation_to_count()
+            // Rule `SetOperationFilterMergeRule`.
+            || config.streaming_merge_set_operation_filters()
+            // Rule `AggGroupKeyReduceRule`.
+            || config.streaming_reduce_group_keys()
+            // Rule `AggUnionNullBranchRule`.
+            || config.streaming_prune_null_union_branches()
     };
     let baseline_args = prune_enabled.then(|| {
         (

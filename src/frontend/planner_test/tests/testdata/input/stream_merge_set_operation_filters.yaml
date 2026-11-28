@@ -1,0 +1,162 @@
+# Tests for `streaming_merge_set_operation_filters` and `batch_merge_set_operation_filters`
+# (`SetOperationFilterMergeRule`): a `UNION`, `INTERSECT` or `EXCEPT` of branches that filter the
+# same input and output the same columns becomes one filter of that input and a `DISTINCT`.
+- id: setup_off
+  sql: |
+    create table t (k int primary key, a int, b int, s varchar, d decimal);
+    create table u (k int primary key, a int, b int, s varchar, d decimal);
+    create table wm (k int, a int, ts timestamp, watermark for ts as ts - interval '1' second) append only;
+  expected_outputs: []
+- id: setup
+  sql: |
+    set streaming_merge_set_operation_filters = true;
+    set batch_merge_set_operation_filters = true;
+    create table t (k int primary key, a int, b int, s varchar, d decimal);
+    create table u (k int primary key, a int, b int, s varchar, d decimal);
+    create table wm (k int, a int, ts timestamp, watermark for ts as ts - interval '1' second) append only;
+  expected_outputs: []
+
+# The variables are off by default.
+- name: off by default - intersect of two filters
+  before: [setup_off]
+  sql: |
+    select k, a from t where a > 1 intersect select k, a from t where b < 5;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+
+# Rewritten.
+- name: union of two filters, whole rows
+  before: [setup]
+  sql: |
+    select * from t where a > 1 union select * from t where b < 5;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: union of two filters, a column that the filters do not output
+  before: [setup]
+  sql: |
+    select a from t where a > 1 union select a from t where b < 5;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: union of three branches, two over the same table
+  before: [setup]
+  sql: |
+    select a from t where a > 1 union select a from u union select a from t where b < 5;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: union with a branch without filter
+  before: [setup]
+  sql: |
+    select a, s from t where a > 1 union select a, s from t;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: intersect with the key in the output
+  before: [setup]
+  sql: |
+    select k, a from t where a > 1 intersect select k, a from t where b < 5;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: intersect whose filters read output columns only
+  before: [setup]
+  sql: |
+    select a, b from t where a > 1 intersect select a, b from t where b < 5 or b is null;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: intersect with a common conjunct on a column that is not output
+  before: [setup]
+  sql: |
+    select a from t where b > 0 and a > 1 intersect select a from t where b > 0 and a < 5;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: except with the key in the output
+  before: [setup]
+  sql: |
+    select k, a from t where a > 1 except select k, a from t where b < 5;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: except whose filters read output columns only
+  before: [setup]
+  sql: |
+    select a, s from t where a > 1 except select a, s from t where s like 'x%';
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: except with later inputs over another table
+  before: [setup]
+  sql: |
+    select k, a from t except select k, a from u where a < 0 except select k, a from u where a > 10;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: null filters
+  before: [setup]
+  sql: |
+    select a, b from t where a is null intersect select a, b from t where b is null;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: batch only - a table with a watermark
+  before: [setup]
+  sql: |
+    select k, a from wm where a > 1 union select k, a from wm where k < 5;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+
+# Left as they are.
+- name: intersect whose second filter reads a column that is not output
+  before: [setup]
+  sql: |
+    select a from t where a > 1 intersect select a from t where b < 5;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: except whose second filter reads a column that is not output
+  before: [setup]
+  sql: |
+    select a from t where a > 1 except select a from t where b < 5;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: intersect whose filters read a numeric output column
+  before: [setup]
+  sql: |
+    select d from t where d > 1 intersect select d from t where d::varchar = '2.0';
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: different output expressions
+  before: [setup]
+  sql: |
+    select a from t where a > 1 intersect select b from t where b < 5;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: different tables
+  before: [setup]
+  sql: |
+    select k, a from t where a > 1 intersect select k, a from u where a < 5;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: volatile filter
+  before: [setup]
+  sql: |
+    select k, a from t where random() < 0.5 union select k, a from t where b < 5;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: union all is left to UnionScanMergeRule
+  before: [setup]
+  sql: |
+    select a from t where a > 1 union all select a from t where b < 5;
+  expected_outputs:
+  - batch_plan

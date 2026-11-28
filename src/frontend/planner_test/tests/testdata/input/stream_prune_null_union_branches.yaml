@@ -1,0 +1,115 @@
+# Tests for `streaming_prune_null_union_branches` and `batch_prune_null_union_branches`
+# (`AggUnionNullBranchRule`): the branches of a `UNION ALL` that only feed `NULL` to the
+# aggregation above are removed, or lose their `GROUP BY` when the aggregation has a group key.
+- id: setup_off
+  sql: |
+    create table a (k int primary key, x int, y int);
+    create table b (k int primary key, x int, y int);
+    create table c (k int primary key, x int);
+  expected_outputs: []
+- id: setup
+  sql: |
+    set streaming_prune_null_union_branches = true;
+    set batch_prune_null_union_branches = true;
+    create table a (k int primary key, x int, y int);
+    create table b (k int primary key, x int, y int);
+    create table c (k int primary key, x int);
+  expected_outputs: []
+
+# The variables are off by default.
+- name: off by default - a branch of nulls
+  before: [setup_off]
+  sql: |
+    select sum(m) as s from (select k, x as m from a union all select k, null::int from b) v;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+
+# Rewritten.
+- name: a branch of nulls without group key
+  before: [setup]
+  sql: |
+    select sum(m) as s, count(m) as n, max(m) as mx from (select k, x as m from a union all select k, null::int from b) v;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: two branches of nulls among three
+  before: [setup]
+  sql: |
+    select sum(m1) as s1, min(m2) as m2 from (select x as m1, y as m2 from a union all select null::int, null::int from b union all select null::int, null::int from c) v;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: every branch is null
+  before: [setup]
+  sql: |
+    select sum(m) as s, count(m) as n from (select null::int as m from a union all select null::int from b) v;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: a branch null by its filter
+  before: [setup]
+  sql: |
+    select sum(m) as s from (select x as m from a union all select y from b where y is null) v;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: with a group key - the group by of the null branch goes
+  before: [setup]
+  sql: |
+    select k, sum(m) as s from (select k, sum(x) as m from a group by k union all select k, null::bigint from b group by k) v group by k;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: with a group key - the distinct of the null branch goes
+  before: [setup]
+  sql: |
+    select k, max(m) as mx, count(m) as n from (select k, x as m from a union all select distinct k, null::int from b) v group by k;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+
+- name: with a group key - the group by of the null branch goes, on a column that is not a key
+  before: [setup]
+  sql: |
+    select x, sum(m) as s from (select x, sum(y) as m from a group by x union all select x, null::bigint from b group by x) v group by x;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: with a group key - the distinct of the null branch goes, on a column that is not a key
+  before: [setup]
+  sql: |
+    select y, max(m) as mx from (select y, x as m from a union all select distinct y, null::int from b) v group by y;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+
+# Left as they are.
+- name: count star counts the null rows
+  before: [setup]
+  sql: |
+    select sum(m) as s, count(*) as n from (select k, x as m from a union all select k, null::int from b) v;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: each branch is null for one call only
+  before: [setup]
+  sql: |
+    select sum(m1) as s1, sum(m2) as s2 from (select x as m1, null::int as m2 from a union all select null::int, y from b) v;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: array_agg sees the nulls
+  before: [setup]
+  sql: |
+    select array_agg(m) as l from (select x as m from a union all select null::int from b) v;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: with a group key - a branch without group by stays as it is
+  before: [setup]
+  sql: |
+    select k, sum(m) as s from (select k, x as m from a union all select k, null::int from b) v group by k;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
