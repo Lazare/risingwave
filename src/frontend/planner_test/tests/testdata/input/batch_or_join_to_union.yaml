@@ -109,7 +109,7 @@
     select a.id, b.y from a join b on a.k = b.y and (a.id = b.id1 or a.id = b.id2);
   expected_outputs:
   - batch_plan
-- name: kept - volatile condition
+- name: kept - a side with a volatile filter is not read twice without a share
   before: [setup]
   sql: |
     select a.id, b.y from a join b on (a.id = b.id1 or a.id = b.id2) and random() < 0.5;

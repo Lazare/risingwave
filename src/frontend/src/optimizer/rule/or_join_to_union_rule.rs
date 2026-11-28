@@ -16,10 +16,13 @@ use risingwave_common::types::DataType;
 use risingwave_pb::plan_common::JoinType;
 
 use super::prelude::{PlanRef, *};
-use crate::expr::{ExprImpl, ExprType, FunctionCall, InputRef, to_conjunctions, to_disjunctions};
+use crate::expr::{
+    ExprImpl, ExprType, ExprVisitor, FunctionCall, InputRef, to_conjunctions, to_disjunctions,
+};
 use crate::optimizer::plan_node::generic::GenericPlanRef;
 use crate::optimizer::plan_node::{
     LogicalJoin, LogicalProject, LogicalShare, LogicalUnion, PlanTreeNodeBinary,
+    VisitExprsRecursive,
 };
 use crate::utils::Condition;
 
@@ -56,7 +59,8 @@ const MAX_DISJUNCTS: usize = 4;
 ///
 /// In streaming (`create_for_stream`), the sides of the join and the `R_i` read by two joins are
 /// shared (when the plan may share sub-plans), so that each is computed once; each join keeps its
-/// own state. The rule is only used on demand (`batch_or_join_to_union`,
+/// own state. Otherwise (batch) each join reads its sides again: the rule then requires that two
+/// reads of a side give the same rows (no volatile expression, no source), which a share ensures. The rule is only used on demand (`batch_or_join_to_union`,
 /// `streaming_or_join_to_union`).
 pub struct OrJoinToUnionRule {
     for_stream: bool,
@@ -73,12 +77,14 @@ impl OrJoinToUnionRule {
         Box::new(OrJoinToUnionRule { for_stream: true })
     }
 
+    /// Whether the sides of the join are shared by the joins that read them.
+    fn shares(&self, plan: &PlanRef) -> bool {
+        self.for_stream && plan.ctx().session_ctx().config().enable_share_plan()
+    }
+
     /// The plan, shared if it is read by several joins of a streaming job.
     fn share(&self, plan: PlanRef) -> PlanRef {
-        if self.for_stream
-            && plan.ctx().session_ctx().config().enable_share_plan()
-            && plan.as_logical_share().is_none()
-        {
+        if self.shares(&plan) && plan.as_logical_share().is_none() {
             LogicalShare::create(plan)
         } else {
             plan
@@ -101,6 +107,10 @@ impl Rule<Logical> for OrJoinToUnionRule {
         let (left_len, right_len) = (left.schema().len(), right.schema().len());
         let on = join.on();
         if on.conjunctions.iter().any(|expr| !expr.is_pure()) {
+            return None;
+        }
+        // Without shares, each join reads the sides again: two reads must give the same rows.
+        if !self.shares(&plan) && (!reads_same_rows(&left) || !reads_same_rows(&right)) {
             return None;
         }
         let has_eq_key = |conjunctions: Vec<ExprImpl>| {
@@ -225,4 +235,27 @@ impl Rule<Logical> for OrJoinToUnionRule {
 
 fn is_not_true(expr: ExprImpl) -> ExprImpl {
     FunctionCall::new_unchecked(ExprType::IsNotTrue, vec![expr], DataType::Boolean).into()
+}
+
+/// Whether two reads of the plan give the same rows: no volatile expression (`random()`...) and no
+/// source, whose two readers may see different messages.
+fn reads_same_rows(plan: &PlanRef) -> bool {
+    fn without_source(plan: &PlanRef) -> bool {
+        plan.as_logical_source().is_none()
+            && plan.as_logical_kafka_scan().is_none()
+            && plan.inputs().iter().all(without_source)
+    }
+    let mut finder = ImpureFinder { found: false };
+    plan.visit_exprs_recursive(&mut finder);
+    !finder.found && without_source(plan)
+}
+
+struct ImpureFinder {
+    found: bool,
+}
+
+impl ExprVisitor for ImpureFinder {
+    fn visit_expr(&mut self, expr: &ExprImpl) {
+        self.found |= expr.is_impure();
+    }
 }
