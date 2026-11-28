@@ -1,9 +1,9 @@
 """Generates `e2e_test/streaming/row_number_unique_key.slt`, the differential test of the unique
 key that a filter `row_number() OVER (PARTITION BY k ...) = n` (or `<= 1`, `< 2`) gives to its
-output (the partition columns `k`; without `PARTITION BY`, the empty key: at most one row), used
-by `streaming_simplify_on_unique_key` (rules `AggOnKeyEliminateRule`,
-`UnusedOuterJoinEliminateRule`). The queries number the rows with a
+output (the partition columns `k`), used by `streaming_simplify_on_unique_key` (rules
+`AggOnKeyEliminateRule`, `UnusedOuterJoinEliminateRule`). The queries number the rows with a
 second window function on the same window, so that the window is not turned into a top-n.
+Windows without `PARTITION BY` (the empty key) are only tested in batch: streaming rejects them.
 
 Every query is materialized with and without the variable, and both materialized views must hold
 the same rows, with the same multiplicities, as the batch query, after the backfill and after each
@@ -23,10 +23,6 @@ TABLES = [('t', 'id int primary key, k int, k2 int, v int, w int'), ('u', 'id in
 RN = ("(select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, "
       "count(w) over (partition by k order by v, id) as sw from {p}t)")
 RN2 = "(select id, k, k2, v, row_number() over (partition by k, k2 order by v desc, id) as rn from {p}t)"
-# The rows of `t` numbered without partition, with a second window function on the same window.
-RN0 = ("(select id, k, k2, v, w, row_number() over (order by v, id) as rn, "
-       "count(w) over (order by v, id) as sw from {p}t)")
-
 # (name, columns of the result with their types, query)
 CASES = [
     # The group key, the distinct columns or the join columns hold the partition columns.
@@ -45,13 +41,7 @@ CASES = [
     ('second_row', 'k int, n bigint', f'select k, count(*) as n from {RN} s where rn = 2 group by k'),
     ('second_join', 'id int, x int', f'select u.id, u.x from {{p}}u u left join (select k, v from {RN} s where rn = 2) s on u.k = s.k'),
     ('third_used_join', 'id int, v int', f'select u.id, s.v from {{p}}u u left join (select k, v from {RN} s where rn = 3) s on u.k = s.k'),
-    # Without partition: at most one row in total.
-    ('no_partition', 'k int, n bigint, sw bigint',
-     f'select k, count(*) as n, max(sw) as sw from {RN0} s where rn = 1 group by k'),
-    ('no_partition_second', 'k int, v int, w int', f'select distinct k, v, w from {RN0} s where rn = 2'),
-    ('no_partition_join', 'id int, x int', f'select u.id, u.x from {{p}}u u left join (select k, v from {RN0} s where rn <= 1) s on u.k = s.k'),
-    # Left as they are: ties, several rows per partition or in total, a filter on another column,
-    # an aggregation without group key.
+    # Left as they are: ties, several rows per partition, a filter on another column.
     ('rank', 'k int, n bigint',
      'select k, count(*) as n from (select k, v, rank() over (partition by k order by v) as rk from {p}t) s '
      'where rk = 1 group by k'),
@@ -60,8 +50,6 @@ CASES = [
     ('other_group', 'v int, n bigint', f'select v, count(*) as n from {RN} s where rn = 1 group by v'),
     ('used_join', 'id int, v int', f'select u.id, s.v from {{p}}u u left join (select k, v from {RN} s where rn <= 2) s on u.k = s.k'),
     ('kept_join', 'id int, x int', f'select u.id, u.x from {{p}}u u left join (select k, v from {RN} s where rn <= 2) s on u.k = s.k'),
-    ('no_partition_two', 'k int, n bigint', f'select k, count(*) as n from {RN0} s where rn <= 2 group by k'),
-    ('no_partition_scalar', 'n bigint, sw bigint', f'select count(*) as n, max(sw) as sw from {RN0} s where rn = 1'),
     ('later_rows', 'k int, n bigint', f'select k, count(*) as n from {RN} s where rn > 1 group by k'),
 ]
 CASES = [(name, cols, sql.format(p=P)) for name, cols, sql in CASES]

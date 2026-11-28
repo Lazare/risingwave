@@ -51,8 +51,9 @@ type Key = BTreeSet<usize>;
 ///   [`scan_keys`]).
 /// - `Values` with at most one row, `Limit` of at most one row: the empty key.
 /// - `Filter`, `Share`, `Limit`: the keys of the input, whose rows they only select.
-/// - `Filter` over an `OverWindow`: also the partition columns of a `row_number()` that it keeps
-///   at a single number, the empty key without `PARTITION BY` (see [`single_row_number_keys`]).
+/// - `Filter` over an `OverWindow` (directly or through a `Project`): also the partition columns
+///   of a `row_number()` that it keeps at a single number, the empty key without `PARTITION BY`
+///   (see [`single_row_number_keys`]).
 /// - `OverWindow`: the keys of the input, whose rows and columns it outputs first.
 /// - `TopN`: the keys of the input, and the group key if it keeps one row per group.
 /// - `Dedup`: the keys of the input, and the columns it deduplicates on.
@@ -181,30 +182,50 @@ fn derive_unique_keys(plan: &PlanRef, memo: &mut HashMap<PlanNodeId, Vec<Key>>) 
 /// partition columns (`NULL` included, a partition like any other) are the same row. Without
 /// `PARTITION BY` the whole input is one partition: at most one row passes, the empty key.
 ///
+/// The column pruning puts a projection between the filter and the window when a column of the
+/// input of the window (an ordering column, say) is not read above: the filter is then looked at
+/// through it, on the columns that it passes as they are.
+///
 /// Not for `rank()` or `dense_rank()`, whose ties get the same number.
 fn single_row_number_keys(filter: &LogicalFilter) -> Vec<Key> {
     let input = filter.input();
-    let Some(over_window) = input.as_logical_over_window() else {
+    // The plan under the filter, and for each column of the filter the column of that plan that
+    // it is, if it is one as it is.
+    let (window_plan, columns): (PlanRef, Vec<Option<usize>>) = match input.as_logical_project() {
+        Some(project) => (
+            project.input(),
+            project
+                .exprs()
+                .iter()
+                .map(|expr| expr.as_input_ref().map(|input_ref| input_ref.index()))
+                .collect(),
+        ),
+        None => (input.clone(), (0..input.schema().len()).map(Some).collect()),
+    };
+    let Some(over_window) = window_plan.as_logical_over_window() else {
         return vec![];
     };
     // The output columns of the over window are its input columns, then its window functions.
     let input_len = over_window.input().schema().len();
+    let column_of_filter = |column: usize| columns.iter().position(|&c| c == Some(column));
     filter
         .predicate()
         .conjunctions
         .iter()
         .filter_map(|conjunct| {
-            let column = column_kept_at_one_value(conjunct)?;
+            let column = (*columns.get(column_kept_at_one_value(conjunct)?)?)?;
             let function = over_window
                 .window_functions()
                 .get(column.checked_sub(input_len)?)?;
-            (function.kind == WindowFuncKind::RowNumber).then(|| {
-                function
-                    .partition_by
-                    .iter()
-                    .map(|i| i.index)
-                    .collect::<Key>()
-            })
+            if function.kind != WindowFuncKind::RowNumber {
+                return None;
+            }
+            // Every partition column must be passed by the projection.
+            function
+                .partition_by
+                .iter()
+                .map(|i| column_of_filter(i.index))
+                .collect::<Option<Key>>()
         })
         .collect()
 }

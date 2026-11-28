@@ -1,6 +1,7 @@
 # The unique key that a filter `row_number() OVER (PARTITION BY k ...) = n` (or `<= 1`, `< 2`) over
-# a window gives to its output: the partition columns `k`, at most one row per partition; without
-# `PARTITION BY`, at most one row (the empty key). Used by
+# a window gives to its output: the partition columns `k`, at most one row per partition. (Without
+# `PARTITION BY`, at most one row, the empty key: streaming rejects such windows, the cases are in
+# `batch_row_number_unique_key.yaml`.) Used by
 # the simplifications on unique keys of streaming jobs (`streaming_simplify_on_unique_key`:
 # `AggOnKeyEliminateRule`, `UnusedOuterJoinEliminateRule`). A window with a single numbering
 # function under such a filter becomes a top-n, whose group key was already a key: the cases
@@ -114,36 +115,6 @@
     on u.k = s.k;
   expected_outputs:
   - stream_plan
-- name: row_number() without partition = 1 keeps at most one row
-  before:
-  - setup
-  sql: |
-    select k, count(*) as n, max(pw) as mpw from (select k, v, row_number() over (order by v) as rn,
-    lag(w) over (order by v) as pw from t) s
-    where rn = 1 group by k;
-  expected_outputs:
-  - stream_plan
-- name: row_number() without partition = 2, distinct
-  before:
-  - setup
-  sql: |
-    select distinct k, v, pw from (select k, v, row_number() over (order by v, id) as rn,
-    lag(w) over (order by v, id) as pw from t) s
-    where rn = 2;
-  expected_outputs:
-  - stream_plan
-- name: unused left join on any column of row_number() without partition <= 1
-  before:
-  - setup
-  sql: |
-    select u.id, u.x from u left join
-    (select k, pw from (select k, v, row_number() over (order by v) as rn,
-    lag(w) over (order by v) as pw from t) s where rn <= 1) s
-    on u.k = s.k;
-  expected_outputs:
-  - stream_plan
-
-# Kept: no key.
 - name: rank() = 1 keeps the ties
   before:
   - setup
@@ -178,23 +149,5 @@
     select k, count(*) as n, max(pw) as mpw from (select k, v, row_number() over (partition by k order by v) as rn,
     lag(w) over (partition by k order by v) as pw from t) s
     where rn <= 2 group by k;
-  expected_outputs:
-  - stream_plan
-- name: row_number() without partition <= 2 keeps two rows
-  before:
-  - setup
-  sql: |
-    select k, count(*) as n, max(pw) as mpw from (select k, v, row_number() over (order by v) as rn,
-    lag(w) over (order by v) as pw from t) s
-    where rn <= 2 group by k;
-  expected_outputs:
-  - stream_plan
-- name: count(*) without group key over row_number() without partition = 1 is kept (a row over no rows)
-  before:
-  - setup
-  sql: |
-    select count(*) as n, max(pw) as mpw from (select k, v, row_number() over (order by v) as rn,
-    lag(w) over (order by v) as pw from t) s
-    where rn = 1;
   expected_outputs:
   - stream_plan
