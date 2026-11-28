@@ -196,20 +196,37 @@ block a producer whose consumers do not read.
 **Not counted yet.** The rows gathered by the compact mode, the root stage channel of the frontend
 (`root_stage_channel_size`), the buffers of tonic and HTTP/2.
 
-**Choosing the parallelism of a stage from its exchanges (design only).** A stage with `P` tasks
-that shuffles to a stage of `Q` tasks may buffer, in the worst case, `P x Q x slots` chunks
-(slices with the default mode, own chunks with the compact mode), and `P x Q x 1000` serialized
-chunks on the gRPC side when the consumers are remote. With rows of estimated width `W` and chunks
-of 1024 rows, the bound is `P x Q x slots x 1024 x W`, or `P x B` with the byte bound `B`. The
-frontend already lowers the parallelism until the reserved memory of the spillable operators fits
-the limit of the query (`batch_limits.rs`). The same loop could add the exchange term: choose the
-largest `P` (and `Q`) such that
+**How much a producer pins.** A producer sends the slices of each block to its `Q` output queues in
+turn (`HashShuffleSender::send_chunk`, empty slices skipped) and blocks as soon as one queue is
+full (`slots` = `output_channel_size` = 64). The blocks that it keeps alive are those between the
+oldest slice still queued (in the queue of the slowest consumer) and the block being sent: at most
+`slots + 1` blocks when every block has rows for every output, which is the normal case with a
+hash distribution and chunks of 1024 rows, whatever `Q` is. The local exchange memory of a
+producer is then about `(slots + 1) x chunk bytes`, and of an exchange of `P` producers about
+`P x (slots + 1) x 1024 x W` for rows of width `W`: not `Q` times more, since the `Q` outputs
+share each block. Exception: with a skewed distribution, an output that gets rows from only a
+fraction `f` of the blocks holds 64 queued slices spanning about `64 / f` blocks, and the pinned
+window grows up to that, bounded by the blocking of the producer on its other queues.
 
-    reserved operators + sum over exchanges of min(P x Q x slots x 1024 x W, P x B) <= query limit
+On the gRPC path (consumers on other nodes), each slice is compacted when it is serialized, and
+each `GetData` stream buffers up to `receiver_channel_size` (1000) messages of about `1024 / Q`
+rows: up to about `1000 x 1024 x W` per producer over its `Q` streams, plus the window of 64
+slots, again independent of `Q`, and much larger than the local window. The byte bound
+`batch_exchange_buffer_max_mb` is what limits it: a serialized chunk keeps the room of its slice
+in the bound until gRPC takes it.
 
-with `W` taken from the cardinality feedback when it has observed the sub-plan (bytes per row are
-not recorded yet: they would be added to the feedback store next to the row counts), else from
-the schema (fixed-size types exact, variable-size types at an assumed average). Gain: wide-row
-exchanges get a lower parallelism or wait earlier instead of filling the node. Risk: a wrong width
-estimate lowers the parallelism of a query that would have fit; it should only lower, never raise,
-the parallelism chosen today.
+**Choosing the parallelism of a stage from its exchanges (design only).** The frontend already
+lowers the parallelism until the reserved memory of the spillable operators fits the limit of the
+query (`batch_limits.rs`). The same loop could add the exchanges: choose the largest `P` such that
+
+    reserved operators
+      + sum over local exchanges of P x (slots + 1) x 1024 x W
+      + sum over remote exchanges of P x min(B, 1000 x 1024 x W)
+      <= query limit
+
+with `B` the byte bound (no bound: `1000 x 1024 x W`), and `W` taken from the cardinality feedback
+when it has observed the sub-plan (bytes per row are not recorded yet: they would be added to the
+feedback store next to the row counts), else from the schema (fixed-size types exact,
+variable-size types at an assumed average). Gain: wide-row exchanges get a lower parallelism
+instead of filling the node. Risk: a wrong width estimate lowers the parallelism of a query that
+would have fit; the rule must only ever lower the parallelism chosen today, never raise it.
