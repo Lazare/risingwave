@@ -22,7 +22,7 @@ CASES = [
     ('except', 'a int, b varchar', 'select a, b from {p}t except select a, b from {p}u'),
     ('intersect3', 'a int, b varchar', 'select a, b from {p}t intersect select a, b from {p}u intersect select a, b from {p}w'),
     ('except3', 'a int, b varchar', 'select a, b from {p}t except select a, b from {p}u except select a, b from {p}w'),
-    ('except_intersect', 'a int, b varchar', '(select a, b from {p}t except select a, b from {p}u) intersect select a, b from {p}w'),
+    ('except_intersect', 'a int, b varchar', 'select * from ((select a, b from {p}t except select a, b from {p}u) intersect select a, b from {p}w) q'),
     ('in_subquery', 'id int', 'select id from {p}x where a in (select a from {p}t intersect select a from {p}u)'),
     ('exprs', 'a1 int, ub varchar', 'select a + 1 as a1, upper(b) as ub from {p}t intersect select a, b from {p}u'),
     ('except_one', 'a int', 'select a from {p}t except select a from {p}u'),

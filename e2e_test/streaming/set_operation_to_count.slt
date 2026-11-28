@@ -50,7 +50,7 @@ statement ok
 create materialized view scs_except3_off as select a, b from scs_t except select a, b from scs_u except select a, b from scs_w;
 
 statement ok
-create materialized view scs_except_intersect_off as (select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w;
+create materialized view scs_except_intersect_off as select * from ((select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w) q;
 
 statement ok
 create materialized view scs_in_subquery_off as select id from scs_x where a in (select a from scs_t intersect select a from scs_u);
@@ -83,7 +83,7 @@ statement ok
 create materialized view scs_except3_on as select a, b from scs_t except select a, b from scs_u except select a, b from scs_w;
 
 statement ok
-create materialized view scs_except_intersect_on as (select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w;
+create materialized view scs_except_intersect_on as select * from ((select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w) q;
 
 statement ok
 create materialized view scs_in_subquery_on as select id from scs_x where a in (select a from scs_t intersect select a from scs_u);
@@ -179,9 +179,9 @@ select
 
 query III
 select
-  (select count(*) from (select a, b, count(*) as scs_rows from scs_except_intersect_on group by a, b except select a, b, count(*) as scs_rows from ((select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w) q group by a, b) x),
-  (select count(*) from (select a, b, count(*) as scs_rows from ((select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w) q group by a, b except select a, b, count(*) as scs_rows from scs_except_intersect_on group by a, b) y),
-  (select count(*) from scs_except_intersect_on) - (select count(*) from ((select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w) q);
+  (select count(*) from (select a, b, count(*) as scs_rows from scs_except_intersect_on group by a, b except select a, b, count(*) as scs_rows from (select * from ((select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w) q) q group by a, b) x),
+  (select count(*) from (select a, b, count(*) as scs_rows from (select * from ((select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w) q) q group by a, b except select a, b, count(*) as scs_rows from scs_except_intersect_on group by a, b) y),
+  (select count(*) from scs_except_intersect_on) - (select count(*) from (select * from ((select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w) q) q);
 ----
 0 0 0
 
@@ -352,9 +352,9 @@ select
 
 query III
 select
-  (select count(*) from (select a, b, count(*) as scs_rows from scs_except_intersect_on group by a, b except select a, b, count(*) as scs_rows from ((select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w) q group by a, b) x),
-  (select count(*) from (select a, b, count(*) as scs_rows from ((select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w) q group by a, b except select a, b, count(*) as scs_rows from scs_except_intersect_on group by a, b) y),
-  (select count(*) from scs_except_intersect_on) - (select count(*) from ((select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w) q);
+  (select count(*) from (select a, b, count(*) as scs_rows from scs_except_intersect_on group by a, b except select a, b, count(*) as scs_rows from (select * from ((select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w) q) q group by a, b) x),
+  (select count(*) from (select a, b, count(*) as scs_rows from (select * from ((select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w) q) q group by a, b except select a, b, count(*) as scs_rows from scs_except_intersect_on group by a, b) y),
+  (select count(*) from scs_except_intersect_on) - (select count(*) from (select * from ((select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w) q) q);
 ----
 0 0 0
 
@@ -534,9 +534,9 @@ select
 
 query III
 select
-  (select count(*) from (select a, b, count(*) as scs_rows from scs_except_intersect_on group by a, b except select a, b, count(*) as scs_rows from ((select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w) q group by a, b) x),
-  (select count(*) from (select a, b, count(*) as scs_rows from ((select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w) q group by a, b except select a, b, count(*) as scs_rows from scs_except_intersect_on group by a, b) y),
-  (select count(*) from scs_except_intersect_on) - (select count(*) from ((select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w) q);
+  (select count(*) from (select a, b, count(*) as scs_rows from scs_except_intersect_on group by a, b except select a, b, count(*) as scs_rows from (select * from ((select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w) q) q group by a, b) x),
+  (select count(*) from (select a, b, count(*) as scs_rows from (select * from ((select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w) q) q group by a, b except select a, b, count(*) as scs_rows from scs_except_intersect_on group by a, b) y),
+  (select count(*) from scs_except_intersect_on) - (select count(*) from (select * from ((select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w) q) q);
 ----
 0 0 0
 
@@ -701,9 +701,9 @@ select
 
 query III
 select
-  (select count(*) from (select a, b, count(*) as scs_rows from scs_except_intersect_on group by a, b except select a, b, count(*) as scs_rows from ((select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w) q group by a, b) x),
-  (select count(*) from (select a, b, count(*) as scs_rows from ((select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w) q group by a, b except select a, b, count(*) as scs_rows from scs_except_intersect_on group by a, b) y),
-  (select count(*) from scs_except_intersect_on) - (select count(*) from ((select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w) q);
+  (select count(*) from (select a, b, count(*) as scs_rows from scs_except_intersect_on group by a, b except select a, b, count(*) as scs_rows from (select * from ((select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w) q) q group by a, b) x),
+  (select count(*) from (select a, b, count(*) as scs_rows from (select * from ((select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w) q) q group by a, b except select a, b, count(*) as scs_rows from scs_except_intersect_on group by a, b) y),
+  (select count(*) from scs_except_intersect_on) - (select count(*) from (select * from ((select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w) q) q);
 ----
 0 0 0
 
@@ -871,9 +871,9 @@ select
 
 query III
 select
-  (select count(*) from (select a, b, count(*) as scs_rows from scs_except_intersect_on group by a, b except select a, b, count(*) as scs_rows from ((select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w) q group by a, b) x),
-  (select count(*) from (select a, b, count(*) as scs_rows from ((select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w) q group by a, b except select a, b, count(*) as scs_rows from scs_except_intersect_on group by a, b) y),
-  (select count(*) from scs_except_intersect_on) - (select count(*) from ((select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w) q);
+  (select count(*) from (select a, b, count(*) as scs_rows from scs_except_intersect_on group by a, b except select a, b, count(*) as scs_rows from (select * from ((select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w) q) q group by a, b) x),
+  (select count(*) from (select a, b, count(*) as scs_rows from (select * from ((select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w) q) q group by a, b except select a, b, count(*) as scs_rows from scs_except_intersect_on group by a, b) y),
+  (select count(*) from scs_except_intersect_on) - (select count(*) from (select * from ((select a, b from scs_t except select a, b from scs_u) intersect select a, b from scs_w) q) q);
 ----
 0 0 0
 

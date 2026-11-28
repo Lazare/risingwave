@@ -1434,7 +1434,9 @@ Project(a, b)
 - Streaming: one aggregation state with each distinct row of the inputs once, instead of the two
   join states (every row of each input), the degree table and the state of the `DISTINCT`. The
   counts are value states (`count`), retractable. Batch: one hash aggregation instead of a hash
-  join and a hash aggregation; no clear gain is expected, the variable exists for symmetry.
+  join and a hash aggregation. Without `batch_distributed_union` the `UNION ALL` gathers both
+  inputs on one node before the exchange to the aggregation, which is worse than the distributed
+  hash join: use the batch variable only together with `batch_distributed_union`.
 - Stage: `SET_OPERATION_TO_COUNT`, right after `SET_OPERATION_MERGE` and before
   `SET_OPERATION_TO_JOIN`, in both pipelines.
 - `INTERSECT ALL` and `EXCEPT ALL` are rejected by the binder ("not implemented"); their rewrite

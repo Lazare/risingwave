@@ -161,13 +161,13 @@ statement ok
 delete from scb_except_intersect_on;
 
 statement ok
-insert into scb_except_intersect_off (select a, b from scb_t except select a, b from scb_u) intersect select a, b from scb_w;
+insert into scb_except_intersect_off select * from ((select a, b from scb_t except select a, b from scb_u) intersect select a, b from scb_w) q;
 
 statement ok
 set batch_set_operation_to_count = true;
 
 statement ok
-insert into scb_except_intersect_on (select a, b from scb_t except select a, b from scb_u) intersect select a, b from scb_w;
+insert into scb_except_intersect_on select * from ((select a, b from scb_t except select a, b from scb_u) intersect select a, b from scb_w) q;
 
 statement ok
 set batch_set_operation_to_count = false;
@@ -439,13 +439,13 @@ statement ok
 delete from scb_except_intersect_on;
 
 statement ok
-insert into scb_except_intersect_off (select a, b from scb_t except select a, b from scb_u) intersect select a, b from scb_w;
+insert into scb_except_intersect_off select * from ((select a, b from scb_t except select a, b from scb_u) intersect select a, b from scb_w) q;
 
 statement ok
 set batch_set_operation_to_count = true;
 
 statement ok
-insert into scb_except_intersect_on (select a, b from scb_t except select a, b from scb_u) intersect select a, b from scb_w;
+insert into scb_except_intersect_on select * from ((select a, b from scb_t except select a, b from scb_u) intersect select a, b from scb_w) q;
 
 statement ok
 set batch_set_operation_to_count = false;
@@ -714,13 +714,13 @@ statement ok
 delete from scb_except_intersect_on;
 
 statement ok
-insert into scb_except_intersect_off (select a, b from scb_t except select a, b from scb_u) intersect select a, b from scb_w;
+insert into scb_except_intersect_off select * from ((select a, b from scb_t except select a, b from scb_u) intersect select a, b from scb_w) q;
 
 statement ok
 set batch_set_operation_to_count = true;
 
 statement ok
-insert into scb_except_intersect_on (select a, b from scb_t except select a, b from scb_u) intersect select a, b from scb_w;
+insert into scb_except_intersect_on select * from ((select a, b from scb_t except select a, b from scb_u) intersect select a, b from scb_w) q;
 
 statement ok
 set batch_set_operation_to_count = false;
@@ -998,13 +998,13 @@ statement ok
 delete from scb_except_intersect_on;
 
 statement ok
-insert into scb_except_intersect_off (select a, b from scb_t except select a, b from scb_u) intersect select a, b from scb_w;
+insert into scb_except_intersect_off select * from ((select a, b from scb_t except select a, b from scb_u) intersect select a, b from scb_w) q;
 
 statement ok
 set batch_set_operation_to_count = true;
 
 statement ok
-insert into scb_except_intersect_on (select a, b from scb_t except select a, b from scb_u) intersect select a, b from scb_w;
+insert into scb_except_intersect_on select * from ((select a, b from scb_t except select a, b from scb_u) intersect select a, b from scb_w) q;
 
 statement ok
 set batch_set_operation_to_count = false;
@@ -1267,13 +1267,13 @@ statement ok
 delete from scb_except_intersect_on;
 
 statement ok
-insert into scb_except_intersect_off (select a, b from scb_t except select a, b from scb_u) intersect select a, b from scb_w;
+insert into scb_except_intersect_off select * from ((select a, b from scb_t except select a, b from scb_u) intersect select a, b from scb_w) q;
 
 statement ok
 set batch_set_operation_to_count = true;
 
 statement ok
-insert into scb_except_intersect_on (select a, b from scb_t except select a, b from scb_u) intersect select a, b from scb_w;
+insert into scb_except_intersect_on select * from ((select a, b from scb_t except select a, b from scb_u) intersect select a, b from scb_w) q;
 
 statement ok
 set batch_set_operation_to_count = false;
@@ -1539,13 +1539,13 @@ statement ok
 delete from scb_except_intersect_on;
 
 statement ok
-insert into scb_except_intersect_off (select a, b from scb_t except select a, b from scb_u) intersect select a, b from scb_w;
+insert into scb_except_intersect_off select * from ((select a, b from scb_t except select a, b from scb_u) intersect select a, b from scb_w) q;
 
 statement ok
 set batch_set_operation_to_count = true;
 
 statement ok
-insert into scb_except_intersect_on (select a, b from scb_t except select a, b from scb_u) intersect select a, b from scb_w;
+insert into scb_except_intersect_on select * from ((select a, b from scb_t except select a, b from scb_u) intersect select a, b from scb_w) q;
 
 statement ok
 set batch_set_operation_to_count = false;
