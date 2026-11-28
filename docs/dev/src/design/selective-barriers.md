@@ -1,6 +1,7 @@
 # Selective barriers with exempted upstreams
 
-Status: design, work in progress on branch `feat/selective-barriers` (base `v3.1.1`).
+Status: implemented on branch `fork/selective-barriers` (base `v3.1.2`), experimental and off by
+default (`[meta.developer] enable_selective_barrier`).
 
 ## Goal
 
