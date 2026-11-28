@@ -111,10 +111,15 @@
   stream_plan: |-
     StreamMaterialize { columns: [id, t.y(hidden), t.k(hidden)], stream_key: [id, t.y, t.k], pk_columns: [id, t.y, t.k], pk_conflict: NoCheck }
     └─StreamExchange { dist: HashShard(t.id, t.y, t.k) }
-      └─StreamHashJoin { type: LeftAnti, predicate: t.y = u.v AND t.k = u.k, output: [t.id, t.y, t.k] }
-        ├─StreamExchange { dist: HashShard(t.y, t.k) }
-        │ └─StreamTableScan { table: t, columns: [t.id, t.k, t.y], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
-        └─StreamExchange { dist: HashShard(u.v, u.k) }
+      └─StreamHashJoin { type: LeftAnti, predicate: t.k = u.k AND (IsNull(t.y) OR IsNull(u.v)), output: [t.id, t.y, t.k] }
+        ├─StreamExchange { dist: HashShard(t.k) }
+        │ └─StreamHashJoin { type: LeftAnti, predicate: t.y = u.v AND t.k = u.k, output: all }
+        │   ├─StreamExchange { dist: HashShard(t.y, t.k) }
+        │   │ └─StreamTableScan { table: t, columns: [t.id, t.k, t.y], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
+        │   └─StreamExchange { dist: HashShard(u.v, u.k) }
+        │     └─StreamProject { exprs: [u.v, u.k, u.id] }
+        │       └─StreamTableScan { table: u, columns: [u.k, u.v, u.id], stream_scan_type: SnapshotBackfill, stream_key: [u.id], pk: [id], dist: UpstreamHashShard(u.id) }
+        └─StreamExchange { dist: HashShard(u.k) }
           └─StreamProject { exprs: [u.v, u.k, u.id] }
             └─StreamTableScan { table: u, columns: [u.k, u.v, u.id], stream_scan_type: SnapshotBackfill, stream_key: [u.id], pk: [id], dist: UpstreamHashShard(u.id) }
 - name: exists with distinct over a limit
@@ -215,13 +220,19 @@
   stream_plan: |-
     StreamMaterialize { columns: [id, t.k(hidden)], stream_key: [id, t.k], pk_columns: [id, t.k], pk_conflict: NoCheck }
     └─StreamExchange { dist: HashShard(t.id, t.k) }
-      └─StreamHashJoin { type: LeftSemi, predicate: t.k = u.k, output: all }
+      └─StreamHashJoin { type: LeftSemi, predicate: t.k IS NOT DISTINCT FROM t.k, output: all }
         ├─StreamExchange { dist: HashShard(t.k) }
         │ └─StreamTableScan { table: t, columns: [t.id, t.k], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
-        └─StreamProject { exprs: [u.k], noop_update_hint: true }
-          └─StreamHashAgg { group_key: [u.k], aggs: [count] }
-            └─StreamExchange { dist: HashShard(u.k) }
-              └─StreamTableScan { table: u, columns: [u.k, u.id], stream_scan_type: SnapshotBackfill, stream_key: [u.id], pk: [id], dist: UpstreamHashShard(u.id) }
+        └─StreamProject { exprs: [t.k], noop_update_hint: true }
+          └─StreamHashAgg { group_key: [t.k], aggs: [count] }
+            └─StreamHashJoin { type: LeftOuter, predicate: t.k IS NOT DISTINCT FROM u.k, output: [t.k, u.id] }
+              ├─StreamProject { exprs: [t.k], noop_update_hint: true }
+              │ └─StreamHashAgg { group_key: [t.k], aggs: [count] }
+              │   └─StreamExchange { dist: HashShard(t.k) }
+              │     └─StreamTableScan { table: t, columns: [t.k, t.id], stream_scan_type: SnapshotBackfill, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
+              └─StreamExchange { dist: HashShard(u.k) }
+                └─StreamFilter { predicate: IsNotNull(u.k) }
+                  └─StreamTableScan { table: u, columns: [u.k, u.id], stream_scan_type: SnapshotBackfill, stream_key: [u.id], pk: [id], dist: UpstreamHashShard(u.id) }
 - name: in with a limit
   before:
   - setup

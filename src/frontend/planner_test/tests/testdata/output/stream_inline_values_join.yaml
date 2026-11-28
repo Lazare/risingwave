@@ -58,7 +58,13 @@
   - setup
   sql: |
     select * from t where t.x not in (select c from (values (1), (2)) v(c));
-  optimized_logical_plan_for_stream: 'LogicalScan { table: t, columns: [t.k, t.code, t.x], predicate: IsNotTrue(In(t.x, 1:Int32, 2:Int32)) }'
+  optimized_logical_plan_for_stream: |-
+    LogicalJoin { type: Inner, on: ($expr1 > $expr2), output: [t.k, t.code, t.x] }
+    ├─LogicalProject { exprs: [t.k, t.code, t.x, Case(IsNull(t.x), 1:Int32, 2:Int32) as $expr1] }
+    │ └─LogicalScan { table: t, columns: [t.k, t.code, t.x], predicate: IsNotTrue(In(t.x, 1:Int32, 2:Int32)) }
+    └─LogicalProject { exprs: [Case((count = 0:Int64), 0:Int32, (count filter(IsNull(*VALUES*_0.column_0)) > 0:Int64), 2:Int32, 1:Int32) as $expr2] }
+      └─LogicalAgg { aggs: [count, count filter(IsNull(*VALUES*_0.column_0))] }
+        └─LogicalValues { rows: [[1:Int32], [2:Int32]], schema: Schema { fields: [*VALUES*_0.column_0:Int32] } }
 - name: semi join - range condition, no key, one disjunct per row
   before:
   - setup

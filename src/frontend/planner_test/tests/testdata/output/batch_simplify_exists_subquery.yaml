@@ -103,10 +103,15 @@
     select t.id from t where t.y not in (select distinct u.v from u where u.k = t.k);
   batch_plan: |-
     BatchExchange { order: [], dist: Single }
-    └─BatchHashJoin { type: LeftAnti, predicate: t.y = u.v AND t.k = u.k, output: [t.id] }
-      ├─BatchExchange { order: [], dist: HashShard(t.y, t.k) }
-      │ └─BatchScan { table: t, columns: [t.id, t.k, t.y], distribution: UpstreamHashShard(t.id) }
-      └─BatchExchange { order: [], dist: HashShard(u.v, u.k) }
+    └─BatchHashJoin { type: LeftAnti, predicate: t.k = u.k AND (IsNull(t.y) OR IsNull(u.v)), output: [t.id] }
+      ├─BatchExchange { order: [], dist: HashShard(t.k) }
+      │ └─BatchHashJoin { type: LeftAnti, predicate: t.y = u.v AND t.k = u.k, output: all }
+      │   ├─BatchExchange { order: [], dist: HashShard(t.y, t.k) }
+      │   │ └─BatchScan { table: t, columns: [t.id, t.k, t.y], distribution: UpstreamHashShard(t.id) }
+      │   └─BatchExchange { order: [], dist: HashShard(u.v, u.k) }
+      │     └─BatchProject { exprs: [u.v, u.k] }
+      │       └─BatchScan { table: u, columns: [u.k, u.v], distribution: SomeShard }
+      └─BatchExchange { order: [], dist: HashShard(u.k) }
         └─BatchProject { exprs: [u.v, u.k] }
           └─BatchScan { table: u, columns: [u.k, u.v], distribution: SomeShard }
 - name: exists with distinct over a limit
@@ -214,12 +219,17 @@
     select t.id from t where exists (select max(u.v) from u where u.k = t.k);
   batch_plan: |-
     BatchExchange { order: [], dist: Single }
-    └─BatchHashJoin { type: LeftSemi, predicate: t.k = u.k, output: [t.id] }
+    └─BatchHashJoin { type: LeftSemi, predicate: t.k IS NOT DISTINCT FROM t.k, output: [t.id] }
       ├─BatchExchange { order: [], dist: HashShard(t.k) }
       │ └─BatchScan { table: t, columns: [t.id, t.k], distribution: UpstreamHashShard(t.id) }
-      └─BatchHashAgg { group_key: [u.k], aggs: [] }
-        └─BatchExchange { order: [], dist: HashShard(u.k) }
-          └─BatchScan { table: u, columns: [u.k], distribution: SomeShard }
+      └─BatchHashAgg { group_key: [t.k], aggs: [] }
+        └─BatchHashJoin { type: LeftOuter, predicate: t.k IS NOT DISTINCT FROM u.k, output: [t.k] }
+          ├─BatchHashAgg { group_key: [t.k], aggs: [] }
+          │ └─BatchExchange { order: [], dist: HashShard(t.k) }
+          │   └─BatchScan { table: t, columns: [t.k], distribution: SomeShard }
+          └─BatchExchange { order: [], dist: HashShard(u.k) }
+            └─BatchFilter { predicate: IsNotNull(u.k) }
+              └─BatchScan { table: u, columns: [u.k], distribution: SomeShard }
 - name: in with a limit
   before:
   - setup
