@@ -682,3 +682,82 @@
 
     Caused by:
       Bind error: Subquery must return only one column
+- id: greatest_setup
+  sql: |
+    create table ga (x int, k int);
+    create table gb (x int, y int);
+- name: greatest - a NULL argument does not make the filter false
+  before:
+  - greatest_setup
+  sql: |
+    select x from ga where greatest(x, null) > 5 and least(k, null) is not null;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchProject { exprs: [ga.x] }
+      └─BatchFilter { predicate: (Greatest(ga.x, null:Int32) > 5:Int32) AND IsNotNull(Least(ga.k, null:Int32)) }
+        └─BatchScan { table: ga, columns: [ga.x, ga.k], distribution: SomeShard }
+- name: greatest - in over a correlated aggregate that is not NULL over an empty input
+  before:
+  - greatest_setup
+  sql: |
+    select x from ga where x in (select greatest(max(y), 0) from gb where gb.x = ga.x);
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: LeftSemi, predicate: ga.x = $expr1 AND ga.x IS NOT DISTINCT FROM ga.x, output: all }
+      ├─BatchExchange { order: [], dist: HashShard(ga.x) }
+      │ └─BatchScan { table: ga, columns: [ga.x], distribution: SomeShard }
+      └─BatchProject { exprs: [ga.x, Greatest(max(gb.y), 0:Int32) as $expr1] }
+        └─BatchHashAgg { group_key: [ga.x], aggs: [max(gb.y)] }
+          └─BatchHashJoin { type: LeftOuter, predicate: ga.x IS NOT DISTINCT FROM gb.x, output: [ga.x, gb.y] }
+            ├─BatchHashAgg { group_key: [ga.x], aggs: [] }
+            │ └─BatchExchange { order: [], dist: HashShard(ga.x) }
+            │   └─BatchScan { table: ga, columns: [ga.x], distribution: SomeShard }
+            └─BatchExchange { order: [], dist: HashShard(gb.x) }
+              └─BatchFilter { predicate: IsNotNull(gb.x) }
+                └─BatchScan { table: gb, columns: [gb.x, gb.y], distribution: SomeShard }
+  stream_plan: |-
+    StreamMaterialize { columns: [x, ga._row_id(hidden)], stream_key: [ga._row_id, x], pk_columns: [ga._row_id, x], pk_conflict: NoCheck }
+    └─StreamExchange { dist: HashShard(ga.x, ga._row_id) }
+      └─StreamHashJoin { type: LeftSemi, predicate: ga.x = $expr1 AND ga.x IS NOT DISTINCT FROM ga.x, output: all }
+        ├─StreamExchange { dist: HashShard(ga.x) }
+        │ └─StreamTableScan { table: ga, columns: [ga.x, ga._row_id], stream_scan_type: SnapshotBackfill, stream_key: [ga._row_id], pk: [_row_id], dist: UpstreamHashShard(ga._row_id) }
+        └─StreamProject { exprs: [ga.x, Greatest(max(gb.y), 0:Int32) as $expr1] }
+          └─StreamHashAgg { group_key: [ga.x], aggs: [max(gb.y), count] }
+            └─StreamHashJoin { type: LeftOuter, predicate: ga.x IS NOT DISTINCT FROM gb.x, output: [ga.x, gb.y, gb._row_id] }
+              ├─StreamProject { exprs: [ga.x], noop_update_hint: true }
+              │ └─StreamHashAgg { group_key: [ga.x], aggs: [count] }
+              │   └─StreamExchange { dist: HashShard(ga.x) }
+              │     └─StreamTableScan { table: ga, columns: [ga.x, ga._row_id], stream_scan_type: SnapshotBackfill, stream_key: [ga._row_id], pk: [_row_id], dist: UpstreamHashShard(ga._row_id) }
+              └─StreamExchange { dist: HashShard(gb.x) }
+                └─StreamFilter { predicate: IsNotNull(gb.x) }
+                  └─StreamTableScan { table: gb, columns: [gb.x, gb.y, gb._row_id], stream_scan_type: SnapshotBackfill, stream_key: [gb._row_id], pk: [_row_id], dist: UpstreamHashShard(gb._row_id) }
+- name: greatest - in over a correlated aggregate that is NULL over an empty input (still rewritten)
+  before:
+  - greatest_setup
+  sql: |
+    select x from ga where x in (select greatest(max(y), min(y)) from gb where gb.x = ga.x);
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: LeftSemi, predicate: ga.x = $expr1 AND ga.x = gb.x, output: all }
+      ├─BatchExchange { order: [], dist: HashShard(ga.x) }
+      │ └─BatchScan { table: ga, columns: [ga.x], distribution: SomeShard }
+      └─BatchProject { exprs: [Greatest(max(gb.y), min(gb.y)) as $expr1, gb.x] }
+        └─BatchHashAgg { group_key: [gb.x], aggs: [max(gb.y), min(gb.y)] }
+          └─BatchExchange { order: [], dist: HashShard(gb.x) }
+            └─BatchScan { table: gb, columns: [gb.x, gb.y], distribution: SomeShard }
+- name: greatest - scalar subquery with the streaming unnesting of the prototype
+  before:
+  - greatest_setup
+  sql: |
+    set streaming_simplify_subquery_unnesting = true;
+    select x, (select greatest(max(y), 0) from gb where gb.x = ga.x) as g from ga;
+  stream_plan: |-
+    StreamMaterialize { columns: [x, g, ga._row_id(hidden)], stream_key: [ga._row_id, x], pk_columns: [ga._row_id, x], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [ga.x, Case(IsNotNull(gb.x), $expr1, 0:Int32) as $expr2, ga._row_id] }
+      └─StreamHashJoin { type: LeftOuter, predicate: ga.x = gb.x, output: [ga.x, $expr1, gb.x, ga._row_id] }
+        ├─StreamExchange { dist: HashShard(ga.x) }
+        │ └─StreamTableScan { table: ga, columns: [ga.x, ga._row_id], stream_scan_type: SnapshotBackfill, stream_key: [ga._row_id], pk: [_row_id], dist: UpstreamHashShard(ga._row_id) }
+        └─StreamProject { exprs: [Greatest(max(gb.y), 0:Int32) as $expr1, gb.x] }
+          └─StreamHashAgg { group_key: [gb.x], aggs: [max(gb.y), count] }
+            └─StreamExchange { dist: HashShard(gb.x) }
+              └─StreamTableScan { table: gb, columns: [gb.x, gb.y, gb._row_id], stream_scan_type: SnapshotBackfill, stream_key: [gb._row_id], pk: [_row_id], dist: UpstreamHashShard(gb._row_id) }
