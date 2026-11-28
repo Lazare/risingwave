@@ -266,6 +266,9 @@ pub use set_operation_to_count_rule::*;
 // Rule `SetOperationFilterMergeRule` (`*_merge_set_operation_filters`).
 mod set_operation_filter_merge_rule;
 pub use set_operation_filter_merge_rule::*;
+// Rule `AggGroupKeyReduceRule` (`*_reduce_group_keys`).
+mod agg_group_key_reduce_rule;
+pub use agg_group_key_reduce_rule::*;
 mod join_project_transpose_rule;
 pub use join_project_transpose_rule::*;
 mod limit_push_down_rule;
@@ -482,6 +485,7 @@ macro_rules! for_all_rules {
             , { MvSelectionRule }
             , { SetOperationToCountRule }
             , { SetOperationFilterMergeRule }
+            , { AggGroupKeyReduceRule }
         }
     };
 }

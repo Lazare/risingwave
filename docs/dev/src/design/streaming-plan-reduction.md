@@ -48,6 +48,7 @@ own rules.
 | BU | Batch: `UNION ALL` run in parallel tasks instead of one (`batch_distributed_union`) | done (prototype, branch `proto/plan-reduction-batch-union-dist`, see "BU" below) |
 | S12 | `INTERSECT` / `EXCEPT` computed by one counting aggregation over a `UNION ALL` of the inputs (`streaming_set_operation_to_count`, `batch_set_operation_to_count`) | done (prototype, branch `proto/plan-reduction-setop-keys`), see "S12" below; `ALL` variants not supported by the binder |
 | S13 | `UNION` / `INTERSECT` / `EXCEPT` of filters over the same input become one filter (`streaming_merge_set_operation_filters`, `batch_merge_set_operation_filters`) | done (prototype, branch `proto/plan-reduction-setop-keys`), see "S13" below |
+| S9 | Group key columns that the other ones determine removed, `min` / `max` / `first_value` / `last_value` of a value of the group replaced (`streaming_reduce_group_keys`, `batch_reduce_group_keys`) | done for aggregations (prototype, branch `proto/plan-reduction-setop-keys`), see "S9" below; partition and order keys of windows and top-n not done |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -1482,6 +1483,47 @@ SELECT k, a FROM t WHERE p0  UNION      SELECT k, a FROM t WHERE p1   =>  DISTIN
   `e2e_test/batch/merge_set_operation_filters` (filters with NULLs, values moved across the
   filters by updates, three branches over two tables, kept cases: a filter on a column not output,
   a `numeric` column, different projections, different tables).
+
+### S9. Group keys and aggregates of values of the group (added on 2026-11-28, done on the branch)
+
+Variables `streaming_reduce_group_keys` and `batch_reduce_group_keys`, rule
+`AggGroupKeyReduceRule` (Calcite `AggregateRemoveDuplicateKeysRule`,
+`AggregateReduceFunctionsOnGroupKeysRule`, `AggregateProjectPullUpConstantsRule`; PostgreSQL
+`remove_useless_groupby_columns`). `AggGroupBySimplifyRule` (always on) only narrows a group key
+that is a key of the whole input, which column pruning makes rare once an aggregate reads another
+column.
+
+```text
+SELECT o.id, o.placed, sum(i.qty) FROM o JOIN i ON i.o_id = o.id GROUP BY o.id, o.placed
+  => GROUP BY o.id, internal_last_seen_value(o.placed)
+SELECT a, b, count(*) FROM t WHERE b = 3 GROUP BY a, b    => GROUP BY a, last seen value of b
+SELECT k, max(k), min(k) FROM t GROUP BY k                => GROUP BY k, projected three times
+```
+
+- The functional dependencies of the input (keys of tables and of aggregations, `a = b` and
+  `a = literal` conjuncts of filters and inner joins, the left side of a left join) and the
+  literal columns of a projection right below. A group key column that the other kept ones
+  determine is removed, from the last one; at least one column is kept (an aggregation without
+  group key returns a row on an empty input). Its value is that of any row of the group
+  (`internal_last_seen_value`, which takes `NULL` as a value and keeps its state on retractions).
+- `min`, `max`, `first_value`, `last_value`, `internal_last_seen_value` without `FILTER` of a column
+  that the kept group key determines: a kept group key column is read from the group key, another
+  one from a single `internal_last_seen_value` call. Valid with `NULL`s: the dependencies hold
+  with `NULL` as a value, and `min` of `NULL`s is `NULL`.
+- Streaming: a narrower state key (and primary key of a materialized view); a `min` / `max` over an
+  input that retracts rows keeps every value of the group (materialized input state), replaced by
+  one value. Not under a source, `now()` or a table with a watermark: a column with a watermark
+  must stay in the group key (state cleaning, `EMIT ON WINDOW CLOSE`).
+- Stage: `STREAM_REDUCE_GROUP_KEYS` after the last stages of the prototype (after the final column
+  pruning, so that the dependencies are those of the columns read), then column pruning;
+  `BATCH_REDUCE_GROUP_KEYS` after the status ladder stage.
+- Not done: partition keys of windows, group keys and order keys of top-n (the same reduction
+  applies; smaller gains), keys made constant by an equivalence class (only direct `= literal`
+  conjuncts and literals are seen).
+- Tests: planner tests `stream_reduce_group_keys.yaml` (batch and streaming plans); differential
+  tests `e2e_test/streaming/reduce_group_keys` and `e2e_test/batch/reduce_group_keys`
+  (determined columns updated, set to and from `NULL`, orders without items, left joins, keys of a
+  sub-aggregation, kept cases).
 
 ## Not for now: sharing between materialized views
 

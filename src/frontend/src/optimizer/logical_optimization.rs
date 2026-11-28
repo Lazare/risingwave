@@ -476,6 +476,23 @@ static BATCH_MERGE_SET_OPERATION_FILTERS: LazyLock<OptimizationStage> = LazyLock
     )
 });
 
+// Rule `AggGroupKeyReduceRule` (`*_reduce_group_keys`).
+static STREAM_REDUCE_GROUP_KEYS: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Reduce Group Keys",
+        vec![AggGroupKeyReduceRule::create_for_stream()],
+        ApplyOrder::TopDown,
+    )
+});
+
+static BATCH_REDUCE_GROUP_KEYS: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Reduce Group Keys",
+        vec![AggGroupKeyReduceRule::create_for_batch()],
+        ApplyOrder::TopDown,
+    )
+});
+
 static SET_OPERATION_MERGE: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Set Operation Merge",
@@ -1559,6 +1576,22 @@ impl LogicalOptimizer {
                 }
             }
         }
+        // Rule `AggGroupKeyReduceRule` (`streaming_reduce_group_keys`): after the final column
+        // pruning, which leaves in the input of an aggregation only the columns that it reads, so
+        // that the functional dependencies of the input are those of the columns read. On demand
+        // only. The columns that a replaced aggregate read may no longer be needed.
+        if ctx.session_ctx().config().streaming_reduce_group_keys()
+            && !ctx.is_stream_prune_baseline()
+        {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&STREAM_REDUCE_GROUP_KEYS)?;
+            let applied = ctx.total_rule_applied() - applied_before;
+            if applied > 0 {
+                ctx.add_stream_prune_rule_applied(applied);
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
+            }
+        }
         crate::optimizer::rule::diagnose_repeated_reads(&plan);
 
         plan = plan.optimize_by_rules(&CONSTANT_OUTPUT_REMOVE)?;
@@ -1934,6 +1967,17 @@ impl LogicalOptimizer {
             if ctx.total_rule_applied() != applied_before {
                 plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
                 plan = Self::column_pruning(plan, explain_trace, &ctx);
+            }
+        }
+
+        // Rule `AggGroupKeyReduceRule` (`batch_reduce_group_keys`): after the final column pruning,
+        // as for streaming. On demand.
+        if ctx.session_ctx().config().batch_reduce_group_keys() {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&BATCH_REDUCE_GROUP_KEYS)?;
+            if ctx.total_rule_applied() != applied_before {
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
             }
         }
 

@@ -527,6 +527,19 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_merge_set_operation_filters: bool,
 
+    // Rule `AggGroupKeyReduceRule` (`*_reduce_group_keys`).
+    /// In the plan of a new streaming job, remove from the group key of an aggregation the columns
+    /// that the other group key columns determine (a key of a table, a constant), and replace
+    /// `min`, `max`, `first_value` and `last_value` of such a column by its value: the state is
+    /// keyed by fewer columns and keeps one value per group instead of every value. Not below a
+    /// source, `now()` or a table with a watermark. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    streaming_reduce_group_keys: bool,
+
+    /// The same as `streaming_reduce_group_keys`, for batch queries. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_reduce_group_keys: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,
