@@ -151,11 +151,11 @@
       └─BatchSimpleAgg { aggs: [count] }
         └─BatchHashJoin { type: Inner, predicate: cfl_mid.k = cfl_big.k, output: [] }
           ├─BatchExchange { order: [], dist: HashShard(cfl_mid.k) }
-          │ └─BatchHashJoin { type: Inner, predicate: cfl_dim.id = cfl_mid.c_id, output: [cfl_mid.k] }
-          │   ├─BatchExchange { order: [], dist: HashShard(cfl_dim.id) }
-          │   │ └─BatchScan { table: cfl_dim, columns: [cfl_dim.id], distribution: UpstreamHashShard(cfl_dim.id) }
-          │   └─BatchExchange { order: [], dist: HashShard(cfl_mid.c_id) }
-          │     └─BatchScan { table: cfl_mid, columns: [cfl_mid.k, cfl_mid.c_id], distribution: SomeShard }
+          │ └─BatchHashJoin { type: Inner, predicate: cfl_mid.c_id = cfl_dim.id, output: [cfl_mid.k] }
+          │   ├─BatchExchange { order: [], dist: HashShard(cfl_mid.c_id) }
+          │   │ └─BatchScan { table: cfl_mid, columns: [cfl_mid.k, cfl_mid.c_id], distribution: SomeShard }
+          │   └─BatchExchange { order: [], dist: HashShard(cfl_dim.id) }
+          │     └─BatchScan { table: cfl_dim, columns: [cfl_dim.id], distribution: UpstreamHashShard(cfl_dim.id) }
           └─BatchHashAgg { group_key: [cfl_big.k], aggs: [] }
             └─BatchExchange { order: [], dist: HashShard(cfl_big.k) }
               └─BatchScan { table: cfl_big, columns: [cfl_big.k], distribution: SomeShard }
