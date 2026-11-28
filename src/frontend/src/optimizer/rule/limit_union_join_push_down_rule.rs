@@ -47,7 +47,6 @@ use risingwave_common::util::sort_util::ColumnOrder;
 use risingwave_pb::plan_common::JoinType;
 
 use super::prelude::{PlanRef, *};
-use crate::optimizer::PlanTreeNode;
 use crate::optimizer::plan_node::generic::GenericPlanRef;
 use crate::optimizer::plan_node::{
     LogicalLimit, LogicalTopN, PlanTreeNodeBinary, PlanTreeNodeUnary,
@@ -196,7 +195,8 @@ impl Rule<Logical> for LimitUnionJoinPushDownRule {
     fn apply(&self, plan: PlanRef) -> Option<PlanRef> {
         let (input, n, k, order) = if let Some(limit) = plan.as_logical_limit() {
             (limit.input(), limit.limit(), limit.offset(), None)
-        } else if let Some(top_n) = plan.as_logical_top_n() {
+        } else {
+            let top_n = plan.as_logical_top_n()?;
             if !top_n.group_key().is_empty() {
                 return None;
             }
@@ -207,8 +207,6 @@ impl Rule<Logical> for LimitUnionJoinPushDownRule {
                 top_n.offset(),
                 Some((top_n.topn_order().clone(), limit_attr.with_ties())),
             )
-        } else {
-            return None;
         };
         // `OFFSET` without `LIMIT` reads every row: nothing to cut. `LIMIT 0` is left to the
         // pruning of empty relations.
