@@ -76,6 +76,7 @@ default.
 | IL | Intersection of the `IN` lists / equalities on the same expression, repeated arguments of `COALESCE` removed (`batch_simplify_in_lists_and_coalesce`, `streaming_simplify_in_lists_and_coalesce`) | done (prototype, branch `proto/plan-reduction-contradictions`), see "IL" below |
 | EB | Batch executor: a hash join whose build side holds no key that can match does not execute its probe side, when the output can not depend on it and the probe side reads nothing from other tasks | done (unconditional, branch `proto/plan-reduction-contradictions`), see "EB" below |
 | BC | Batch: cross join, or join on the same constant on both sides, as a nested loop join that copies its left side to every task (broadcast exchange) instead of one task (`batch_broadcast_cross_join`) | done (prototype, branch `proto/plan-reduction-contradictions`), see "BC" below |
+| RK | Unique key of the partition columns of a `row_number() = n` filter over a window (the empty key without `PARTITION BY`), for the rules of 1 and 2 (`streaming_simplify_on_unique_key`, `batch_simplify_on_unique_key`) | done (prototype, branch `proto/plan-reduction-fix-cast-rownum`, see "RK" below) |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -3040,6 +3041,72 @@ join; the join on a constant stays on one vnode). Local execution keeps both inp
 
 - Tests: planner test `batch_broadcast_cross_join.yaml`; differential test
   `e2e_test/batch/broadcast_cross_join` (distributed mode).
+### RK. Unique key of `row_number() = n` (added on 2026-11-28, done on the branch)
+
+A filter `row_number() OVER (PARTITION BY k ORDER BY ...) = 1` over a window keeps at most one row
+per partition: `row_number()` numbers the rows of a partition 1, 2, 3... without ties, so two rows
+of the filter's output that agree on `k` (a `NULL` partition is a partition like any other) are
+the same row. The same holds for `row_number() = n` with any integer constant `n`: the numbers of a
+partition are distinct, so at most one row of a partition has the number `n` (none if `n < 1`).
+Without `PARTITION BY` the whole input is a single partition: at most one row passes, which the
+unique keys write as the empty key. The unique keys of idea 4 (`unique_keys` in
+`unique_key_simplify_rule.rs`) now hold `k` (or the empty key) for such a filter, the conjunct
+written `rn = n`, `rn <= 1`, `rn < 2` or the other way round (`1 = rn`, `2 > rn`), whatever the
+other conjuncts, the filter right above the window or above a projection of it (the column
+pruning puts one there when an ordering column is not read above; the partition columns must be
+projected as they are); and an over window passes the keys of its input through (its first columns
+are its input columns, its rows those of its input). The window is not turned into a top-n for this.
+Streaming rejects windows without `PARTITION BY`: the empty key only matters in batch.
+
+When it matters: streaming turns a window with a single numbering function under such a filter
+into a top-n, whose group key was already a key; the window stays when it has another function
+on the same window (`lag`, a running `sum`...), and in batch unless `batch_over_window_to_topn`.
+The rules of 1 and 2 then remove what the key makes useless:
+
+```sql
+-- No partition holds two first rows: the aggregation becomes a projection, the filter
+-- `1 > 1` is never true and the query an empty relation.
+select k from (select k, row_number() over (partition by k order by v) as rn from t) s
+where rn = 1 group by k having count(*) > 1;
+-- The DISTINCT and the left join on k are removed the same way.
+select distinct k, v from (... where rn = 1) s;
+select u.id from u left join (... where rn = 1) s on u.k = s.k;
+```
+
+It is a new fact for the existing rules, so it is behind their variables
+(`streaming_simplify_on_unique_key`, `batch_simplify_on_unique_key`); the other readers of the
+unique keys (merge of repeated lookups, aggregations pushed below joins or into unions, the
+estimates of the cost-based join ordering) get the same fact behind their own variables. A key of
+a shared sub-plan read twice designates the same row in both reads, as for the group key of a
+top-1: a stream is computed once, and batch plans have no shared sub-plans at execution.
+
+Not done:
+- `rank()` and `dense_rank()`: ties all get 1, no key.
+- `row_number() <= n` or `< n` keeping more than the number 1, `> n`: several rows per partition.
+- An aggregation without group key over a one-row filter is kept: it emits a row over no rows.
+- A partition column computed or dropped by the projection between the filter and the window.
+
+Side effect on an existing output: in `batch_reduce_keys_after_conversions.yaml`, the duplicates
+of a primary key searched with `lag(id) OVER (ORDER BY id)` and grouped by `id`: the window now
+passes the key `id` of the table, so the first pass of the reductions on keys removes the outer
+aggregation before `LagDuplicatesRule` runs; the rule then expands each `id` into
+`generate_series(2, 1)` rows, none, instead of the former `count > 1` filter folded to an empty
+relation. Same (empty) result, but no longer an empty relation at planning time.
+
+Tests: `batch_row_number_unique_key.yaml` and `stream_row_number_unique_key.yaml` (planner:
+`GROUP BY k HAVING count(*) > 1` folded to an empty relation, aggregates per key, `DISTINCT`,
+`<= 1` and `2 > rn`, other conjuncts and another window function, two partition columns, a group
+key holding more than the partition, an unused left join on `k`, `row_number() = 2` and `= 3`,
+no partition with `= 1`, `= 2` and `<= 1` (aggregation, `DISTINCT`, left join on any column;
+batch only);
+kept: `rank() = 1`, `<= 2` with and without partition, `> 1`, a filter on another column, a group
+key without the partition, a row number of another partition, `count(*)` without group key over
+a window without partition, off by default), the differential
+`e2e_test/batch/row_number_unique_key.gen.py` and `e2e_test/streaming/row_number_unique_key.gen.py`
+(25 batch and 20 streaming queries, without the windows without partition, with and without the
+variable, the streaming ones also compared with the batch query,
+after rounds that insert a new first row, move a row to another partition, change, delete and set
+to `NULL` the first rows, empty and refill the tables).
 
 ## Not for now: sharing between materialized views
 

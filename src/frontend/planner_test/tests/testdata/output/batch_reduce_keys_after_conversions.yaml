@@ -44,8 +44,8 @@
     select id, count(*) + 1 as n from o where id = prev group by id;
   batch_plan: |-
     BatchExchange { order: [], dist: Single }
-    └─BatchProject { exprs: [t.id, ((count - 1:Int64) + 1:Int32) as $expr1] }
-      └─BatchFilter { predicate: (count > 1:Int64) }
+    └─BatchProject { exprs: [t.id, 2:Int64] }
+      └─BatchProjectSet { select_list: [$0, GenerateSeries(2:Int64, $1)] }
         └─BatchSortAgg { group_key: [t.id], aggs: [count] }
           └─BatchFilter { predicate: IsNotNull(t.id) }
             └─BatchScan { table: t, columns: [t.id], distribution: UpstreamHashShard(t.id) }
@@ -85,8 +85,18 @@
   sql: |
     with o as (select id, lag(id) over (order by id) as prev from t)
     select id, count(*) + 1 as n from o where id = prev group by id;
-  optimized_logical_plan_for_batch: 'LogicalValues { rows: [], schema: Schema { fields: [t.id:Int32, $expr10022:Int64] } }'
-  batch_plan: 'BatchValues { rows: [] }'
+  optimized_logical_plan_for_batch: |-
+    LogicalProject { exprs: [t.id, (1:Int64 + 1:Int32) as $expr1] }
+    └─LogicalProjectSet { select_list: [$0, GenerateSeries(2:Int64, $1)] }
+      └─LogicalProject { exprs: [t.id, 1:Int64] }
+        └─LogicalScan { table: t, columns: [t.id], predicate: IsNotNull(t.id) }
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchProject { exprs: [t.id, 2:Int64] }
+      └─BatchProjectSet { select_list: [$0, GenerateSeries(2:Int64, $1)] }
+        └─BatchProject { exprs: [t.id, 1:Int64] }
+          └─BatchFilter { predicate: IsNotNull(t.id) }
+            └─BatchScan { table: t, columns: [t.id], distribution: UpstreamHashShard(t.id) }
 - name: lag - the duplicate rows of a key are none
   before:
   - setup

@@ -24,6 +24,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use risingwave_common::types::DataType;
 use risingwave_expr::aggregate::{AggType, PbAggKind};
+use risingwave_expr::window_function::WindowFuncKind;
 use risingwave_pb::plan_common::JoinType;
 
 use super::column_facts_simplify_rule::{column_facts, scan_predicate_constant_columns};
@@ -33,8 +34,8 @@ use crate::catalog::table_catalog::TableType;
 use crate::expr::{Expr, ExprImpl, ExprType, FunctionCall, InputRef};
 use crate::optimizer::plan_node::generic::{GenericPlanRef, PlanAggCall};
 use crate::optimizer::plan_node::{
-    LogicalAgg, LogicalJoin, LogicalProject, LogicalScan, PlanNodeId, PlanTreeNodeBinary,
-    PlanTreeNodeUnary,
+    LogicalAgg, LogicalFilter, LogicalJoin, LogicalProject, LogicalScan, PlanNodeId,
+    PlanTreeNodeBinary, PlanTreeNodeUnary,
 };
 
 /// A set of columns on which no two rows agree. The empty set means at most one row.
@@ -50,6 +51,10 @@ type Key = BTreeSet<usize>;
 ///   [`scan_keys`]).
 /// - `Values` with at most one row, `Limit` of at most one row: the empty key.
 /// - `Filter`, `Share`, `Limit`: the keys of the input, whose rows they only select.
+/// - `Filter` over an `OverWindow` (directly or through a `Project`): also the partition columns
+///   of a `row_number()` that it keeps at a single number, the empty key without `PARTITION BY`
+///   (see [`single_row_number_keys`]).
+/// - `OverWindow`: the keys of the input, whose rows and columns it outputs first.
 /// - `TopN`: the keys of the input, and the group key if it keeps one row per group.
 /// - `Dedup`: the keys of the input, and the columns it deduplicates on.
 /// - `Agg` without grouping sets: the group key.
@@ -140,7 +145,12 @@ fn derive_unique_keys(plan: &PlanRef, memo: &mut HashMap<PlanNodeId, Vec<Key>>) 
             _ => vec![],
         }
     };
-    if plan.as_logical_filter().is_some() || plan.as_logical_share().is_some() {
+    if let Some(filter) = plan.as_logical_filter() {
+        let mut keys = input_keys(memo);
+        keys.extend(single_row_number_keys(filter));
+        return keys;
+    }
+    if plan.as_logical_share().is_some() || plan.as_logical_over_window().is_some() {
         return input_keys(memo);
     }
     if let Some(limit) = plan.as_logical_limit() {
@@ -163,6 +173,86 @@ fn derive_unique_keys(plan: &PlanRef, memo: &mut HashMap<PlanNodeId, Vec<Key>>) 
         return keys;
     }
     vec![]
+}
+
+/// The keys that a filter over an over window gets from `row_number()`: the partition columns
+/// of each `row_number()` that a conjunct of the filter keeps at a single value (`= n`, see
+/// [`column_kept_at_one_value`]). `row_number()` numbers the rows of each partition 1, 2, 3...
+/// without ties, so at most one row of a partition passes, and two rows that agree on the
+/// partition columns (`NULL` included, a partition like any other) are the same row. Without
+/// `PARTITION BY` the whole input is one partition: at most one row passes, the empty key.
+///
+/// The column pruning puts a projection between the filter and the window when a column of the
+/// input of the window (an ordering column, say) is not read above: the filter is then looked at
+/// through it, on the columns that it passes as they are.
+///
+/// Not for `rank()` or `dense_rank()`, whose ties get the same number.
+fn single_row_number_keys(filter: &LogicalFilter) -> Vec<Key> {
+    let input = filter.input();
+    // The plan under the filter, and for each column of the filter the column of that plan that
+    // it is, if it is one as it is.
+    let (window_plan, columns): (PlanRef, Vec<Option<usize>>) = match input.as_logical_project() {
+        Some(project) => (
+            project.input(),
+            project
+                .exprs()
+                .iter()
+                .map(|expr| expr.as_input_ref().map(|input_ref| input_ref.index()))
+                .collect(),
+        ),
+        None => (input.clone(), (0..input.schema().len()).map(Some).collect()),
+    };
+    let Some(over_window) = window_plan.as_logical_over_window() else {
+        return vec![];
+    };
+    // The output columns of the over window are its input columns, then its window functions.
+    let input_len = over_window.input().schema().len();
+    let column_of_filter = |column: usize| columns.iter().position(|&c| c == Some(column));
+    filter
+        .predicate()
+        .conjunctions
+        .iter()
+        .filter_map(|conjunct| {
+            let column = (*columns.get(column_kept_at_one_value(conjunct)?)?)?;
+            let function = over_window
+                .window_functions()
+                .get(column.checked_sub(input_len)?)?;
+            if function.kind != WindowFuncKind::RowNumber {
+                return None;
+            }
+            // Every partition column must be passed by the projection.
+            function
+                .partition_by
+                .iter()
+                .map(|i| column_of_filter(i.index))
+                .collect::<Option<Key>>()
+        })
+        .collect()
+}
+
+/// The column `c` of a conjunct that lets at most one value of `c` pass: `c = n` on any integer
+/// constant `n`, `c <= 1` or `c < 2` (each written either way round). The last two keep at
+/// most the value 1 of a row number, which starts at 1.
+fn column_kept_at_one_value(conjunct: &ExprImpl) -> Option<usize> {
+    let to_int = |value: ExprImpl| -> Option<i64> {
+        let value = value
+            .cast_implicit(&DataType::Int64)
+            .ok()?
+            .fold_const()
+            .ok()??;
+        Some(*value.as_int64())
+    };
+    if let Some((input_ref, value)) = conjunct.as_eq_const() {
+        return to_int(value).map(|_| input_ref.index());
+    }
+    let (input_ref, comparison, value) = conjunct.as_comparison_const()?;
+    let value = to_int(value)?;
+    let kept_at_one = match comparison {
+        ExprType::LessThanOrEqual => value == 1,
+        ExprType::LessThan => value == 2,
+        _ => false,
+    };
+    kept_at_one.then_some(input_ref.index())
 }
 
 /// Keeps the keys whose columns all have an image in the mapping, with their columns mapped.

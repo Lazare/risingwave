@@ -797,11 +797,18 @@ impl Estimator<'_> {
         }
         if let Some(join) = plan.as_logical_join() {
             let mut internal = self.column_widths(&join.left());
+            // The output indices of a right semi or anti join index its right side alone.
+            let offset = right_only_output_offset(join);
             internal.extend(self.column_widths(&join.right()));
             return join
                 .output_indices()
                 .iter()
-                .map(|&i| internal.get(i).copied().unwrap_or(ROW_OVERHEAD_BYTES))
+                .map(|&i| {
+                    internal
+                        .get(i + offset)
+                        .copied()
+                        .unwrap_or(ROW_OVERHEAD_BYTES)
+                })
                 .collect();
         }
         if let Some(multi_join) = plan.as_logical_multi_join() {
@@ -1361,7 +1368,13 @@ fn input_required_columns(plan: &PlanRef, columns: &BTreeSet<usize>) -> Vec<BTre
         let left_num = join.left().schema().len();
         let num = left_num + join.right().schema().len();
         let mut internal = expr_columns(join.on().conjunctions.iter(), num);
-        internal.extend(columns.iter().filter_map(|&c| join.output_indices().get(c)));
+        // The output indices of a right semi or anti join index its right side alone.
+        let offset = right_only_output_offset(join);
+        internal.extend(
+            columns
+                .iter()
+                .filter_map(|&c| join.output_indices().get(c).map(|&i| i + offset)),
+        );
         return vec![
             internal.iter().copied().filter(|&c| c < left_num).collect(),
             internal
@@ -1750,4 +1763,14 @@ pub(super) fn hash_join_cost(
     probe.rows * probe.width * PROBE_COST
         + build.rows_hi * build.width * BUILD_COST
         + output_rows * output_width * OUTPUT_COST
+}
+
+/// The number of left columns of `join` when it is a right semi or anti join, whose output
+/// indices index its right side alone, else 0: added to an output index, it gives the column in
+/// the left columns followed by the right ones.
+fn right_only_output_offset(join: &LogicalJoin) -> usize {
+    match join.join_type() {
+        JoinType::RightSemi | JoinType::RightAnti => join.left().schema().len(),
+        _ => 0,
+    }
 }

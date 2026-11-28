@@ -943,14 +943,27 @@ impl PredicatePushdown for LogicalJoin {
         predicate: Condition,
         ctx: &mut PredicatePushdownContext,
     ) -> PlanRef {
-        // rewrite output col referencing indices as internal cols
-        let mut predicate = {
-            let mut mapping = self.core.o2i_col_mapping();
-            predicate.rewrite_expr(&mut mapping)
-        };
-
         let left_col_num = self.left().schema().len();
         let right_col_num = self.right().schema().len();
+        // The internal columns of a right semi or anti join are its right columns alone, numbered
+        // from 0, while the functions below split a predicate over the left columns followed by
+        // the right ones: shift its columns after the left ones (and back at the end).
+        let right_only_offset = match self.join_type() {
+            JoinType::RightSemi | JoinType::RightAnti => left_col_num,
+            _ => 0,
+        };
+
+        // rewrite output col referencing indices as internal cols
+        let mut predicate = {
+            let mut mapping = ColIndexMapping::new(
+                self.output_indices()
+                    .iter()
+                    .map(|i| Some(i + right_only_offset))
+                    .collect(),
+                self.core.internal_column_num() + right_only_offset,
+            );
+            predicate.rewrite_expr(&mut mapping)
+        };
         let join_type = LogicalJoin::simplify_outer(&predicate, left_col_num, self.join_type());
 
         let push_down_temporal_predicate = self.temporal_join_on().is_none();
@@ -1032,6 +1045,13 @@ impl PredicatePushdown for LogicalJoin {
             self.output_indices().clone(),
         );
 
+        if right_only_offset > 0 {
+            let mut mapping = ColIndexMapping::with_shift_offset(
+                left_col_num + right_col_num,
+                -(right_only_offset as isize),
+            );
+            predicate = predicate.rewrite_expr(&mut mapping);
+        }
         let mut mapping = self.core.i2o_col_mapping();
         predicate = predicate.rewrite_expr(&mut mapping);
         LogicalFilter::create(new_join.into(), predicate)
@@ -2119,6 +2139,79 @@ mod tests {
             assert_eq!(as_plan.schema().fields()[0], fields[offset]);
             assert_eq!(as_plan.schema().fields()[1], fields[offset + 1]);
             assert_eq!(as_plan.schema().fields()[2], fields[offset + 2]);
+        }
+    }
+
+    /// A filter above a right semi or anti join reads its right columns, its only output: it is
+    /// pushed into the right side, on the same column. A column whose index was below the number
+    /// of left columns used to be taken for a left column (here `v6 > 0` for `v3 > 0`).
+    #[tokio::test]
+    async fn test_predicate_pushdown_right_semi_anti_join() {
+        let ty = DataType::Int32;
+        let ctx = OptimizerContext::mock();
+        let fields: Vec<Field> = (1..7)
+            .map(|i| Field::with_name(ty.clone(), format!("v{}", i)))
+            .collect();
+        let left = LogicalValues::new(
+            vec![],
+            Schema {
+                fields: fields[0..3].to_vec(),
+            },
+            ctx.clone(),
+        );
+        let right = LogicalValues::new(
+            vec![],
+            Schema {
+                fields: fields[3..6].to_vec(),
+            },
+            ctx,
+        );
+        // v2 = v5
+        let on: ExprImpl = FunctionCall::new(
+            Type::Equal,
+            vec![
+                InputRef::new(1, ty.clone()).into(),
+                InputRef::new(4, ty.clone()).into(),
+            ],
+        )
+        .unwrap()
+        .into();
+        for join_type in [JoinType::RightSemi, JoinType::RightAnti] {
+            let join: PlanRef = LogicalJoin::new(
+                left.clone().into(),
+                right.clone().into(),
+                join_type,
+                Condition::with_expr(on.clone()),
+            )
+            .into();
+            // v6 > 0: the third output column of the join.
+            let predicate: ExprImpl = FunctionCall::new(
+                Type::GreaterThan,
+                vec![
+                    InputRef::new(2, ty.clone()).into(),
+                    ExprImpl::literal_int(0),
+                ],
+            )
+            .unwrap()
+            .into();
+            let plan = join.predicate_pushdown(
+                Condition::with_expr(predicate),
+                &mut PredicatePushdownContext::new(join.clone()),
+            );
+            let new_join = plan.as_logical_join().unwrap();
+            assert_eq!(new_join.join_type(), join_type);
+            assert_eq!(new_join.on().conjunctions.len(), 1, "{join_type:?}");
+            assert!(
+                new_join.left().as_logical_values().is_some(),
+                "{join_type:?}"
+            );
+            let right = new_join.right();
+            let filter = right.as_logical_filter().unwrap();
+            let pushed: ExprImpl = filter.predicate().clone().into();
+            let call = pushed.as_function_call().unwrap();
+            assert_eq!(call.func_type(), Type::GreaterThan);
+            assert_eq_input_ref!(&call.inputs()[0], 2);
+            assert_eq!(plan.schema().fields(), &fields[3..6]);
         }
     }
 

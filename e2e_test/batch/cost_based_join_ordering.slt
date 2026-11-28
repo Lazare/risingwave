@@ -237,6 +237,18 @@ create table cbj_r_off_wide_three (c0 int, c1 varchar, c2 int);
 statement ok
 create table cbj_r_on_wide_three (c0 int, c1 varchar, c2 int);
 
+statement ok
+create table cbj_r_off_cast_anti (c0 varchar, c1 varchar);
+
+statement ok
+create table cbj_r_on_cast_anti (c0 varchar, c1 varchar);
+
+statement ok
+create table cbj_r_off_cast_semi (c0 varchar, c1 varchar);
+
+statement ok
+create table cbj_r_on_cast_semi (c0 varchar, c1 varchar);
+
 # Initial data: a large table, small and medium ones, NULLs and keys without match.
 
 statement ok
@@ -761,6 +773,36 @@ insert into cbj_r_on_wide_three select n.id, w.body->>'k', d3.c from cbj_n n joi
 statement ok
 set batch_cost_based_join_ordering = false;
 
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+insert into cbj_r_off_cast_anti select s.src, s.k::varchar from (select src, (last_value(body order by done_at) ->> 'k')::jsonb as k from cbj_w group by src) s where not exists (select 1 from cbj_n n where n.src = s.src and n.n = 3);
+
+statement ok
+set batch_cost_based_join_ordering = true;
+
+statement ok
+insert into cbj_r_on_cast_anti select s.src, s.k::varchar from (select src, (last_value(body order by done_at) ->> 'k')::jsonb as k from cbj_w group by src) s where not exists (select 1 from cbj_n n where n.src = s.src and n.n = 3);
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+insert into cbj_r_off_cast_semi select s.src, s.k::varchar from (select src, (last_value(body order by done_at) ->> 'k')::jsonb as k from cbj_w group by src) s where exists (select 1 from cbj_n n where n.src = s.src and n.n = 3);
+
+statement ok
+set batch_cost_based_join_ordering = true;
+
+statement ok
+insert into cbj_r_on_cast_semi select s.src, s.k::varchar from (select src, (last_value(body order by done_at) ->> 'k')::jsonb as k from cbj_w group by src) s where exists (select 1 from cbj_n n where n.src = s.src and n.n = 3);
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
 # Initial data: with and without the cost-based join ordering, the same rows.
 
 query III
@@ -1016,6 +1058,22 @@ select
   (select count(*) from (select c0, c1, c2, count(*) as n from cbj_r_on_wide_three group by c0, c1, c2 except select c0, c1, c2, count(*) as n from cbj_r_off_wide_three group by c0, c1, c2) x),
   (select count(*) from (select c0, c1, c2, count(*) as n from cbj_r_off_wide_three group by c0, c1, c2 except select c0, c1, c2, count(*) as n from cbj_r_on_wide_three group by c0, c1, c2) y),
   (select count(*) from cbj_r_on_wide_three) - (select count(*) from cbj_r_off_wide_three);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select c0, c1, count(*) as n from cbj_r_on_cast_anti group by c0, c1 except select c0, c1, count(*) as n from cbj_r_off_cast_anti group by c0, c1) x),
+  (select count(*) from (select c0, c1, count(*) as n from cbj_r_off_cast_anti group by c0, c1 except select c0, c1, count(*) as n from cbj_r_on_cast_anti group by c0, c1) y),
+  (select count(*) from cbj_r_on_cast_anti) - (select count(*) from cbj_r_off_cast_anti);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select c0, c1, count(*) as n from cbj_r_on_cast_semi group by c0, c1 except select c0, c1, count(*) as n from cbj_r_off_cast_semi group by c0, c1) x),
+  (select count(*) from (select c0, c1, count(*) as n from cbj_r_off_cast_semi group by c0, c1 except select c0, c1, count(*) as n from cbj_r_on_cast_semi group by c0, c1) y),
+  (select count(*) from cbj_r_on_cast_semi) - (select count(*) from cbj_r_off_cast_semi);
 ----
 0 0 0
 
@@ -1312,6 +1370,18 @@ delete from cbj_r_off_wide_three;
 
 statement ok
 delete from cbj_r_on_wide_three;
+
+statement ok
+delete from cbj_r_off_cast_anti;
+
+statement ok
+delete from cbj_r_on_cast_anti;
+
+statement ok
+delete from cbj_r_off_cast_semi;
+
+statement ok
+delete from cbj_r_on_cast_semi;
 
 statement ok
 set batch_cost_based_join_ordering = false;
@@ -1799,6 +1869,36 @@ insert into cbj_r_on_wide_three select n.id, w.body->>'k', d3.c from cbj_n n joi
 statement ok
 set batch_cost_based_join_ordering = false;
 
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+insert into cbj_r_off_cast_anti select s.src, s.k::varchar from (select src, (last_value(body order by done_at) ->> 'k')::jsonb as k from cbj_w group by src) s where not exists (select 1 from cbj_n n where n.src = s.src and n.n = 3);
+
+statement ok
+set batch_cost_based_join_ordering = true;
+
+statement ok
+insert into cbj_r_on_cast_anti select s.src, s.k::varchar from (select src, (last_value(body order by done_at) ->> 'k')::jsonb as k from cbj_w group by src) s where not exists (select 1 from cbj_n n where n.src = s.src and n.n = 3);
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+insert into cbj_r_off_cast_semi select s.src, s.k::varchar from (select src, (last_value(body order by done_at) ->> 'k')::jsonb as k from cbj_w group by src) s where exists (select 1 from cbj_n n where n.src = s.src and n.n = 3);
+
+statement ok
+set batch_cost_based_join_ordering = true;
+
+statement ok
+insert into cbj_r_on_cast_semi select s.src, s.k::varchar from (select src, (last_value(body order by done_at) ->> 'k')::jsonb as k from cbj_w group by src) s where exists (select 1 from cbj_n n where n.src = s.src and n.n = 3);
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
 # After the changes: with and without the cost-based join ordering, the same rows.
 
 query III
@@ -2057,6 +2157,22 @@ select
 ----
 0 0 0
 
+query III
+select
+  (select count(*) from (select c0, c1, count(*) as n from cbj_r_on_cast_anti group by c0, c1 except select c0, c1, count(*) as n from cbj_r_off_cast_anti group by c0, c1) x),
+  (select count(*) from (select c0, c1, count(*) as n from cbj_r_off_cast_anti group by c0, c1 except select c0, c1, count(*) as n from cbj_r_on_cast_anti group by c0, c1) y),
+  (select count(*) from cbj_r_on_cast_anti) - (select count(*) from cbj_r_off_cast_anti);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select c0, c1, count(*) as n from cbj_r_on_cast_semi group by c0, c1 except select c0, c1, count(*) as n from cbj_r_off_cast_semi group by c0, c1) x),
+  (select count(*) from (select c0, c1, count(*) as n from cbj_r_off_cast_semi group by c0, c1 except select c0, c1, count(*) as n from cbj_r_on_cast_semi group by c0, c1) y),
+  (select count(*) from cbj_r_on_cast_semi) - (select count(*) from cbj_r_off_cast_semi);
+----
+0 0 0
+
 # Cleanup.
 
 statement ok
@@ -2250,6 +2366,18 @@ drop table cbj_r_off_wide_three;
 
 statement ok
 drop table cbj_r_on_wide_three;
+
+statement ok
+drop table cbj_r_off_cast_anti;
+
+statement ok
+drop table cbj_r_on_cast_anti;
+
+statement ok
+drop table cbj_r_off_cast_semi;
+
+statement ok
+drop table cbj_r_on_cast_semi;
 
 statement ok
 drop table cbj_f;

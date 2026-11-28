@@ -99,6 +99,14 @@ CASES = [
      f"select n.id, w.body->>'k' from {N} n left join {TOP1} w on n.src = w.src", None),
     ('wide_three', 'int, varchar, int',
      f"select n.id, w.body->>'k', d3.c from {N} n join {W} w on n.src = w.src join {D3} d3 on d3.id = n.n", None),
+    # A computed column on the kept side of a semi or anti join that becomes a right join: the
+    # projection pulled up above the right join must keep the cast.
+    ('cast_anti', 'varchar, varchar',
+     f"select s.src, s.k::varchar from (select src, (last_value(body order by done_at) ->> 'k')::jsonb as k "
+     f"from {W} group by src) s where not exists (select 1 from {N} n where n.src = s.src and n.n = 3)", None),
+    ('cast_semi', 'varchar, varchar',
+     f"select s.src, s.k::varchar from (select src, (last_value(body order by done_at) ->> 'k')::jsonb as k "
+     f"from {W} group by src) s where exists (select 1 from {N} n where n.src = s.src and n.n = 3)", None),
 ]
 
 out = []

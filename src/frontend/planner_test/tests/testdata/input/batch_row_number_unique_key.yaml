@@ -1,0 +1,223 @@
+# The unique key that a filter `row_number() OVER (PARTITION BY k ...) = n` (or `<= 1`, `< 2`) over
+# a window gives to its output: the partition columns `k`, at most one row per partition; without
+# `PARTITION BY`, at most one row (the empty key). Used by
+# the simplifications on unique keys of batch queries (`batch_simplify_on_unique_key`:
+# `AggOnKeyEliminateRule`, `UnusedOuterJoinEliminateRule`), without turning the window into a
+# top-n (`batch_over_window_to_topn` is off).
+- id: setup_off
+  sql: |
+    create table t (id int primary key, k int, k2 int, v int, w int);
+    create table u (id int primary key, k int, x int);
+  expected_outputs: []
+- id: setup
+  sql: |
+    set batch_simplify_on_unique_key = true;
+    set batch_simplify_column_facts = true;
+    create table t (id int primary key, k int, k2 int, v int, w int);
+    create table u (id int primary key, k int, x int);
+  expected_outputs: []
+
+# The variable is off by default: the aggregation is kept.
+- name: off by default - group by the partition key of row_number() = 1 is kept
+  before:
+  - setup_off
+  sql: |
+    select k from (select k, v, row_number() over (partition by k order by v) as rn from t) s
+    where rn = 1 group by k having count(*) > 1;
+  expected_outputs:
+  - batch_plan
+
+# Rewritten: the partition columns are a key of the rows kept.
+- name: group by the partition key having count(*) > 1 is empty
+  before:
+  - setup
+  sql: |
+    select k from (select k, v, row_number() over (partition by k order by v) as rn from t) s
+    where rn = 1 group by k having count(*) > 1;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+- name: aggregates per partition key over row_number() = 1
+  before:
+  - setup
+  sql: |
+    select k, count(*) as n, max(v) as mv from (select k, v, row_number() over (partition by k order by v) as rn from t) s
+    where rn = 1 group by k;
+  expected_outputs:
+  - batch_plan
+- name: distinct over row_number() = 1
+  before:
+  - setup
+  sql: |
+    select distinct k, v from (select k, v, row_number() over (partition by k order by v desc) as rn from t) s
+    where rn = 1;
+  expected_outputs:
+  - batch_plan
+- name: row_number() <= 1
+  before:
+  - setup
+  sql: |
+    select k, count(*) as n from (select k, v, row_number() over (partition by k order by v) as rn from t) s
+    where rn <= 1 group by k;
+  expected_outputs:
+  - batch_plan
+- name: 2 > row_number()
+  before:
+  - setup
+  sql: |
+    select k, count(*) as n from (select k, v, row_number() over (partition by k order by v) as rn from t) s
+    where 2 > rn group by k;
+  expected_outputs:
+  - batch_plan
+- name: row_number() = 1 with other conjuncts and another window function on the same window
+  before:
+  - setup
+  sql: |
+    select k, count(*) as n from (select k, v, row_number() over (partition by k order by v) as rn,
+    lag(w) over (partition by k order by v) as pw from t) s
+    where rn = 1 and pw is not null group by k;
+  expected_outputs:
+  - batch_plan
+- name: two partition columns
+  before:
+  - setup
+  sql: |
+    select k, k2, count(*) as n from (select k, k2, v, row_number() over (partition by k, k2 order by v) as rn from t) s
+    where rn = 1 group by k, k2;
+  expected_outputs:
+  - batch_plan
+- name: group key holding the partition key and more
+  before:
+  - setup
+  sql: |
+    select k, v, count(*) as n from (select k, v, row_number() over (partition by k order by v) as rn from t) s
+    where rn = 1 group by k, v;
+  expected_outputs:
+  - batch_plan
+- name: unused left join on the partition key of row_number() = 1
+  before:
+  - setup
+  sql: |
+    select u.id, u.x from u left join
+    (select k, v from (select k, v, row_number() over (partition by k order by v) as rn from t) s where rn = 1) s
+    on u.k = s.k;
+  expected_outputs:
+  - batch_plan
+
+- name: row_number() = 2 keeps one row per partition too
+  before:
+  - setup
+  sql: |
+    select k, count(*) as n from (select k, v, row_number() over (partition by k order by v) as rn from t) s
+    where rn = 2 group by k;
+  expected_outputs:
+  - batch_plan
+- name: left join on the partition key of row_number() = 3
+  before:
+  - setup
+  sql: |
+    select u.id, u.x from u left join
+    (select k, v from (select k, v, row_number() over (partition by k order by v) as rn from t) s where rn = 3) s
+    on u.k = s.k;
+  expected_outputs:
+  - batch_plan
+- name: row_number() without partition = 1 keeps at most one row
+  before:
+  - setup
+  sql: |
+    select k, count(*) as n from (select k, v, row_number() over (order by v) as rn from t) s
+    where rn = 1 group by k;
+  expected_outputs:
+  - batch_plan
+- name: row_number() without partition = 2, distinct
+  before:
+  - setup
+  sql: |
+    select distinct k, v from (select k, v, row_number() over (order by v, id) as rn from t) s
+    where rn = 2;
+  expected_outputs:
+  - batch_plan
+- name: unused left join on any column of row_number() without partition <= 1
+  before:
+  - setup
+  sql: |
+    select u.id, u.x from u left join
+    (select k, v from (select k, v, row_number() over (order by v) as rn from t) s where rn <= 1) s
+    on u.k = s.k;
+  expected_outputs:
+  - batch_plan
+
+# Kept: no key.
+- name: rank() = 1 keeps the ties
+  before:
+  - setup
+  sql: |
+    select k, count(*) as n from (select k, v, rank() over (partition by k order by v) as rk from t) s
+    where rk = 1 group by k;
+  expected_outputs:
+  - batch_plan
+- name: row_number() <= 2 keeps two rows per partition
+  before:
+  - setup
+  sql: |
+    select k, count(*) as n from (select k, v, row_number() over (partition by k order by v) as rn from t) s
+    where rn <= 2 group by k;
+  expected_outputs:
+  - batch_plan
+- name: filter not on the row number
+  before:
+  - setup
+  sql: |
+    select k, count(*) as n from (select k, v, row_number() over (partition by k order by v) as rn from t) s
+    where v = 1 group by k;
+  expected_outputs:
+  - batch_plan
+- name: group key without the partition key
+  before:
+  - setup
+  sql: |
+    select v, count(*) as n from (select k, v, row_number() over (partition by k order by v) as rn from t) s
+    where rn = 1 group by v;
+  expected_outputs:
+  - batch_plan
+- name: row number of another partition
+  before:
+  - setup
+  sql: |
+    select k, count(*) as n from (select k, v, row_number() over (partition by k, k2 order by v) as rn from t) s
+    where rn = 1 group by k;
+  expected_outputs:
+  - batch_plan
+- name: left join on the partition key of row_number() <= 2 is kept
+  before:
+  - setup
+  sql: |
+    select u.id, u.x from u left join
+    (select k, v from (select k, v, row_number() over (partition by k order by v) as rn from t) s where rn <= 2) s
+    on u.k = s.k;
+  expected_outputs:
+  - batch_plan
+- name: row_number() without partition <= 2 keeps two rows
+  before:
+  - setup
+  sql: |
+    select k, count(*) as n from (select k, v, row_number() over (order by v) as rn from t) s
+    where rn <= 2 group by k;
+  expected_outputs:
+  - batch_plan
+- name: count(*) without group key over row_number() without partition = 1 is kept (a row over no rows)
+  before:
+  - setup
+  sql: |
+    select count(*) as n from (select k, v, row_number() over (order by v) as rn from t) s
+    where rn = 1;
+  expected_outputs:
+  - batch_plan
+- name: row_number() > 1 keeps many rows per partition
+  before:
+  - setup
+  sql: |
+    select k, count(*) as n from (select k, v, row_number() over (partition by k order by v) as rn from t) s
+    where rn > 1 group by k;
+  expected_outputs:
+  - batch_plan

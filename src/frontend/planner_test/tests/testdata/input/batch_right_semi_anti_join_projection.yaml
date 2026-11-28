@@ -1,0 +1,69 @@
+# A right semi or anti join only outputs its right side. `batch_cost_based_join_ordering` turns a
+# left semi or anti join whose subquery side is much larger into the right join of the other
+# side, after which the projection pulled up from its right side (`JoinProjectTransposeRule`) used
+# to read the columns of the join after the left ones: the computed column (here a cast to jsonb)
+# was replaced by another column, of another type. See `docs/fork/corrections/`.
+# `table_row_counts` is test only: the row counts that a running frontend receives as statistics.
+- id: tables
+  sql: |
+    create table ok_t (k varchar, v int);
+    create table bad_t (k varchar, doc jsonb, ts int);
+    create table big_t (k varchar, w int);
+  expected_outputs: []
+- name: anti join with a computed column on its kept side, left join as written (variable off)
+  before:
+  - tables
+  sql: |
+    select k, detail from (select k, (last_value(doc order by ts) ->> 'r')::jsonb as detail from bad_t group by k) b
+    where not exists (select 1 from ok_t o where o.k = b.k);
+  table_row_counts:
+    ok_t: 10000000
+    bad_t: 1000
+    big_t: 10000000
+  expected_outputs:
+  - batch_plan
+- name: anti join with a computed column on its kept side, turned into a right anti join
+  before:
+  - tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select k, detail from (select k, (last_value(doc order by ts) ->> 'r')::jsonb as detail from bad_t group by k) b
+    where not exists (select 1 from ok_t o where o.k = b.k);
+  table_row_counts:
+    ok_t: 10000000
+    bad_t: 1000
+    big_t: 10000000
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+- name: semi join with a computed column on its kept side, turned into a right semi join
+  before:
+  - tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select k, detail from (select k, (last_value(doc order by ts) ->> 'r')::jsonb as detail, count(*) as n from bad_t group by k) b
+    where exists (select 1 from ok_t o where o.k = b.k);
+  table_row_counts:
+    ok_t: 10000000
+    bad_t: 1000
+    big_t: 10000000
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+- name: union of a table and of the unmatched groups of another (anti join), joined downstream
+  before:
+  - tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    create view outcome as
+      select k, 'ok' as st, null::jsonb as detail from ok_t
+      union all
+      select k, 'bad' as st, (last_value(doc order by ts) ->> 'r')::jsonb as detail from bad_t b
+        where not exists (select 1 from ok_t o where o.k = b.k) group by k;
+    select outcome.k, outcome.st, outcome.detail, big_t.w from outcome join big_t on outcome.k = big_t.k;
+  table_row_counts:
+    ok_t: 10000000
+    bad_t: 1000
+    big_t: 10000000
+  expected_outputs:
+  - batch_plan
