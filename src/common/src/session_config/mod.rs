@@ -554,6 +554,47 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_limit_distinct: bool,
 
+    // Rule `NullSafeEqToEqRule`.
+    /// In the plan of a new streaming job, turn `a IS NOT DISTINCT FROM b` into `a = b` in a join
+    /// condition, a filter or a scan predicate (top-level conjuncts only) when `a` or `b` is never
+    /// `NULL` (a constant, a `NOT NULL` column, a column filtered with `IS NOT NULL`...):
+    /// both then reject the same rows. Subquery decorrelation writes such conditions, and a join
+    /// on `=` keeps no row whose key is `NULL`. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    streaming_null_safe_eq_to_eq: bool,
+
+    /// The same as `streaming_null_safe_eq_to_eq`, for batch queries. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_null_safe_eq_to_eq: bool,
+
+    // Rule `ExistsSubquerySimplifyRule`.
+    /// In the plan of a new streaming job, remove from a correlated `EXISTS` / `NOT EXISTS`
+    /// subquery what can not change whether it returns a row: a `LIMIT` of at least one row
+    /// without `OFFSET` (with its `ORDER BY`), a `DISTINCT` and a `GROUP BY` without aggregates
+    /// and without `HAVING`; from a correlated `IN` / `NOT IN` subquery, only the `DISTINCT` and
+    /// such a `GROUP BY`. The subquery is then decorrelated without the per-row top-n or
+    /// aggregation. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    streaming_simplify_exists_subquery: bool,
+
+    /// The same as `streaming_simplify_exists_subquery`, for batch queries. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_simplify_exists_subquery: bool,
+
+    // Rule `OuterJoinReduceRule`.
+    /// In the plan of a new streaming job, turn an outer join into an inner (or a full join into
+    /// a left or right) join when a filter or a join condition right above it can not be true on
+    /// its rows padded with `NULL`s (a function of a padded column, `IS NOT NULL`, `IN`, `OR` of
+    /// such conditions...), and `LEFT JOIN r ... WHERE r.c IS NULL` into a left anti join when
+    /// `r.c` is never `NULL` in a matched row (a `NOT NULL` column, a column compared with `=` in
+    /// the join condition). Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    streaming_reduce_outer_joins: bool,
+
+    /// The same as `streaming_reduce_outer_joins`, for batch queries. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_reduce_outer_joins: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,

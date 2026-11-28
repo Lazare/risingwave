@@ -1,0 +1,146 @@
+# Tests for `streaming_null_safe_eq_to_eq` (`NullSafeEqToEqRule`):
+# `a IS NOT DISTINCT FROM b` becomes `a = b` in a join condition, a filter or a scan predicate
+# (top-level conjuncts only) when `a` or `b` is never `NULL`.
+- id: setup_off
+  sql: |
+    create table a (id int primary key, k int, x int not null, y int);
+    create table b (id int primary key, k int, y int, kb bigint);
+  expected_outputs: []
+- id: setup
+  sql: |
+    set streaming_null_safe_eq_to_eq = true;
+    create table a (id int primary key, k int, x int not null, y int);
+    create table b (id int primary key, k int, y int, kb bigint);
+  expected_outputs: []
+
+# The variable is off by default: nothing changes.
+- name: off by default - join on a not null column is kept
+  before: [setup_off]
+  sql: |
+    select a.id, b.y from a join b on a.x is not distinct from b.k;
+  expected_outputs:
+  - stream_plan
+
+# Rewritten.
+- name: join on a not null column
+  before: [setup]
+  sql: |
+    select a.id, b.y from a join b on a.x is not distinct from b.k;
+  expected_outputs:
+  - stream_plan
+- name: filter with a constant
+  before: [setup]
+  sql: |
+    select * from b where b.k is not distinct from 5;
+  expected_outputs:
+  - stream_plan
+- name: column filtered with is not null below the join
+  before: [setup]
+  sql: |
+    select a.id, b.y from a join b on a.y is not distinct from b.y where b.y is not null;
+  expected_outputs:
+  - stream_plan
+- name: other conjunct of the join condition rejects null
+  before: [setup]
+  sql: |
+    select a.id, b.y from a join b on a.y = b.id and a.y is not distinct from b.k;
+  expected_outputs:
+  - stream_plan
+- name: left join condition
+  before: [setup]
+  sql: |
+    select a.id, b.y from a left join b on a.x is not distinct from b.k;
+  expected_outputs:
+  - stream_plan
+- name: full join condition
+  before: [setup]
+  sql: |
+    select a.id, b.y from a full join b on a.x is not distinct from b.k;
+  expected_outputs:
+  - stream_plan
+- name: filter above a left join, the preserved operand is not null
+  before: [setup]
+  sql: |
+    select a.id, b.y from a left join b on a.id = b.id where a.x is not distinct from b.k;
+  expected_outputs:
+  - stream_plan
+- name: exists decorrelated through the domain, the inner key is filtered not null
+  before: [setup]
+  sql: |
+    select a.id from a where exists (select 1 from b where b.k = a.id limit 1);
+  expected_outputs:
+  - stream_plan
+- name: not exists decorrelated through the domain, the inner key is filtered not null
+  before: [setup]
+  sql: |
+    select a.id from a where not exists (select 1 from b where b.k = a.id limit 1);
+  expected_outputs:
+  - stream_plan
+- name: scalar subquery decorrelated through the domain of a not null column
+  before: [setup]
+  sql: |
+    select a.id, (select max(b.y) from b where b.k = a.x) as m from a;
+  expected_outputs:
+  - stream_plan
+- name: operands of different integer types, compared without a cast
+  before: [setup]
+  sql: |
+    select a.id, b.y from a join b on a.x is not distinct from b.kb;
+  expected_outputs:
+  - stream_plan
+
+# Kept.
+- name: join on a primary key column, which RisingWave does not declare not null
+  before: [setup]
+  sql: |
+    select a.id, b.y from a join b on a.id is not distinct from b.k;
+  expected_outputs:
+  - stream_plan
+- name: left join on a primary key column
+  before: [setup]
+  sql: |
+    select a.id, b.y from a left join b on a.id is not distinct from b.k;
+  expected_outputs:
+  - stream_plan
+- name: both operands may be null
+  before: [setup]
+  sql: |
+    select a.id, b.y from a join b on a.y is not distinct from b.y;
+  expected_outputs:
+  - stream_plan
+- name: under or
+  before: [setup]
+  sql: |
+    select a.id, b.y from a join b on a.id = b.id and ((a.x is not distinct from b.k) or b.y > 0);
+  expected_outputs:
+  - stream_plan
+- name: under not
+  before: [setup]
+  sql: |
+    select a.id, b.y from a join b on a.id = b.id and not (a.x is not distinct from b.k);
+  expected_outputs:
+  - stream_plan
+- name: in a projection
+  before: [setup]
+  sql: |
+    select a.x is not distinct from b.k as same from a join b on a.id = b.id;
+  expected_outputs:
+  - stream_plan
+- name: under case
+  before: [setup]
+  sql: |
+    select a.id from a join b on a.id = b.id where case when a.x is not distinct from b.k then b.y > 0 else false end;
+  expected_outputs:
+  - stream_plan
+- name: an arithmetic expression is not proven non-null
+  before: [setup]
+  sql: |
+    select a.id, b.y from a join b on a.x + 1 is not distinct from b.k;
+  expected_outputs:
+  - stream_plan
+- name: filter above a left join, both operands may be null
+  before: [setup]
+  sql: |
+    select a.id, b.y from a left join b on a.id = b.id where a.y is not distinct from b.k;
+  expected_outputs:
+  - stream_plan

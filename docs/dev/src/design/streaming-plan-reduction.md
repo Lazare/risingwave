@@ -49,6 +49,9 @@ own rules.
 | BS | Batch: identical sub-plans of a stage computed once per task and read again through a spool (`batch_share_identical_subplans`) | first version (prototype, branch `proto/plan-reduction-batch-spool`, see "BS" below); copies in different stages not shared |
 | BLM | Batch: a copy of a `LIMIT` / top-n pushed into the branches of a `UNION ALL` and into the preserved side of a left or right join (`batch_push_down_limit`) | done (prototype, branch `proto/plan-reduction-batch-limit`, see "BLM" below); full outer join rejected (wrong results) |
 | BLD | Batch: a distinct under a `LIMIT` (`SELECT DISTINCT`, `UNION`) read by a non-blocking operator that stops after `limit + offset` rows, also in each branch of the union (`batch_limit_distinct`) | done (prototype, branch `proto/plan-reduction-batch-limit`, see "BLD" below); ordered variant not done |
+| NE | `a IS NOT DISTINCT FROM b` becomes `a = b` when an operand is never `NULL` (`batch_null_safe_eq_to_eq`, `streaming_null_safe_eq_to_eq`) | done (prototype, branch `proto/plan-reduction-null-rules`, see "NE" below) |
+| SE | Simplification of the subquery of a correlated `EXISTS` / `IN`: no limit, `DISTINCT` or `GROUP BY` without aggregates (`batch_simplify_exists_subquery`, `streaming_simplify_exists_subquery`) | done (prototype, branch `proto/plan-reduction-null-rules`, see "SE" below) |
+| RO | Outer join reduction with a null-rejection test, and `LEFT JOIN ... WHERE r.c IS NULL` as an anti join (`batch_reduce_outer_joins`, `streaming_reduce_outer_joins`) | done (prototype, branch `proto/plan-reduction-null-rules`, see "RO" below) |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -758,6 +761,148 @@ Agg(count)                                   Agg(count)
   `e2e_test/streaming/narrow_value_aggregates` (NULL values and order keys, missing fields,
   fields a cast cannot read in older rows, ties, unions, joins, a `CASE` over a lower
   `first_value`, updates and deletes of the last rows, emptied tables).
+
+### NE. Null-safe equality on a non-null operand (added on 2026-11-28, done on the branch)
+
+Variables `batch_null_safe_eq_to_eq` and `streaming_null_safe_eq_to_eq`, rule
+`NullSafeEqToEqRule`. Subquery decorrelation joins the outer side with the subquery, and with the
+domain, on `IS NOT DISTINCT FROM` the correlated columns. Several rules refuse or penalize such a
+key (`RepeatedLookupMergeRule`, `NullKeyJoinRule`, the column facts protect it), and a hash join
+on a null-safe key keeps the rows whose key is `NULL`, which can match. When one operand is never
+`NULL`, the condition is a plain equality:
+
+```text
+SELECT * FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.k = t.id LIMIT 1)
+
+Join(LeftSemi, t.id IS NOT DISTINCT FROM u.k)       Join(LeftSemi, t.id = u.k)
+├─Scan(t)                                     =>    ├─Scan(t)
+└─GroupTopN(u.k, limit 1)                           └─GroupTopN(u.k, limit 1)
+  └─Filter(u.k IS NOT NULL)                           └─Filter(u.k IS NOT NULL)
+```
+
+- Where: the top-level conjuncts of a join condition (any join type but as-of), of a filter and
+  of a scan predicate. Never an operand of `NOT`, `OR`, `CASE`, nor a projected expression.
+- Never `NULL`: what the column facts of the input say (E: `NOT NULL` columns, constants, a filter
+  below that rejects `NULL`, counts), a non-null literal, and the facts of
+  the other conjuncts of the same predicate (`a.y = b.id AND a.y IS NOT DISTINCT FROM b.k`). For a
+  join condition, the facts of each side, whatever the type of the join: the condition is
+  evaluated on rows of the inputs, before padding.
+- Valid: both forms are the same comparison when both operands are not `NULL`; with exactly one
+  `NULL`, `IS NOT DISTINCT FROM` is `FALSE` and `=` is `NULL`, and a top-level conjunct of a
+  predicate evaluated with filter semantics rejects the row (or the pair) in both cases; both
+  `NULL` can not happen. The facts hold for every row ever produced, under retractions, so the
+  rewrite is valid for a frozen streaming plan. Duplicates are not involved.
+- A primary key column is not taken as never `NULL`: RisingWave does not declare it `NOT NULL`
+  (`id INT PRIMARY KEY NOT NULL` does).
+- Not rewritten: a conjunct with `now()`, a comparison that would need an implicit cast, an
+  operand that is an expression that may fail or be `NULL` (a cast to a wider type is not proven
+  non-null), both operands nullable.
+- Stages: `NULL_SAFE_EQ_TO_EQ` (bottom-up) right after the first predicate pushdown, before join
+  ordering, in both pipelines.
+- Tests: planner tests `batch_null_safe_eq_to_eq.yaml`, `stream_null_safe_eq_to_eq.yaml`;
+  differential tests `e2e_test/batch/null_safe_eq_to_eq` and `e2e_test/streaming/null_safe_eq_to_eq`
+  (NULLs on both sides, duplicates, outer and full joins, `EXISTS` / `NOT EXISTS` / scalar
+  subqueries through the domain, updates to and from `NULL`, emptied tables).
+
+### SE. Simplification of the subquery of `EXISTS` (added on 2026-11-28, done on the branch)
+
+Variables `batch_simplify_exists_subquery` and `streaming_simplify_exists_subquery`, rule
+`ExistsSubquerySimplifyRule`, after PostgreSQL's `simplify_EXISTS_query`. People write
+`EXISTS (SELECT 1 ... LIMIT 1)` or `EXISTS (SELECT DISTINCT ...)`; with the limit or the
+aggregation, the simple unnesting does not apply, and the general one reads the outer side again
+for the domain and keeps a top-n or an aggregation per correlated value:
+
+```text
+SELECT * FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.k = t.k ORDER BY u.ts DESC LIMIT 1)
+
+Join(LeftSemi, t.k IS NOT DISTINCT FROM u.k)        Join(LeftSemi, t.k = u.k)
+├─Scan(t)                                     =>    ├─Scan(t)
+└─GroupTopN(u.k; u.ts DESC; limit 1)                └─Scan(u)
+  └─Scan(u)
+```
+
+- Where: the right side of a correlated left semi or anti apply (`EXISTS`, `NOT EXISTS`, `IN`,
+  `NOT IN` in a `WHERE` conjunct), through projections only, before the simple unnesting.
+- `EXISTS` / `NOT EXISTS` (the condition of the apply does not read the subquery): a limit or a
+  top-n (with or without ties) of at least one row without offset is removed: the result is not
+  empty iff its input is not empty.
+- All four: an aggregation without aggregate calls and with a group key (`DISTINCT`, `GROUP BY`
+  without aggregates) becomes the projection of its group key: the same set of rows. A semi or
+  anti join only tells whether a matching row exists, so it depends on the set of rows of its
+  right side, whatever the condition; projections keep both properties.
+- Not removed: `LIMIT 0` (an empty relation, see B), an offset, a limit under `IN` (it chooses the
+  compared values), an aggregation with calls or without group key (a scalar aggregation returns
+  one row; `EXISTS` over it is left to the correctness work on that case), anything under a filter
+  (`HAVING`, a `WHERE` above a limited derived table), a limit or an aggregation right above a
+  set-returning function of the select list (as PostgreSQL), an `EXISTS` elsewhere than in a
+  `WHERE` conjunct (planned as a count), an uncorrelated subquery (not decorrelated; its limit
+  saves work).
+- Valid for every row of the outer side and every content of the tables, hence for a frozen
+  streaming plan; duplicates and retractions are covered by the set argument.
+- Streaming gain: the domain, its join and the group top-n or aggregation with their states are
+  gone; the semi join keeps the subquery rows that the join with the domain kept anyway.
+- Stage: `SIMPLIFY_EXISTS_SUBQUERY` at the start of `subquery_unnesting`, in both pipelines. The
+  projections left above a removed operator are merged, unless an impure expression or a function
+  call would be evaluated several times.
+- Tests: planner tests `batch_simplify_exists_subquery.yaml`,
+  `stream_simplify_exists_subquery.yaml`; differential tests
+  `e2e_test/batch/simplify_exists_subquery` and `e2e_test/streaming/simplify_exists_subquery`
+  (several rows per key with ties, NULL keys and values, duplicates on the outer side, `NOT IN`,
+  updates and deletes, emptied tables).
+
+### RO. Outer join reduction (added on 2026-11-28, done on the branch)
+
+Variables `batch_reduce_outer_joins` and `streaming_reduce_outer_joins`, rule
+`OuterJoinReduceRule`, after PostgreSQL's `reduce_outer_joins`. Predicate pushdown turns an outer
+join into an inner one with `LogicalJoin::simplify_outer`, which only recognizes a comparison
+(`=`, `<`, ...) with a plain column of the padded side among the conjuncts of the filter above.
+Two reductions are missing:
+
+```text
+SELECT t.*, r.name FROM t LEFT JOIN r ON t.k = r.id WHERE r.c + 1 > t.x
+Filter(r.c + 1 > t.x)                         Filter(r.c + 1 > t.x)
+└─Join(LeftOuter, t.k = r.id)           =>    └─Join(Inner, t.k = r.id)
+
+SELECT t.* FROM t LEFT JOIN r ON t.k = r.k WHERE r.k IS NULL
+Filter(IsNull(r.k))                           Project(t.*, NULL)
+└─Join(LeftOuter, t.k = r.k)            =>    └─Join(LeftAnti, t.k = r.k)
+```
+
+- Outer to inner (or full to left / right): a conjunct of the filter right above the join, or of
+  the condition of a join whose input the outer join is and which does not keep the rows of that
+  input that match nothing (inner and semi joins, the optional side of an outer join, the right
+  side of a left anti join), can not be `TRUE` when all the columns of a padded side are `NULL`.
+  The test: `Strong` (the expression is `NULL`; except over `greatest` / `least`, which skip
+  `NULL`s in RisingWave although `Strong` lists them as strict), `FALSE`, `AND` with one such
+  conjunct, `OR` with all, `IS TRUE`, `IS NOT NULL`, `NOT (e IS NULL)`, `IN`, `IS NOT DISTINCT
+  FROM` a non-`NULL` constant. The strict functions that `Strong` lists (arithmetic, casts,
+  `LIKE`, `trim`, `extract`...; not `lower` / `upper`, which it does not list), `IS NOT NULL`,
+  `IN`, `OR` and the conditions of a join above are now recognized. Valid: every padded row is rejected, so the join need not
+  produce it; an identity for every content of the inputs, hence for a frozen streaming plan.
+- Outer to anti: a top-level conjunct `r.c IS NULL` above a left join where `r.c` is never `NULL`
+  in a matched row: the column facts of the right input say so (a `NOT NULL` column, a count, a
+  filter below), or the join condition rejects a `NULL` `r.c` (`t.k = r.c`). The filter then
+  keeps exactly the unmatched left rows, each once: a left anti join, the right columns output as
+  `NULL`, the other conjuncts kept above (evaluated on those `NULL`s), the `IS NULL` conjuncts of
+  the right side removed. Symmetric for a right join. For a full join only the column facts
+  count (the unmatched right rows keep their own `r.c`), and the result is the anti join of the
+  other side.
+- Not rewritten: conjuncts with `now()`, as-of joins, an anti join over a temporal join (`FOR
+  SYSTEM_TIME AS OF`), `r.c IS NULL` on a column a matched row may hold `NULL` in (a nullable
+  column outside the condition; a column only compared with `IS NOT DISTINCT FROM` or inside
+  `coalesce`), `IS NULL`, `IS NOT TRUE`, `coalesce(r.c, 0)`, `CASE`, and a join above that keeps
+  the unmatched rows of the outer join (a left join on its preserved side, an anti join).
+- Streaming gain: an inner join has no degree table and emits no padded rows to retract when a
+  match appears; it enters the multi-join and the key rules. An anti join keeps only the key
+  columns of the right side, and the matched pairs (the fan-out) are no longer emitted to be
+  filtered out.
+- Stages: `REDUCE_OUTER_JOINS` (top-down) right after the first predicate pushdown, before
+  `NullSafeEqToEqRule` and join ordering, in up to three rounds, each followed by predicate
+  pushdown (a reduced join lets conjuncts through to the joins below).
+- Tests: planner tests `batch_reduce_outer_joins.yaml`, `stream_reduce_outer_joins.yaml`;
+  differential tests `e2e_test/batch/reduce_outer_joins` and `e2e_test/streaming/reduce_outer_joins`
+  (NULL keys and values on both sides, duplicates on both sides, left, right and full joins, joins
+  above, updates to and from `NULL`, emptied sides).
 
 ### 5. Aggregation pushed below a join onto the unique side
 
@@ -1679,9 +1824,7 @@ Decision of 2026-11-25: too large for now.
   uncertain gain.
 - **Aggregate then join back, to a top-n with ties.** `t JOIN (SELECT k, max(ts) ... GROUP BY k)`
   on `k` and `ts` becomes `rank() ... = 1`. Narrow pattern.
-- **Null rejection as an analysis.** Replace the syntactic test of the conversion of an outer join
-  to an inner join (`simplify_outer`) with an evaluation of the predicate with `NULL` for the
-  optional side.
+- **Null rejection as an analysis.** Done: see RO.
 - **Sharing sub-plans again after normalization**, within one query. Must run after 1 and 2,
   which need per-consumer plans. Done for stateful sub-plans: see 10.
 - **Semi join simplifications.** `(A semi B) semi B`; `k IN (SELECT k FROM A)` on `A` itself.

@@ -1,0 +1,235 @@
+# Tests for `streaming_reduce_outer_joins` (`OuterJoinReduceRule`):
+# an outer join whose padded rows a filter or a join condition right above rejects becomes an inner
+# (or left / right) join, and `LEFT JOIN r ... WHERE r.c IS NULL` becomes a left anti join when
+# `r.c` is never `NULL` in a matched row.
+- id: setup_off
+  sql: |
+    create table t (id int primary key, k int, x int not null, y int);
+    create table r (id int primary key, k int not null, c int, name varchar);
+    create table s (id int primary key, k int, v int);
+  expected_outputs: []
+- id: setup
+  sql: |
+    set streaming_reduce_outer_joins = true;
+    create table t (id int primary key, k int, x int not null, y int);
+    create table r (id int primary key, k int not null, c int, name varchar);
+    create table s (id int primary key, k int, v int);
+  expected_outputs: []
+
+# The variable is off by default: nothing changes.
+- name: off by default - left join filtered with like
+  before: [setup_off]
+  sql: |
+    select t.id, r.name from t left join r on t.k = r.id where r.name like 'a%';
+  expected_outputs:
+  - stream_plan
+
+# Rewritten: outer join to inner join.
+- name: left join filtered with like
+  before: [setup]
+  sql: |
+    select t.id, r.name from t left join r on t.k = r.id where r.name like 'a%';
+  expected_outputs:
+  - stream_plan
+- name: left join filtered with is not null
+  before: [setup]
+  sql: |
+    select t.id, r.name from t left join r on t.k = r.id where r.name is not null;
+  expected_outputs:
+  - stream_plan
+- name: left join filtered with in
+  before: [setup]
+  sql: |
+    select t.id, r.name from t left join r on t.k = r.id where r.c in (1, 2);
+  expected_outputs:
+  - stream_plan
+- name: left join filtered on an arithmetic comparison
+  before: [setup]
+  sql: |
+    select t.id, r.name from t left join r on t.k = r.id where r.c + 1 > t.x;
+  expected_outputs:
+  - stream_plan
+- name: left join filtered with an or of rejecting conjuncts
+  before: [setup]
+  sql: |
+    select t.id, r.name from t left join r on t.k = r.id where r.c > 1 or r.name = 'x';
+  expected_outputs:
+  - stream_plan
+- name: left join filtered on a coalesce of padded columns
+  before: [setup]
+  sql: |
+    select t.id, r.name from t left join r on t.k = r.id where coalesce(r.c, r.k) > 0;
+  expected_outputs:
+  - stream_plan
+- name: left join filtered with not
+  before: [setup]
+  sql: |
+    select t.id, r.name from t left join r on t.k = r.id where not (r.c > 5);
+  expected_outputs:
+  - stream_plan
+- name: left join filtered with is true
+  before: [setup]
+  sql: |
+    select t.id, r.name from t left join r on t.k = r.id where (r.c > 5) is true;
+  expected_outputs:
+  - stream_plan
+- name: right join filtered on a function of the padded side
+  before: [setup]
+  sql: |
+    select t.id, r.name from t right join r on t.k = r.id where t.y + 1 > 2;
+  expected_outputs:
+  - stream_plan
+- name: full join filtered on one side
+  before: [setup]
+  sql: |
+    select t.id, r.id as rid from t full join r on t.k = r.id where t.y is not null;
+  expected_outputs:
+  - stream_plan
+- name: full join filtered on both sides
+  before: [setup]
+  sql: |
+    select t.id, r.id as rid from t full join r on t.k = r.id where t.y is not null and r.c is not null;
+  expected_outputs:
+  - stream_plan
+- name: inner join above compares a padded column
+  before: [setup]
+  sql: |
+    select t.id, s.v from t left join r on t.k = r.id join s on s.k = r.c;
+  expected_outputs:
+  - stream_plan
+- name: semi join above compares a padded column
+  before: [setup]
+  sql: |
+    select t.id from t left join r on t.k = r.id where exists (select 1 from s where s.k = r.c);
+  expected_outputs:
+  - stream_plan
+
+# Rewritten: outer join to anti join.
+- name: left join filtered on the null key
+  before: [setup]
+  sql: |
+    select t.id from t left join r on t.k = r.k where r.k is null;
+  expected_outputs:
+  - stream_plan
+- name: left join filtered on a nullable column compared with =
+  before: [setup]
+  sql: |
+    select t.id, t.x from t left join s on t.k = s.k where s.k is null;
+  expected_outputs:
+  - stream_plan
+- name: left join filtered on a not null column
+  before: [setup]
+  sql: |
+    select t.id from t left join r on t.k = r.c where r.k is null;
+  expected_outputs:
+  - stream_plan
+- name: left join filtered on the primary key, other columns output
+  before: [setup]
+  sql: |
+    select t.id, r.name from t left join r on t.k = r.id where r.id is null;
+  expected_outputs:
+  - stream_plan
+- name: anti join with another conjunct on the padded side
+  before: [setup]
+  sql: |
+    select t.id, s.v from t left join s on t.k = s.k where s.k is null and coalesce(s.v, 0) = 0;
+  expected_outputs:
+  - stream_plan
+- name: right join filtered on the null key
+  before: [setup]
+  sql: |
+    select r.id, r.name from t right join r on t.k = r.id where t.k is null;
+  expected_outputs:
+  - stream_plan
+- name: full join filtered on a not null column
+  before: [setup]
+  sql: |
+    select t.id, r.id as rid from t full join r on t.k = r.c where r.k is null;
+  expected_outputs:
+  - stream_plan
+- name: count over the anti join
+  before: [setup]
+  sql: |
+    select count(*) as n from t left join s on t.k = s.k where s.k is null;
+  expected_outputs:
+  - stream_plan
+
+# Kept.
+- name: function that Strong does not list as strict (lower)
+  before: [setup]
+  sql: |
+    select t.id, r.name from t left join r on t.k = r.id where lower(r.name) like 'a%';
+  expected_outputs:
+  - stream_plan
+- name: right join filtered on a primary key column, which may hold null
+  before: [setup]
+  sql: |
+    select r.id, r.name from t right join r on t.k = r.id where t.id is null;
+  expected_outputs:
+  - stream_plan
+- name: is null or a comparison
+  before: [setup]
+  sql: |
+    select t.id, r.name from t left join r on t.k = r.id where r.c is null or r.c > 5;
+  expected_outputs:
+  - stream_plan
+- name: coalesce with a constant
+  before: [setup]
+  sql: |
+    select t.id, r.name from t left join r on t.k = r.id where coalesce(r.c, 0) = 0;
+  expected_outputs:
+  - stream_plan
+- name: is not true
+  before: [setup]
+  sql: |
+    select t.id, r.name from t left join r on t.k = r.id where (r.c > 5) is not true;
+  expected_outputs:
+  - stream_plan
+- name: greatest skips nulls
+  before: [setup]
+  sql: |
+    select t.id, r.name from t left join r on t.k = r.id where greatest(r.c, t.x) > 0;
+  expected_outputs:
+  - stream_plan
+- name: case
+  before: [setup]
+  sql: |
+    select t.id, r.name from t left join r on t.k = r.id where case when r.c is null then true else r.c > 5 end;
+  expected_outputs:
+  - stream_plan
+- name: preserved side of the left join above
+  before: [setup]
+  sql: |
+    select t.id, s.v from t left join r on t.k = r.id left join s on s.k = r.c;
+  expected_outputs:
+  - stream_plan
+- name: preserved side of the anti join above
+  before: [setup]
+  sql: |
+    select t.id from t left join r on t.k = r.id where not exists (select 1 from s where s.k = r.c);
+  expected_outputs:
+  - stream_plan
+- name: is null on a nullable column outside the condition
+  before: [setup]
+  sql: |
+    select t.id from t left join s on t.k = s.k where s.v is null;
+  expected_outputs:
+  - stream_plan
+- name: full join, is null on a column only compared with =
+  before: [setup]
+  sql: |
+    select t.id, s.id as sid from t full join s on t.k = s.k where s.k is null;
+  expected_outputs:
+  - stream_plan
+- name: null-safe condition
+  before: [setup]
+  sql: |
+    select t.id from t left join s on t.k is not distinct from s.k where s.k is null;
+  expected_outputs:
+  - stream_plan
+- name: condition on a coalesce
+  before: [setup]
+  sql: |
+    select t.id from t left join s on t.k = coalesce(s.k, 0) where s.k is null;
+  expected_outputs:
+  - stream_plan
