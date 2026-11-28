@@ -25,18 +25,18 @@
     select a.id, b.y from a join b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 3 and b.y = 4);
   optimized_logical_plan_for_stream: |-
     LogicalJoin { type: Inner, on: (a.k = b.k) AND (((a.x = 1:Int32) AND (b.y = 2:Int32)) OR ((a.x = 3:Int32) AND (b.y = 4:Int32))), output: [a.id, b.y] }
-    ├─LogicalScan { table: a, columns: [a.id, a.k, a.x], predicate: ((a.x = 1:Int32) OR (a.x = 3:Int32)) }
-    └─LogicalScan { table: b, columns: [b.k, b.y], predicate: ((b.y = 2:Int32) OR (b.y = 4:Int32)) }
+    ├─LogicalScan { table: a, columns: [a.id, a.k, a.x], predicate: In(a.x, 1:Int32, 3:Int32) }
+    └─LogicalScan { table: b, columns: [b.k, b.y], predicate: In(b.y, 2:Int32, 4:Int32) }
   stream_plan: |-
     StreamMaterialize { columns: [id, y, a.k(hidden), b.id(hidden)], stream_key: [id, b.id, a.k], pk_columns: [id, b.id, a.k], pk_conflict: NoCheck }
     └─StreamProject { exprs: [a.id, b.y, a.k, b.id] }
       └─StreamFilter { predicate: (((a.x = 1:Int32) AND (b.y = 2:Int32)) OR ((a.x = 3:Int32) AND (b.y = 4:Int32))) }
         └─StreamHashJoin { type: Inner, predicate: a.k = b.k, output: all }
           ├─StreamExchange { dist: HashShard(a.k) }
-          │ └─StreamFilter { predicate: ((a.x = 1:Int32) OR (a.x = 3:Int32)) }
+          │ └─StreamFilter { predicate: In(a.x, 1:Int32, 3:Int32) }
           │   └─StreamTableScan { table: a, columns: [a.id, a.k, a.x], stream_scan_type: SnapshotBackfill, stream_key: [a.id], pk: [id], dist: UpstreamHashShard(a.id) }
           └─StreamExchange { dist: HashShard(b.k) }
-            └─StreamFilter { predicate: ((b.y = 2:Int32) OR (b.y = 4:Int32)) }
+            └─StreamFilter { predicate: In(b.y, 2:Int32, 4:Int32) }
               └─StreamTableScan { table: b, columns: [b.k, b.y, b.id], stream_scan_type: SnapshotBackfill, stream_key: [b.id], pk: [id], dist: UpstreamHashShard(b.id) }
 - name: inner join - several parts per side and is null
   before:
@@ -45,7 +45,7 @@
     select a.id, b.y from a join b on a.k = b.k where (a.x = 1 and a.id > 5 and b.y = 2) or (a.x = 3 and b.y is null);
   optimized_logical_plan_for_stream: |-
     LogicalJoin { type: Inner, on: (a.k = b.k) AND ((((a.x = 1:Int32) AND (a.id > 5:Int32)) AND (b.y = 2:Int32)) OR ((a.x = 3:Int32) AND IsNull(b.y))), output: [a.id, b.y] }
-    ├─LogicalScan { table: a, columns: [a.id, a.k, a.x], predicate: (((a.x = 1:Int32) AND (a.id > 5:Int32)) OR (a.x = 3:Int32)) }
+    ├─LogicalScan { table: a, columns: [a.id, a.k, a.x], predicate: ((a.x = 3:Int32) OR ((a.x = 1:Int32) AND (a.id > 5:Int32))) }
     └─LogicalScan { table: b, columns: [b.k, b.y], predicate: ((b.y = 2:Int32) OR IsNull(b.y)) }
 - name: inner join - one disjunct without a part of the left side restricts the right side only
   before:
@@ -55,7 +55,7 @@
   optimized_logical_plan_for_stream: |-
     LogicalJoin { type: Inner, on: (a.k = b.k) AND (((a.x = 1:Int32) AND (b.y = 2:Int32)) OR (b.y = 4:Int32)), output: [a.id, b.y] }
     ├─LogicalScan { table: a, columns: [a.id, a.k, a.x] }
-    └─LogicalScan { table: b, columns: [b.k, b.y], predicate: ((b.y = 2:Int32) OR (b.y = 4:Int32)) }
+    └─LogicalScan { table: b, columns: [b.k, b.y], predicate: In(b.y, 2:Int32, 4:Int32) }
 - name: inner join - three disjuncts, in lists and comparisons
   before:
   - setup
@@ -63,7 +63,7 @@
     select a.id, b.y from a join b on a.k = b.k where (a.x in (1, 2) and b.y > 10) or (a.x = 3 and b.z <= 0) or (a.s = 'p' and b.y is not distinct from b.z);
   optimized_logical_plan_for_stream: |-
     LogicalJoin { type: Inner, on: (a.k = b.k) AND (((In(a.x, 1:Int32, 2:Int32) AND (b.y > 10:Int32)) OR ((a.x = 3:Int32) AND (b.z <= 0:Int32))) OR ((a.s = 'p':Varchar) AND IsNotDistinctFrom(b.y, b.z))), output: [a.id, b.y] }
-    ├─LogicalScan { table: a, columns: [a.id, a.k, a.x, a.s], predicate: ((In(a.x, 1:Int32, 2:Int32) OR (a.x = 3:Int32)) OR (a.s = 'p':Varchar)) }
+    ├─LogicalScan { table: a, columns: [a.id, a.k, a.x, a.s], predicate: (In(a.x, 1:Int32, 2:Int32, 3:Int32) OR (a.s = 'p':Varchar)) }
     └─LogicalScan { table: b, columns: [b.k, b.y, b.z], predicate: (((b.y > 10:Int32) OR (b.z <= 0:Int32)) OR IsNotDistinctFrom(b.y, b.z)) }
 - name: inner join without equality - the restrictions are pushed anyway
   before:
@@ -72,8 +72,8 @@
     select a.id, b.y from a join b on (a.x = 1 and b.y = 2) or (a.x = 3 and b.y = 4);
   optimized_logical_plan_for_stream: |-
     LogicalJoin { type: Inner, on: (((a.x = 1:Int32) AND (b.y = 2:Int32)) OR ((a.x = 3:Int32) AND (b.y = 4:Int32))), output: [a.id, b.y] }
-    ├─LogicalScan { table: a, columns: [a.id, a.x], predicate: ((a.x = 1:Int32) OR (a.x = 3:Int32)) }
-    └─LogicalScan { table: b, columns: [b.y], predicate: ((b.y = 2:Int32) OR (b.y = 4:Int32)) }
+    ├─LogicalScan { table: a, columns: [a.id, a.x], predicate: In(a.x, 1:Int32, 3:Int32) }
+    └─LogicalScan { table: b, columns: [b.y], predicate: In(b.y, 2:Int32, 4:Int32) }
 - name: left join - only the optional side is restricted
   before:
   - setup
@@ -82,7 +82,7 @@
   optimized_logical_plan_for_stream: |-
     LogicalJoin { type: LeftOuter, on: (a.k = b.k) AND (((a.x = 1:Int32) AND (b.y = 2:Int32)) OR ((a.x = 3:Int32) AND (b.y = 4:Int32))), output: [a.id, b.y] }
     ├─LogicalScan { table: a, columns: [a.id, a.k, a.x] }
-    └─LogicalScan { table: b, columns: [b.k, b.y], predicate: ((b.y = 2:Int32) OR (b.y = 4:Int32)) }
+    └─LogicalScan { table: b, columns: [b.k, b.y], predicate: In(b.y, 2:Int32, 4:Int32) }
 - name: right join - only the optional side is restricted
   before:
   - setup
@@ -91,7 +91,7 @@
   optimized_logical_plan_for_stream: |-
     LogicalJoin { type: LeftOuter, on: (a.k = b.k) AND (((a.x = 1:Int32) AND (b.y = 2:Int32)) OR ((a.x = 3:Int32) AND (b.y = 4:Int32))), output: [a.id, b.y] }
     ├─LogicalScan { table: b, columns: [b.k, b.y] }
-    └─LogicalScan { table: a, columns: [a.id, a.k, a.x], predicate: ((a.x = 1:Int32) OR (a.x = 3:Int32)) }
+    └─LogicalScan { table: a, columns: [a.id, a.k, a.x], predicate: In(a.x, 1:Int32, 3:Int32) }
 - name: semi join - the outer side is restricted
   before:
   - setup
@@ -99,7 +99,7 @@
     select a.id from a where exists (select 1 from b where b.k = a.k and ((a.x = 1 and b.y = 2) or (a.x = 3 and b.y = 4)));
   optimized_logical_plan_for_stream: |-
     LogicalJoin { type: LeftSemi, on: (b.k = a.k) AND (((a.x = 1:Int32) AND (b.y = 2:Int32)) OR ((a.x = 3:Int32) AND (b.y = 4:Int32))), output: [a.id] }
-    ├─LogicalScan { table: a, columns: [a.id, a.k, a.x], predicate: ((a.x = 1:Int32) OR (a.x = 3:Int32)) }
+    ├─LogicalScan { table: a, columns: [a.id, a.k, a.x], predicate: In(a.x, 1:Int32, 3:Int32) }
     └─LogicalProject { exprs: [b.k, b.y, b.y] }
       └─LogicalScan { table: b, columns: [b.k, b.y] }
 - name: three tables - each join derives its own restrictions
@@ -110,9 +110,9 @@
   optimized_logical_plan_for_stream: |-
     LogicalJoin { type: Inner, on: (c.k = b.k) AND (((a.x = 1:Int32) AND (c.w = 2:Int32)) OR ((a.x = 3:Int32) AND (c.w = 4:Int32))) AND (((b.y = 1:Int32) AND (c.w = 2:Int32)) OR ((b.y = 5:Int32) AND (c.w = 6:Int32))), output: [a.id, b.y, c.w] }
     ├─LogicalJoin { type: Inner, on: (a.k = b.k), output: [a.id, a.x, b.k, b.y] }
-    │ ├─LogicalScan { table: a, columns: [a.id, a.k, a.x], predicate: ((a.x = 1:Int32) OR (a.x = 3:Int32)) }
-    │ └─LogicalScan { table: b, columns: [b.k, b.y], predicate: ((b.y = 1:Int32) OR (b.y = 5:Int32)) }
-    └─LogicalScan { table: c, columns: [c.k, c.w], predicate: ((c.w = 2:Int32) OR (c.w = 4:Int32)) AND ((c.w = 2:Int32) OR (c.w = 6:Int32)) }
+    │ ├─LogicalScan { table: a, columns: [a.id, a.k, a.x], predicate: In(a.x, 1:Int32, 3:Int32) }
+    │ └─LogicalScan { table: b, columns: [b.k, b.y], predicate: In(b.y, 1:Int32, 5:Int32) }
+    └─LogicalScan { table: c, columns: [c.k, c.w], predicate: In(c.w, 2:Int32, 4:Int32) AND In(c.w, 2:Int32, 6:Int32) }
 - name: kept - an or on one side only is pushed down as it is
   before:
   - setup
@@ -158,7 +158,7 @@
   optimized_logical_plan_for_stream: |-
     LogicalJoin { type: Inner, on: (a.k = b.k) AND ((((Lower(a.s) = 'p':Varchar) AND ((10:Int32 / b.z) = 1:Int32)) AND (b.y = 2:Int32)) OR ((Lower(a.s) = 'q':Varchar) AND (b.y = 4:Int32))), output: [a.id, b.y] }
     ├─LogicalScan { table: a, columns: [a.id, a.k, a.s] }
-    └─LogicalScan { table: b, columns: [b.k, b.y, b.z], predicate: ((b.y = 2:Int32) OR (b.y = 4:Int32)) }
+    └─LogicalScan { table: b, columns: [b.k, b.y, b.z], predicate: In(b.y, 2:Int32, 4:Int32) }
 - name: kept - a volatile part is not derived
   before:
   - setup
@@ -167,7 +167,7 @@
   optimized_logical_plan_for_stream: |-
     LogicalJoin { type: Inner, on: (a.k = b.k) AND ((((a.x = 1:Int32) AND (Random < 0.5:Decimal::Float64)) AND (b.y = 2:Int32)) OR ((a.x::Float64 > Random) AND (b.y = 4:Int32))), output: [a.id, b.y] }
     ├─LogicalScan { table: a, columns: [a.id, a.k, a.x] }
-    └─LogicalScan { table: b, columns: [b.k, b.y], predicate: ((b.y = 2:Int32) OR (b.y = 4:Int32)) }
+    └─LogicalScan { table: b, columns: [b.k, b.y], predicate: In(b.y, 2:Int32, 4:Int32) }
 - name: kept - now() is not derived
   before:
   - setup
@@ -176,4 +176,62 @@
   optimized_logical_plan_for_stream: |-
     LogicalJoin { type: Inner, on: (a.k = b.k) AND (((a.ts > (Now - '01:00:00':Interval)) AND (b.y = 2:Int32)) OR (IsNull(a.ts) AND (b.y = 4:Int32))), output: [a.id, b.y] }
     ├─LogicalScan { table: a, columns: [a.id, a.k, a.ts] }
-    └─LogicalScan { table: b, columns: [b.k, b.y], predicate: ((b.y = 2:Int32) OR (b.y = 4:Int32)) }
+    └─LogicalScan { table: b, columns: [b.k, b.y], predicate: In(b.y, 2:Int32, 4:Int32) }
+- name: rewritten - equalities and in lists of a column merged into one in list without duplicates
+  before:
+  - setup
+  sql: |
+    select a.id, b.y from a join b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'r') and b.y = 4);
+  optimized_logical_plan_for_stream: |-
+    LogicalJoin { type: Inner, on: (a.k = b.k) AND ((((a.s = 'p':Varchar) AND (b.y = 1:Int32)) OR ((a.s = 'q':Varchar) AND (b.y = 2:Int32))) OR (((a.s = 'p':Varchar) AND (b.y = 3:Int32)) OR (In(a.s, 'p':Varchar, 'r':Varchar) AND (b.y = 4:Int32)))), output: [a.id, b.y] }
+    ├─LogicalScan { table: a, columns: [a.id, a.k, a.s], predicate: In(a.s, 'p':Varchar, 'q':Varchar, 'r':Varchar) }
+    └─LogicalScan { table: b, columns: [b.k, b.y], predicate: In(b.y, 1:Int32, 2:Int32, 3:Int32, 4:Int32) }
+- name: kept - a value common to every disjunct is factored out of the or before the rule
+  before:
+  - setup
+  sql: |
+    select a.id, b.y from a join b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 3);
+  optimized_logical_plan_for_stream: |-
+    LogicalJoin { type: Inner, on: (a.k = b.k), output: [a.id, b.y] }
+    ├─LogicalScan { table: a, output_columns: [a.id, a.k], required_columns: [a.id, a.k, a.x], predicate: (a.x = 1:Int32) }
+    └─LogicalScan { table: b, columns: [b.k, b.y], predicate: ((b.y = 2:Int32) OR (b.y = 3:Int32)) }
+- name: kept - a case compared with some of its values is inlined into the join condition, only the other side is restricted
+  before:
+  - setup
+  sql: |
+    select a.id, bb.z from a join (select id, k, z, case when y > 0 then 1 when y < 0 then 2 else 0 end as f from b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3);
+  optimized_logical_plan_for_stream: |-
+    LogicalJoin { type: Inner, on: (a.k = b.k) AND (((Case((b.y > 0:Int32), 1:Int32, (b.y < 0:Int32), 2:Int32, 0:Int32) = 1:Int32) AND (a.x = 1:Int32)) OR ((Case((b.y > 0:Int32), 1:Int32, (b.y < 0:Int32), 2:Int32, 0:Int32) = 2:Int32) AND (a.x = 3:Int32))), output: [a.id, b.z] }
+    ├─LogicalScan { table: a, columns: [a.id, a.k, a.x], predicate: In(a.x, 1:Int32, 3:Int32) }
+    └─LogicalScan { table: b, columns: [b.k, b.y, b.z] }
+- name: kept - a case that returns 0 or 1 compared with both values derives nothing on its side
+  before:
+  - setup
+  sql: |
+    select a.id, bb.z from a join (select id, k, z, case when y > 0 then 1 else 0 end as f from b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3);
+  optimized_logical_plan_for_stream: |-
+    LogicalJoin { type: Inner, on: (a.k = b.k) AND (((Case((b.y > 0:Int32), 1:Int32, 0:Int32) = 0:Int32) AND (a.x = 1:Int32)) OR ((Case((b.y > 0:Int32), 1:Int32, 0:Int32) = 1:Int32) AND (a.x = 3:Int32))), output: [a.id, b.z] }
+    ├─LogicalScan { table: a, columns: [a.id, a.k, a.x], predicate: In(a.x, 1:Int32, 3:Int32) }
+    └─LogicalScan { table: b, columns: [b.k, b.y, b.z] }
+- name: kept - a case without else compared with all its values derives nothing on its side
+  before:
+  - setup
+  sql: |
+    select a.id, bb.z from a join (select id, k, z, case when y > 0 then 1 when y < 0 then 2 end as f from b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3);
+  optimized_logical_plan_for_stream: |-
+    LogicalJoin { type: Inner, on: (a.k = b.k) AND ((In(Case((b.y > 0:Int32), 1:Int32, (b.y < 0:Int32), 2:Int32), 1:Int32, 2:Int32) AND (a.x = 1:Int32)) OR ((Case((b.y > 0:Int32), 1:Int32, (b.y < 0:Int32), 2:Int32) = 1:Int32) AND (a.x = 3:Int32))), output: [a.id, b.z] }
+    ├─LogicalScan { table: a, columns: [a.id, a.k, a.x], predicate: In(a.x, 1:Int32, 3:Int32) }
+    └─LogicalScan { table: b, columns: [b.k, b.y, b.z] }
+- name: kept - a constant of each union branch compared with all its values derives nothing on its side
+  before:
+  - setup
+  sql: |
+    select a.id, u.k from a join (select id, k, 'x' as tag from b union all select id, k, 'y' as tag from c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3);
+  optimized_logical_plan_for_stream: |-
+    LogicalJoin { type: Inner, on: (a.k = b.k) AND ((('x':Varchar = 'x':Varchar) AND (a.x = 1:Int32)) OR (('x':Varchar = 'y':Varchar) AND (a.x = 3:Int32))), output: [a.id, b.k] }
+    ├─LogicalScan { table: a, columns: [a.id, a.k, a.x], predicate: In(a.x, 1:Int32, 3:Int32) }
+    └─LogicalUnion { all: true }
+      ├─LogicalProject { exprs: [b.k, 'x':Varchar] }
+      │ └─LogicalScan { table: b, columns: [b.k] }
+      └─LogicalProject { exprs: [c.k, 'y':Varchar] }
+        └─LogicalScan { table: c, columns: [c.k] }

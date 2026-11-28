@@ -48,6 +48,25 @@ CASES = [
     ('three_tables', 'id int, bid int, cid int',
      f"select a.id, b.id as bid, c.id as cid from {A} a join {B} b on a.k = b.k join {C} c on c.k = b.k "
      f"where ((a.x = 1 and c.w = 2) or (a.x = 3 and c.w = 4)) and ((b.y = 2 and c.w = 2) or (b.y = 4 and c.w = 4))"),
+    # Restrictions written without redundancy (one `IN` list per column), or not derived when they
+    # can not remove a row (a `CASE` or the constants of a union compared with all their values).
+    ('merged_in', 'id int, bid int',
+     f"select a.id, b.id as bid from {A} a join {B} b on a.k = b.k where (a.s = 'p' and b.y = 1) "
+     f"or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'z') and b.y = 4)"),
+    ('same_value', 'id int, bid int',
+     f"select a.id, b.id as bid from {A} a join {B} b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 4)"),
+    ('case_some_values', 'id int, bid int',
+     f"select a.id, bb.id as bid from {A} a join (select id, k, case when y > 2 then 1 when y < 2 then 2 "
+     f"else 0 end as f from {B}) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3)"),
+    ('case_all_values', 'id int, bid int',
+     f"select a.id, bb.id as bid from {A} a join (select id, k, case when y > 2 then 1 else 0 end as f "
+     f"from {B}) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3)"),
+    ('case_no_else', 'id int, bid int',
+     f"select a.id, bb.id as bid from {A} a join (select id, k, case when y > 2 then 1 when y < 2 then 2 end as f "
+     f"from {B}) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3)"),
+    ('union_tags', 'id int, uid int',
+     f"select a.id, u.id as uid from {A} a join (select id, k, 'x' as tag from {B} union all "
+     f"select id, k, 'y' as tag from {C}) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3)"),
     # Left as they are by the rule.
     ('kept_anti', 'id int',
      f"select a.id from {A} a where not exists (select 1 from {B} b where b.k = a.k "

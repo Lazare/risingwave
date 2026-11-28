@@ -316,7 +316,7 @@ fn distinct_literals<'a>(exprs: impl Iterator<Item = &'a ExprImpl>) -> bool {
 }
 
 /// `k IN (v_1, ..., v_n)` without duplicates, or `k = v_1` for a single value.
-fn in_list(key: &InputRef, values: Vec<ExprImpl>) -> ExprImpl {
+pub(super) fn in_list(key: &InputRef, values: Vec<ExprImpl>) -> ExprImpl {
     let mut list: Vec<ExprImpl> = vec![];
     for value in values {
         if !list.contains(&value) {
