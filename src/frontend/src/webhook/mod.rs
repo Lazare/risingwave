@@ -274,9 +274,16 @@ pub(super) mod handlers {
             )
         };
 
+        // The worker of the table is unknown while the cluster recovers (no vnode mapping yet):
+        // answer that the service is unavailable instead of panicking the frontend.
         let compute_client = choose_fast_insert_client(table_id, frontend_env, request_id)
             .await
-            .unwrap();
+            .map_err(|e| {
+                err(
+                    anyhow!(e).context("no compute node can receive the rows yet, retry later"),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                )
+            })?;
 
         Ok(WebhookTableInsertContext {
             webhook_source_info,
