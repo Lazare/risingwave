@@ -1,0 +1,202 @@
+# Tests for `streaming_preserve_mv_key`: the plan reductions of the other streaming variables do
+# not change the key of a materialized view (its primary key and its distribution key) when the key
+# it would have without them is still valid. The cases with `setup_rules` show the key changed by
+# the reductions, the same cases with `setup_keep` the key kept.
+- id: setup_rules
+  sql: |
+    set streaming_simplify_on_unique_key = true;
+    set streaming_merge_repeated_lookups = true;
+    create table e (id int primary key, ref_id int, payload varchar);
+    create table d (id int primary key, v varchar);
+    create table t (id int primary key, e_id int, w int);
+  expected_outputs: []
+- id: setup_keep
+  sql: |
+    set streaming_simplify_on_unique_key = true;
+    set streaming_merge_repeated_lookups = true;
+    set streaming_preserve_mv_key = true;
+    create table e (id int primary key, ref_id int, payload varchar);
+    create table d (id int primary key, v varchar);
+    create table t (id int primary key, e_id int, w int);
+  expected_outputs: []
+- id: setup_only_keep
+  sql: |
+    set streaming_preserve_mv_key = true;
+    create table e (id int primary key, ref_id int, payload varchar);
+    create table d (id int primary key, v varchar);
+  expected_outputs: []
+
+# A top-1 per key at the top of the view, over a join whose other side has at most one row per
+# row: `AggOnKeyEliminateRule` removes it, and the key becomes the stream key of the join.
+- name: top-1 per key over a left join - removed, the key of the view becomes wider
+  before:
+  - setup_rules
+  sql: |
+    select id, payload, v from (
+      select e.id, e.payload, d.v, row_number() over (partition by e.id order by d.v) as rn
+      from e left join d on e.ref_id = d.id
+    ) s where rn = 1;
+  expected_outputs:
+  - stream_plan
+- name: top-1 per key over a left join - kept, the key of the view stays its group key
+  before:
+  - setup_keep
+  sql: |
+    select id, payload, v from (
+      select e.id, e.payload, d.v, row_number() over (partition by e.id order by d.v) as rn
+      from e left join d on e.ref_id = d.id
+    ) s where rn = 1;
+  expected_outputs:
+  - stream_plan
+- name: aggregation on a key over a left join - removed
+  before:
+  - setup_rules
+  sql: |
+    select e.id, max(d.v) as v, count(*) as n from e left join d on e.ref_id = d.id group by e.id;
+  expected_outputs:
+  - stream_plan
+- name: aggregation on a key over a left join - kept
+  before:
+  - setup_keep
+  sql: |
+    select e.id, max(d.v) as v, count(*) as n from e left join d on e.ref_id = d.id group by e.id;
+  expected_outputs:
+  - stream_plan
+- name: distinct over a left join, below a filter - kept
+  before:
+  - setup_keep
+  sql: |
+    select id, v from (select distinct e.id, d.v from e left join d on e.ref_id = d.id) s
+    where v is not null;
+  expected_outputs:
+  - stream_plan
+
+# Still removed with the variable.
+- name: top-1 per key over a scan - removed, the key does not change
+  before:
+  - setup_keep
+  sql: |
+    select id, ref_id from (
+      select id, ref_id, row_number() over (partition by id order by ref_id) as rn from e
+    ) s where rn = 1;
+  expected_outputs:
+  - stream_plan
+- name: aggregation on a key over a scan - removed
+  before:
+  - setup_keep
+  sql: |
+    select id, max(payload) as p from e group by id;
+  expected_outputs:
+  - stream_plan
+- name: top-1 per key below a join - removed, it does not give the view its key
+  before:
+  - setup_keep
+  sql: |
+    select t.id, x.v from t join (
+      select id, v from (
+        select e.id, d.v, row_number() over (partition by e.id order by d.v) as rn
+        from e left join d on e.ref_id = d.id
+      ) s where rn = 1
+    ) x on t.e_id = x.id;
+  expected_outputs:
+  - stream_plan
+- name: top-3 per key over a left join - its key is the key of its input, nothing to keep
+  before:
+  - setup_keep
+  sql: |
+    select id, v from (
+      select e.id, d.v, row_number() over (partition by e.id order by d.v) as rn
+      from e left join d on e.ref_id = d.id
+    ) s where rn <= 3;
+  expected_outputs:
+  - stream_plan
+- name: the variable alone changes nothing
+  before:
+  - setup_only_keep
+  sql: |
+    select e.id, max(d.v) as v from e left join d on e.ref_id = d.id group by e.id;
+  expected_outputs:
+  - stream_plan
+
+# A join of a table with itself on its key, removed by `streaming_merge_repeated_lookups`: the
+# view keeps the distribution by `id` that the removed join gave it.
+- name: self-join on the key removed - distributed by the remaining join
+  before:
+  - setup_rules
+  sql: |
+    select e1.id, e1.payload || '!' as payload, x.v from e e1
+    join (select e2.id, d.v from e e2 left join d on e2.ref_id = d.id) x on e1.id = x.id;
+  expected_outputs:
+  - stream_plan
+- name: self-join on the key removed - distributed as without the reductions
+  before:
+  - setup_keep
+  sql: |
+    select e1.id, e1.payload || '!' as payload, x.v from e e1
+    join (select e2.id, d.v from e e2 left join d on e2.ref_id = d.id) x on e1.id = x.id;
+  expected_outputs:
+  - stream_plan
+- name: distribution by a column that the view does not output - not kept
+  before:
+  - setup_keep
+  sql: |
+    select e1.payload || '!' as payload, x.v from e e1
+    join (select e2.id, d.v from e e2 left join d on e2.ref_id = d.id) x on e1.id = x.id;
+  expected_outputs:
+  - stream_plan
+
+# The consumers of the views: a batch lookup join and a streaming join by the key.
+- name: batch lookup join on a view - key changed by the reductions
+  before:
+  - setup_rules
+  sql: |
+    create materialized view m1 as select id, payload, v from (
+      select e.id, e.payload, d.v, row_number() over (partition by e.id order by d.v) as rn
+      from e left join d on e.ref_id = d.id
+    ) s where rn = 1;
+    create materialized view m2 as
+      select e.id, max(d.v) as v, count(*) as n from e left join d on e.ref_id = d.id group by e.id;
+    create materialized view m3 as select e1.id, e1.payload || '!' as payload, x.v from e e1
+      join (select e2.id, d.v from e e2 left join d on e2.ref_id = d.id) x on e1.id = x.id;
+    select t.id, m1.v, m2.n, m3.payload from t
+      join m1 on t.e_id = m1.id join m2 on t.e_id = m2.id join m3 on t.e_id = m3.id;
+  expected_outputs:
+  - batch_plan
+- name: batch lookup join on a view - key kept
+  before:
+  - setup_keep
+  sql: |
+    create materialized view m1 as select id, payload, v from (
+      select e.id, e.payload, d.v, row_number() over (partition by e.id order by d.v) as rn
+      from e left join d on e.ref_id = d.id
+    ) s where rn = 1;
+    create materialized view m2 as
+      select e.id, max(d.v) as v, count(*) as n from e left join d on e.ref_id = d.id group by e.id;
+    create materialized view m3 as select e1.id, e1.payload || '!' as payload, x.v from e e1
+      join (select e2.id, d.v from e e2 left join d on e2.ref_id = d.id) x on e1.id = x.id;
+    select t.id, m1.v, m2.n, m3.payload from t
+      join m1 on t.e_id = m1.id join m2 on t.e_id = m2.id join m3 on t.e_id = m3.id;
+  expected_outputs:
+  - batch_plan
+- name: streaming join on a view - key changed by the reductions
+  before:
+  - setup_rules
+  sql: |
+    create materialized view m1 as select id, payload, v from (
+      select e.id, e.payload, d.v, row_number() over (partition by e.id order by d.v) as rn
+      from e left join d on e.ref_id = d.id
+    ) s where rn = 1;
+    select t.id, m1.v from t join m1 on t.e_id = m1.id;
+  expected_outputs:
+  - stream_plan
+- name: streaming join on a view - key kept
+  before:
+  - setup_keep
+  sql: |
+    create materialized view m1 as select id, payload, v from (
+      select e.id, e.payload, d.v, row_number() over (partition by e.id order by d.v) as rn
+      from e left join d on e.ref_id = d.id
+    ) s where rn = 1;
+    select t.id, m1.v from t join m1 on t.e_id = m1.id;
+  expected_outputs:
+  - stream_plan

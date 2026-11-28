@@ -69,6 +69,9 @@ pub struct OptimizerContext {
     /// Whether `NarrowValueAggRule` or `NarrowValuePushRule` applied to the plan: the projections
     /// that narrow a value below a join are then kept there.
     values_narrowed: Cell<bool>,
+    /// `streaming_preserve_mv_key`: the distribution key (names of visible columns) that the
+    /// materialized view would have without the plan reductions, kept if still valid.
+    preferred_mv_distribution: RefCell<Option<Vec<String>>>,
 
     /// Last assigned plan node ID.
     last_plan_node_id: Cell<i32>,
@@ -126,6 +129,7 @@ impl OptimizerContext {
             stream_prune_baseline: Cell::new(false),
             stream_prune_rule_applied: Cell::new(0),
             values_narrowed: Cell::new(false),
+            preferred_mv_distribution: RefCell::new(None),
 
             last_plan_node_id: Cell::new(RESERVED_ID_NUM.into()),
             last_correlated_id: Cell::new(0),
@@ -154,6 +158,7 @@ impl OptimizerContext {
             stream_prune_baseline: Cell::new(false),
             stream_prune_rule_applied: Cell::new(0),
             values_narrowed: Cell::new(false),
+            preferred_mv_distribution: RefCell::new(None),
 
             last_plan_node_id: Cell::new(0),
             last_correlated_id: Cell::new(0),
@@ -243,6 +248,33 @@ impl OptimizerContext {
 
     pub fn values_narrowed(&self) -> bool {
         self.values_narrowed.get()
+    }
+
+    /// A new context for the same statement, that plans the job again without the plan
+    /// reductions (`stream_prune_baseline`), e.g. to find the key it would have without them.
+    pub fn new_stream_prune_baseline(&self) -> Self {
+        let mut context = Self::new(
+            HandlerArgs {
+                session: self.session_ctx.clone(),
+                sql: self.sql.clone(),
+                normalized_sql: self.normalized_sql.clone(),
+                with_options: self.with_options.clone(),
+            },
+            ExplainOptions::default(),
+        );
+        // The options of the `WITH` clause that `new` would have extracted are already extracted.
+        context.overwrite_options = self.overwrite_options.clone();
+        context.set_stream_prune_baseline();
+        context
+    }
+
+    /// See `preferred_mv_distribution`.
+    pub fn set_preferred_mv_distribution(&self, columns: Vec<String>) {
+        *self.preferred_mv_distribution.borrow_mut() = Some(columns);
+    }
+
+    pub fn preferred_mv_distribution(&self) -> Option<Vec<String>> {
+        self.preferred_mv_distribution.borrow().clone()
     }
 
     pub fn is_explain_verbose(&self) -> bool {

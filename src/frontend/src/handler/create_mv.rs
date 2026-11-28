@@ -132,6 +132,34 @@ pub fn gen_create_mv_plan_bound(
         context.warn_to_user("The session variable CREATE_COMPACTION_GROUP_FOR_MV has been deprecated. It will not take effect.");
     }
 
+    // `streaming_preserve_mv_key`: the view is planned once without the plan reductions, to find
+    // the distribution key it would have; `StreamMaterialize` keeps it if it is still valid.
+    if session.config().streaming_preserve_mv_key() && !context.is_stream_prune_baseline() {
+        let baseline: OptimizerContextRef = context.new_stream_prune_baseline().into();
+        if let Ok((_, table)) = gen_create_mv_plan_bound(
+            session,
+            baseline,
+            query.clone(),
+            name.clone(),
+            columns.clone(),
+            emit_mode.clone(),
+            refresh_interval_sec,
+        ) {
+            // Only visible columns: the hidden ones may differ between the two plans.
+            let names: Option<Vec<String>> = table
+                .distribution_key
+                .iter()
+                .map(|&index| {
+                    let column = &table.columns[index];
+                    (!column.is_hidden).then(|| column.name().to_owned())
+                })
+                .collect();
+            if let Some(names) = names {
+                context.set_preferred_mv_distribution(names);
+            }
+        }
+    }
+
     let db_name = &session.database();
     let (schema_name, table_name) = Binder::resolve_schema_qualified_name(db_name, &name)?;
 
