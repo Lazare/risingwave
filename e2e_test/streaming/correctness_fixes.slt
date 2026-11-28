@@ -573,3 +573,88 @@ drop table cfs_ga;
 
 statement ok
 drop table cfs_gb;
+
+# An update between equal values with different texts (numeric 1.0 and 1.00, float 0 and -0) is
+# not a no-op: the table, and every materialized view reading it, must see the new value.
+statement ok
+create table cfs_n (id int primary key, k numeric, f float8, g int);
+
+statement ok
+create materialized view cfs_n1 as select id, k::varchar as kt, f::varchar as ft from cfs_n;
+
+statement ok
+create materialized view cfs_n2 as select id from cfs_n where k::varchar = '1.0';
+
+statement ok
+insert into cfs_n values (1, 1.0, 0, 1), (2, 2.5, 1, 1);
+
+query ITT rowsort
+select id, kt, ft from cfs_n1;
+----
+1 1.0 0
+2 2.5 1
+
+query I rowsort
+select id from cfs_n2;
+----
+1
+
+# A row written again with its primary key, equal on every column to the previous one.
+statement ok
+insert into cfs_n values (1, 1.00, '-0'::float8, 1);
+
+query ITT rowsort
+select id, k::varchar, f::varchar from cfs_n;
+----
+1 1.00 -0
+2 2.5 1
+
+query ITT rowsort
+select id, kt, ft from cfs_n1;
+----
+1 1.00 -0
+2 2.5 1
+
+query I rowsort
+select id from cfs_n2;
+----
+
+# An update of another column too: the materialized view does not read it.
+statement ok
+update cfs_n set g = 2, k = 2.50 where id = 2;
+
+query ITT rowsort
+select id, kt, ft from cfs_n1;
+----
+1 1.00 -0
+2 2.50 1
+
+statement ok
+update cfs_n set k = 1.0 where id = 1;
+
+query I rowsort
+select id from cfs_n2;
+----
+1
+
+statement ok
+delete from cfs_n;
+
+query I
+select count(*) from cfs_n1;
+----
+0
+
+query I
+select count(*) from cfs_n2;
+----
+0
+
+statement ok
+drop materialized view cfs_n1;
+
+statement ok
+drop materialized view cfs_n2;
+
+statement ok
+drop table cfs_n;
