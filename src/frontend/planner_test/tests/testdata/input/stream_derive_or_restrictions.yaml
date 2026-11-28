@@ -87,7 +87,7 @@
     select a.id, b.y from a join b on a.k = b.k where a.x = 1 or a.x = 3;
   expected_outputs:
   - optimized_logical_plan_for_stream
-- name: kept - left join, the preserved side is not restricted by its on condition
+- name: left join - the preserved side is not restricted by its on condition, the optional side is
   before: [setup]
   sql: |
     select a.id, b.y from a left join b on a.k = b.k and ((a.x = 1 and b.y is null) or (a.x = 3 and b.z is null));
