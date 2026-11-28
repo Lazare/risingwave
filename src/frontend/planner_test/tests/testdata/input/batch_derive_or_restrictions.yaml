@@ -131,7 +131,7 @@
     select a.id, b.y from a join b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'r') and b.y = 4);
   expected_outputs:
   - batch_plan
-- name: rewritten - the same value in every disjunct gives one equality
+- name: kept - a value common to every disjunct is factored out of the or before the rule
   before: [setup]
   sql: |
     select a.id, b.y from a join b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 3);

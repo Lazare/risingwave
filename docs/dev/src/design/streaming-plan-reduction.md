@@ -1523,7 +1523,9 @@ into the other side when it may).
   of outer joins aside), unions (all branches), group keys, shares, dedups, top-n and limits.
   Example: `CASE WHEN y > 2 THEN 1 ELSE 0 END = 0 OR ... = 1`, or the constant tag of each branch
   of a union compared with every tag: before this check, such a tautology was evaluated on every
-  row for nothing. A `CASE` compared with some of its values is still derived.
+  row for nothing. A `CASE` compared with some of its values is still derived when it is a
+  column of a projection under the join (batch); in streaming it is usually inlined into the join
+  condition, where `CASE` is not a safe part, and only the other side is restricted.
 - Placement: batch and streaming, after the first predicate pushdown (the `WHERE` conjuncts of
   inner joins are in the join conditions), before join ordering; predicate pushdown right after.
   The rule adds a conjunct only if the condition changes (a join reached again through a shared
@@ -1536,8 +1538,8 @@ into the other side when it may).
   one or several parts per side, `IS NULL`, `IN`, a disjunct with one side only, no equality, left,
   right and semi joins, three tables, scan ranges on a primary key; kept: an `OR` on one side, the
   preserved side of a left join, anti and full joins, parts that may fail, volatile parts, `now()`;
-  form: equalities and `IN` lists merged without duplicates, the same value in every disjunct, a
-  `CASE` compared with some of its values; not derived: a `CASE` with or without `ELSE` compared
+  form: equalities and `IN` lists merged without duplicates, a value common to every disjunct
+  (factored out before the rule), a `CASE` compared with some of its values; not derived: a `CASE` with or without `ELSE` compared
   with all its values, the constants of union branches compared with all of them; off by
   default), and the differentials `e2e_test/batch/derive_or_restrictions.gen.py` and
   `e2e_test/streaming/derive_or_restrictions.gen.py` (23 and 22 queries compared with the variable

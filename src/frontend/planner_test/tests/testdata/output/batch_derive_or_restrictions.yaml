@@ -32,7 +32,7 @@
       ├─BatchExchange { order: [], dist: HashShard(a.k) }
       │ └─BatchScan { table: a, columns: [a.id, a.k], scan_ranges: [a.id = Int32(1), a.id = Int32(3)], distribution: UpstreamHashShard(a.id) }
       └─BatchExchange { order: [], dist: HashShard(b.k) }
-        └─BatchFilter { predicate: ((b.y = 2:Int32) OR (b.y = 4:Int32)) }
+        └─BatchFilter { predicate: In(b.y, 2:Int32, 4:Int32) }
           └─BatchScan { table: b, columns: [b.k, b.y], distribution: SomeShard }
 - name: inner join - a restriction for each side
   before:
@@ -43,10 +43,10 @@
     BatchExchange { order: [], dist: Single }
     └─BatchHashJoin { type: Inner, predicate: a.k = b.k AND (((a.x = 1:Int32) AND (b.y = 2:Int32)) OR ((a.x = 3:Int32) AND (b.y = 4:Int32))), output: [a.id, b.y] }
       ├─BatchExchange { order: [], dist: HashShard(a.k) }
-      │ └─BatchFilter { predicate: ((a.x = 1:Int32) OR (a.x = 3:Int32)) }
+      │ └─BatchFilter { predicate: In(a.x, 1:Int32, 3:Int32) }
       │   └─BatchScan { table: a, columns: [a.id, a.k, a.x], distribution: UpstreamHashShard(a.id) }
       └─BatchExchange { order: [], dist: HashShard(b.k) }
-        └─BatchFilter { predicate: ((b.y = 2:Int32) OR (b.y = 4:Int32)) }
+        └─BatchFilter { predicate: In(b.y, 2:Int32, 4:Int32) }
           └─BatchScan { table: b, columns: [b.k, b.y], distribution: SomeShard }
 - name: inner join - several parts per side and is null
   before:
@@ -57,7 +57,7 @@
     BatchExchange { order: [], dist: Single }
     └─BatchHashJoin { type: Inner, predicate: a.k = b.k AND ((((a.x = 1:Int32) AND (a.id > 5:Int32)) AND (b.y = 2:Int32)) OR ((a.x = 3:Int32) AND IsNull(b.y))), output: [a.id, b.y] }
       ├─BatchExchange { order: [], dist: HashShard(a.k) }
-      │ └─BatchFilter { predicate: (((a.x = 1:Int32) AND (a.id > 5:Int32)) OR (a.x = 3:Int32)) }
+      │ └─BatchFilter { predicate: ((a.x = 3:Int32) OR ((a.x = 1:Int32) AND (a.id > 5:Int32))) }
       │   └─BatchScan { table: a, columns: [a.id, a.k, a.x], distribution: UpstreamHashShard(a.id) }
       └─BatchExchange { order: [], dist: HashShard(b.k) }
         └─BatchFilter { predicate: ((b.y = 2:Int32) OR IsNull(b.y)) }
@@ -73,7 +73,7 @@
       ├─BatchExchange { order: [], dist: HashShard(a.k) }
       │ └─BatchScan { table: a, columns: [a.id, a.k, a.x], distribution: UpstreamHashShard(a.id) }
       └─BatchExchange { order: [], dist: HashShard(b.k) }
-        └─BatchFilter { predicate: ((b.y = 2:Int32) OR (b.y = 4:Int32)) }
+        └─BatchFilter { predicate: In(b.y, 2:Int32, 4:Int32) }
           └─BatchScan { table: b, columns: [b.k, b.y], distribution: SomeShard }
 - name: inner join - three disjuncts, in lists and comparisons
   before:
@@ -84,7 +84,7 @@
     BatchExchange { order: [], dist: Single }
     └─BatchHashJoin { type: Inner, predicate: a.k = b.k AND (((In(a.x, 1:Int32, 2:Int32) AND (b.y > 10:Int32)) OR ((a.x = 3:Int32) AND (b.z <= 0:Int32))) OR ((a.s = 'p':Varchar) AND IsNotDistinctFrom(b.y, b.z))), output: [a.id, b.y] }
       ├─BatchExchange { order: [], dist: HashShard(a.k) }
-      │ └─BatchFilter { predicate: ((In(a.x, 1:Int32, 2:Int32) OR (a.x = 3:Int32)) OR (a.s = 'p':Varchar)) }
+      │ └─BatchFilter { predicate: (In(a.x, 1:Int32, 2:Int32, 3:Int32) OR (a.s = 'p':Varchar)) }
       │   └─BatchScan { table: a, columns: [a.id, a.k, a.x, a.s], distribution: UpstreamHashShard(a.id) }
       └─BatchExchange { order: [], dist: HashShard(b.k) }
         └─BatchFilter { predicate: (((b.y > 10:Int32) OR (b.z <= 0:Int32)) OR IsNotDistinctFrom(b.y, b.z)) }
@@ -97,10 +97,10 @@
   batch_plan: |-
     BatchNestedLoopJoin { type: Inner, predicate: (((a.x = 1:Int32) AND (b.y = 2:Int32)) OR ((a.x = 3:Int32) AND (b.y = 4:Int32))), output: [a.id, b.y] }
     ├─BatchExchange { order: [], dist: Single }
-    │ └─BatchFilter { predicate: ((a.x = 1:Int32) OR (a.x = 3:Int32)) }
+    │ └─BatchFilter { predicate: In(a.x, 1:Int32, 3:Int32) }
     │   └─BatchScan { table: a, columns: [a.id, a.x], distribution: UpstreamHashShard(a.id) }
     └─BatchExchange { order: [], dist: Single }
-      └─BatchFilter { predicate: ((b.y = 2:Int32) OR (b.y = 4:Int32)) }
+      └─BatchFilter { predicate: In(b.y, 2:Int32, 4:Int32) }
         └─BatchScan { table: b, columns: [b.y], distribution: SomeShard }
 - name: left join - only the optional side is restricted
   before:
@@ -113,7 +113,7 @@
       ├─BatchExchange { order: [], dist: HashShard(a.k) }
       │ └─BatchScan { table: a, columns: [a.id, a.k, a.x], distribution: UpstreamHashShard(a.id) }
       └─BatchExchange { order: [], dist: HashShard(b.k) }
-        └─BatchFilter { predicate: ((b.y = 2:Int32) OR (b.y = 4:Int32)) }
+        └─BatchFilter { predicate: In(b.y, 2:Int32, 4:Int32) }
           └─BatchScan { table: b, columns: [b.k, b.y], distribution: SomeShard }
 - name: right join - only the optional side is restricted
   before:
@@ -126,7 +126,7 @@
       ├─BatchExchange { order: [], dist: HashShard(b.k) }
       │ └─BatchScan { table: b, columns: [b.k, b.y], distribution: SomeShard }
       └─BatchExchange { order: [], dist: HashShard(a.k) }
-        └─BatchFilter { predicate: ((a.x = 1:Int32) OR (a.x = 3:Int32)) }
+        └─BatchFilter { predicate: In(a.x, 1:Int32, 3:Int32) }
           └─BatchScan { table: a, columns: [a.id, a.k, a.x], distribution: UpstreamHashShard(a.id) }
 - name: semi join - the outer side is restricted
   before:
@@ -137,7 +137,7 @@
     BatchExchange { order: [], dist: Single }
     └─BatchHashJoin { type: LeftSemi, predicate: a.k = b.k AND (((a.x = 1:Int32) AND (b.y = 2:Int32)) OR ((a.x = 3:Int32) AND (b.y = 4:Int32))), output: [a.id] }
       ├─BatchExchange { order: [], dist: HashShard(a.k) }
-      │ └─BatchFilter { predicate: ((a.x = 1:Int32) OR (a.x = 3:Int32)) }
+      │ └─BatchFilter { predicate: In(a.x, 1:Int32, 3:Int32) }
       │   └─BatchScan { table: a, columns: [a.id, a.k, a.x], distribution: UpstreamHashShard(a.id) }
       └─BatchExchange { order: [], dist: HashShard(b.k) }
         └─BatchProject { exprs: [b.k, b.y, b.y] }
@@ -153,13 +153,13 @@
       ├─BatchExchange { order: [], dist: HashShard(b.k) }
       │ └─BatchHashJoin { type: Inner, predicate: a.k = b.k, output: [a.id, a.x, b.k, b.y] }
       │   ├─BatchExchange { order: [], dist: HashShard(a.k) }
-      │   │ └─BatchFilter { predicate: ((a.x = 1:Int32) OR (a.x = 3:Int32)) }
+      │   │ └─BatchFilter { predicate: In(a.x, 1:Int32, 3:Int32) }
       │   │   └─BatchScan { table: a, columns: [a.id, a.k, a.x], distribution: UpstreamHashShard(a.id) }
       │   └─BatchExchange { order: [], dist: HashShard(b.k) }
-      │     └─BatchFilter { predicate: ((b.y = 1:Int32) OR (b.y = 5:Int32)) }
+      │     └─BatchFilter { predicate: In(b.y, 1:Int32, 5:Int32) }
       │       └─BatchScan { table: b, columns: [b.k, b.y], distribution: SomeShard }
       └─BatchExchange { order: [], dist: HashShard(c.k) }
-        └─BatchFilter { predicate: ((c.w = 2:Int32) OR (c.w = 4:Int32)) AND ((c.w = 2:Int32) OR (c.w = 6:Int32)) }
+        └─BatchFilter { predicate: In(c.w, 2:Int32, 4:Int32) AND In(c.w, 2:Int32, 6:Int32) }
           └─BatchScan { table: c, columns: [c.k, c.w], distribution: SomeShard }
 - name: kept - an or on one side only is pushed down as it is
   before:
@@ -224,7 +224,7 @@
       ├─BatchExchange { order: [], dist: HashShard(a.k) }
       │ └─BatchScan { table: a, columns: [a.id, a.k, a.s], distribution: UpstreamHashShard(a.id) }
       └─BatchExchange { order: [], dist: HashShard(b.k) }
-        └─BatchFilter { predicate: ((b.y = 2:Int32) OR (b.y = 4:Int32)) }
+        └─BatchFilter { predicate: In(b.y, 2:Int32, 4:Int32) }
           └─BatchScan { table: b, columns: [b.k, b.y, b.z], distribution: SomeShard }
 - name: kept - a volatile part is not derived
   before:
@@ -237,5 +237,96 @@
       ├─BatchExchange { order: [], dist: HashShard(a.k) }
       │ └─BatchScan { table: a, columns: [a.id, a.k, a.x], distribution: UpstreamHashShard(a.id) }
       └─BatchExchange { order: [], dist: HashShard(b.k) }
-        └─BatchFilter { predicate: ((b.y = 2:Int32) OR (b.y = 4:Int32)) }
+        └─BatchFilter { predicate: In(b.y, 2:Int32, 4:Int32) }
           └─BatchScan { table: b, columns: [b.k, b.y], distribution: SomeShard }
+- name: rewritten - equalities and in lists of a column merged into one in list without duplicates
+  before:
+  - setup
+  sql: |
+    select a.id, b.y from a join b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'r') and b.y = 4);
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: Inner, predicate: a.k = b.k AND ((((a.s = 'p':Varchar) AND (b.y = 1:Int32)) OR ((a.s = 'q':Varchar) AND (b.y = 2:Int32))) OR (((a.s = 'p':Varchar) AND (b.y = 3:Int32)) OR (In(a.s, 'p':Varchar, 'r':Varchar) AND (b.y = 4:Int32)))), output: [a.id, b.y] }
+      ├─BatchExchange { order: [], dist: HashShard(a.k) }
+      │ └─BatchFilter { predicate: In(a.s, 'p':Varchar, 'q':Varchar, 'r':Varchar) }
+      │   └─BatchScan { table: a, columns: [a.id, a.k, a.s], distribution: UpstreamHashShard(a.id) }
+      └─BatchExchange { order: [], dist: HashShard(b.k) }
+        └─BatchFilter { predicate: In(b.y, 1:Int32, 2:Int32, 3:Int32, 4:Int32) }
+          └─BatchScan { table: b, columns: [b.k, b.y], distribution: SomeShard }
+- name: kept - a value common to every disjunct is factored out of the or before the rule
+  before:
+  - setup
+  sql: |
+    select a.id, b.y from a join b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 3);
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: Inner, predicate: a.k = b.k, output: [a.id, b.y] }
+      ├─BatchExchange { order: [], dist: HashShard(a.k) }
+      │ └─BatchProject { exprs: [a.id, a.k] }
+      │   └─BatchFilter { predicate: (a.x = 1:Int32) }
+      │     └─BatchScan { table: a, columns: [a.id, a.k, a.x], distribution: UpstreamHashShard(a.id) }
+      └─BatchExchange { order: [], dist: HashShard(b.k) }
+        └─BatchFilter { predicate: ((b.y = 2:Int32) OR (b.y = 3:Int32)) }
+          └─BatchScan { table: b, columns: [b.k, b.y], distribution: SomeShard }
+- name: rewritten - a case compared with some of its values restricts its side
+  before:
+  - setup
+  sql: |
+    select a.id, bb.z from a join (select id, k, z, case when y > 0 then 1 when y < 0 then 2 else 0 end as f from b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3);
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: Inner, predicate: a.k = b.k AND ((($expr1 = 1:Int32) AND (a.x = 1:Int32)) OR (($expr1 = 2:Int32) AND (a.x = 3:Int32))), output: [a.id, b.z] }
+      ├─BatchExchange { order: [], dist: HashShard(a.k) }
+      │ └─BatchFilter { predicate: In(a.x, 1:Int32, 3:Int32) }
+      │   └─BatchScan { table: a, columns: [a.id, a.k, a.x], distribution: UpstreamHashShard(a.id) }
+      └─BatchExchange { order: [], dist: HashShard(b.k) }
+        └─BatchProject { exprs: [b.k, b.z, Case((b.y > 0:Int32), 1:Int32, (b.y < 0:Int32), 2:Int32, 0:Int32) as $expr1] }
+          └─BatchFilter { predicate: In(Case((b.y > 0:Int32), 1:Int32, (b.y < 0:Int32), 2:Int32, 0:Int32), 1:Int32, 2:Int32) }
+            └─BatchScan { table: b, columns: [b.k, b.y, b.z], distribution: SomeShard }
+- name: kept - a case that returns 0 or 1 compared with both values derives nothing on its side
+  before:
+  - setup
+  sql: |
+    select a.id, bb.z from a join (select id, k, z, case when y > 0 then 1 else 0 end as f from b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3);
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: Inner, predicate: a.k = b.k AND ((($expr1 = 0:Int32) AND (a.x = 1:Int32)) OR (($expr1 = 1:Int32) AND (a.x = 3:Int32))), output: [a.id, b.z] }
+      ├─BatchExchange { order: [], dist: HashShard(a.k) }
+      │ └─BatchFilter { predicate: In(a.x, 1:Int32, 3:Int32) }
+      │   └─BatchScan { table: a, columns: [a.id, a.k, a.x], distribution: UpstreamHashShard(a.id) }
+      └─BatchExchange { order: [], dist: HashShard(b.k) }
+        └─BatchProject { exprs: [b.k, b.z, Case((b.y > 0:Int32), 1:Int32, 0:Int32) as $expr1] }
+          └─BatchScan { table: b, columns: [b.k, b.y, b.z], distribution: SomeShard }
+- name: kept - a case without else compared with all its values derives nothing on its side
+  before:
+  - setup
+  sql: |
+    select a.id, bb.z from a join (select id, k, z, case when y > 0 then 1 when y < 0 then 2 end as f from b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3);
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: Inner, predicate: a.k = b.k AND ((In($expr1, 1:Int32, 2:Int32) AND (a.x = 1:Int32)) OR (($expr1 = 1:Int32) AND (a.x = 3:Int32))), output: [a.id, b.z] }
+      ├─BatchExchange { order: [], dist: HashShard(a.k) }
+      │ └─BatchFilter { predicate: In(a.x, 1:Int32, 3:Int32) }
+      │   └─BatchScan { table: a, columns: [a.id, a.k, a.x], distribution: UpstreamHashShard(a.id) }
+      └─BatchExchange { order: [], dist: HashShard(b.k) }
+        └─BatchProject { exprs: [b.k, b.z, Case((b.y > 0:Int32), 1:Int32, (b.y < 0:Int32), 2:Int32) as $expr1] }
+          └─BatchScan { table: b, columns: [b.k, b.y, b.z], distribution: SomeShard }
+- name: kept - a constant of each union branch compared with all its values derives nothing on its side
+  before:
+  - setup
+  sql: |
+    select a.id, u.k from a join (select id, k, 'x' as tag from b union all select id, k, 'y' as tag from c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3);
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: Inner, predicate: a.k = b.k AND ((('x':Varchar = 'x':Varchar) AND (a.x = 1:Int32)) OR (('x':Varchar = 'y':Varchar) AND (a.x = 3:Int32))), output: [a.id, b.k] }
+      ├─BatchExchange { order: [], dist: HashShard(a.k) }
+      │ └─BatchFilter { predicate: In(a.x, 1:Int32, 3:Int32) }
+      │   └─BatchScan { table: a, columns: [a.id, a.k, a.x], distribution: UpstreamHashShard(a.id) }
+      └─BatchExchange { order: [], dist: HashShard(b.k) }
+        └─BatchUnion { all: true }
+          ├─BatchExchange { order: [], dist: Single }
+          │ └─BatchProject { exprs: [b.k, 'x':Varchar] }
+          │   └─BatchScan { table: b, columns: [b.k], distribution: SomeShard }
+          └─BatchExchange { order: [], dist: Single }
+            └─BatchProject { exprs: [c.k, 'y':Varchar] }
+              └─BatchScan { table: c, columns: [c.k], distribution: SomeShard }

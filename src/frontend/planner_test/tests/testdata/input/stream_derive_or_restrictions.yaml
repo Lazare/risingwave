@@ -132,13 +132,13 @@
     select a.id, b.y from a join b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'r') and b.y = 4);
   expected_outputs:
   - optimized_logical_plan_for_stream
-- name: rewritten - the same value in every disjunct gives one equality
+- name: kept - a value common to every disjunct is factored out of the or before the rule
   before: [setup]
   sql: |
     select a.id, b.y from a join b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 3);
   expected_outputs:
   - optimized_logical_plan_for_stream
-- name: rewritten - a case compared with some of its values restricts its side
+- name: kept - a case compared with some of its values is inlined into the join condition, only the other side is restricted
   before: [setup]
   sql: |
     select a.id, bb.z from a join (select id, k, z, case when y > 0 then 1 when y < 0 then 2 else 0 end as f from b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3);
