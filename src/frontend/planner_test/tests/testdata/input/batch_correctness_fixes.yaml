@@ -81,3 +81,133 @@
     select dn.id, dm.id as mid from dn join dm on dn.k = dm.k where dn.k::varchar = '1.0';
   expected_outputs:
   - stream_plan
+
+# `x NOT IN (SELECT y ...)` keeps a row only when `x <> y` is true for every `y`: no row when the
+# subquery returns a NULL, no row with a NULL `x` unless the subquery is empty. The anti join on
+# `x = y` is completed with the NULL cases: a comparison with one row computed over an
+# uncorrelated subquery (a dynamic filter in streaming), or a second anti join on
+# `x IS NULL OR y IS NULL` for a correlated one. Kept as a plain anti join when `x` and `y` are
+# never NULL.
+- id: not_in_setup
+  sql: |
+    create table na (id int primary key, x int, k int);
+    create table nb (id int primary key, y int, k int);
+    create table nn (id int primary key, x int not null, k int not null);
+    create table nm (id int primary key, y int not null, k int not null);
+  expected_outputs: []
+- name: not in - uncorrelated, nullable columns
+  before: [not_in_setup]
+  sql: |
+    select id from na where x not in (select y from nb);
+  expected_outputs:
+  - logical_plan
+  - batch_plan
+  - stream_plan
+- name: not in - uncorrelated, expression compared with a filtered subquery
+  before: [not_in_setup]
+  sql: |
+    select id, x from na where x + 1 not in (select y from nb where k > 0) and k < 10;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: not in - correlated with an equality
+  before: [not_in_setup]
+  sql: |
+    select id from na where x not in (select y from nb where nb.k = na.k);
+  expected_outputs:
+  - logical_plan
+  - batch_plan
+  - stream_plan
+# Without equality in the correlated conditions, a streaming job keeps the anti join on `=`
+# unless `streaming_exact_not_in_without_equality` is set: the exact plan needs a nested-loop
+# join. Batch queries are always exact, but the planner tests plan every query with the planner
+# of streaming jobs: the exact batch plan is shown with the variable set.
+- name: not in - correlated without equality, streaming keeps the anti join on `=`
+  before: [not_in_setup]
+  sql: |
+    select id from na where x not in (select y from nb where nb.k > na.k);
+  expected_outputs:
+  - stream_plan
+- name: not in - correlated without equality, exact (batch nested loop, streaming not plannable)
+  before: [not_in_setup]
+  sql: |
+    set streaming_exact_not_in_without_equality = true;
+    select id from na where x not in (select y from nb where nb.k > na.k);
+  expected_outputs:
+  - batch_plan
+  - stream_error
+- name: not in - two not in conditions
+  before: [not_in_setup]
+  sql: |
+    select id from na where x not in (select y from nb) and k not in (select k from nb where nb.id = na.id);
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: not in - columns declared not null, plain anti join
+  before: [not_in_setup]
+  sql: |
+    select id from nn where x not in (select y from nm);
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: not in - correlated, columns declared not null, plain anti join
+  before: [not_in_setup]
+  sql: |
+    select id from nn where x not in (select y from nm where nm.k = nn.k);
+  expected_outputs:
+  - batch_plan
+- name: not in - subquery filtered on not null, outer column not null, plain anti join
+  before: [not_in_setup]
+  sql: |
+    select id from nn where x not in (select y from nb where y is not null);
+  expected_outputs:
+  - batch_plan
+- name: not in - outer column not null, subquery column nullable
+  before: [not_in_setup]
+  sql: |
+    select id from nn where x not in (select y from nb);
+  expected_outputs:
+  - batch_plan
+- name: not in - outer column nullable, subquery column not null
+  before: [not_in_setup]
+  sql: |
+    select id from na where x not in (select y from nm);
+  expected_outputs:
+  - batch_plan
+- name: not in - in having
+  before: [not_in_setup]
+  sql: |
+    select k, count(*) from na group by k having k not in (select k from nb);
+  expected_outputs:
+  - batch_plan
+- name: not in - delete
+  before: [not_in_setup]
+  sql: |
+    delete from na where x not in (select y from nb);
+  expected_outputs:
+  - batch_plan
+- name: in - unchanged, a semi join on `=`
+  before: [not_in_setup]
+  sql: |
+    select id from na where x in (select y from nb);
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: not exists - unchanged
+  before: [not_in_setup]
+  sql: |
+    select id from na where not exists (select 1 from nb where nb.y = na.x);
+  expected_outputs:
+  - batch_plan
+- name: not in - in the select list, not supported (unchanged)
+  before: [not_in_setup]
+  sql: |
+    select id, x not in (select y from nb) from na;
+  expected_outputs:
+  - planner_error
+- name: not in - several columns, not supported (unchanged)
+  before: [not_in_setup]
+  sql: |
+    select id from na where (x, k) not in (select y, k from nb);
+  expected_outputs:
+  - binder_error
