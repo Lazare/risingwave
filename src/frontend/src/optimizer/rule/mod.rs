@@ -239,6 +239,9 @@ pub use inner_join_to_semi_join_rule::*;
 // `IS NOT NULL` on equi-join keys (`batch_join_keys_not_null`).
 mod join_key_not_null_rule;
 pub use join_key_not_null_rule::*;
+// Range form of date predicates (`batch_date_range_predicates`).
+mod date_range_predicate_rule;
+pub use date_range_predicate_rule::*;
 // Rule `UnionScanMergeRule` (`streaming_merge_union_scans`).
 mod union_scan_merge_rule;
 pub use union_scan_merge_rule::*;
@@ -429,6 +432,7 @@ macro_rules! for_all_rules {
             , { InnerJoinToSemiJoinRule }
             , { SemiJoinDistinctRemoveRule }
             , { JoinKeyNotNullRule }
+            , { DateRangePredicateRule }
             , { UnionScanMergeRule }
             , { StackedAggMergeRule }
             , { LateralTableFunctionRule }

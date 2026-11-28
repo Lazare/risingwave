@@ -26,6 +26,7 @@ user background_ddl
 user batch_cardinality_feedback
 user batch_cardinality_feedback_learning
 user batch_cost_based_join_ordering
+user batch_date_range_predicates
 user batch_distributed_union
 user batch_enable_distributed_dml
 user batch_enable_lookup_join

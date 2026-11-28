@@ -519,6 +519,14 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_join_keys_not_null: bool,
 
+    /// In a batch query, turn a comparison of `date_trunc(unit, x)`, `x::date`,
+    /// `extract(year from x)` or `date_part('year', x)` with a constant into a range of `x`
+    /// (`x >= lo AND x < hi`), which a scan reads as a key range when `x` leads the key of the
+    /// table. For `date` and `timestamp` values, and `timestamptz` values in the `UTC` time zone.
+    /// Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_date_range_predicates: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,

@@ -48,6 +48,7 @@ own rules.
 | BU | Batch: `UNION ALL` run in parallel tasks instead of one (`batch_distributed_union`) | done (prototype, branch `proto/plan-reduction-batch-union-dist`, see "BU" below) |
 | SJ17 | Batch: inner join to semi join on a unique side that is not read; `DISTINCT` removed under a semi or anti join by estimates (`batch_inner_join_to_semi_join`) | done (prototype, branch `proto/plan-reduction-batch-joins`, see "SJ" below) |
 | SJ18 | Batch: `IS NOT NULL` on equi-join keys, on the sides whose unmatched rows are not output (`batch_join_keys_not_null`) | done (prototype, branch `proto/plan-reduction-batch-joins`, see "SJ" below) |
+| SJ15 | Batch: range form of `date_trunc`, `::date`, `extract(year ...)` compared with constants (`batch_date_range_predicates`) | done for `date`, `timestamp` and `timestamptz` in `UTC` (prototype, branch `proto/plan-reduction-batch-joins`, see "SJ" below); other time zones not done |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -1480,6 +1481,51 @@ hash join.
   below, left, right, full, semi, anti, null-safe, lookup, expression key, three-way join; off by
   default); differential test `e2e_test/batch/join_keys_not_null.gen.py` (16 queries, `NULL` keys
   on both sides, duplicates, keys set to `NULL` and back, a side with only `NULL` keys, deletes).
+
+**15. Range form of date predicates (`batch_date_range_predicates`, Calcite `DateRangeRules`).**
+
+```sql
+date_trunc('month', ts) = '2024-05-01'   =>  ts >= '2024-05-01 00:00:00' AND ts < '2024-06-01 00:00:00'
+ts::date <= '2024-05-01'                 =>  ts < '2024-05-02 00:00:00'
+extract(year from d) between 2020 and 2022  =>  d >= '2020-01-01' AND d < '2023-01-01'
+date_trunc('month', d) = '2024-05-01'    =>  d >= '2024-05-01' AND d < '2024-06-01'   -- d a date
+```
+
+`DateRangePredicateRule` rewrites, in the predicate of a filter or of a scan (after the first
+predicate pushdown, in place), each top-level conjunct comparing (`=`, `<`, `<=`, `>`, `>=`, the
+constant on either side) with a constant: `date_trunc(unit, x)` for units `second` to `year` (not
+`decade` and larger: their conventions for the years before Christ differ), `x::date`,
+`extract(year from x)` and `date_part('year', x)`. The scan then turns the bounds into key ranges
+when `x` leads the key of the table.
+
+- Exactness: a truncation `f` is non-decreasing, idempotent and below its argument, so for an
+  aligned value `a` (`f(a) = a`), `f(x) < a` exactly when `x < a`. With `up(c)` the smallest
+  aligned value at or above `c` and `after(c)` the smallest above `c`: `f(x) < c` is
+  `x < up(c)`, `>=` is `x >= up(c)`, `<=` is `x < after(c)`, `>` is `x >= after(c)`, `=` is
+  `c <= x < after(c)` when `c` is aligned (never true otherwise: left as it is). The truncation
+  is the one of `date_trunc` itself (`Timestamp::truncate_*`); the next aligned value adds one
+  unit and is checked to be aligned and larger. A cast to `date` is the truncation to the day;
+  the year of `extract` is an integer, `y(x) < n` exactly when `x` is before January 1 of `n`, for
+  bounds from year 1 to 9999 (both conventions for the years before Christ make them smaller).
+  `NULL` gives `NULL` in both forms. `x` must be deterministic (written twice for `=`).
+- Time zones: RisingWave binds the session time zone into the call (`date_trunc(u, tz, zone)`,
+  `extract(year from tz, zone)`, `(tz AT TIME ZONE zone)::date`), and a `date` given to
+  `date_trunc` as `d::timestamp AT TIME ZONE zone`. The rule handles a `timestamptz` only with
+  the zone `UTC` (or `Etc/UTC`): there a `timestamptz` behaves as a `timestamp`. In other zones a
+  day or an hour may be shorter or longer, and the truncation of a local time that does not exist
+  or exists twice depends on the zone: left as it is. The bounds then go through the increasing
+  conversions of `x` (`AT TIME ZONE 'UTC'` keeps the value; `d::timestamp >= v` is `d >=` the
+  first day at or after `v`), so that the bounds apply to the column itself.
+- Not done: other time zones (a proof per zone, or bounds computed and checked in the zone);
+  `date_trunc` compared with another expression than a constant; `extract` of other fields
+  (`month` alone is not a range); conjuncts inside `OR`; join conditions.
+- Tests: planner tests `batch_date_range_predicates.yaml` (each function and comparison, aligned
+  and unaligned constants, constant on the left, week, quarter, hour, a `date` truncated, `between`,
+  `date_part` with fractions, `timestamptz` in `UTC` and kept in another zone, a column that is not
+  a key, kept cases: `decade`, `month` field, fraction with `=`, year bound 0, `OR`; off by
+  default); differential test `e2e_test/batch/date_range_predicates.gen.py` (26 queries on values
+  on, one microsecond before and after each boundary, in `UTC` and in `Europe/Paris`, after
+  updates to `NULL`, deletes and inserts).
 
 ## Not for now: sharing between materialized views
 

@@ -400,6 +400,15 @@ static BATCH_JOIN_KEYS_NOT_NULL: LazyLock<OptimizationStage> = LazyLock::new(|| 
     )
 });
 
+// Rule `DateRangePredicateRule` (`batch_date_range_predicates`).
+static BATCH_DATE_RANGE_PREDICATES: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Date Range Predicates For Batch",
+        vec![DateRangePredicateRule::create()],
+        ApplyOrder::TopDown,
+    )
+});
+
 // Rule `UnionScanMergeRule` (`streaming_merge_union_scans`).
 static STREAM_MERGE_UNION_SCANS: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
@@ -1684,6 +1693,14 @@ impl LogicalOptimizer {
         // Predicate Push-down
         let mut last_total_rule_applied_before_predicate_pushdown = ctx.total_rule_applied();
         plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+
+        // Range form of the comparisons of `date_trunc`, `extract(year ...)` and casts to `date`
+        // with a constant (`batch_date_range_predicates`): after the predicate pushdown, which
+        // puts the conjuncts into the scans, where they become key ranges. The conjuncts are
+        // rewritten in place: nothing needs to be pushed again.
+        if ctx.session_ctx().config().batch_date_range_predicates() {
+            plan = plan.optimize_by_rules(&BATCH_DATE_RANGE_PREDICATES)?;
+        }
 
         // Simplifications with column facts and unique keys, and merge of repeated lookups, on
         // demand (`batch_simplify_column_facts`, `batch_simplify_on_unique_key`,
