@@ -222,6 +222,10 @@ pub use apply_one_row_join_split_rule::*;
 // Rule `NullSafeEqToEqRule` (`batch_null_safe_eq_to_eq`, `streaming_null_safe_eq_to_eq`).
 mod null_safe_eq_to_eq_rule;
 pub use null_safe_eq_to_eq_rule::*;
+// Rule `ExistsSubquerySimplifyRule` (`batch_simplify_exists_subquery`,
+// `streaming_simplify_exists_subquery`).
+mod exists_subquery_simplify_rule;
+pub use exists_subquery_simplify_rule::*;
 // Rule `NullKeyJoinRule` (`batch_simplify_null_join_keys`, `streaming_simplify_null_join_keys`).
 mod null_key_join_rule;
 pub use null_key_join_rule::*;
@@ -415,6 +419,7 @@ macro_rules! for_all_rules {
             , { CommonJoinOverUnionRule }
             , { ApplyOneRowJoinSplitRule }
             , { NullSafeEqToEqRule }
+            , { ExistsSubquerySimplifyRule }
             , { NullKeyJoinRule }
             , { NarrowValueAggRule }
             , { NarrowValuePushRule }

@@ -260,6 +260,17 @@ static NULL_SAFE_EQ_TO_EQ: LazyLock<OptimizationStage> = LazyLock::new(|| {
     )
 });
 
+// Rule `ExistsSubquerySimplifyRule` (`streaming_simplify_exists_subquery`,
+// `batch_simplify_exists_subquery`): the limit, `DISTINCT` and `GROUP BY` without aggregates that
+// can not change the result of a correlated `EXISTS` / `IN` subquery are removed before unnesting.
+static SIMPLIFY_EXISTS_SUBQUERY: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Simplify Exists Subquery",
+        vec![ExistsSubquerySimplifyRule::create()],
+        ApplyOrder::TopDown,
+    )
+});
+
 // Batch counterparts of `STREAM_PRUNE_EMPTY_RELATION`, `STREAM_SIMPLIFY_ON_UNIQUE_KEY` and
 // `STREAM_MERGE_REPEATED_LOOKUPS`, with the same rules (`batch_simplify_column_facts`,
 // `batch_simplify_on_unique_key`, `batch_merge_repeated_lookups`), see `reduce_batch_on_keys`.
@@ -995,6 +1006,25 @@ impl LogicalOptimizer {
         // Bail our if no apply operators.
         if !has_logical_apply(plan.clone()) {
             return Ok(plan);
+        }
+        // Rule `ExistsSubquerySimplifyRule` (`streaming_simplify_exists_subquery`,
+        // `batch_simplify_exists_subquery`): before the simple unnesting, so that a correlated
+        // `EXISTS (... LIMIT 1)` becomes a semi join on the correlated columns instead of going
+        // through the domain and a top-n per correlated value. On demand only.
+        let simplify_exists_subquery = if for_stream {
+            ctx.session_ctx()
+                .config()
+                .streaming_simplify_exists_subquery()
+                && !ctx.is_stream_prune_baseline()
+        } else {
+            ctx.session_ctx().config().batch_simplify_exists_subquery()
+        };
+        if simplify_exists_subquery {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&SIMPLIFY_EXISTS_SUBQUERY)?;
+            if for_stream {
+                ctx.add_stream_prune_rule_applied(ctx.total_rule_applied() - applied_before);
+            }
         }
         // Simple Unnesting.
         plan = plan.optimize_by_rules(&SIMPLE_UNNESTING)?;

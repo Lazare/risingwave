@@ -1,0 +1,141 @@
+# Tests for `streaming_simplify_exists_subquery` (`ExistsSubquerySimplifyRule`):
+# the limit, `DISTINCT` and `GROUP BY` without aggregates that can not change the result of a
+# correlated `EXISTS` / `NOT EXISTS` subquery (only `DISTINCT` and `GROUP BY` for `IN` / `NOT IN`)
+# are removed before unnesting.
+- id: setup_off
+  sql: |
+    create table t (id int primary key, k int, x int not null, y int);
+    create table u (id int primary key, k int, ts int, v int);
+  expected_outputs: []
+- id: setup
+  sql: |
+    set streaming_simplify_exists_subquery = true;
+    create table t (id int primary key, k int, x int not null, y int);
+    create table u (id int primary key, k int, ts int, v int);
+  expected_outputs: []
+
+# The variable is off by default: nothing changes.
+- name: off by default - exists with order by and limit 1
+  before: [setup_off]
+  sql: |
+    select t.id from t where exists (select 1 from u where u.k = t.k order by u.ts desc limit 1);
+  expected_outputs:
+  - stream_plan
+
+# Rewritten.
+- name: exists with order by and limit 1
+  before: [setup]
+  sql: |
+    select t.id from t where exists (select 1 from u where u.k = t.k order by u.ts desc limit 1);
+  expected_outputs:
+  - stream_plan
+- name: exists with limit 3
+  before: [setup]
+  sql: |
+    select t.id from t where exists (select u.v from u where u.k = t.k limit 3);
+  expected_outputs:
+  - stream_plan
+- name: not exists with limit 1
+  before: [setup]
+  sql: |
+    select t.id from t where not exists (select 1 from u where u.k = t.k limit 1);
+  expected_outputs:
+  - stream_plan
+- name: exists with distinct
+  before: [setup]
+  sql: |
+    select t.id from t where exists (select distinct u.v from u where u.k = t.k);
+  expected_outputs:
+  - stream_plan
+- name: exists with group by without aggregates
+  before: [setup]
+  sql: |
+    select t.id from t where exists (select u.v from u where u.k = t.k group by u.v);
+  expected_outputs:
+  - stream_plan
+- name: in with distinct
+  before: [setup]
+  sql: |
+    select t.id from t where t.y in (select distinct u.v from u where u.k = t.k);
+  expected_outputs:
+  - stream_plan
+- name: not in with distinct
+  before: [setup]
+  sql: |
+    select t.id from t where t.y not in (select distinct u.v from u where u.k = t.k);
+  expected_outputs:
+  - stream_plan
+- name: exists with distinct over a limit
+  before: [setup]
+  sql: |
+    select t.id from t where exists (select distinct s.v from (select u.v from u where u.k = t.k limit 2) s);
+  expected_outputs:
+  - stream_plan
+- name: exists with ties
+  before: [setup]
+  sql: |
+    select t.id from t where exists (select 1 from u where u.k = t.k order by u.ts fetch first 1 rows with ties);
+  expected_outputs:
+  - stream_plan
+- name: exists with a non-equi correlated conjunct
+  before: [setup]
+  sql: |
+    select t.id from t where exists (select 1 from u where u.k = t.k and u.v > t.y limit 1);
+  expected_outputs:
+  - stream_plan
+
+# Kept.
+- name: offset
+  before: [setup]
+  sql: |
+    select t.id from t where exists (select 1 from u where u.k = t.k order by u.ts limit 1 offset 1);
+  expected_outputs:
+  - stream_plan
+- name: having
+  before: [setup]
+  sql: |
+    select t.id from t where exists (select u.v from u where u.k = t.k group by u.v having count(*) > 1);
+  expected_outputs:
+  - stream_plan
+- name: group by with an aggregate
+  before: [setup]
+  sql: |
+    select t.id from t where exists (select count(*) from u where u.k = t.k group by u.v);
+  expected_outputs:
+  - stream_plan
+- name: scalar aggregation
+  before: [setup]
+  sql: |
+    select t.id from t where exists (select max(u.v) from u where u.k = t.k);
+  expected_outputs:
+  - stream_plan
+- name: in with a limit
+  before: [setup]
+  sql: |
+    select t.id from t where t.y in (select u.v from u where u.k = t.k order by u.ts limit 1);
+  expected_outputs:
+  - stream_plan
+- name: filter above a limit
+  before: [setup]
+  sql: |
+    select t.id from t where exists (select 1 from (select u.v from u where u.k = t.k order by u.ts desc limit 1) s where s.v > 0);
+  expected_outputs:
+  - stream_plan
+- name: set-returning function in the select list
+  before: [setup]
+  sql: |
+    select t.id from t where exists (select unnest(array[u.v, u.ts]) from u where u.k = t.k limit 1);
+  expected_outputs:
+  - stream_plan
+- name: exists in the select list
+  before: [setup]
+  sql: |
+    select t.id, exists (select 1 from u where u.k = t.k limit 1) as e from t;
+  expected_outputs:
+  - stream_plan
+- name: exists under or
+  before: [setup]
+  sql: |
+    select t.id from t where t.x > 0 or exists (select 1 from u where u.k = t.k limit 1);
+  expected_outputs:
+  - stream_plan

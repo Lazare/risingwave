@@ -47,6 +47,7 @@ own rules.
 | BT | Batch: `row_number() <= n` per partition becomes a top-n per group, small `n` only (`batch_over_window_to_topn`) | done (prototype, branch `proto/plan-reduction-batch-pass2`, see "BP and BT" below) |
 | BU | Batch: `UNION ALL` run in parallel tasks instead of one (`batch_distributed_union`) | done (prototype, branch `proto/plan-reduction-batch-union-dist`, see "BU" below) |
 | NE | `a IS NOT DISTINCT FROM b` becomes `a = b` when an operand is never `NULL` (`batch_null_safe_eq_to_eq`, `streaming_null_safe_eq_to_eq`) | done (prototype, branch `proto/plan-reduction-null-rules`, see "NE" below) |
+| SE | Simplification of the subquery of a correlated `EXISTS` / `IN`: no limit, `DISTINCT` or `GROUP BY` without aggregates (`batch_simplify_exists_subquery`, `streaming_simplify_exists_subquery`) | done (prototype, branch `proto/plan-reduction-null-rules`, see "SE" below) |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -796,6 +797,52 @@ Join(LeftSemi, t.id IS NOT DISTINCT FROM u.k)       Join(LeftSemi, t.id = u.k)
   differential tests `e2e_test/batch/null_safe_eq_to_eq` and `e2e_test/streaming/null_safe_eq_to_eq`
   (NULLs on both sides, duplicates, outer and full joins, `EXISTS` / `NOT EXISTS` / scalar
   subqueries through the domain, updates to and from `NULL`, emptied tables).
+
+### SE. Simplification of the subquery of `EXISTS` (added on 2026-11-28, done on the branch)
+
+Variables `batch_simplify_exists_subquery` and `streaming_simplify_exists_subquery`, rule
+`ExistsSubquerySimplifyRule`, after PostgreSQL's `simplify_EXISTS_query`. People write
+`EXISTS (SELECT 1 ... LIMIT 1)` or `EXISTS (SELECT DISTINCT ...)`; with the limit or the
+aggregation, the simple unnesting does not apply, and the general one reads the outer side again
+for the domain and keeps a top-n or an aggregation per correlated value:
+
+```text
+SELECT * FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.k = t.k ORDER BY u.ts DESC LIMIT 1)
+
+Join(LeftSemi, t.k IS NOT DISTINCT FROM u.k)        Join(LeftSemi, t.k = u.k)
+├─Scan(t)                                     =>    ├─Scan(t)
+└─GroupTopN(u.k; u.ts DESC; limit 1)                └─Scan(u)
+  └─Scan(u)
+```
+
+- Where: the right side of a correlated left semi or anti apply (`EXISTS`, `NOT EXISTS`, `IN`,
+  `NOT IN` in a `WHERE` conjunct), through projections only, before the simple unnesting.
+- `EXISTS` / `NOT EXISTS` (the condition of the apply does not read the subquery): a limit or a
+  top-n (with or without ties) of at least one row without offset is removed: the result is not
+  empty iff its input is not empty.
+- All four: an aggregation without aggregate calls and with a group key (`DISTINCT`, `GROUP BY`
+  without aggregates) becomes the projection of its group key: the same set of rows. A semi or
+  anti join only tells whether a matching row exists, so it depends on the set of rows of its
+  right side, whatever the condition; projections keep both properties.
+- Not removed: `LIMIT 0` (an empty relation, see B), an offset, a limit under `IN` (it chooses the
+  compared values), an aggregation with calls or without group key (a scalar aggregation returns
+  one row; `EXISTS` over it is left to the correctness work on that case), anything under a filter
+  (`HAVING`, a `WHERE` above a limited derived table), a limit or an aggregation right above a
+  set-returning function of the select list (as PostgreSQL), an `EXISTS` elsewhere than in a
+  `WHERE` conjunct (planned as a count), an uncorrelated subquery (not decorrelated; its limit
+  saves work).
+- Valid for every row of the outer side and every content of the tables, hence for a frozen
+  streaming plan; duplicates and retractions are covered by the set argument.
+- Streaming gain: the domain, its join and the group top-n or aggregation with their states are
+  gone; the semi join keeps the subquery rows that the join with the domain kept anyway.
+- Stage: `SIMPLIFY_EXISTS_SUBQUERY` at the start of `subquery_unnesting`, in both pipelines. The
+  projections left above a removed operator are merged, unless an impure expression or a function
+  call would be evaluated several times.
+- Tests: planner tests `batch_simplify_exists_subquery.yaml`,
+  `stream_simplify_exists_subquery.yaml`; differential tests
+  `e2e_test/batch/simplify_exists_subquery` and `e2e_test/streaming/simplify_exists_subquery`
+  (several rows per key with ties, NULL keys and values, duplicates on the outer side, `NOT IN`,
+  updates and deletes, emptied tables).
 
 ### 5. Aggregation pushed below a join onto the unique side
 

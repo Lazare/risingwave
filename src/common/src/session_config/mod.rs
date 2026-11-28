@@ -517,6 +517,20 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_null_safe_eq_to_eq: bool,
 
+    // Rule `ExistsSubquerySimplifyRule`.
+    /// In the plan of a new streaming job, remove from a correlated `EXISTS` / `NOT EXISTS`
+    /// subquery what can not change whether it returns a row: a `LIMIT` of at least one row
+    /// without `OFFSET` (with its `ORDER BY`), a `DISTINCT` and a `GROUP BY` without aggregates
+    /// and without `HAVING`; from a correlated `IN` / `NOT IN` subquery, only the `DISTINCT` and
+    /// such a `GROUP BY`. The subquery is then decorrelated without the per-row top-n or
+    /// aggregation. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    streaming_simplify_exists_subquery: bool,
+
+    /// The same as `streaming_simplify_exists_subquery`, for batch queries. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_simplify_exists_subquery: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,
