@@ -57,6 +57,16 @@ CASES = [
      f"select t.* from {T} t left join (select distinct k from {U}) x on t.k = x.k"),
     ('kept_scalar_agg', 'id int, k int, v int',
      f"select * from {T} t where exists (select 1 from (select count(*) as c from {U}) x where x.c = t.k)"),
+    # Constant or one-row sides: left as inner joins.
+    ('kept_const_values', 'id int, v int',
+     f"select s.id, s.v from (select id, v, 1 as one from {T} union all select id, w, 1 as one from {U}) s "
+     f"join (values (1)) as c(x) on s.one = c.x and s.v = any(array[1, 2, 3])"),
+    ('kept_const_key', 'id int, v int',
+     f"select s.id, s.v from (select id, v, 2 as two from {T}) s join {D} d on s.two = d.id"),
+    ('kept_scalar_subquery', 'id int, k int, v int',
+     f"select t.* from {T} t where t.v = (select max(w) from {U})"),
+    ('kept_one_row_values', 'id int, k int, v int',
+     f"select t.* from {T} t join (values (1)) as c(x) on t.k = c.x"),
 ]
 
 out = []

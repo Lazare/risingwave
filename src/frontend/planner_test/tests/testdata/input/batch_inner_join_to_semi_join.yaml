@@ -205,3 +205,50 @@
     ijs_u: 100000
   expected_outputs:
   - batch_plan
+# Joins with a constant or one-row side: kept as inner joins. A semi join on an equality between
+# constant columns would send every row to one partition, and the reductions on keys and constants
+# fold the inner join away.
+- name: kept, the only equality compares constant columns (one-row VALUES joined to a union)
+  before:
+  - tables
+  sql: |
+    set batch_inner_join_to_semi_join = true;
+    select s.id, s.v from (select id, v, 1 as one from ijs_t union all select id, w, 1 as one from ijs_u) s
+    join (values (1)) as c(x) on s.one = c.x and s.v = any(array[1, 2, 3]);
+  expected_outputs:
+  - batch_plan
+- name: kept and folded by the reductions on keys and constants, the filter reaches the scans
+  before:
+  - tables
+  sql: |
+    set batch_inner_join_to_semi_join = true;
+    set batch_simplify_column_facts = true;
+    set batch_reduce_keys_after_conversions = true;
+    select s.id, s.v from (select id, v, 1 as one from ijs_t union all select id, w, 1 as one from ijs_u) s
+    join (select 1 as x) as c on s.one = c.x where s.v = any(array[1, 2, 3]);
+  expected_outputs:
+  - batch_plan
+- name: kept, a constant column of the kept side compared with the key of a table
+  before:
+  - tables
+  sql: |
+    set batch_inner_join_to_semi_join = true;
+    select s.id, s.v from (select id, v, 2 as two from ijs_t) s join ijs_d d on s.two = d.id;
+  expected_outputs:
+  - batch_plan
+- name: kept, the other side is a scalar subquery (at most one row)
+  before:
+  - tables
+  sql: |
+    set batch_inner_join_to_semi_join = true;
+    select t.* from ijs_t t where t.v = (select max(w) from ijs_u);
+  expected_outputs:
+  - batch_plan
+- name: kept, the other side is a one-row VALUES compared with a column
+  before:
+  - tables
+  sql: |
+    set batch_inner_join_to_semi_join = true;
+    select t.* from ijs_t t join (values (1)) as c(x) on t.k = c.x;
+  expected_outputs:
+  - batch_plan
