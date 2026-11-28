@@ -232,6 +232,10 @@ pub use lag_duplicates_rule::*;
 // Cost-based ordering of the inner joins of batch queries (`batch_cost_based_join_ordering`).
 mod cost_based_join_ordering_rule;
 pub use cost_based_join_ordering_rule::*;
+// Batch join rules of the survey of Calcite and PostgreSQL rules, each behind its own variable.
+// Inner join to semi join (`batch_inner_join_to_semi_join`).
+mod inner_join_to_semi_join_rule;
+pub use inner_join_to_semi_join_rule::*;
 // Rule `UnionScanMergeRule` (`streaming_merge_union_scans`).
 mod union_scan_merge_rule;
 pub use union_scan_merge_rule::*;
@@ -419,6 +423,8 @@ macro_rules! for_all_rules {
             , { CostBasedJoinOrderingRule }
             , { CostBasedJoinSidesRule }
             , { CostBasedOuterJoinSidesRule }
+            , { InnerJoinToSemiJoinRule }
+            , { SemiJoinDistinctRemoveRule }
             , { UnionScanMergeRule }
             , { StackedAggMergeRule }
             , { LateralTableFunctionRule }

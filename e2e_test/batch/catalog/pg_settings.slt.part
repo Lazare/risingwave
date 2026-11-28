@@ -33,6 +33,7 @@ user batch_enable_sort_agg
 user batch_expr_strict_mode
 user batch_factor_union_join
 user batch_hnsw_ef_search
+user batch_inner_join_to_semi_join
 user batch_merge_repeated_lookups
 user batch_merge_union_scans
 user batch_narrow_value_aggregates

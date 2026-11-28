@@ -376,6 +376,21 @@ static BATCH_MERGE_UNION_SCANS: LazyLock<OptimizationStage> = LazyLock::new(|| {
     )
 });
 
+// Batch join rules of the survey of Calcite and PostgreSQL rules, each behind its own variable.
+// Rules `InnerJoinToSemiJoinRule` and `SemiJoinDistinctRemoveRule`
+// (`batch_inner_join_to_semi_join`): the second one applies to the semi join that the first one
+// makes, in the same pass.
+static BATCH_INNER_JOIN_TO_SEMI_JOIN: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Inner Join To Semi Join For Batch",
+        vec![
+            InnerJoinToSemiJoinRule::create(),
+            SemiJoinDistinctRemoveRule::create(),
+        ],
+        ApplyOrder::TopDown,
+    )
+});
+
 // Rule `UnionScanMergeRule` (`streaming_merge_union_scans`).
 static STREAM_MERGE_UNION_SCANS: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
@@ -1799,6 +1814,15 @@ impl LogicalOptimizer {
             plan = Self::narrow_value_aggregates(plan, explain_trace, &ctx)?.0;
         }
         plan = plan.optimize_by_rules(&SIMPLIFY_AGG)?;
+
+        // Inner join to semi join on a unique side that is not read, and `DISTINCT` removed
+        // under a semi or anti join (`batch_inner_join_to_semi_join`): after the join ordering
+        // (the inner join was ordered as such) and the column pruning (the output of a join only
+        // holds the columns read above it), before `JOIN_COMMUTE` turns a right semi join into
+        // a left one and the sides of the semi joins are chosen by cost.
+        if ctx.session_ctx().config().batch_inner_join_to_semi_join() {
+            plan = plan.optimize_by_rules(&BATCH_INNER_JOIN_TO_SEMI_JOIN)?;
+        }
 
         plan = plan.optimize_by_rules(&JOIN_COMMUTE)?;
 

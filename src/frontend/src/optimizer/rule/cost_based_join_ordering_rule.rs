@@ -1386,3 +1386,34 @@ fn input_required_columns(plan: &PlanRef, columns: &BTreeSet<usize>) -> Vec<BTre
         .map(|input| (0..input.schema().len()).collect())
         .collect()
 }
+
+// Estimates and costs shared with the batch join rules of the survey of Calcite and PostgreSQL
+// rules.
+
+/// Runs `f` with the estimator of the cost-based ordering, which uses the learned ratios when
+/// `batch_cardinality_feedback_learning` is on (and the fixed guesses where nothing is learned).
+fn with_estimator<T>(
+    ctx: &crate::optimizer::optimizer_context::OptimizerContextRef,
+    f: impl FnOnce(&Estimator<'_>) -> T,
+) -> T {
+    let lookup_join_enabled = ctx.session_ctx().config().batch_enable_lookup_join();
+    let learning = ctx
+        .session_ctx()
+        .config()
+        .batch_cardinality_feedback_learning();
+    let catalog_reader = ctx.session_ctx().env().catalog_reader().read_guard();
+    let estimator = Estimator {
+        stats: catalog_reader.table_stats(),
+        lookup_join_enabled,
+        learned: learning.then_some(&**CARDINALITY_LEARNING_STORE),
+    };
+    f(&estimator)
+}
+
+/// The estimated rows of a relation, estimated as an input of a join of the cost-based ordering,
+/// or `None` without an estimate.
+pub(crate) fn estimated_rows(plan: &PlanRef) -> Option<f64> {
+    with_estimator(&plan.ctx(), |estimator| {
+        estimator.input_estimate(plan).map(|estimate| estimate.rows)
+    })
+}

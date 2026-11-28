@@ -46,6 +46,7 @@ own rules.
 | BP | Batch: second pass of the reductions on keys after the stages that create aggregations (`batch_reduce_keys_after_conversions`) | done (prototype, branch `proto/plan-reduction-batch-pass2`, see "BP and BT" below) |
 | BT | Batch: `row_number() <= n` per partition becomes a top-n per group, small `n` only (`batch_over_window_to_topn`) | done (prototype, branch `proto/plan-reduction-batch-pass2`, see "BP and BT" below) |
 | BU | Batch: `UNION ALL` run in parallel tasks instead of one (`batch_distributed_union`) | done (prototype, branch `proto/plan-reduction-batch-union-dist`, see "BU" below) |
+| SJ17 | Batch: inner join to semi join on a unique side that is not read; `DISTINCT` removed under a semi or anti join by estimates (`batch_inner_join_to_semi_join`) | done (prototype, branch `proto/plan-reduction-batch-joins`, see "SJ" below) |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -1399,6 +1400,58 @@ projection; without the variable, or without a union below, they convert their i
   empty branches, after updates and deletes, and with a single branch left).
 - Not done: a round-robin exchange, which would let a union with no requirement keep its inputs
   in their stages without hashing; a partial aggregation pushed into each branch.
+
+### SJ. Batch join rules of the survey of Calcite and PostgreSQL rules (added on 2026-11-28)
+
+Rules 14 to 18 of the survey of the rewrite rules of Calcite and PostgreSQL missing from the fork,
+for batch queries only, each behind its own variable (default false). Branch
+`proto/plan-reduction-batch-joins`.
+
+**17. Inner join to semi join (`batch_inner_join_to_semi_join`, Calcite `SemiJoinRule`).**
+
+```sql
+select t.* from t join (select distinct k from u) x on t.k = x.k;
+-- before: HashJoin(Inner, t.k = u.k) <- Scan(t), HashAgg(group u.k) <- Scan(u)
+-- after:  HashJoin(LeftSemi, t.k = u.k) <- Scan(t), HashAgg(group u.k) <- Scan(u)
+--         and, when the estimates say the aggregation keeps at least half of its rows:
+--         HashJoin(LeftSemi, t.k = u.k) <- Scan(t), Scan(u)
+```
+
+- `InnerJoinToSemiJoinRule`: an inner join with an equality between its sides, no column of one
+  side in its output, and that side unique on the columns its condition binds
+  (`is_unique_on_compared_columns`: equalities between the sides or with constants, on types whose
+  equal values are identical) becomes a left (or right) semi join with the same condition. A row
+  of the kept side matches at most one row, so the inner join outputs it once or not at all: the
+  semi join's output. The other conjuncts only remove matches. `IS NOT DISTINCT FROM` keys are
+  fine (the unique key treats `NULL` as a value). The unique side is a `DISTINCT` subquery, a
+  `GROUP BY` whose aggregates are not read (the column pruning drops them), or a table joined on
+  its key (`count(*)` over a join to a dimension, a join used as a filter).
+- `SemiJoinDistinctRemoveRule`: a semi or anti join whose tested side is an aggregation without
+  aggregate calls and with a group key (an empty group key returns a row over an empty input) gets
+  the input of the aggregation, projected on the group key, instead. Exact: a semi join keeps a
+  row when some row matches, an anti join when none does, neither depends on how many. Not always
+  cheaper: the batch hash join holds every row of its build side, duplicates included, where the
+  aggregation held each group once (the hash table of the aggregation plus the build side of the
+  distinct rows, against the build side of all the rows). Removed only when the estimates of BJ
+  (learned with `batch_cardinality_feedback_learning`) say the aggregation keeps at least half of
+  its input rows: grouped by a key of its input, or a learned group ratio of 0.5 or more. Without
+  an estimate, or with the fixed guess of 10 % of groups, it stays. This also applies to
+  `IN (SELECT DISTINCT ...)` as written.
+- Stage `BATCH_INNER_JOIN_TO_SEMI_JOIN`, after the join ordering (the inner join was ordered as
+  such) and the first column pruning (the output of a join holds only the columns read above it),
+  just before `JOIN_COMMUTE` (a right semi join becomes a left one) and before
+  `CostBasedOuterJoinSidesRule` (the sides of the semi join can still be swapped by cost).
+- Not done: an inner join whose other side is read only through columns equal to columns of the
+  kept side (they could be replaced); a semi join on a side that is not unique and that a
+  `DISTINCT` could make unique (PostgreSQL's unique-ification, a cost decision).
+- Tests: planner tests `batch_inner_join_to_semi_join.yaml` (distinct side on either side, table
+  joined on its key, `count(*)`, null-safe key, extra conjunct; kept: a column read, not unique on
+  the compared columns, no equality, outer join; removal of the aggregation with statistics on a
+  key, with nothing learned, with a learned ratio high and low, under an anti join, empty group
+  key kept; off by default); differential test `e2e_test/batch/inner_join_to_semi_join.gen.py`
+  (19 queries with the variable off and on, compared as multisets, on empty tables, duplicates and
+  `NULL` keys, a distinct side with few and with many groups, updates, deletes, each side emptied,
+  with a pause after each change so that the storage statistics reach the frontend).
 
 ## Not for now: sharing between materialized views
 

@@ -504,6 +504,14 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_spill_on_memory_wait: bool,
 
+    // Batch join rules of the survey of Calcite and PostgreSQL rules.
+    /// In a batch query, turn an inner join into a semi join when no column of one side is read
+    /// above it and that side is unique on the compared columns (a `DISTINCT` subquery, a table
+    /// joined on its key), and drop the `DISTINCT` of the side that a semi or anti join only
+    /// tests when the estimates say it removes few rows. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_inner_join_to_semi_join: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,
