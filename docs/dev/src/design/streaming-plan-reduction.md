@@ -2440,6 +2440,15 @@ select t.* from t join (select distinct k from u) x on t.k = x.k;
   fine (the unique key treats `NULL` as a value). The unique side is a `DISTINCT` subquery, a
   `GROUP BY` whose aggregates are not read (the column pruning drops them), or a table joined on
   its key (`count(*)` over a join to a dimension, a join used as a filter).
+  Two exclusions: (1) the condition needs an equality between a column of each side where neither
+  column is constant (`column_facts`): an equality between constant columns, such as
+  `1 = 1` after a projected constant is joined with a one-row `VALUES (1)`, is a cross join in
+  disguise, and a semi join on it would hash every row on the constant (all rows in one partition,
+  a hidden single-task gather) and would keep the join, where the reductions on keys and constants
+  fold the inner join away and let the other filters reach the scans; (2) the tested side must not
+  hold at most one row (a one-row `VALUES`, possibly under projections, a scalar subquery): the
+  inner join already outputs each kept row at most once, the semi join gains nothing, and the
+  one-row join rules handle the inner join.
 - `SemiJoinDistinctRemoveRule`: a semi or anti join whose tested side is an aggregation without
   aggregate calls and with a group key (an empty group key returns a row over an empty input) gets
   the input of the aggregation, projected on the group key, instead. Exact: a semi join keeps a
@@ -2460,10 +2469,12 @@ select t.* from t join (select distinct k from u) x on t.k = x.k;
   `DISTINCT` could make unique (PostgreSQL's unique-ification, a cost decision).
 - Tests: planner tests `batch_inner_join_to_semi_join.yaml` (distinct side on either side, table
   joined on its key, `count(*)`, null-safe key, extra conjunct; kept: a column read, not unique on
-  the compared columns, no equality, outer join; removal of the aggregation with statistics on a
+  the compared columns, no equality, outer join, equality between constant columns (alone and
+  with the reductions that then fold the join), constant column against a table key, scalar
+  subquery, one-row `VALUES`; removal of the aggregation with statistics on a
   key, with nothing learned, with a learned ratio high and low, under an anti join, empty group
   key kept; off by default); differential test `e2e_test/batch/inner_join_to_semi_join.gen.py`
-  (19 queries with the variable off and on, compared as multisets, on empty tables, duplicates and
+  (23 queries with the variable off and on, compared as multisets, on empty tables, duplicates and
   `NULL` keys, a distinct side with few and with many groups, updates, deletes, each side emptied,
   with a pause after each change so that the storage statistics reach the frontend).
 

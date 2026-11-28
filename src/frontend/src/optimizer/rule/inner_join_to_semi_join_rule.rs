@@ -19,6 +19,7 @@
 
 use risingwave_pb::plan_common::JoinType;
 
+use super::column_facts_simplify_rule::column_facts;
 use super::cost_based_join_ordering_rule::estimated_rows;
 use super::prelude::{PlanRef, *};
 use super::unique_key_simplify_rule::is_unique_on_compared_columns;
@@ -26,6 +27,7 @@ use crate::optimizer::plan_node::generic::GenericPlanRef;
 use crate::optimizer::plan_node::{
     EqJoinPredicate, LogicalJoin, LogicalProject, PlanTreeNodeBinary, PlanTreeNodeUnary,
 };
+use crate::optimizer::plan_visitor::LogicalCardinalityExt;
 
 /// Turns an inner join into a semi join when no column of one side is in its output and that side
 /// is unique on the columns that the condition binds.
@@ -44,7 +46,16 @@ use crate::optimizer::plan_node::{
 ///   kept side once if it has a match and never otherwise: exactly what the semi join outputs.
 /// - No column of the other side is read above the join (its output columns all come from the
 ///   kept side), so the semi join, which only outputs the kept side, has the same output.
-/// - The condition must hold an equality between the two sides, so that both joins are hash joins.
+/// - The condition must hold an equality between a column of each side, neither of which holds
+///   the same constant in every row, so that both joins are hash joins that spread their rows.
+///   An equality between constant columns (`1 = 1` after the constants of the projections are
+///   known) is a cross join in disguise: the semi join would send every row to one partition, and
+///   the inner join is folded away by the reductions on keys and constants.
+/// - The side that the semi join would test must not be at most one row (a one-row `VALUES`,
+///   possibly under projections, or a scalar subquery): the inner join already outputs each row
+///   of the kept side at most once and holds one row, so the semi join gains nothing, and the
+///   rules on one-row joins (the inlining of constant `VALUES`, the reductions on keys and
+///   constants) handle the inner join better.
 ///
 /// Used after the join ordering and the column pruning, which leave in the output of a join only
 /// the columns that are read: the inner join was ordered as an inner join, and the semi join can
@@ -60,7 +71,8 @@ impl Rule<Logical> for InnerJoinToSemiJoinRule {
         }
         let left_len = join.left().schema().len();
         let right_len = join.right().schema().len();
-        if !EqJoinPredicate::create(left_len, right_len, join.on().clone()).has_eq() {
+        let predicate = EqJoinPredicate::create(left_len, right_len, join.on().clone());
+        if !predicate.has_eq() {
             return None;
         }
         let output = join.output_indices();
@@ -69,7 +81,12 @@ impl Rule<Logical> for InnerJoinToSemiJoinRule {
         if !right_is_unused && !left_is_unused {
             return None;
         }
+        if !has_equality_on_varying_columns(join, &predicate) {
+            return None;
+        }
         let (left_is_unique, right_is_unique) = is_unique_on_compared_columns(join);
+        let right_is_unique = right_is_unique && !join.right().max_one_row();
+        let left_is_unique = left_is_unique && !join.left().max_one_row();
         let (left, right, on, _, output_indices) = join.clone().decompose();
         if right_is_unused && right_is_unique {
             // The internal columns of a left semi join are those of its left side.
@@ -109,6 +126,17 @@ impl InnerJoinToSemiJoinRule {
     pub fn create() -> BoxedRule {
         Box::new(InnerJoinToSemiJoinRule)
     }
+}
+
+/// Returns whether the equalities of the condition compare a column of each side, neither of
+/// which holds the same constant in every row (see [`column_facts`]).
+fn has_equality_on_varying_columns(join: &LogicalJoin, predicate: &EqJoinPredicate) -> bool {
+    let left_constants = column_facts(&join.left()).constant_columns();
+    let right_constants = column_facts(&join.right()).constant_columns();
+    predicate
+        .eq_indexes()
+        .into_iter()
+        .any(|(left, right)| !left_constants.contains(&left) && !right_constants.contains(&right))
 }
 
 /// An aggregation that keeps this fraction of its input rows or more is removed from below a semi

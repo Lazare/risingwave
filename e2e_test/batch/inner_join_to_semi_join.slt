@@ -134,6 +134,30 @@ create table ijs_kept_scalar_agg_off (id int, k int, v int);
 statement ok
 create table ijs_kept_scalar_agg_on (id int, k int, v int);
 
+statement ok
+create table ijs_kept_const_values_off (id int, v int);
+
+statement ok
+create table ijs_kept_const_values_on (id int, v int);
+
+statement ok
+create table ijs_kept_const_key_off (id int, v int);
+
+statement ok
+create table ijs_kept_const_key_on (id int, v int);
+
+statement ok
+create table ijs_kept_scalar_subquery_off (id int, k int, v int);
+
+statement ok
+create table ijs_kept_scalar_subquery_on (id int, k int, v int);
+
+statement ok
+create table ijs_kept_one_row_values_off (id int, k int, v int);
+
+statement ok
+create table ijs_kept_one_row_values_on (id int, k int, v int);
+
 sleep 5s
 
 # Empty tables: every query runs without, then with the variable.
@@ -480,6 +504,78 @@ insert into ijs_kept_scalar_agg_on select * from ijs_t t where exists (select 1 
 statement ok
 set batch_inner_join_to_semi_join = false;
 
+statement ok
+delete from ijs_kept_const_values_off;
+
+statement ok
+delete from ijs_kept_const_values_on;
+
+statement ok
+insert into ijs_kept_const_values_off select s.id, s.v from (select id, v, 1 as one from ijs_t union all select id, w, 1 as one from ijs_u) s join (values (1)) as c(x) on s.one = c.x and s.v = any(array[1, 2, 3]);
+
+statement ok
+set batch_inner_join_to_semi_join = true;
+
+statement ok
+insert into ijs_kept_const_values_on select s.id, s.v from (select id, v, 1 as one from ijs_t union all select id, w, 1 as one from ijs_u) s join (values (1)) as c(x) on s.one = c.x and s.v = any(array[1, 2, 3]);
+
+statement ok
+set batch_inner_join_to_semi_join = false;
+
+statement ok
+delete from ijs_kept_const_key_off;
+
+statement ok
+delete from ijs_kept_const_key_on;
+
+statement ok
+insert into ijs_kept_const_key_off select s.id, s.v from (select id, v, 2 as two from ijs_t) s join ijs_d d on s.two = d.id;
+
+statement ok
+set batch_inner_join_to_semi_join = true;
+
+statement ok
+insert into ijs_kept_const_key_on select s.id, s.v from (select id, v, 2 as two from ijs_t) s join ijs_d d on s.two = d.id;
+
+statement ok
+set batch_inner_join_to_semi_join = false;
+
+statement ok
+delete from ijs_kept_scalar_subquery_off;
+
+statement ok
+delete from ijs_kept_scalar_subquery_on;
+
+statement ok
+insert into ijs_kept_scalar_subquery_off select t.* from ijs_t t where t.v = (select max(w) from ijs_u);
+
+statement ok
+set batch_inner_join_to_semi_join = true;
+
+statement ok
+insert into ijs_kept_scalar_subquery_on select t.* from ijs_t t where t.v = (select max(w) from ijs_u);
+
+statement ok
+set batch_inner_join_to_semi_join = false;
+
+statement ok
+delete from ijs_kept_one_row_values_off;
+
+statement ok
+delete from ijs_kept_one_row_values_on;
+
+statement ok
+insert into ijs_kept_one_row_values_off select t.* from ijs_t t join (values (1)) as c(x) on t.k = c.x;
+
+statement ok
+set batch_inner_join_to_semi_join = true;
+
+statement ok
+insert into ijs_kept_one_row_values_on select t.* from ijs_t t join (values (1)) as c(x) on t.k = c.x;
+
+statement ok
+set batch_inner_join_to_semi_join = false;
+
 # Empty tables: both results hold the same rows, each the same number of times.
 
 query III
@@ -631,6 +727,38 @@ select
   (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_agg_on group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_agg_off group by id, k, v) x),
   (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_agg_off group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_agg_on group by id, k, v) y),
   (select count(*) from ijs_kept_scalar_agg_on) - (select count(*) from ijs_kept_scalar_agg_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as ijs_rows from ijs_kept_const_values_on group by id, v except select id, v, count(*) as ijs_rows from ijs_kept_const_values_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as ijs_rows from ijs_kept_const_values_off group by id, v except select id, v, count(*) as ijs_rows from ijs_kept_const_values_on group by id, v) y),
+  (select count(*) from ijs_kept_const_values_on) - (select count(*) from ijs_kept_const_values_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as ijs_rows from ijs_kept_const_key_on group by id, v except select id, v, count(*) as ijs_rows from ijs_kept_const_key_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as ijs_rows from ijs_kept_const_key_off group by id, v except select id, v, count(*) as ijs_rows from ijs_kept_const_key_on group by id, v) y),
+  (select count(*) from ijs_kept_const_key_on) - (select count(*) from ijs_kept_const_key_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_subquery_on group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_subquery_off group by id, k, v) x),
+  (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_subquery_off group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_subquery_on group by id, k, v) y),
+  (select count(*) from ijs_kept_scalar_subquery_on) - (select count(*) from ijs_kept_scalar_subquery_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_one_row_values_on group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_one_row_values_off group by id, k, v) x),
+  (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_one_row_values_off group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_one_row_values_on group by id, k, v) y),
+  (select count(*) from ijs_kept_one_row_values_on) - (select count(*) from ijs_kept_one_row_values_off);
 ----
 0 0 0
 
@@ -994,6 +1122,78 @@ insert into ijs_kept_scalar_agg_on select * from ijs_t t where exists (select 1 
 statement ok
 set batch_inner_join_to_semi_join = false;
 
+statement ok
+delete from ijs_kept_const_values_off;
+
+statement ok
+delete from ijs_kept_const_values_on;
+
+statement ok
+insert into ijs_kept_const_values_off select s.id, s.v from (select id, v, 1 as one from ijs_t union all select id, w, 1 as one from ijs_u) s join (values (1)) as c(x) on s.one = c.x and s.v = any(array[1, 2, 3]);
+
+statement ok
+set batch_inner_join_to_semi_join = true;
+
+statement ok
+insert into ijs_kept_const_values_on select s.id, s.v from (select id, v, 1 as one from ijs_t union all select id, w, 1 as one from ijs_u) s join (values (1)) as c(x) on s.one = c.x and s.v = any(array[1, 2, 3]);
+
+statement ok
+set batch_inner_join_to_semi_join = false;
+
+statement ok
+delete from ijs_kept_const_key_off;
+
+statement ok
+delete from ijs_kept_const_key_on;
+
+statement ok
+insert into ijs_kept_const_key_off select s.id, s.v from (select id, v, 2 as two from ijs_t) s join ijs_d d on s.two = d.id;
+
+statement ok
+set batch_inner_join_to_semi_join = true;
+
+statement ok
+insert into ijs_kept_const_key_on select s.id, s.v from (select id, v, 2 as two from ijs_t) s join ijs_d d on s.two = d.id;
+
+statement ok
+set batch_inner_join_to_semi_join = false;
+
+statement ok
+delete from ijs_kept_scalar_subquery_off;
+
+statement ok
+delete from ijs_kept_scalar_subquery_on;
+
+statement ok
+insert into ijs_kept_scalar_subquery_off select t.* from ijs_t t where t.v = (select max(w) from ijs_u);
+
+statement ok
+set batch_inner_join_to_semi_join = true;
+
+statement ok
+insert into ijs_kept_scalar_subquery_on select t.* from ijs_t t where t.v = (select max(w) from ijs_u);
+
+statement ok
+set batch_inner_join_to_semi_join = false;
+
+statement ok
+delete from ijs_kept_one_row_values_off;
+
+statement ok
+delete from ijs_kept_one_row_values_on;
+
+statement ok
+insert into ijs_kept_one_row_values_off select t.* from ijs_t t join (values (1)) as c(x) on t.k = c.x;
+
+statement ok
+set batch_inner_join_to_semi_join = true;
+
+statement ok
+insert into ijs_kept_one_row_values_on select t.* from ijs_t t join (values (1)) as c(x) on t.k = c.x;
+
+statement ok
+set batch_inner_join_to_semi_join = false;
+
 # First data: both results hold the same rows, each the same number of times.
 
 query III
@@ -1145,6 +1345,38 @@ select
   (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_agg_on group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_agg_off group by id, k, v) x),
   (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_agg_off group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_agg_on group by id, k, v) y),
   (select count(*) from ijs_kept_scalar_agg_on) - (select count(*) from ijs_kept_scalar_agg_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as ijs_rows from ijs_kept_const_values_on group by id, v except select id, v, count(*) as ijs_rows from ijs_kept_const_values_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as ijs_rows from ijs_kept_const_values_off group by id, v except select id, v, count(*) as ijs_rows from ijs_kept_const_values_on group by id, v) y),
+  (select count(*) from ijs_kept_const_values_on) - (select count(*) from ijs_kept_const_values_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as ijs_rows from ijs_kept_const_key_on group by id, v except select id, v, count(*) as ijs_rows from ijs_kept_const_key_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as ijs_rows from ijs_kept_const_key_off group by id, v except select id, v, count(*) as ijs_rows from ijs_kept_const_key_on group by id, v) y),
+  (select count(*) from ijs_kept_const_key_on) - (select count(*) from ijs_kept_const_key_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_subquery_on group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_subquery_off group by id, k, v) x),
+  (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_subquery_off group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_subquery_on group by id, k, v) y),
+  (select count(*) from ijs_kept_scalar_subquery_on) - (select count(*) from ijs_kept_scalar_subquery_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_one_row_values_on group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_one_row_values_off group by id, k, v) x),
+  (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_one_row_values_off group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_one_row_values_on group by id, k, v) y),
+  (select count(*) from ijs_kept_one_row_values_on) - (select count(*) from ijs_kept_one_row_values_off);
 ----
 0 0 0
 
@@ -1523,6 +1755,78 @@ insert into ijs_kept_scalar_agg_on select * from ijs_t t where exists (select 1 
 statement ok
 set batch_inner_join_to_semi_join = false;
 
+statement ok
+delete from ijs_kept_const_values_off;
+
+statement ok
+delete from ijs_kept_const_values_on;
+
+statement ok
+insert into ijs_kept_const_values_off select s.id, s.v from (select id, v, 1 as one from ijs_t union all select id, w, 1 as one from ijs_u) s join (values (1)) as c(x) on s.one = c.x and s.v = any(array[1, 2, 3]);
+
+statement ok
+set batch_inner_join_to_semi_join = true;
+
+statement ok
+insert into ijs_kept_const_values_on select s.id, s.v from (select id, v, 1 as one from ijs_t union all select id, w, 1 as one from ijs_u) s join (values (1)) as c(x) on s.one = c.x and s.v = any(array[1, 2, 3]);
+
+statement ok
+set batch_inner_join_to_semi_join = false;
+
+statement ok
+delete from ijs_kept_const_key_off;
+
+statement ok
+delete from ijs_kept_const_key_on;
+
+statement ok
+insert into ijs_kept_const_key_off select s.id, s.v from (select id, v, 2 as two from ijs_t) s join ijs_d d on s.two = d.id;
+
+statement ok
+set batch_inner_join_to_semi_join = true;
+
+statement ok
+insert into ijs_kept_const_key_on select s.id, s.v from (select id, v, 2 as two from ijs_t) s join ijs_d d on s.two = d.id;
+
+statement ok
+set batch_inner_join_to_semi_join = false;
+
+statement ok
+delete from ijs_kept_scalar_subquery_off;
+
+statement ok
+delete from ijs_kept_scalar_subquery_on;
+
+statement ok
+insert into ijs_kept_scalar_subquery_off select t.* from ijs_t t where t.v = (select max(w) from ijs_u);
+
+statement ok
+set batch_inner_join_to_semi_join = true;
+
+statement ok
+insert into ijs_kept_scalar_subquery_on select t.* from ijs_t t where t.v = (select max(w) from ijs_u);
+
+statement ok
+set batch_inner_join_to_semi_join = false;
+
+statement ok
+delete from ijs_kept_one_row_values_off;
+
+statement ok
+delete from ijs_kept_one_row_values_on;
+
+statement ok
+insert into ijs_kept_one_row_values_off select t.* from ijs_t t join (values (1)) as c(x) on t.k = c.x;
+
+statement ok
+set batch_inner_join_to_semi_join = true;
+
+statement ok
+insert into ijs_kept_one_row_values_on select t.* from ijs_t t join (values (1)) as c(x) on t.k = c.x;
+
+statement ok
+set batch_inner_join_to_semi_join = false;
+
 # Second data: both results hold the same rows, each the same number of times.
 
 query III
@@ -1674,6 +1978,38 @@ select
   (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_agg_on group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_agg_off group by id, k, v) x),
   (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_agg_off group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_agg_on group by id, k, v) y),
   (select count(*) from ijs_kept_scalar_agg_on) - (select count(*) from ijs_kept_scalar_agg_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as ijs_rows from ijs_kept_const_values_on group by id, v except select id, v, count(*) as ijs_rows from ijs_kept_const_values_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as ijs_rows from ijs_kept_const_values_off group by id, v except select id, v, count(*) as ijs_rows from ijs_kept_const_values_on group by id, v) y),
+  (select count(*) from ijs_kept_const_values_on) - (select count(*) from ijs_kept_const_values_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as ijs_rows from ijs_kept_const_key_on group by id, v except select id, v, count(*) as ijs_rows from ijs_kept_const_key_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as ijs_rows from ijs_kept_const_key_off group by id, v except select id, v, count(*) as ijs_rows from ijs_kept_const_key_on group by id, v) y),
+  (select count(*) from ijs_kept_const_key_on) - (select count(*) from ijs_kept_const_key_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_subquery_on group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_subquery_off group by id, k, v) x),
+  (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_subquery_off group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_subquery_on group by id, k, v) y),
+  (select count(*) from ijs_kept_scalar_subquery_on) - (select count(*) from ijs_kept_scalar_subquery_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_one_row_values_on group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_one_row_values_off group by id, k, v) x),
+  (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_one_row_values_off group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_one_row_values_on group by id, k, v) y),
+  (select count(*) from ijs_kept_one_row_values_on) - (select count(*) from ijs_kept_one_row_values_off);
 ----
 0 0 0
 
@@ -2034,6 +2370,78 @@ insert into ijs_kept_scalar_agg_on select * from ijs_t t where exists (select 1 
 statement ok
 set batch_inner_join_to_semi_join = false;
 
+statement ok
+delete from ijs_kept_const_values_off;
+
+statement ok
+delete from ijs_kept_const_values_on;
+
+statement ok
+insert into ijs_kept_const_values_off select s.id, s.v from (select id, v, 1 as one from ijs_t union all select id, w, 1 as one from ijs_u) s join (values (1)) as c(x) on s.one = c.x and s.v = any(array[1, 2, 3]);
+
+statement ok
+set batch_inner_join_to_semi_join = true;
+
+statement ok
+insert into ijs_kept_const_values_on select s.id, s.v from (select id, v, 1 as one from ijs_t union all select id, w, 1 as one from ijs_u) s join (values (1)) as c(x) on s.one = c.x and s.v = any(array[1, 2, 3]);
+
+statement ok
+set batch_inner_join_to_semi_join = false;
+
+statement ok
+delete from ijs_kept_const_key_off;
+
+statement ok
+delete from ijs_kept_const_key_on;
+
+statement ok
+insert into ijs_kept_const_key_off select s.id, s.v from (select id, v, 2 as two from ijs_t) s join ijs_d d on s.two = d.id;
+
+statement ok
+set batch_inner_join_to_semi_join = true;
+
+statement ok
+insert into ijs_kept_const_key_on select s.id, s.v from (select id, v, 2 as two from ijs_t) s join ijs_d d on s.two = d.id;
+
+statement ok
+set batch_inner_join_to_semi_join = false;
+
+statement ok
+delete from ijs_kept_scalar_subquery_off;
+
+statement ok
+delete from ijs_kept_scalar_subquery_on;
+
+statement ok
+insert into ijs_kept_scalar_subquery_off select t.* from ijs_t t where t.v = (select max(w) from ijs_u);
+
+statement ok
+set batch_inner_join_to_semi_join = true;
+
+statement ok
+insert into ijs_kept_scalar_subquery_on select t.* from ijs_t t where t.v = (select max(w) from ijs_u);
+
+statement ok
+set batch_inner_join_to_semi_join = false;
+
+statement ok
+delete from ijs_kept_one_row_values_off;
+
+statement ok
+delete from ijs_kept_one_row_values_on;
+
+statement ok
+insert into ijs_kept_one_row_values_off select t.* from ijs_t t join (values (1)) as c(x) on t.k = c.x;
+
+statement ok
+set batch_inner_join_to_semi_join = true;
+
+statement ok
+insert into ijs_kept_one_row_values_on select t.* from ijs_t t join (values (1)) as c(x) on t.k = c.x;
+
+statement ok
+set batch_inner_join_to_semi_join = false;
+
 # Third data: both results hold the same rows, each the same number of times.
 
 query III
@@ -2185,6 +2593,38 @@ select
   (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_agg_on group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_agg_off group by id, k, v) x),
   (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_agg_off group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_agg_on group by id, k, v) y),
   (select count(*) from ijs_kept_scalar_agg_on) - (select count(*) from ijs_kept_scalar_agg_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as ijs_rows from ijs_kept_const_values_on group by id, v except select id, v, count(*) as ijs_rows from ijs_kept_const_values_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as ijs_rows from ijs_kept_const_values_off group by id, v except select id, v, count(*) as ijs_rows from ijs_kept_const_values_on group by id, v) y),
+  (select count(*) from ijs_kept_const_values_on) - (select count(*) from ijs_kept_const_values_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as ijs_rows from ijs_kept_const_key_on group by id, v except select id, v, count(*) as ijs_rows from ijs_kept_const_key_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as ijs_rows from ijs_kept_const_key_off group by id, v except select id, v, count(*) as ijs_rows from ijs_kept_const_key_on group by id, v) y),
+  (select count(*) from ijs_kept_const_key_on) - (select count(*) from ijs_kept_const_key_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_subquery_on group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_subquery_off group by id, k, v) x),
+  (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_subquery_off group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_subquery_on group by id, k, v) y),
+  (select count(*) from ijs_kept_scalar_subquery_on) - (select count(*) from ijs_kept_scalar_subquery_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_one_row_values_on group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_one_row_values_off group by id, k, v) x),
+  (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_one_row_values_off group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_one_row_values_on group by id, k, v) y),
+  (select count(*) from ijs_kept_one_row_values_on) - (select count(*) from ijs_kept_one_row_values_off);
 ----
 0 0 0
 
@@ -2542,6 +2982,78 @@ insert into ijs_kept_scalar_agg_on select * from ijs_t t where exists (select 1 
 statement ok
 set batch_inner_join_to_semi_join = false;
 
+statement ok
+delete from ijs_kept_const_values_off;
+
+statement ok
+delete from ijs_kept_const_values_on;
+
+statement ok
+insert into ijs_kept_const_values_off select s.id, s.v from (select id, v, 1 as one from ijs_t union all select id, w, 1 as one from ijs_u) s join (values (1)) as c(x) on s.one = c.x and s.v = any(array[1, 2, 3]);
+
+statement ok
+set batch_inner_join_to_semi_join = true;
+
+statement ok
+insert into ijs_kept_const_values_on select s.id, s.v from (select id, v, 1 as one from ijs_t union all select id, w, 1 as one from ijs_u) s join (values (1)) as c(x) on s.one = c.x and s.v = any(array[1, 2, 3]);
+
+statement ok
+set batch_inner_join_to_semi_join = false;
+
+statement ok
+delete from ijs_kept_const_key_off;
+
+statement ok
+delete from ijs_kept_const_key_on;
+
+statement ok
+insert into ijs_kept_const_key_off select s.id, s.v from (select id, v, 2 as two from ijs_t) s join ijs_d d on s.two = d.id;
+
+statement ok
+set batch_inner_join_to_semi_join = true;
+
+statement ok
+insert into ijs_kept_const_key_on select s.id, s.v from (select id, v, 2 as two from ijs_t) s join ijs_d d on s.two = d.id;
+
+statement ok
+set batch_inner_join_to_semi_join = false;
+
+statement ok
+delete from ijs_kept_scalar_subquery_off;
+
+statement ok
+delete from ijs_kept_scalar_subquery_on;
+
+statement ok
+insert into ijs_kept_scalar_subquery_off select t.* from ijs_t t where t.v = (select max(w) from ijs_u);
+
+statement ok
+set batch_inner_join_to_semi_join = true;
+
+statement ok
+insert into ijs_kept_scalar_subquery_on select t.* from ijs_t t where t.v = (select max(w) from ijs_u);
+
+statement ok
+set batch_inner_join_to_semi_join = false;
+
+statement ok
+delete from ijs_kept_one_row_values_off;
+
+statement ok
+delete from ijs_kept_one_row_values_on;
+
+statement ok
+insert into ijs_kept_one_row_values_off select t.* from ijs_t t join (values (1)) as c(x) on t.k = c.x;
+
+statement ok
+set batch_inner_join_to_semi_join = true;
+
+statement ok
+insert into ijs_kept_one_row_values_on select t.* from ijs_t t join (values (1)) as c(x) on t.k = c.x;
+
+statement ok
+set batch_inner_join_to_semi_join = false;
+
 # Empty tested side: both results hold the same rows, each the same number of times.
 
 query III
@@ -2693,6 +3205,38 @@ select
   (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_agg_on group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_agg_off group by id, k, v) x),
   (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_agg_off group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_agg_on group by id, k, v) y),
   (select count(*) from ijs_kept_scalar_agg_on) - (select count(*) from ijs_kept_scalar_agg_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as ijs_rows from ijs_kept_const_values_on group by id, v except select id, v, count(*) as ijs_rows from ijs_kept_const_values_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as ijs_rows from ijs_kept_const_values_off group by id, v except select id, v, count(*) as ijs_rows from ijs_kept_const_values_on group by id, v) y),
+  (select count(*) from ijs_kept_const_values_on) - (select count(*) from ijs_kept_const_values_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as ijs_rows from ijs_kept_const_key_on group by id, v except select id, v, count(*) as ijs_rows from ijs_kept_const_key_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as ijs_rows from ijs_kept_const_key_off group by id, v except select id, v, count(*) as ijs_rows from ijs_kept_const_key_on group by id, v) y),
+  (select count(*) from ijs_kept_const_key_on) - (select count(*) from ijs_kept_const_key_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_subquery_on group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_subquery_off group by id, k, v) x),
+  (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_subquery_off group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_subquery_on group by id, k, v) y),
+  (select count(*) from ijs_kept_scalar_subquery_on) - (select count(*) from ijs_kept_scalar_subquery_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_one_row_values_on group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_one_row_values_off group by id, k, v) x),
+  (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_one_row_values_off group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_one_row_values_on group by id, k, v) y),
+  (select count(*) from ijs_kept_one_row_values_on) - (select count(*) from ijs_kept_one_row_values_off);
 ----
 0 0 0
 
@@ -3051,6 +3595,78 @@ insert into ijs_kept_scalar_agg_on select * from ijs_t t where exists (select 1 
 statement ok
 set batch_inner_join_to_semi_join = false;
 
+statement ok
+delete from ijs_kept_const_values_off;
+
+statement ok
+delete from ijs_kept_const_values_on;
+
+statement ok
+insert into ijs_kept_const_values_off select s.id, s.v from (select id, v, 1 as one from ijs_t union all select id, w, 1 as one from ijs_u) s join (values (1)) as c(x) on s.one = c.x and s.v = any(array[1, 2, 3]);
+
+statement ok
+set batch_inner_join_to_semi_join = true;
+
+statement ok
+insert into ijs_kept_const_values_on select s.id, s.v from (select id, v, 1 as one from ijs_t union all select id, w, 1 as one from ijs_u) s join (values (1)) as c(x) on s.one = c.x and s.v = any(array[1, 2, 3]);
+
+statement ok
+set batch_inner_join_to_semi_join = false;
+
+statement ok
+delete from ijs_kept_const_key_off;
+
+statement ok
+delete from ijs_kept_const_key_on;
+
+statement ok
+insert into ijs_kept_const_key_off select s.id, s.v from (select id, v, 2 as two from ijs_t) s join ijs_d d on s.two = d.id;
+
+statement ok
+set batch_inner_join_to_semi_join = true;
+
+statement ok
+insert into ijs_kept_const_key_on select s.id, s.v from (select id, v, 2 as two from ijs_t) s join ijs_d d on s.two = d.id;
+
+statement ok
+set batch_inner_join_to_semi_join = false;
+
+statement ok
+delete from ijs_kept_scalar_subquery_off;
+
+statement ok
+delete from ijs_kept_scalar_subquery_on;
+
+statement ok
+insert into ijs_kept_scalar_subquery_off select t.* from ijs_t t where t.v = (select max(w) from ijs_u);
+
+statement ok
+set batch_inner_join_to_semi_join = true;
+
+statement ok
+insert into ijs_kept_scalar_subquery_on select t.* from ijs_t t where t.v = (select max(w) from ijs_u);
+
+statement ok
+set batch_inner_join_to_semi_join = false;
+
+statement ok
+delete from ijs_kept_one_row_values_off;
+
+statement ok
+delete from ijs_kept_one_row_values_on;
+
+statement ok
+insert into ijs_kept_one_row_values_off select t.* from ijs_t t join (values (1)) as c(x) on t.k = c.x;
+
+statement ok
+set batch_inner_join_to_semi_join = true;
+
+statement ok
+insert into ijs_kept_one_row_values_on select t.* from ijs_t t join (values (1)) as c(x) on t.k = c.x;
+
+statement ok
+set batch_inner_join_to_semi_join = false;
+
 # Empty kept side: both results hold the same rows, each the same number of times.
 
 query III
@@ -3205,7 +3821,63 @@ select
 ----
 0 0 0
 
+query III
+select
+  (select count(*) from (select id, v, count(*) as ijs_rows from ijs_kept_const_values_on group by id, v except select id, v, count(*) as ijs_rows from ijs_kept_const_values_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as ijs_rows from ijs_kept_const_values_off group by id, v except select id, v, count(*) as ijs_rows from ijs_kept_const_values_on group by id, v) y),
+  (select count(*) from ijs_kept_const_values_on) - (select count(*) from ijs_kept_const_values_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as ijs_rows from ijs_kept_const_key_on group by id, v except select id, v, count(*) as ijs_rows from ijs_kept_const_key_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as ijs_rows from ijs_kept_const_key_off group by id, v except select id, v, count(*) as ijs_rows from ijs_kept_const_key_on group by id, v) y),
+  (select count(*) from ijs_kept_const_key_on) - (select count(*) from ijs_kept_const_key_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_subquery_on group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_subquery_off group by id, k, v) x),
+  (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_subquery_off group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_scalar_subquery_on group by id, k, v) y),
+  (select count(*) from ijs_kept_scalar_subquery_on) - (select count(*) from ijs_kept_scalar_subquery_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_one_row_values_on group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_one_row_values_off group by id, k, v) x),
+  (select count(*) from (select id, k, v, count(*) as ijs_rows from ijs_kept_one_row_values_off group by id, k, v except select id, k, v, count(*) as ijs_rows from ijs_kept_one_row_values_on group by id, k, v) y),
+  (select count(*) from ijs_kept_one_row_values_on) - (select count(*) from ijs_kept_one_row_values_off);
+----
+0 0 0
+
 # Cleanup.
+
+statement ok
+drop table ijs_kept_one_row_values_on;
+
+statement ok
+drop table ijs_kept_one_row_values_off;
+
+statement ok
+drop table ijs_kept_scalar_subquery_on;
+
+statement ok
+drop table ijs_kept_scalar_subquery_off;
+
+statement ok
+drop table ijs_kept_const_key_on;
+
+statement ok
+drop table ijs_kept_const_key_off;
+
+statement ok
+drop table ijs_kept_const_values_on;
+
+statement ok
+drop table ijs_kept_const_values_off;
 
 statement ok
 drop table ijs_kept_scalar_agg_on;
