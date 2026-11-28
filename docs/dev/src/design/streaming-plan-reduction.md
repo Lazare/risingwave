@@ -1355,6 +1355,13 @@ side again for the domain.
     generated (it is `NULL`), so its stream key tells no rows apart;
   - a table with a watermark is merged by `UnionScanMergeRule` (the watermark only matters to a
     streaming union);
+  - `ApplyOneRowJoinSplitRule::create_for_batch` splits the apply of the subqueries of a select
+    list only when the rule that follows it in its stage unnests all of them alone but at most
+    one: a subquery that goes through the general unnesting joins its own domain, and the outer
+    side of each apply holds the applies before it. Streaming shares these copies; a batch plan
+    copies them, and the upstream case "subqueries in case when exprs" (four `ARRAY` subqueries
+    over functions of one outer row) grew from 8 to 80 joins. With at most one such subquery,
+    there is one domain, as with one apply for all;
   - no `UnionScanShareRule` and no sharing of identical sub-plans: a batch plan has no shared
     sub-plan (`DAG_TO_TREE` runs first). Two copies of a view in two branches are matched by
     `CommonJoinOverUnionRule` as equal sub-plans: in one batch query they read the same snapshot.

@@ -321,7 +321,11 @@ static BATCH_SIMPLE_UNNESTING_AGG: LazyLock<OptimizationStage> = LazyLock::new(|
     OptimizationStage::new(
         "Batch Simple Unnesting of Aggregations",
         vec![
-            ApplyOneRowJoinSplitRule::create(),
+            // Split only when every subquery is then unnested alone: a batch plan copies the
+            // domain of each apply that goes through the general unnesting.
+            ApplyOneRowJoinSplitRule::create_for_batch(
+                PullUpCorrelatedPredicateAggRule::create_for_stream(),
+            ),
             PullUpCorrelatedPredicateAggRule::create_for_stream(),
         ],
         ApplyOrder::BottomUp,
@@ -385,7 +389,8 @@ static BATCH_UNNEST_LATERAL_FUNCTIONS: LazyLock<OptimizationStage> = LazyLock::n
     OptimizationStage::new(
         "Batch Unnest Lateral Functions",
         vec![
-            ApplyOneRowJoinSplitRule::create(),
+            // As above: split only when every subquery is then unnested alone.
+            ApplyOneRowJoinSplitRule::create_for_batch(LateralTableFunctionRule::create_for_batch()),
             LateralTableFunctionRule::create_for_batch(),
         ],
         ApplyOrder::BottomUp,
