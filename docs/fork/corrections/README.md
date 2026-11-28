@@ -28,6 +28,7 @@ without conflicts. Each file gives:
 | [noop-update-elimination-equal-values.md](noop-update-elimination-equal-values.md) | updates between equal values with different texts dropped as no-ops downstream | upstream |
 | [exists-scalar-aggregate.md](exists-scalar-aggregate.md) | `EXISTS` over a correlated scalar aggregation was not always true | upstream |
 | [semi-anti-join-swap-output.md](semi-anti-join-swap-output.md) | swapping the sides of a semi or anti join shifted its output columns | upstream and fork |
+| [right-semi-anti-join-output-columns.md](right-semi-anti-join-output-columns.md) | output columns of right semi and anti joins read after the left columns (a computed column replaced by another one) | upstream code, exposed by the fork |
 | [group-key-of-single-row-input.md](group-key-of-single-row-input.md) | `GROUP BY` / `DISTINCT` over an input of at most one row returned a row of NULLs on an empty input | upstream |
 | [first-last-value-pruning.md](first-last-value-pruning.md) | unread `first_value` / `last_value` columns kept in memory | upstream |
 | [set-operation-column-pruning.md](set-operation-column-pruning.md) | columns pruned below `UNION` (without `ALL`), `EXCEPT`, `INTERSECT` | upstream code, exposed by the fork |
