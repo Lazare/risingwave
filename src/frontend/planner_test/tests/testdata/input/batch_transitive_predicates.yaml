@@ -1,0 +1,163 @@
+# Predicates copied to the other side of a join through its equalities in batch plans
+# (`batch_transitive_predicates`): `TransitivePredicateRule`; and, with
+# `batch_cost_based_join_ordering`, the equalities implied by those of the inner joins link their
+# inputs in the cost-based join ordering. `table_row_counts` is test only (storage statistics).
+- id: setup
+  sql: |
+    create table o (id int primary key, region varchar, amount int, k numeric);
+    create table s (sid int primary key, order_id int, region varchar, w int, k numeric);
+    create table s2 (region varchar, order_id int, x int, primary key (region, order_id));
+    create table c (id int primary key, order_id int, note varchar);
+    create view eu_o as select * from o where region = 'EU' and id > 1000;
+    create table ta (x int primary key, p int);
+    create table tb (id int primary key, y int, q int);
+    create table tc (z int primary key, r int);
+    create table td (id int primary key, z int, v int);
+  expected_outputs: []
+
+- name: off by default - the filter of the view stays on its side
+  before: [setup]
+  sql: |
+    set batch_enable_lookup_join = false;
+    select o.id, s2.x from eu_o o join s2 on s2.region = o.region and s2.order_id = o.id;
+  expected_outputs:
+  - batch_plan
+- name: the copied filter becomes a range of the primary key of the other side
+  before: [setup]
+  sql: |
+    set batch_transitive_predicates = true;
+    set batch_enable_lookup_join = false;
+    select o.id, s2.x from eu_o o join s2 on s2.region = o.region and s2.order_id = o.id;
+  expected_outputs:
+  - batch_plan
+- name: the copied filter with lookup joins enabled
+  before: [setup]
+  sql: |
+    set batch_transitive_predicates = true;
+    select o.id, s2.x from eu_o o join s2 on s2.region = o.region and s2.order_id = o.id;
+  expected_outputs:
+  - batch_plan
+- name: chain of three joins - the filter reaches the third table
+  before: [setup]
+  sql: |
+    set batch_transitive_predicates = true;
+    select o.id, s.sid, c.note from eu_o o
+    join s on s.order_id = o.id
+    join c on c.order_id = s.order_id;
+  expected_outputs:
+  - batch_plan
+- name: union - the tags of the branches become an IN list on the other side
+  before: [setup]
+  sql: |
+    set batch_transitive_predicates = true;
+    set batch_enable_lookup_join = false;
+    select u.tag, u.id, s2.x
+    from (select 'A' as tag, id from o union all select 'B' as tag, id from o where amount > 5) u
+    join s2 on s2.region = u.tag and s2.order_id = u.id;
+  expected_outputs:
+  - batch_plan
+- name: left join - copied from the preserved side into the optional side only
+  before: [setup]
+  sql: |
+    set batch_transitive_predicates = true;
+    select o.id, s.sid
+    from eu_o o left join (select * from s where w > 3 and order_id < 5000) s on s.order_id = o.id;
+  expected_outputs:
+  - batch_plan
+- name: semi join - a filter of the subquery is copied to the outer side
+  before: [setup]
+  sql: |
+    set batch_transitive_predicates = true;
+    select o.id from o where o.id in (select order_id from s where order_id between 5 and 9);
+  expected_outputs:
+  - batch_plan
+- name: anti join - kept, a filter of the subquery is not copied to the outer side
+  before: [setup]
+  sql: |
+    set batch_transitive_predicates = true;
+    select o.id from o where not exists (select 1 from s where s.order_id = o.id and s.order_id > 5);
+  expected_outputs:
+  - batch_plan
+- name: kept - numeric key, a predicate on the text of the value is not copied
+  before: [setup]
+  sql: |
+    set batch_transitive_predicates = true;
+    select o.id, s.sid from (select * from o where k::varchar = '1.0') o join s on s.k = o.k;
+  expected_outputs:
+  - batch_plan
+- name: kept - a volatile filter is not copied
+  before: [setup]
+  sql: |
+    set batch_transitive_predicates = true;
+    select o.id, s.sid from (select * from o where id > random() * 10) o join s on s.order_id = o.id;
+  expected_outputs:
+  - batch_plan
+
+# Implied equalities in the cost-based join ordering: `ta.x = tb.y AND tb.y = tc.z` implies
+# `ta.x = tc.z`, which links the two small tables.
+- name: implied equality - off, the large table is joined first
+  before: [setup]
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    set batch_enable_lookup_join = false;
+    select ta.p, tb.q, tc.r from ta join tb on ta.x = tb.y join tc on tb.y = tc.z
+    where ta.p = 1 and tc.r = 2;
+  table_row_counts:
+    ta: 1000
+    tb: 1000000
+    tc: 1000
+  expected_outputs:
+  - batch_plan
+- name: implied equality - the two small tables are joined first
+  before: [setup]
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    set batch_transitive_predicates = true;
+    set batch_enable_lookup_join = false;
+    select ta.p, tb.q, tc.r from ta join tb on ta.x = tb.y join tc on tb.y = tc.z
+    where ta.p = 1 and tc.r = 2;
+  table_row_counts:
+    ta: 1000
+    tb: 1000000
+    tc: 1000
+  expected_outputs:
+  - batch_plan
+- name: implied equality - four tables, chain through the large one
+  before: [setup]
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    set batch_transitive_predicates = true;
+    select ta.p, tb.q, tc.r, td.v from ta
+    join tb on ta.x = tb.y
+    join tc on tb.y = tc.z
+    join td on td.z = tc.z
+    where ta.p = 1;
+  table_row_counts:
+    ta: 1000
+    tb: 1000000
+    tc: 1000
+    td: 5000
+  expected_outputs:
+  - batch_plan
+- name: implied equality - kept, not across an outer join
+  before: [setup]
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    set batch_transitive_predicates = true;
+    set batch_enable_lookup_join = false;
+    select ta.p, tb.q, tc.r from ta join tb on ta.x = tb.y left join tc on tb.y = tc.z
+    where ta.p = 1;
+  table_row_counts:
+    ta: 1000
+    tb: 1000000
+    tc: 1000
+  expected_outputs:
+  - batch_plan
+- name: implied equality - without statistics, the heuristic order
+  before: [setup]
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    set batch_transitive_predicates = true;
+    select ta.p, tb.q, tc.r from ta join tb on ta.x = tb.y join tc on tb.y = tc.z;
+  expected_outputs:
+  - batch_plan

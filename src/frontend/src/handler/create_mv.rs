@@ -399,6 +399,8 @@ pub(crate) fn gen_create_mv_graph(
             || config.streaming_derive_or_restrictions()
             // Rule `OrJoinToUnionRule`.
             || config.streaming_or_join_to_union()
+            // Rule `TransitivePredicateRule`.
+            || config.streaming_transitive_predicates()
     };
     let baseline_args = prune_enabled.then(|| {
         (

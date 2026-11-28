@@ -636,6 +636,21 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_or_join_to_union: bool,
 
+    // Rule `TransitivePredicateRule`, and the implied equalities of the cost-based join ordering.
+    /// In the plan of a new streaming job, copy to one side of a join the predicates that hold on
+    /// every row of its other side (the filter of a view, a constant column, the tags of the
+    /// branches of a `UNION ALL`) and only read the columns compared with `=`, rewritten on the
+    /// columns they are compared with: the rows that can not match are dropped before the join
+    /// state. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    streaming_transitive_predicates: bool,
+
+    /// The same as `streaming_transitive_predicates`, for batch queries; with
+    /// `batch_cost_based_join_ordering`, the equalities implied by those between the inner joins
+    /// (`a.x = b.y` and `b.y = c.z` give `a.x = c.z`) also link their inputs. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_transitive_predicates: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,
