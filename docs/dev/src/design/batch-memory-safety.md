@@ -10,9 +10,10 @@ spilling the output of operators that cannot spill, and phased execution.
 
 A query reserves the pool of its spillable operators (hash aggregation, hash join, sort) before
 it starts. The budget of the node only knows these reservations and the memory that operators
-which cannot spill (top-n, top-n per group, lookup join, nested loop join) take beyond the pool
-of their query. Everything else that a query allocates is invisible to it: the budget may show
-a few gigabytes taken while the process holds several times more.
+which cannot spill (top-n, top-n per group unless `batch_spill_group_topn`, lookup join, nested
+loop join) take beyond the pool of their query. Everything else that a query allocates is
+invisible to it: the budget may show a few gigabytes taken while the process holds several times
+more.
 
 ## 2. Where memory escapes the budget
 
@@ -230,3 +231,108 @@ feedback store next to the row counts), else from the schema (fixed-size types e
 variable-size types at an assumed average). Gain: wide-row exchanges get a lower parallelism
 instead of filling the node. Risk: a wrong width estimate lowers the parallelism of a query that
 would have fit; the rule must only ever lower the parallelism chosen today, never raise it.
+
+## 8. Top-n per group without order (implemented)
+
+**Problem.** `SELECT DISTINCT ON (k) ...` without `ORDER BY` is planned as a top-n per group with
+`order: [], limit: 1, group_key: [k]`. The executor kept a heap per group until its input ended,
+then emitted the heaps: over wide rows (a `UNION ALL` of aggregations with large `jsonb` values)
+it held one whole row per group, could not spill, and blocked a `LIMIT` above it until the whole
+input was read.
+
+**Mechanism (unconditional).** Without order, `WITH TIES` and offset, the rows of a group are all
+equal for the heap, and a full heap never replaces a row with an equal one: the heaps kept the
+first `limit` rows of each group in input order. The executor now emits these rows as they
+arrive: for each input chunk it marks the visible rows whose group has emitted fewer than `limit`
+rows (a count per group key, needed for `limit` > 1), and sends the chunk with that visibility
+(copied out when fewer than half of its rows are kept). It only keeps the group keys, counted in
+its memory (the table and the bytes of keys of variable size), and takes that memory from its
+query after each chunk as before. Same rows as the heaps, in a different output order, which a top-n per group
+does not guarantee anyway. A `LIMIT` above it stops it after its first rows.
+
+**Planner (`batch_streaming_unordered_group_topn`, default off).** In `LogicalTopN::to_batch`,
+the order columns that belong to the group key are dropped from the order of a top-n per group:
+they are equal within a group, so ordering by them only orders peers. `DISTINCT ON (k) ... ORDER
+BY k` and `row_number() OVER (PARTITION BY k ORDER BY k) <= n` (with `batch_over_window_to_topn`)
+become unordered and run as above. The only difference is which row of a group is returned among
+rows that are equal for the group key but differ in their sort encoding; SQL leaves that choice
+open (peers), and a query that depends on it is already nondeterministic across parallelisms.
+Streaming plans are not changed.
+
+**Gain.** Memory from one row per group (plus the heap) to one key per group. On a synthetic case
+(the executor unit test `test_unordered_group_top_n_memory_compared_with_heaps`: 20 000 rows of
+about 2 KB, 5 000 groups, limit 1) the heaps hold more than 10 MB when the input ends, the
+unordered executor less than a fifth of that at any time (its hash table of integer keys).
+
+## 9. One victim when every query waits (implemented)
+
+**Problem.** An operator that cannot spill and finds no memory waits for other queries. When every
+active query of the node had an operator waiting (`active_queries <= blocked_queries`), each
+waiting operator concluded that nobody could release memory and failed. The check is made by
+every waiting operator on its own: when the last running query ends, all the waiting operators are
+woken at once and all of them see every query blocked; and a query with two waiting operators
+stays blocked after the first one fails. All the queries failed at the same instant, although the
+failure of one of them would have released memory for the others.
+
+**Mechanism.** Queries are numbered when they are admitted (`MemoryBudget::activate`). When an
+operator finds every active query blocked, and no waiting operator may still get memory from the
+spillable operators of its own query (`spilling_waiters == 0`, `batch_spill_on_memory_wait`), one
+query is chosen: the youngest blocked one (highest admission number). Its operators fail with
+`MemoryWaitVictim`, whose message says that it was chosen to fail so that the others can proceed;
+any later operator of that query that needs memory fails at once. The other operators keep
+waiting, for the memory that the victim releases when its tasks end. If they are still all blocked
+then, a new victim is chosen. A query alone on the node fails as before (`NoMemoryLeft`): no other
+query can release memory. The overflow wait limit (`overflow_memory_wait_secs`) still bounds every
+wait.
+
+**Why the youngest.** It has done the least work, so failing it wastes the least. The oldest query
+is never chosen while another blocked query exists, so each round lets at least the oldest one
+progress, and no query is starved by repeated choices. Choosing by memory held was rejected: the
+counts are incomplete (section 2), a query holding little memory would not unblock the others and
+would only lead to more victims, and a query holding much memory is usually the one that worked
+longest.
+
+**Also changed.** While an operator of any query waits for its own spillable operators (the grace
+period of `batch_spill_on_memory_wait`), no other operator fails for lack of a releasing query:
+the spilling query may get its memory, finish and release it. Before, the other operators failed
+at once.
+
+**Retrying the victim (design only).** The frontend could retry a query once when it failed with
+`MemoryWaitVictim`: the error is only raised when other queries were running, so a retry after
+they end, or with an exclusive admission (wait until no other query is active on the nodes of the
+query), would run it alone. It needs a session variable, an admission mode in `QueryMemory::admit`
+that waits for `active_queries == 0`, and care for queries that already sent rows to the client
+(only retry when nothing was sent). Not implemented.
+
+## 10. Spilling top-n per group (`batch_spill_group_topn`, implemented)
+
+**Problem.** A top-n per group with an order holds up to `limit + offset` rows per group until its
+input ends, and could not spill: with many groups it fails, and `batch_spill_on_memory_wait` finds
+nothing to ask of it.
+
+**Mechanism.** With the variable, the frontend marks the plan node (`GroupTopNNode.spill`, shown
+as `spill: true` in `EXPLAIN`) unless it is unordered (section 8), and counts it as a spillable
+operator of the query (`spillable_operator_instances`): the query reserves its part of the pool.
+On the compute node the executor counts its heaps in a meter of its own and, after each input
+chunk, charges what they hold to a spillable operator context (`spillable_operator_context`,
+under the spill gate). When the context refuses more (the pool of the query is short, or an
+operator that cannot spill asked the spillable operators to spill), the executor writes the rows
+of its heaps (all of them, those of the offset included) and then the rest of its input to 20
+partitions by a hash of the group key (`SpillOp`, one file per partition), releases its memory,
+and processes the partitions one by one with a new executor each. A partition holds whole
+groups; the top-n per group of the kept rows and the remaining rows of a group is the top-n of
+the group, since a heap only drops rows that rank after `limit + offset` rows (or after the ties
+of the last one) of its group. A partition that does not fit either is partitioned again with
+another hash seed, up to three times; beyond, the rows of a group are kept in memory counted
+beyond the limit (a single group whose rows do not fit cannot be split). It does not spill when
+its heaps hold less than 1 MB, or when spilling is disabled on the node (`enable_spill`).
+
+**`batch_over_window_to_topn` and large groups.** With this variable, the top-n per group that
+replaces a window no longer holds its heaps in memory without bound: it spills like the sort that
+it replaces. The limit of 10 rows per group of the batch rule (`BATCH_MAX_TOP_N_ROWS_PER_GROUP`)
+was set because the top-n could not spill; with `batch_spill_group_topn` that reason is gone and
+the limit could be raised (not done: it would change existing plans). `rank()` (ties) stays
+excluded: a group with many ties is one unsplittable group.
+
+**Cost.** Disk writes of the kept rows and the remaining input when memory is short, and the
+reading back. Default off.
