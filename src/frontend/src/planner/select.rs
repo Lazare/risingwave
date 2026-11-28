@@ -36,7 +36,7 @@ use crate::optimizer::plan_node::generic::{Agg, GenericPlanRef, Project, Project
 use crate::optimizer::plan_node::{
     LogicalAgg, LogicalApply, LogicalDedup, LogicalJoin, LogicalOverWindow,
     LogicalPlanRef as PlanRef, LogicalProject, LogicalProjectSet, LogicalTopN, LogicalValues,
-    PlanAggCall,
+    PlanAggCall, PlanTreeNodeUnary,
 };
 use crate::optimizer::property::Order;
 use crate::planner::{PlanFor, Planner};
