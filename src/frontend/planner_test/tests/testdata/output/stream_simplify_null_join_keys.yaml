@@ -404,3 +404,103 @@
           └─StreamExchange { dist: HashShard(b.k) }
             └─StreamFilter { predicate: IsNull(b.k) }
               └─StreamTableScan { table: b, columns: [b.k, b.label, b.id], stream_scan_type: SnapshotBackfill, stream_key: [b.id], pk: [id], dist: UpstreamHashShard(b.id) }
+- id: setup_expr
+  sql: |
+    set streaming_simplify_null_join_keys = true;
+    create table a (id int primary key, bk int, x int);
+    create table b (id int primary key, k int, label varchar);
+    create table e (p int primary key, u int, w int);
+    create view ej as select p, u, w, jsonb_build_object('w', w) as doc from e;
+    create view chain as select a.id, a.bk, b.label from a
+      left join ej on a.bk = ej.p left join b on (ej.doc->>'w')::int = b.k;
+- id: setup_expr_off
+  sql: |
+    create table a (id int primary key, bk int, x int);
+    create table b (id int primary key, k int, label varchar);
+    create table e (p int primary key, u int, w int);
+    create view ej as select p, u, w, jsonb_build_object('w', w) as doc from e;
+    create view chain as select a.id, a.bk, b.label from a
+      left join ej on a.bk = ej.p left join b on (ej.doc->>'w')::int = b.k;
+- name: off by default - left join on an expression of a padded column
+  before:
+  - setup_expr_off
+  sql: |
+    select * from chain where bk is null;
+  stream_plan: |-
+    StreamMaterialize { columns: [id, bk, label, $expr2(hidden), b.id(hidden)], stream_key: [id, bk, b.id, $expr2], pk_columns: [id, bk, b.id, $expr2], pk_conflict: NoCheck }
+    └─StreamExchange { dist: HashShard(a.id, a.bk, $expr2, b.id) }
+      └─StreamHashJoin { type: LeftOuter, predicate: $expr2 = b.k, output: [a.id, a.bk, b.label, $expr2, b.id] }
+        ├─StreamExchange { dist: HashShard($expr2) }
+        │ └─StreamProject { exprs: [a.id, a.bk, JsonbAccessStr($expr1, 'w':Varchar)::Int32 as $expr2] }
+        │   └─StreamHashJoin { type: LeftOuter, predicate: a.bk = e.p, output: [a.id, a.bk, $expr1, e.p] }
+        │     ├─StreamExchange { dist: HashShard(a.bk) }
+        │     │ └─StreamFilter { predicate: IsNull(a.bk) }
+        │     │   └─StreamTableScan { table: a, columns: [a.id, a.bk], stream_scan_type: SnapshotBackfill, stream_key: [a.id], pk: [id], dist: UpstreamHashShard(a.id) }
+        │     └─StreamExchange { dist: HashShard(e.p) }
+        │       └─StreamProject { exprs: [e.p, JsonbBuildObject('w':Varchar, e.w) as $expr1] }
+        │         └─StreamFilter { predicate: IsNull(e.p) }
+        │           └─StreamTableScan { table: e, columns: [e.p, e.w], pk_scan_range: p = None, stream_scan_type: SnapshotBackfill, stream_key: [e.p], pk: [p], dist: UpstreamHashShard(e.p) }
+        └─StreamExchange { dist: HashShard(b.k) }
+          └─StreamTableScan { table: b, columns: [b.k, b.label, b.id], stream_scan_type: SnapshotBackfill, stream_key: [b.id], pk: [id], dist: UpstreamHashShard(b.id) }
+- name: left join on a jsonb field of a padded column, through a view
+  before:
+  - setup_expr
+  sql: |
+    select * from chain where bk is null;
+  stream_plan: |-
+    StreamMaterialize { columns: [id, bk, label], stream_key: [id], pk_columns: [id], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [a.id, a.bk, null:Varchar] }
+      └─StreamFilter { predicate: IsNull(a.bk) }
+        └─StreamTableScan { table: a, columns: [a.id, a.bk], stream_scan_type: SnapshotBackfill, stream_key: [a.id], pk: [id], dist: UpstreamHashShard(a.id) }
+- name: left join on a strict expression of a padded column and another column
+  before:
+  - setup_expr
+  sql: |
+    select a.id, b.label from a left join e on a.bk = e.p left join b on e.w + a.x = b.k
+    where a.bk is null;
+  stream_plan: |-
+    StreamMaterialize { columns: [id, label], stream_key: [id], pk_columns: [id], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [a.id, null:Varchar] }
+      └─StreamFilter { predicate: IsNull(a.bk) }
+        └─StreamTableScan { table: a, columns: [a.id, a.bk], stream_scan_type: SnapshotBackfill, stream_key: [a.id], pk: [id], dist: UpstreamHashShard(a.id) }
+- name: inner join with a comparison other than equality on a column known to be null
+  before:
+  - setup_expr
+  sql: |
+    select a.id, b.label from (select * from a where x is null) a join b on a.bk = b.k and b.id > a.x;
+  stream_plan: |-
+    StreamMaterialize { columns: [id, label, _row_id(hidden)], stream_key: [_row_id], pk_columns: [_row_id], pk_conflict: NoCheck }
+    └─StreamValues { rows: [] }
+- name: kept - coalesce of a padded column can match
+  before:
+  - setup_expr
+  sql: |
+    select a.id, b.label from a left join e on a.bk = e.p left join b on coalesce(e.w, 0) = b.k
+    where a.bk is null;
+  stream_plan: |-
+    StreamMaterialize { columns: [id, label, 0:Int32(hidden), b.id(hidden)], stream_key: [id, b.id, 0:Int32], pk_columns: [id, b.id, 0:Int32], pk_conflict: NoCheck }
+    └─StreamExchange { dist: HashShard(a.id, 0:Int32, b.id) }
+      └─StreamHashJoin { type: LeftOuter, predicate: 0:Int32 = b.k, output: [a.id, b.label, 0:Int32, b.id] }
+        ├─StreamExchange { dist: HashShard(0:Int32) }
+        │ └─StreamProject { exprs: [a.id, 0:Int32] }
+        │   └─StreamFilter { predicate: IsNull(a.bk) }
+        │     └─StreamTableScan { table: a, columns: [a.id, a.bk], stream_scan_type: SnapshotBackfill, stream_key: [a.id], pk: [id], dist: UpstreamHashShard(a.id) }
+        └─StreamExchange { dist: HashShard(b.k) }
+          └─StreamTableScan { table: b, columns: [b.k, b.label, b.id], stream_scan_type: SnapshotBackfill, stream_key: [b.id], pk: [id], dist: UpstreamHashShard(b.id) }
+- name: kept - an expression that is not null when its column is null
+  before:
+  - setup_expr
+  sql: |
+    select a.id, b.label from a left join e on a.bk = e.p
+    left join b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k
+    where a.bk is null;
+  stream_plan: |-
+    StreamMaterialize { columns: [id, label, 1:Int32(hidden), b.id(hidden)], stream_key: [id, b.id, 1:Int32], pk_columns: [id, b.id, 1:Int32], pk_conflict: NoCheck }
+    └─StreamExchange { dist: HashShard(a.id, 1:Int32, b.id) }
+      └─StreamHashJoin { type: LeftOuter, predicate: 1:Int32 = b.k, output: [a.id, b.label, 1:Int32, b.id] }
+        ├─StreamExchange { dist: HashShard(1:Int32) }
+        │ └─StreamProject { exprs: [a.id, 1:Int32] }
+        │   └─StreamFilter { predicate: IsNull(a.bk) }
+        │     └─StreamTableScan { table: a, columns: [a.id, a.bk], stream_scan_type: SnapshotBackfill, stream_key: [a.id], pk: [id], dist: UpstreamHashShard(a.id) }
+        └─StreamExchange { dist: HashShard(b.k) }
+          └─StreamTableScan { table: b, columns: [b.k, b.label, b.id], stream_scan_type: SnapshotBackfill, stream_key: [b.id], pk: [id], dist: UpstreamHashShard(b.id) }

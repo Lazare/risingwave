@@ -224,7 +224,7 @@
     select a.id, b.label from a join b on coalesce(a.bk, 0) = b.k where a.bk is null;
   expected_outputs:
   - batch_plan
-- name: kept - comparison other than equality
+- name: rewritten - comparison other than equality with a column known to be null (`<` is null too)
   before: [setup]
   sql: |
     select a.id, b.label from a join b on a.id = b.id and a.bk < b.k where b.k is null;
