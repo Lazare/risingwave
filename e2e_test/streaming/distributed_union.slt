@@ -119,7 +119,7 @@ create materialized view sdu_join_aggs_off as select u.k, u.cnt, d.w from (selec
 statement ok
 create materialized view sdu_nested_off as select id, count(*) as cnt from (select id from sdu_a union all (select id from sdu_b union select id from sdu_e)) u group by id;
 
-# union produced by the union-join factoring, under the factored join
+# kept: union produced by the union-join factoring
 
 statement ok
 set streaming_factor_union_join = true;
@@ -228,7 +228,7 @@ create materialized view sdu_join_aggs_on as select u.k, u.cnt, d.w from (select
 statement ok
 create materialized view sdu_nested_on as select id, count(*) as cnt from (select id from sdu_a union all (select id from sdu_b union select id from sdu_e)) u group by id;
 
-# union produced by the union-join factoring, under the factored join
+# kept: union produced by the union-join factoring
 
 statement ok
 set streaming_factor_union_join = true;

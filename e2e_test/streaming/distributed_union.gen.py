@@ -55,7 +55,7 @@ CASES = [
      f"select u.k, u.cnt, d.w from {AGGS} u join {D} d on u.k = d.id", []),
     ('nested', 'id, cnt', 'a union distinct inside a union all, under an aggregation',
      f"select id, count(*) as cnt from (select id from {A} union all (select id from {B} union select id from {E})) u group by id", []),
-    ('factored', 'id, v, w', 'union produced by the union-join factoring, under the factored join',
+    ('factored', 'id, v, w', 'kept: union produced by the union-join factoring',
      f"select x.id, x.v, d.w from {A} x join {D} d on x.id = d.id "
      f"union all select y.id, y.v, d.w from {B} y join {D} d on y.id = d.id",
      ['streaming_factor_union_join']),

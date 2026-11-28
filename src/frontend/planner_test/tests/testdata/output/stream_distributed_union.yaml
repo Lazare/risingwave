@@ -330,7 +330,7 @@
               └─StreamExchange { dist: HashShard(e.id) }
                 └─StreamProject { exprs: [e.id, 1:Int32] }
                   └─StreamTableScan { table: e, columns: [e.id], stream_scan_type: SnapshotBackfill, stream_key: [e.id], pk: [id], dist: UpstreamHashShard(e.id) }
-- name: union produced by the union-join factoring, under the factored join
+- name: kept - union produced by the union-join factoring (the join uses the copy of its key outside the stream key)
   before:
   - setup
   sql: |

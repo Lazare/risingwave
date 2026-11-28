@@ -78,19 +78,11 @@ impl LogicalUnion {
     /// shuffled to satisfy `required` directly, instead of being shuffled by the stream key of the
     /// union and the union then shuffled again by its parent. `None` keeps the default plan.
     ///
-    /// Every column of the key must be in the stream key of the union, or be the very column that
-    /// every input also outputs at a column of the stream key (`equals_stream_key_column`, e.g. a
-    /// join key duplicated by the union-join factoring): every change of a row of the union
-    /// (identified by its stream key) then has the same key, hence goes through the same exchange
-    /// channel to the same actor, in order, as with the default shuffle by the whole stream key
-    /// (which is the case `key == stream key`).
-    ///
-    /// `StreamExchange::new` asserts that the input of a hash exchange over a retractable stream
-    /// has its distribution key inside its stream key. The key is, column by column, equal to
-    /// stream key columns, and no exchange is put over the union: its parent gets the distribution
-    /// it required, a projection passes the requirement down only when it then provides exactly
-    /// that distribution (`LogicalProject::input_required_dist_for_union`), and the union falls
-    /// back to the default plan if the requirement is not met.
+    /// The key must be a subset of the stream key of the union: every change of a row of the
+    /// union (identified by its stream key) then has the same key, hence goes through the same
+    /// exchange channel to the same actor, in order, as with the default shuffle by the whole
+    /// stream key (which is the case `key == stream key`). The union then also satisfies the
+    /// invariant asserted by `StreamExchange::new`, a distribution key inside the stream key.
     fn distributed_target(&self, required: &RequiredDist) -> Option<Vec<usize>> {
         if !streaming_distributed_union_enabled(&self.base.ctx())
             || !self.all()
@@ -104,29 +96,10 @@ impl LogicalUnion {
             return None;
         }
         let key = required_hash_key(required)?;
-        if !key
-            .iter()
-            .all(|&col| stream_key.contains(&col) || self.equals_stream_key_column(col, stream_key))
-        {
+        if !key.iter().all(|col| stream_key.contains(col)) {
             return None;
         }
         Some(key)
-    }
-
-    /// Whether every input is a projection that outputs, at `col`, the same column of its input as
-    /// at some column `s` of the stream key (the same `s` for all inputs): `col` and `s` then hold
-    /// the same value, of the same type, in every row of the union.
-    fn equals_stream_key_column(&self, col: usize, stream_key: &[usize]) -> bool {
-        stream_key.iter().any(|&s| {
-            self.inputs().iter().all(|input| {
-                input.as_logical_project().is_some_and(|project| {
-                    match (&project.exprs()[col], &project.exprs()[s]) {
-                        (ExprImpl::InputRef(a), ExprImpl::InputRef(b)) => a.index() == b.index(),
-                        _ => false,
-                    }
-                })
-            })
-        })
     }
 }
 
@@ -319,8 +292,8 @@ impl ToStream for LogicalUnion {
         // `StreamUnion::new` checks that every input is distributed as `HashShard(key)`.
         let plan: crate::optimizer::plan_node::StreamPlanRef = StreamUnion::new(core).into();
         if !plan.distribution().satisfies(required_dist) {
-            // Not expected (the key is the one the requirement asks for). No exchange is put over
-            // this union, see `distributed_target`: fall back to the default plan.
+            // Not expected (the key is the one the requirement asks for): fall back to the
+            // default plan rather than add an exchange above the union.
             let plan = self.to_stream(ctx)?;
             return required_dist.streaming_enforce_if_not_satisfies(plan);
         }

@@ -116,7 +116,7 @@
     select id, count(*) as cnt from (select id from a union all (select id from b union select id from e)) u group by id;
   expected_outputs:
   - stream_plan
-- name: union produced by the union-join factoring, under the factored join
+- name: kept - union produced by the union-join factoring (the join uses the copy of its key outside the stream key)
   before: [setup]
   sql: |
     set streaming_factor_union_join = true;
