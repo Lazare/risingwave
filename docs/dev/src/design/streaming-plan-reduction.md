@@ -1516,9 +1516,11 @@ when `x` leads the key of the table.
   `d::timestamp AT TIME ZONE zone`) only after the logical optimization; during it the call has no
   zone argument (`date_trunc(u, tz)`, `tz::date`, `date_trunc(u, d::timestamptz)`). Both forms are
   handled, the first with an explicit `UTC` zone, the second when the session time zone (read
-  from the optimizer context) is `UTC`. A `timestamptz` is handled only in `UTC` (or `Etc/UTC`):
-  there a `timestamptz` behaves as a `timestamp`. In other zones a
-  day or an hour may be shorter or longer, and the truncation of a local time that does not exist
+  from the optimizer context) is `UTC`; so is a text without offset compared with a
+  `timestamptz` (`date_trunc('month', d) = '2024-05-01'`), a cast that cannot be folded before
+  the zone is inlined and is read as in a `UTC` session. A `timestamptz` is handled only in `UTC`
+  (or `Etc/UTC`): there a `timestamptz` behaves as a `timestamp`. In other zones a day or an hour
+  may be shorter or longer, and the truncation of a local time that does not exist
   or exists twice depends on the zone: left as it is. The bounds then go through the increasing
   conversions of `x` (`AT TIME ZONE 'UTC'` and the casts between `timestamp` and `timestamptz` in
   a `UTC` session keep the value; `d::timestamp >= v` is `d >=` the first day at or after `v`), so

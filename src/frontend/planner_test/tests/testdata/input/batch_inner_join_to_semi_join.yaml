@@ -172,6 +172,17 @@
     ijs_u: 100000
   expected_outputs:
   - batch_plan
+- name: anti join over a distinct non-key column, with statistics and nothing learned (kept)
+  before:
+  - tables
+  sql: |
+    set batch_inner_join_to_semi_join = true;
+    select * from ijs_t t where not exists (select 1 from (select distinct k from ijs_u) x where x.k = t.k);
+  table_row_counts:
+    ijs_t: 1000
+    ijs_u: 100000
+  expected_outputs:
+  - batch_plan
 - name: inner join with a distinct key, with statistics (semi join, then the aggregation is removed)
   before:
   - tables

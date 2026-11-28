@@ -317,9 +317,33 @@ fn literal_text(expr: &ExprImpl) -> Option<&str> {
 }
 
 /// The value of a constant expression, if not `NULL`.
-fn constant(expr: &ExprImpl) -> Option<ScalarImpl> {
+///
+/// A text without offset cast to `timestamptz` (`'2024-05-01'` compared with a `timestamptz`) is
+/// read in the session time zone, which is inlined only after the logical optimization: until
+/// then the cast cannot be folded. It is read here as `cast_with_time_zone` does in a `UTC`
+/// session (a `timestamptz` text with its offset, otherwise a `timestamp` taken in `UTC`), and
+/// not at all in other sessions.
+fn constant(expr: &ExprImpl, utc_session: bool) -> Option<ScalarImpl> {
     if !expr.is_const() {
         return None;
+    }
+    if let Some(call) = expr.as_function_call()
+        && call.func_type() == ExprType::Cast
+        && call.return_type() == DataType::Timestamptz
+        && let [text] = call.inputs()
+        && text.return_type() == DataType::Varchar
+    {
+        if !utc_session {
+            return None;
+        }
+        let ScalarImpl::Utf8(text) = constant(text, utc_session)? else {
+            return None;
+        };
+        let value = text.parse::<Timestamptz>().ok().or_else(|| {
+            let ts = text.parse::<Timestamp>().ok()?;
+            Timestamptz::from_micros(ts.0.and_utc().timestamp_micros())
+        })?;
+        return Some(ScalarImpl::Timestamptz(value));
     }
     expr.try_fold_const()?.ok()?
 }
@@ -343,7 +367,7 @@ fn range_form(expr: &ExprImpl, utc_session: bool) -> Option<Vec<ExprImpl>> {
     let [a, b] = call.inputs() else {
         return None;
     };
-    let (operand, value, cmp) = match (constant(b), constant(a)) {
+    let (operand, value, cmp) = match (constant(b, utc_session), constant(a, utc_session)) {
         (Some(value), _) => (a, value, cmp),
         (None, Some(value)) => (b, value, cmp.flip()),
         (None, None) => return None,

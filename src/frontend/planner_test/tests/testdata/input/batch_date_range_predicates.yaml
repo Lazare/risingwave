@@ -150,6 +150,23 @@
     select * from drp_tz where tz::date = '2024-05-01';
   expected_outputs:
   - batch_plan
+- name: timestamptz compared with texts without offset in UTC (read in UTC)
+  before:
+  - tables
+  sql: |
+    set batch_date_range_predicates = true;
+    select * from drp_tz where date_trunc('day', tz) >= '2024-05-01' and date_trunc('day', tz) < '2024-05-02 12:00:00';
+  expected_outputs:
+  - batch_plan
+- name: kept, date_trunc of a date in another time zone
+  before:
+  - tables
+  sql: |
+    set batch_date_range_predicates = true;
+    set timezone = 'Europe/Paris';
+    select * from drp_d where date_trunc('month', d) = '2024-05-01';
+  expected_outputs:
+  - batch_plan
 - name: kept, timestamptz in another time zone
   before:
   - tables

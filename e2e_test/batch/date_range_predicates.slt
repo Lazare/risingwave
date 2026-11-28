@@ -144,6 +144,12 @@ statement ok
 create table drp_tz_trunc_month_bounds_on (tz timestamptz, v int);
 
 statement ok
+create table drp_tz_trunc_no_offset_off (tz timestamptz, v int);
+
+statement ok
+create table drp_tz_trunc_no_offset_on (tz timestamptz, v int);
+
+statement ok
 create table drp_tz_cast_date_off (tz timestamptz, v int);
 
 statement ok
@@ -554,6 +560,24 @@ statement ok
 set batch_date_range_predicates = false;
 
 statement ok
+delete from drp_tz_trunc_no_offset_off;
+
+statement ok
+delete from drp_tz_trunc_no_offset_on;
+
+statement ok
+insert into drp_tz_trunc_no_offset_off select * from drp_tz where date_trunc('day', tz) >= '2024-05-01' and date_trunc('day', tz) < '2024-05-01 12:00:00';
+
+statement ok
+set batch_date_range_predicates = true;
+
+statement ok
+insert into drp_tz_trunc_no_offset_on select * from drp_tz where date_trunc('day', tz) >= '2024-05-01' and date_trunc('day', tz) < '2024-05-01 12:00:00';
+
+statement ok
+set batch_date_range_predicates = false;
+
+statement ok
 delete from drp_tz_cast_date_off;
 
 statement ok
@@ -810,6 +834,14 @@ select
   (select count(*) from (select tz, v, count(*) as drp_rows from drp_tz_trunc_month_bounds_on group by tz, v except select tz, v, count(*) as drp_rows from drp_tz_trunc_month_bounds_off group by tz, v) x),
   (select count(*) from (select tz, v, count(*) as drp_rows from drp_tz_trunc_month_bounds_off group by tz, v except select tz, v, count(*) as drp_rows from drp_tz_trunc_month_bounds_on group by tz, v) y),
   (select count(*) from drp_tz_trunc_month_bounds_on) - (select count(*) from drp_tz_trunc_month_bounds_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select tz, v, count(*) as drp_rows from drp_tz_trunc_no_offset_on group by tz, v except select tz, v, count(*) as drp_rows from drp_tz_trunc_no_offset_off group by tz, v) x),
+  (select count(*) from (select tz, v, count(*) as drp_rows from drp_tz_trunc_no_offset_off group by tz, v except select tz, v, count(*) as drp_rows from drp_tz_trunc_no_offset_on group by tz, v) y),
+  (select count(*) from drp_tz_trunc_no_offset_on) - (select count(*) from drp_tz_trunc_no_offset_off);
 ----
 0 0 0
 
@@ -1245,6 +1277,24 @@ statement ok
 set batch_date_range_predicates = false;
 
 statement ok
+delete from drp_tz_trunc_no_offset_off;
+
+statement ok
+delete from drp_tz_trunc_no_offset_on;
+
+statement ok
+insert into drp_tz_trunc_no_offset_off select * from drp_tz where date_trunc('day', tz) >= '2024-05-01' and date_trunc('day', tz) < '2024-05-01 12:00:00';
+
+statement ok
+set batch_date_range_predicates = true;
+
+statement ok
+insert into drp_tz_trunc_no_offset_on select * from drp_tz where date_trunc('day', tz) >= '2024-05-01' and date_trunc('day', tz) < '2024-05-01 12:00:00';
+
+statement ok
+set batch_date_range_predicates = false;
+
+statement ok
 delete from drp_tz_cast_date_off;
 
 statement ok
@@ -1501,6 +1551,14 @@ select
   (select count(*) from (select tz, v, count(*) as drp_rows from drp_tz_trunc_month_bounds_on group by tz, v except select tz, v, count(*) as drp_rows from drp_tz_trunc_month_bounds_off group by tz, v) x),
   (select count(*) from (select tz, v, count(*) as drp_rows from drp_tz_trunc_month_bounds_off group by tz, v except select tz, v, count(*) as drp_rows from drp_tz_trunc_month_bounds_on group by tz, v) y),
   (select count(*) from drp_tz_trunc_month_bounds_on) - (select count(*) from drp_tz_trunc_month_bounds_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select tz, v, count(*) as drp_rows from drp_tz_trunc_no_offset_on group by tz, v except select tz, v, count(*) as drp_rows from drp_tz_trunc_no_offset_off group by tz, v) x),
+  (select count(*) from (select tz, v, count(*) as drp_rows from drp_tz_trunc_no_offset_off group by tz, v except select tz, v, count(*) as drp_rows from drp_tz_trunc_no_offset_on group by tz, v) y),
+  (select count(*) from drp_tz_trunc_no_offset_on) - (select count(*) from drp_tz_trunc_no_offset_off);
 ----
 0 0 0
 
@@ -1950,6 +2008,24 @@ statement ok
 set batch_date_range_predicates = false;
 
 statement ok
+delete from drp_tz_trunc_no_offset_off;
+
+statement ok
+delete from drp_tz_trunc_no_offset_on;
+
+statement ok
+insert into drp_tz_trunc_no_offset_off select * from drp_tz where date_trunc('day', tz) >= '2024-05-01' and date_trunc('day', tz) < '2024-05-01 12:00:00';
+
+statement ok
+set batch_date_range_predicates = true;
+
+statement ok
+insert into drp_tz_trunc_no_offset_on select * from drp_tz where date_trunc('day', tz) >= '2024-05-01' and date_trunc('day', tz) < '2024-05-01 12:00:00';
+
+statement ok
+set batch_date_range_predicates = false;
+
+statement ok
 delete from drp_tz_cast_date_off;
 
 statement ok
@@ -2206,6 +2282,14 @@ select
   (select count(*) from (select tz, v, count(*) as drp_rows from drp_tz_trunc_month_bounds_on group by tz, v except select tz, v, count(*) as drp_rows from drp_tz_trunc_month_bounds_off group by tz, v) x),
   (select count(*) from (select tz, v, count(*) as drp_rows from drp_tz_trunc_month_bounds_off group by tz, v except select tz, v, count(*) as drp_rows from drp_tz_trunc_month_bounds_on group by tz, v) y),
   (select count(*) from drp_tz_trunc_month_bounds_on) - (select count(*) from drp_tz_trunc_month_bounds_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select tz, v, count(*) as drp_rows from drp_tz_trunc_no_offset_on group by tz, v except select tz, v, count(*) as drp_rows from drp_tz_trunc_no_offset_off group by tz, v) x),
+  (select count(*) from (select tz, v, count(*) as drp_rows from drp_tz_trunc_no_offset_off group by tz, v except select tz, v, count(*) as drp_rows from drp_tz_trunc_no_offset_on group by tz, v) y),
+  (select count(*) from drp_tz_trunc_no_offset_on) - (select count(*) from drp_tz_trunc_no_offset_off);
 ----
 0 0 0
 
@@ -2656,6 +2740,24 @@ statement ok
 set batch_date_range_predicates = false;
 
 statement ok
+delete from drp_tz_trunc_no_offset_off;
+
+statement ok
+delete from drp_tz_trunc_no_offset_on;
+
+statement ok
+insert into drp_tz_trunc_no_offset_off select * from drp_tz where date_trunc('day', tz) >= '2024-05-01' and date_trunc('day', tz) < '2024-05-01 12:00:00';
+
+statement ok
+set batch_date_range_predicates = true;
+
+statement ok
+insert into drp_tz_trunc_no_offset_on select * from drp_tz where date_trunc('day', tz) >= '2024-05-01' and date_trunc('day', tz) < '2024-05-01 12:00:00';
+
+statement ok
+set batch_date_range_predicates = false;
+
+statement ok
 delete from drp_tz_cast_date_off;
 
 statement ok
@@ -2917,6 +3019,14 @@ select
 
 query III
 select
+  (select count(*) from (select tz, v, count(*) as drp_rows from drp_tz_trunc_no_offset_on group by tz, v except select tz, v, count(*) as drp_rows from drp_tz_trunc_no_offset_off group by tz, v) x),
+  (select count(*) from (select tz, v, count(*) as drp_rows from drp_tz_trunc_no_offset_off group by tz, v except select tz, v, count(*) as drp_rows from drp_tz_trunc_no_offset_on group by tz, v) y),
+  (select count(*) from drp_tz_trunc_no_offset_on) - (select count(*) from drp_tz_trunc_no_offset_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select tz, v, count(*) as drp_rows from drp_tz_cast_date_on group by tz, v except select tz, v, count(*) as drp_rows from drp_tz_cast_date_off group by tz, v) x),
   (select count(*) from (select tz, v, count(*) as drp_rows from drp_tz_cast_date_off group by tz, v except select tz, v, count(*) as drp_rows from drp_tz_cast_date_on group by tz, v) y),
   (select count(*) from drp_tz_cast_date_on) - (select count(*) from drp_tz_cast_date_off);
@@ -2986,6 +3096,12 @@ drop table drp_tz_cast_date_on;
 
 statement ok
 drop table drp_tz_cast_date_off;
+
+statement ok
+drop table drp_tz_trunc_no_offset_on;
+
+statement ok
+drop table drp_tz_trunc_no_offset_off;
 
 statement ok
 drop table drp_tz_trunc_month_bounds_on;

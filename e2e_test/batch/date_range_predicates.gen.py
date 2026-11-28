@@ -63,6 +63,9 @@ CASES = [
     ('tz_trunc_month_bounds', 'tz timestamptz, v int',
      f"select * from {TZ} where date_trunc('month', tz) >= '2024-04-15 00:00:00+00:00' "
      f"and date_trunc('month', tz) < '2024-05-15 00:00:00+00:00'"),
+    ('tz_trunc_no_offset', 'tz timestamptz, v int',
+     f"select * from {TZ} where date_trunc('day', tz) >= '2024-05-01' "
+     f"and date_trunc('day', tz) < '2024-05-01 12:00:00'"),
     ('tz_cast_date', 'tz timestamptz, v int',
      f"select * from {TZ} where tz::date = '2024-05-01'"),
     ('tz_extract_year', 'tz timestamptz, v int',
