@@ -1,0 +1,85 @@
+# Tests for `batch_broadcast_cross_join` (`ConstantKeyJoinRule`, `BatchNestedLoopJoin`): a cross
+# join, or a join on the same constant on both sides, runs as a nested loop join that copies its
+# left side to every task of its right side.
+- id: setup_off
+  sql: |
+    create table t (id int primary key, v int, x int);
+    create table c (id varchar primary key, rate int);
+  expected_outputs: []
+- id: setup
+  sql: |
+    set batch_broadcast_cross_join = true;
+    create table t (id int primary key, v int, x int);
+    create table c (id varchar primary key, rate int);
+    create view tv as select id, v, x, 1 as one from t;
+    create view cv as select id as cid, rate, 1 as one from c;
+  expected_outputs: []
+
+# The variable is off by default: nothing changes.
+- name: off by default - a join on a constant is a hash join on the constant
+  before: [setup_off]
+  sql: |
+    select a.id, b.id as cid from (select id, 1 as one from t) a join (select id, 1 as one from c) b on a.one = b.one;
+  expected_outputs:
+  - batch_plan
+- name: off by default - a cross join gathers both sides
+  before: [setup_off]
+  sql: |
+    select t.id, c.id as cid from t cross join c;
+  expected_outputs:
+  - batch_plan
+
+# Rewritten.
+
+- name: a join on the same constant on both sides
+  before: [setup]
+  sql: |
+    select tv.id, cv.cid from tv join cv on tv.one = cv.one;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+- name: a join on the same constant and on a column
+  before: [setup]
+  sql: |
+    select tv.id, cv.cid from tv join cv on tv.one = cv.one and tv.v = cv.rate;
+  expected_outputs:
+  - batch_plan
+- name: a cross join
+  before: [setup]
+  sql: |
+    select t.id, c.id as cid from t cross join c;
+  expected_outputs:
+  - batch_plan
+- name: a join on true with a condition between the sides
+  before: [setup]
+  sql: |
+    select t.id, c.id as cid from t join c on t.v > c.rate;
+  expected_outputs:
+  - batch_plan
+- name: a cross join below an aggregation
+  before: [setup]
+  sql: |
+    select c.id, count(*) as n from t cross join c group by c.id;
+  expected_outputs:
+  - batch_plan
+
+# Kept.
+
+- name: kept - different constants on both sides
+  before: [setup]
+  sql: |
+    select a.id, b.id as cid from (select id, 1 as one from t) a join (select id, 2 as two from c) b on a.one = b.two;
+  expected_outputs:
+  - batch_plan
+- name: kept - a left join copies no side
+  before: [setup]
+  sql: |
+    select t.id, c.id as cid from t left join c on t.v > c.rate;
+  expected_outputs:
+  - batch_plan
+- name: kept - local execution
+  before: [setup]
+  sql: |
+    select t.id, c.id as cid from t cross join c;
+  expected_outputs:
+  - batch_local_plan

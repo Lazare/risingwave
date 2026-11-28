@@ -106,7 +106,7 @@ pub(super) fn fold_join_without_match(
 }
 
 /// Whether a part of a plan reads a table `AS OF` (the lookup side of a temporal join).
-fn has_temporal_lookup(plan: &PlanRef) -> bool {
+pub(super) fn has_temporal_lookup(plan: &PlanRef) -> bool {
     plan.as_logical_scan()
         .is_some_and(|scan| scan.as_of().is_some())
         || plan.inputs().iter().any(has_temporal_lookup)

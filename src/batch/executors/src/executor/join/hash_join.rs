@@ -34,6 +34,7 @@ use risingwave_common::util::iter_util::ZipEqFast;
 use risingwave_common_estimate_size::EstimateSize;
 use risingwave_expr::expr::{BoxedExpression, build_from_prost};
 use risingwave_pb::Message;
+use risingwave_pb::batch_plan::PlanNode as PbPlanNode;
 use risingwave_pb::batch_plan::plan_node::NodeBody;
 use risingwave_pb::data::DataChunk as PbDataChunk;
 
@@ -103,7 +104,48 @@ pub struct HashJoinExecutor<K> {
     /// Where the join takes the memory of the build rows that spilling cannot split, once its
     /// own memory is exhausted. See [`UnsplittableMemory`].
     unsplittable_memory: Option<UnsplittableMemory>,
+    /// Whether the probe side runs entirely in this task: it reads nothing from other tasks (no
+    /// exchange). It may then be left unexecuted, see [`output_needs_probe_side`].
+    probe_side_in_task: bool,
     _phantom: PhantomData<K>,
+}
+
+/// Whether the output of a join may hold rows that depend on its probe (left) side, once its
+/// build (right) side is known to hold `build_row_count` rows, of which none has a join key that
+/// can match (`no_matching_key`: the hash map is empty).
+///
+/// When it can not, the join outputs nothing, whatever the probe side:
+///
+/// - inner (and as-of inner), left semi and right semi joins only output rows that match, and
+///   no probe row can match a build key when there is none;
+/// - right outer and right anti joins output (some of) the build rows, and there is none.
+///
+/// The other joins output the probe rows that match nothing (left outer, left anti, full outer,
+/// as-of left outer), and the right outer and anti joins output the build rows whose key can not
+/// match: those need the probe side.
+fn output_needs_probe_side(
+    join_type: JoinType,
+    build_row_count: usize,
+    no_matching_key: bool,
+) -> bool {
+    match join_type {
+        JoinType::Inner | JoinType::AsOfInner | JoinType::LeftSemi | JoinType::RightSemi => {
+            !no_matching_key
+        }
+        JoinType::RightOuter | JoinType::RightAnti => build_row_count > 0,
+        JoinType::LeftOuter
+        | JoinType::LeftAnti
+        | JoinType::FullOuter
+        | JoinType::AsOfLeftOuter => true,
+    }
+}
+
+/// Whether a batch plan node reads from other tasks: it, or a node below it, is an exchange.
+fn reads_other_tasks(plan_node: &PbPlanNode) -> bool {
+    matches!(
+        plan_node.node_body,
+        Some(NodeBody::Exchange(_) | NodeBody::MergeSortExchange(_))
+    ) || plan_node.children.iter().any(reads_other_tasks)
 }
 
 /// Creates the memory of the build rows of a join that spilling cannot split, because they share
@@ -742,6 +784,17 @@ impl<K: HashKey> HashJoinExecutor<K> {
             }
         }
 
+        // The build side holds no key that can match (or no row at all): for some join types the
+        // output is empty whatever the probe side, which is then not executed. Only when the probe
+        // side runs entirely in this task: an exchange that is never read would leave the tasks
+        // that feed it waiting to send their rows.
+        if !need_to_spill
+            && self.probe_side_in_task
+            && !output_needs_probe_side(self.join_type, build_row_count, hash_map.is_empty())
+        {
+            return Ok(());
+        }
+
         if need_to_spill {
             // A spilling version of hash join based on the RFC: Spill Hash Join https://github.com/risingwavelabs/rfcs/pull/91
             // When HashJoinExecutor told memory is insufficient, JoinSpillManager will start to partition the hash table and spill to disk.
@@ -868,7 +921,9 @@ impl<K: HashKey> HashJoinExecutor<K> {
                     self.shutdown_rx.clone(),
                     self.mem_ctx.clone(),
                 )
-                .with_unsplittable_memory(self.unsplittable_memory.clone());
+                .with_unsplittable_memory(self.unsplittable_memory.clone())
+                // The probe side of a partition is read from a spill file of this task.
+                .with_probe_side_in_task(true);
 
                 debug!(
                     "create sub_hash_join {} for hash_join {} to spill",
@@ -2535,6 +2590,13 @@ impl BoxedExecutorBuilder for HashJoinExecutor<()> {
 
         let identity = context.plan_node().get_identity().clone();
 
+        // The probe side is the left child.
+        let probe_side_in_task = context
+            .plan_node()
+            .children
+            .first()
+            .is_some_and(|probe| !reads_other_tasks(probe));
+
         let asof_desc = hash_join_node
             .asof_desc
             .map(|desc| AsOfDesc::from_protobuf(&desc))
@@ -2568,6 +2630,7 @@ impl BoxedExecutorBuilder for HashJoinExecutor<()> {
                 let identity = identity.clone();
                 Arc::new(move || context.create_executor_memory(&identity))
             },
+            probe_side_in_task,
         }
         .dispatch())
     }
@@ -2591,6 +2654,7 @@ struct HashJoinExecutorArgs {
     shutdown_rx: ShutdownToken,
     mem_ctx: MemoryContext,
     unsplittable_memory: UnsplittableMemory,
+    probe_side_in_task: bool,
 }
 
 impl HashKeyDispatcher for HashJoinExecutorArgs {
@@ -2615,7 +2679,8 @@ impl HashKeyDispatcher for HashJoinExecutorArgs {
                 self.shutdown_rx,
                 self.mem_ctx,
             )
-            .with_unsplittable_memory(Some(self.unsplittable_memory)),
+            .with_unsplittable_memory(Some(self.unsplittable_memory))
+            .with_probe_side_in_task(self.probe_side_in_task),
         )
     }
 
@@ -2724,6 +2789,7 @@ impl<K> HashJoinExecutor<K> {
             spill_depth,
             mem_ctx,
             unsplittable_memory: None,
+            probe_side_in_task: false,
             _phantom: PhantomData,
         }
     }
@@ -2736,6 +2802,14 @@ impl<K> HashJoinExecutor<K> {
         unsplittable_memory: Option<UnsplittableMemory>,
     ) -> Self {
         self.unsplittable_memory = unsplittable_memory;
+        self
+    }
+
+    /// Tells the join that its probe side reads nothing from other tasks, so that it may leave
+    /// it unexecuted when its build side holds no key that can match, see
+    /// [`output_needs_probe_side`].
+    pub fn with_probe_side_in_task(mut self, probe_side_in_task: bool) -> Self {
+        self.probe_side_in_task = probe_side_in_task;
         self
     }
 }
@@ -4688,5 +4762,157 @@ mod tests {
         drop(build_side);
         drop(join);
         assert_eq!(query.get_bytes_used(), 0);
+    }
+
+    /// A probe side that records whether it was executed.
+    struct ProbeSpy {
+        inner: MockExecutor,
+        executed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Executor for ProbeSpy {
+        fn schema(&self) -> &Schema {
+            self.inner.schema()
+        }
+
+        fn identity(&self) -> &str {
+            "ProbeSpy"
+        }
+
+        fn execute(self: Box<Self>) -> crate::executor::BoxedDataChunkStream {
+            self.executed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Box::new(self.inner).execute()
+        }
+    }
+
+    /// Joins three probe rows (`1`, `2`, `NULL`) with the given build rows, with or without a
+    /// probe side that runs in the task. Returns the number of output rows and whether the probe
+    /// side was executed.
+    async fn join_with_build_side(
+        join_type: JoinType,
+        build: Option<&str>,
+        probe_side_in_task: bool,
+    ) -> (usize, bool) {
+        let schema = Schema {
+            fields: vec![Field::unnamed(DataType::Int32)],
+        };
+        let probe = MockExecutor::with_chunk(
+            DataChunk::from_pretty(
+                "i
+                 1
+                 2
+                 .",
+            ),
+            schema.clone(),
+        );
+        let executed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let probe = Box::new(ProbeSpy {
+            inner: probe,
+            executed: executed.clone(),
+        });
+        let mut build_executor = MockExecutor::new(schema);
+        if let Some(build) = build {
+            build_executor.add(DataChunk::from_pretty(build));
+        }
+        let output_indices = match join_type {
+            JoinType::LeftSemi | JoinType::LeftAnti | JoinType::RightSemi | JoinType::RightAnti => {
+                vec![0]
+            }
+            _ => vec![0, 1],
+        };
+        let join = Box::new(
+            HashJoinExecutor::<Key32>::new(
+                join_type,
+                output_indices,
+                probe,
+                Box::new(build_executor),
+                vec![0],
+                vec![0],
+                vec![false],
+                None,
+                "HashJoinExecutor".to_owned(),
+                CHUNK_SIZE,
+                None,
+                None,
+                BatchSpillMetrics::for_test(),
+                ShutdownToken::empty(),
+                MemoryContext::none(),
+            )
+            .with_probe_side_in_task(probe_side_in_task),
+        );
+        let mut rows = 0;
+        #[for_await]
+        for chunk in join.execute() {
+            rows += chunk.unwrap().cardinality();
+        }
+        (rows, executed.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    /// An empty build side: the joins whose output can not depend on the probe side do not
+    /// execute it.
+    #[tokio::test]
+    async fn test_empty_build_side_skips_probe_side() {
+        for join_type in [
+            JoinType::Inner,
+            JoinType::LeftSemi,
+            JoinType::RightSemi,
+            JoinType::RightOuter,
+            JoinType::RightAnti,
+        ] {
+            assert_eq!(
+                join_with_build_side(join_type, None, true).await,
+                (0, false),
+                "{join_type:?}"
+            );
+            // Not when the probe side reads from other tasks.
+            assert_eq!(
+                join_with_build_side(join_type, None, false).await,
+                (0, true),
+                "{join_type:?}"
+            );
+        }
+        // The probe rows are output without a match.
+        for join_type in [JoinType::LeftOuter, JoinType::LeftAnti, JoinType::FullOuter] {
+            assert_eq!(
+                join_with_build_side(join_type, None, true).await,
+                (3, true),
+                "{join_type:?}"
+            );
+        }
+    }
+
+    /// Build rows whose keys are all `NULL` match nothing: the inner and semi joins do not execute
+    /// the probe side, the right outer and anti joins output the build rows after reading it.
+    #[tokio::test]
+    async fn test_build_side_without_matching_key() {
+        let build = Some(
+            "i
+             .
+             .",
+        );
+        for join_type in [JoinType::Inner, JoinType::LeftSemi, JoinType::RightSemi] {
+            assert_eq!(
+                join_with_build_side(join_type, build, true).await,
+                (0, false),
+                "{join_type:?}"
+            );
+        }
+        for join_type in [JoinType::RightOuter, JoinType::RightAnti] {
+            assert_eq!(
+                join_with_build_side(join_type, build, true).await,
+                (2, true),
+                "{join_type:?}"
+            );
+        }
+        // A build side with a matching key: the probe side is read.
+        let build = Some(
+            "i
+             2",
+        );
+        assert_eq!(
+            join_with_build_side(JoinType::Inner, build, true).await,
+            (1, true)
+        );
     }
 }

@@ -317,6 +317,15 @@ pub use agg_union_null_branch_rule::*;
 // The operator that gives a streaming job its key is kept (`streaming_preserve_mv_key`).
 mod key_operator_guard;
 pub use key_operator_guard::*;
+// Rules `NullContradictionRule` (`*_fold_null_contradictions`) and `InListCoalesceSimplifyRule`
+// (`*_simplify_in_lists_and_coalesce`).
+mod null_contradiction_rule;
+pub use null_contradiction_rule::*;
+mod in_list_coalesce_simplify_rule;
+pub use in_list_coalesce_simplify_rule::*;
+// Rule `ConstantKeyJoinRule` (`batch_broadcast_cross_join`).
+mod constant_key_join_rule;
+pub use constant_key_join_rule::*;
 mod join_project_transpose_rule;
 pub use join_project_transpose_rule::*;
 mod limit_push_down_rule;
@@ -555,6 +564,9 @@ macro_rules! for_all_rules {
             , { SetOperationFilterMergeRule }
             , { AggGroupKeyReduceRule }
             , { AggUnionNullBranchRule }
+            , { NullContradictionRule }
+            , { InListCoalesceSimplifyRule }
+            , { ConstantKeyJoinRule }
         }
     };
 }

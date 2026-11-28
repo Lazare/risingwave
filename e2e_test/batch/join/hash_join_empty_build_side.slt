@@ -1,0 +1,226 @@
+# A batch hash join whose build (right) side is empty, or holds no key that can match, does not
+# execute its probe (left) side when the probe side runs in the task (a self-join on the key of a
+# table needs no exchange) and the output can not depend on it: inner, left semi, right semi,
+# right outer and right anti joins. The results must be those of every other plan.
+
+statement ok
+SET RW_IMPLICIT_FLUSH TO true;
+
+statement ok
+set batch_enable_lookup_join = false;
+
+statement ok
+create table ebs (id int primary key, v int, k int);
+
+statement ok
+insert into ebs values (1, 10, 1), (2, 20, null), (3, null, 3), (4, -5, null);
+
+statement ok
+set query_mode = local;
+
+# Mode local: an empty build side.
+
+query II rowsort
+select a.id, b.id from ebs a join ebs b on a.id = b.id where b.v < -100;
+----
+
+
+query II rowsort
+select a.id, b.id from ebs a right join (select * from ebs where v < -100) b on a.id = b.id;
+----
+
+
+query I rowsort
+select a.id from ebs a where a.id in (select id from ebs where v < -100);
+----
+
+
+query I rowsort
+select b.id from (select * from ebs where v < -100) b where exists (select 1 from ebs a where a.id = b.id);
+----
+
+
+query I rowsort
+select count(*) from ebs a join ebs b on a.id = b.id where b.v < -100;
+----
+0
+
+query II rowsort
+select a.id, b.id from ebs a left join (select * from ebs where v < -100) b on a.id = b.id;
+----
+1 NULL
+2 NULL
+3 NULL
+4 NULL
+
+query I rowsort
+select a.id from ebs a where not exists (select 1 from ebs b where b.id = a.id and b.v < -100);
+----
+1
+2
+3
+4
+
+query II rowsort
+select a.id, b.id from ebs a full join (select * from ebs where v < -100) b on a.id = b.id;
+----
+1 NULL
+2 NULL
+3 NULL
+4 NULL
+
+# Mode local: build rows whose keys are all NULL match nothing.
+
+query II rowsort
+select a.id, b.id from ebs a join ebs b on a.k = b.k where b.k is null;
+----
+
+
+query II rowsort
+select a.id, b.id from ebs a right join (select * from ebs where k is null) b on a.k = b.k;
+----
+NULL 2
+NULL 4
+
+# Mode local: a build side with a match.
+
+query II rowsort
+select a.id, b.id from ebs a join ebs b on a.id = b.id where b.v < 0;
+----
+4 4
+
+query II rowsort
+select a.id, b.id from ebs a right join (select * from ebs where v < 0) b on a.id = b.id;
+----
+4 4
+
+query I rowsort
+select a.id from ebs a where a.id in (select id from ebs where v < 0);
+----
+4
+
+
+statement ok
+set query_mode = distributed;
+
+# Mode distributed: an empty build side.
+
+query II rowsort
+select a.id, b.id from ebs a join ebs b on a.id = b.id where b.v < -100;
+----
+
+
+query II rowsort
+select a.id, b.id from ebs a right join (select * from ebs where v < -100) b on a.id = b.id;
+----
+
+
+query I rowsort
+select a.id from ebs a where a.id in (select id from ebs where v < -100);
+----
+
+
+query I rowsort
+select b.id from (select * from ebs where v < -100) b where exists (select 1 from ebs a where a.id = b.id);
+----
+
+
+query I rowsort
+select count(*) from ebs a join ebs b on a.id = b.id where b.v < -100;
+----
+0
+
+query II rowsort
+select a.id, b.id from ebs a left join (select * from ebs where v < -100) b on a.id = b.id;
+----
+1 NULL
+2 NULL
+3 NULL
+4 NULL
+
+query I rowsort
+select a.id from ebs a where not exists (select 1 from ebs b where b.id = a.id and b.v < -100);
+----
+1
+2
+3
+4
+
+query II rowsort
+select a.id, b.id from ebs a full join (select * from ebs where v < -100) b on a.id = b.id;
+----
+1 NULL
+2 NULL
+3 NULL
+4 NULL
+
+# Mode distributed: build rows whose keys are all NULL match nothing.
+
+query II rowsort
+select a.id, b.id from ebs a join ebs b on a.k = b.k where b.k is null;
+----
+
+
+query II rowsort
+select a.id, b.id from ebs a right join (select * from ebs where k is null) b on a.k = b.k;
+----
+NULL 2
+NULL 4
+
+# Mode distributed: a build side with a match.
+
+query II rowsort
+select a.id, b.id from ebs a join ebs b on a.id = b.id where b.v < 0;
+----
+4 4
+
+query II rowsort
+select a.id, b.id from ebs a right join (select * from ebs where v < 0) b on a.id = b.id;
+----
+4 4
+
+query I rowsort
+select a.id from ebs a where a.id in (select id from ebs where v < 0);
+----
+4
+
+
+# An empty table on both sides.
+
+statement ok
+delete from ebs;
+
+statement ok
+set query_mode = local;
+
+query II rowsort
+select a.id, b.id from ebs a join ebs b on a.id = b.id;
+----
+
+
+query II rowsort
+select a.id, b.id from ebs a left join ebs b on a.id = b.id;
+----
+
+
+statement ok
+set query_mode = distributed;
+
+query II rowsort
+select a.id, b.id from ebs a join ebs b on a.id = b.id;
+----
+
+
+query II rowsort
+select a.id, b.id from ebs a left join ebs b on a.id = b.id;
+----
+
+
+statement ok
+set query_mode = auto;
+
+statement ok
+set batch_enable_lookup_join = true;
+
+statement ok
+drop table ebs;

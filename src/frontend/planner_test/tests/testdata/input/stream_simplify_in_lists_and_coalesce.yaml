@@ -1,0 +1,117 @@
+# Tests for `streaming_simplify_in_lists_and_coalesce` (`InListCoalesceSimplifyRule`): the conjuncts
+# that restrict the same expression to lists of constants are intersected, and the arguments of
+# `COALESCE` that repeat an earlier argument are removed.
+- id: setup_off
+  sql: |
+    create table t (id int primary key, a varchar, b varchar, c int, d int, n numeric, f double);
+  expected_outputs: []
+- id: setup
+  sql: |
+    set streaming_simplify_in_lists_and_coalesce = true;
+    create table t (id int primary key, a varchar, b varchar, c int, d int, n numeric, f double);
+    create table r (id int primary key, k varchar, v int);
+  expected_outputs: []
+
+# The variable is off by default: nothing changes.
+- name: off by default - two in lists on the same column
+  before: [setup_off]
+  sql: |
+    select id from t where c in (1, 2) and c in (1, 3, 4);
+  expected_outputs:
+  - stream_plan
+
+# Rewritten.
+
+- name: two in lists with one common value become an equality
+  before: [setup]
+  sql: |
+    select id from t where c in (1, 2) and c in (1, 3, 4);
+  expected_outputs:
+  - stream_plan
+- name: two in lists with two common values
+  before: [setup]
+  sql: |
+    select id from t where a in ('x', 'y', 'z') and a in ('w', 'z', 'y');
+  expected_outputs:
+  - stream_plan
+- name: an equality and an in list
+  before: [setup]
+  sql: |
+    select id from t where c = 2 and c in (1, 2) and d > 0;
+  expected_outputs:
+  - stream_plan
+- name: a null item never makes an in list true
+  before: [setup]
+  sql: |
+    select id from t where c in (1, null) and c in (1, 2);
+  expected_outputs:
+  - stream_plan
+- name: lists on an expression
+  before: [setup]
+  sql: |
+    select id from t where upper(a) in ('X', 'Y') and upper(a) in ('Y', 'Z');
+  expected_outputs:
+  - stream_plan
+- name: empty intersection - nothing is read
+  before: [setup]
+  sql: |
+    select id from t where upper(a) in ('X', 'Y') and upper(a) in ('Z');
+  expected_outputs:
+  - stream_plan
+- name: lists in a join condition
+  before: [setup]
+  sql: |
+    select t.id, r.k from t left join r on t.c = r.v and r.k in ('x', 'y') and r.k in ('y', 'z');
+  expected_outputs:
+  - stream_plan
+- name: repeated arguments of coalesce in a projection
+  before: [setup]
+  sql: |
+    select coalesce(a, a, b, a) as x, coalesce(c, c) as y from t;
+  expected_outputs:
+  - stream_plan
+- name: repeated arguments of coalesce in a filter
+  before: [setup]
+  sql: |
+    select id from t where coalesce(a, b, a, b) = 'x';
+  expected_outputs:
+  - stream_plan
+
+# Kept.
+
+- name: kept - lists on different columns
+  before: [setup]
+  sql: |
+    select id from t where c in (1, 2) and d in (2, 3);
+  expected_outputs:
+  - stream_plan
+- name: kept - lists inside an or
+  before: [setup]
+  sql: |
+    select id from t where c in (1, 2) or c in (2, 3);
+  expected_outputs:
+  - stream_plan
+- name: kept - numeric values may be equal with different scales
+  before: [setup]
+  sql: |
+    select id from t where n in (1.0, 2.0) and n in (1.00, 3.0);
+  expected_outputs:
+  - stream_plan
+- name: kept - floating point values
+  before: [setup]
+  sql: |
+    select id from t where f in (1.5, 2.5) and f in (2.5, 3.5);
+  expected_outputs:
+  - stream_plan
+- name: kept - not in is not a list of allowed values
+  before: [setup]
+  sql: |
+    select id from t where c not in (1, 2) and c in (2, 3);
+  expected_outputs:
+  - stream_plan
+- name: kept - coalesce without repeated arguments
+  before: [setup]
+  sql: |
+    select coalesce(a, b) as x from t;
+  expected_outputs:
+  - stream_plan

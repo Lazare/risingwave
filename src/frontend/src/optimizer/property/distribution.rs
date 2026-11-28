@@ -54,7 +54,7 @@ use risingwave_common::catalog::{FieldDisplay, Schema, TableId};
 use risingwave_common::hash::WorkerSlotId;
 use risingwave_pb::batch_plan::ExchangeInfo;
 use risingwave_pb::batch_plan::exchange_info::{
-    ConsistentHashInfo, Distribution as PbDistribution, DistributionMode, HashInfo,
+    BroadcastInfo, ConsistentHashInfo, Distribution as PbDistribution, DistributionMode, HashInfo,
 };
 
 use super::super::plan_node::*;
@@ -147,7 +147,10 @@ impl Distribution {
                 }
                 // TODO: add round robin distribution
                 Distribution::SomeShard => None,
-                Distribution::Broadcast => None,
+                // `batch_broadcast_cross_join`: every consumer task receives every row.
+                Distribution::Broadcast => Some(PbDistribution::BroadcastInfo(BroadcastInfo {
+                    count: output_count,
+                })),
                 Distribution::UpstreamHashShard(key, table_id) => {
                     assert!(
                         !key.is_empty(),
