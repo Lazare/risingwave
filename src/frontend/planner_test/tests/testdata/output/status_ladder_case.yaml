@@ -11,6 +11,16 @@
     create table e (id int primary key, a int, b int, s varchar, ts timestamptz);
     create table f (r int primary key, k int, st varchar, amt int, ts timestamptz);
     create table g (r int primary key, k int);
+- id: setup_share
+  sql: |
+    set streaming_status_ladder_case = true;
+    set streaming_share_identical_subplans = true;
+    set streaming_factor_union_join = true;
+    set batch_status_ladder_case = true;
+    set batch_factor_union_join = true;
+    create table e (id int primary key, a int, b int, s varchar, ts timestamptz);
+    create table f (r int primary key, k int, st varchar, amt int, ts timestamptz);
+    create table g (r int primary key, k int);
 - id: setup_both
   sql: |
     set streaming_status_ladder_case = true;
@@ -329,3 +339,413 @@
         │ └─LogicalScan { table: f, columns: [f.k, f.amt] }
         └─LogicalProject { exprs: [f.k, 'paid':Varchar, f.amt, 2:Int32] }
           └─LogicalScan { table: f, columns: [f.k, f.amt], predicate: (f.amt > 0:Int32) }
+- name: off by default - one aggregation per GROUP BY branch
+  before:
+  - setup_off
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select id as k, 'new' as st, 1 as p from e
+        union all select k, 'active', 2 from f where amt > 0 group by k
+        union all select k, 'closed', 3 from f where st = 'back' group by k
+      ) u
+    ) x where rn = 1;
+  stream_plan: |-
+    StreamMaterialize { columns: [k, st], stream_key: [k], pk_columns: [k], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [e.id, 'new':Varchar] }
+      └─StreamGroupTopN { order: [1:Int32 DESC], limit: 1, offset: 0, group_key: [e.id] }
+        └─StreamExchange { dist: HashShard(e.id) }
+          └─StreamUnion { all: true }
+            ├─StreamExchange { dist: HashShard(e.id, 0:Int32) }
+            │ └─StreamProject { exprs: [e.id, 'new':Varchar, 1:Int32, 0:Int32] }
+            │   └─StreamTableScan { table: e, columns: [e.id], stream_scan_type: SnapshotBackfill, stream_key: [e.id], pk: [id], dist: UpstreamHashShard(e.id) }
+            ├─StreamExchange { dist: HashShard(f.k, 1:Int32) }
+            │ └─StreamProject { exprs: [f.k, 'active':Varchar, 2:Int32, 1:Int32], noop_update_hint: true }
+            │   └─StreamHashAgg { group_key: [f.k], aggs: [count] }
+            │     └─StreamExchange { dist: HashShard(f.k) }
+            │       └─StreamProject { exprs: [f.k, f.r] }
+            │         └─StreamFilter { predicate: (f.amt > 0:Int32) }
+            │           └─StreamTableScan { table: f, columns: [f.k, f.r, f.amt], stream_scan_type: SnapshotBackfill, stream_key: [f.r], pk: [r], dist: UpstreamHashShard(f.r) }
+            └─StreamExchange { dist: HashShard(f.k, 2:Int32) }
+              └─StreamProject { exprs: [f.k, 'closed':Varchar, 3:Int32, 2:Int32], noop_update_hint: true }
+                └─StreamHashAgg { group_key: [f.k], aggs: [count] }
+                  └─StreamExchange { dist: HashShard(f.k) }
+                    └─StreamProject { exprs: [f.k, f.r] }
+                      └─StreamFilter { predicate: (f.st = 'back':Varchar) }
+                        └─StreamTableScan { table: f, columns: [f.k, f.r, f.st], stream_scan_type: SnapshotBackfill, stream_key: [f.r], pk: [r], dist: UpstreamHashShard(f.r) }
+- name: GROUP BY branches over the same table become one aggregation and one CASE
+  before:
+  - setup
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select id as k, 'new' as st, 1 as p from e
+        union all select k, 'active', 2 from f where amt > 0 group by k
+        union all select k, 'closed', 3 from f where st = 'back' group by k
+      ) u
+    ) x where rn = 1;
+  optimized_logical_plan_for_stream: |-
+    LogicalProject { exprs: [e.id, 'new':Varchar] }
+    └─LogicalTopN { order: [1:Int32 DESC], limit: 1, offset: 0, group_key: [e.id] }
+      └─LogicalUnion { all: true }
+        ├─LogicalProject { exprs: [e.id, 'new':Varchar, 1:Int32] }
+        │ └─LogicalScan { table: e, columns: [e.id] }
+        └─LogicalProject { exprs: [f.k, Case((count filter((f.st = 'back':Varchar)) > 0:Int64), 'closed':Varchar, (count filter((f.amt > 0:Int32)) > 0:Int64), 'active':Varchar) as $expr1, Case((count filter((f.st = 'back':Varchar)) > 0:Int64), 3:Int32, (count filter((f.amt > 0:Int32)) > 0:Int64), 2:Int32) as $expr2] }
+          └─LogicalFilter { predicate: ((count filter((f.st = 'back':Varchar)) > 0:Int64) OR (count filter((f.amt > 0:Int32)) > 0:Int64)) }
+            └─LogicalAgg { group_key: [f.k], aggs: [count filter((f.amt > 0:Int32)), count filter((f.st = 'back':Varchar))] }
+              └─LogicalScan { table: f, columns: [f.k, f.st, f.amt], predicate: ((f.amt > 0:Int32) OR (f.st = 'back':Varchar)) }
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchProject { exprs: [e.id, 'new':Varchar] }
+      └─BatchFilter { predicate: (row_number = 1:Int32) }
+        └─BatchProject { exprs: [e.id, 'new':Varchar, row_number] }
+          └─BatchOverWindow { window_functions: [row_number() OVER(PARTITION BY e.id ORDER BY 1:Int32 DESC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)] }
+            └─BatchExchange { order: [e.id ASC, 1:Int32 DESC], dist: HashShard(e.id) }
+              └─BatchSort { order: [e.id ASC, 1:Int32 DESC] }
+                └─BatchUnion { all: true }
+                  ├─BatchExchange { order: [], dist: Single }
+                  │ └─BatchProject { exprs: [e.id, 'new':Varchar, 1:Int32] }
+                  │   └─BatchScan { table: e, columns: [e.id], distribution: UpstreamHashShard(e.id) }
+                  └─BatchExchange { order: [], dist: Single }
+                    └─BatchProject { exprs: [f.k, Case((count filter((f.st = 'back':Varchar)) > 0:Int64), 'closed':Varchar, (count filter((f.amt > 0:Int32)) > 0:Int64), 'active':Varchar) as $expr1, Case((count filter((f.st = 'back':Varchar)) > 0:Int64), 3:Int32, (count filter((f.amt > 0:Int32)) > 0:Int64), 2:Int32) as $expr2] }
+                      └─BatchFilter { predicate: ((count filter((f.st = 'back':Varchar)) > 0:Int64) OR (count filter((f.amt > 0:Int32)) > 0:Int64)) }
+                        └─BatchHashAgg { group_key: [f.k], aggs: [count filter((f.amt > 0:Int32)), count filter((f.st = 'back':Varchar))] }
+                          └─BatchExchange { order: [], dist: HashShard(f.k) }
+                            └─BatchFilter { predicate: ((f.amt > 0:Int32) OR (f.st = 'back':Varchar)) }
+                              └─BatchScan { table: f, columns: [f.k, f.st, f.amt], distribution: SomeShard }
+  stream_plan: |-
+    StreamMaterialize { columns: [k, st], stream_key: [k], pk_columns: [k], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [e.id, 'new':Varchar] }
+      └─StreamGroupTopN { order: [1:Int32 DESC], limit: 1, offset: 0, group_key: [e.id] }
+        └─StreamExchange { dist: HashShard(e.id) }
+          └─StreamUnion { all: true }
+            ├─StreamExchange { dist: HashShard(e.id, 0:Int32) }
+            │ └─StreamProject { exprs: [e.id, 'new':Varchar, 1:Int32, 0:Int32] }
+            │   └─StreamTableScan { table: e, columns: [e.id], stream_scan_type: SnapshotBackfill, stream_key: [e.id], pk: [id], dist: UpstreamHashShard(e.id) }
+            └─StreamExchange { dist: HashShard(f.k, 1:Int32) }
+              └─StreamProject { exprs: [f.k, Case((count filter((f.st = 'back':Varchar)) > 0:Int64), 'closed':Varchar, (count filter((f.amt > 0:Int32)) > 0:Int64), 'active':Varchar) as $expr1, Case((count filter((f.st = 'back':Varchar)) > 0:Int64), 3:Int32, (count filter((f.amt > 0:Int32)) > 0:Int64), 2:Int32) as $expr2, 1:Int32] }
+                └─StreamFilter { predicate: ((count filter((f.st = 'back':Varchar)) > 0:Int64) OR (count filter((f.amt > 0:Int32)) > 0:Int64)) }
+                  └─StreamProject { exprs: [f.k, count filter((f.amt > 0:Int32)), count filter((f.st = 'back':Varchar))] }
+                    └─StreamHashAgg { group_key: [f.k], aggs: [count filter((f.amt > 0:Int32)), count filter((f.st = 'back':Varchar)), count] }
+                      └─StreamExchange { dist: HashShard(f.k) }
+                        └─StreamFilter { predicate: ((f.amt > 0:Int32) OR (f.st = 'back':Varchar)) }
+                          └─StreamTableScan { table: f, columns: [f.k, f.st, f.amt, f.r], stream_scan_type: SnapshotBackfill, stream_key: [f.r], pk: [r], dist: UpstreamHashShard(f.r) }
+- name: every branch is a GROUP BY of the same table by the key - the top-n is removed
+  before:
+  - setup
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select k, 'seen' as st, 1 as p from f group by k
+        union all select k, 'active', 2 from f where amt > 0 group by k
+        union all select k, 'closed', 3 from f where st = 'back' and amt is not null group by k
+      ) u
+    ) x where rn = 1;
+  optimized_logical_plan_for_stream: |-
+    LogicalProject { exprs: [f.k, Case((count filter((f.st = 'back':Varchar) AND IsNotNull(f.amt)) > 0:Int64), 'closed':Varchar, (count filter((f.amt > 0:Int32)) > 0:Int64), 'active':Varchar, 'seen':Varchar) as $expr1] }
+    └─LogicalAgg { group_key: [f.k], aggs: [count filter((f.amt > 0:Int32)), count filter((f.st = 'back':Varchar) AND IsNotNull(f.amt))] }
+      └─LogicalScan { table: f, columns: [f.k, f.st, f.amt] }
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchProject { exprs: [f.k, Case((count filter((f.st = 'back':Varchar) AND IsNotNull(f.amt)) > 0:Int64), 'closed':Varchar, (count filter((f.amt > 0:Int32)) > 0:Int64), 'active':Varchar, 'seen':Varchar) as $expr1] }
+      └─BatchHashAgg { group_key: [f.k], aggs: [count filter((f.amt > 0:Int32)), count filter((f.st = 'back':Varchar) AND IsNotNull(f.amt))] }
+        └─BatchExchange { order: [], dist: HashShard(f.k) }
+          └─BatchScan { table: f, columns: [f.k, f.st, f.amt], distribution: SomeShard }
+  stream_plan: |-
+    StreamMaterialize { columns: [k, st], stream_key: [k], pk_columns: [k], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [f.k, Case((count filter((f.st = 'back':Varchar) AND IsNotNull(f.amt)) > 0:Int64), 'closed':Varchar, (count filter((f.amt > 0:Int32)) > 0:Int64), 'active':Varchar, 'seen':Varchar) as $expr1] }
+      └─StreamHashAgg { group_key: [f.k], aggs: [count filter((f.amt > 0:Int32)), count filter((f.st = 'back':Varchar) AND IsNotNull(f.amt)), count] }
+        └─StreamExchange { dist: HashShard(f.k) }
+          └─StreamTableScan { table: f, columns: [f.k, f.st, f.amt, f.r], stream_scan_type: SnapshotBackfill, stream_key: [f.r], pk: [r], dist: UpstreamHashShard(f.r) }
+- name: GROUP BY branches with conditions on their aggregates
+  before:
+  - setup
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select k, 'neg' as st, 1 as p from f where amt < 0 group by k having count(*) >= 1
+        union all select k, 'some', 2 from f where st = 'back' group by k having max(amt) > 0
+        union all select k, 'big', 3 from f group by k having sum(amt) > 10
+      ) u
+    ) x where rn = 1;
+  optimized_logical_plan_for_stream: |-
+    LogicalProject { exprs: [f.k, Case((sum(f.amt) > 10:Int32), 'big':Varchar, ((count filter((f.st = 'back':Varchar)) > 0:Int64) AND (max(f.amt) filter((f.st = 'back':Varchar)) > 0:Int32)), 'some':Varchar, ((count filter((f.amt < 0:Int32)) > 0:Int64) AND (count filter((f.amt < 0:Int32)) >= 1:Int32)), 'neg':Varchar) as $expr1] }
+    └─LogicalFilter { predicate: (((sum(f.amt) > 10:Int32) OR ((count filter((f.st = 'back':Varchar)) > 0:Int64) AND (max(f.amt) filter((f.st = 'back':Varchar)) > 0:Int32))) OR ((count filter((f.amt < 0:Int32)) > 0:Int64) AND (count filter((f.amt < 0:Int32)) >= 1:Int32))) }
+      └─LogicalAgg { group_key: [f.k], aggs: [count filter((f.amt < 0:Int32)), count filter((f.st = 'back':Varchar)), max(f.amt) filter((f.st = 'back':Varchar)), sum(f.amt)] }
+        └─LogicalScan { table: f, columns: [f.k, f.st, f.amt] }
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchProject { exprs: [f.k, Case((sum(f.amt) > 10:Int32), 'big':Varchar, ((count filter((f.st = 'back':Varchar)) > 0:Int64) AND (max(f.amt) filter((f.st = 'back':Varchar)) > 0:Int32)), 'some':Varchar, ((count filter((f.amt < 0:Int32)) > 0:Int64) AND (count filter((f.amt < 0:Int32)) >= 1:Int32)), 'neg':Varchar) as $expr1] }
+      └─BatchFilter { predicate: (((sum(f.amt) > 10:Int32) OR ((count filter((f.st = 'back':Varchar)) > 0:Int64) AND (max(f.amt) filter((f.st = 'back':Varchar)) > 0:Int32))) OR ((count filter((f.amt < 0:Int32)) > 0:Int64) AND (count filter((f.amt < 0:Int32)) >= 1:Int32))) }
+        └─BatchHashAgg { group_key: [f.k], aggs: [count filter((f.amt < 0:Int32)), count filter((f.st = 'back':Varchar)), max(f.amt) filter((f.st = 'back':Varchar)), sum(f.amt)] }
+          └─BatchExchange { order: [], dist: HashShard(f.k) }
+            └─BatchScan { table: f, columns: [f.k, f.st, f.amt], distribution: SomeShard }
+- name: SELECT DISTINCT branches over the same table
+  before:
+  - setup
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select distinct k, 'active' as st, 2 as p from f where amt > 0
+        union all select distinct k, 'closed', 3 from f where st = 'back'
+        union all select k, 'held', 4 from g
+      ) u
+    ) x where rn = 1;
+  optimized_logical_plan_for_stream: |-
+    LogicalProject { exprs: [f.k, $expr1] }
+    └─LogicalTopN { order: [$expr2 DESC], limit: 1, offset: 0, group_key: [f.k] }
+      └─LogicalUnion { all: true }
+        ├─LogicalProject { exprs: [f.k, Case((count filter((f.st = 'back':Varchar)) > 0:Int64), 'closed':Varchar, (count filter((f.amt > 0:Int32)) > 0:Int64), 'active':Varchar) as $expr1, Case((count filter((f.st = 'back':Varchar)) > 0:Int64), 3:Int32, (count filter((f.amt > 0:Int32)) > 0:Int64), 2:Int32) as $expr2] }
+        │ └─LogicalFilter { predicate: ((count filter((f.st = 'back':Varchar)) > 0:Int64) OR (count filter((f.amt > 0:Int32)) > 0:Int64)) }
+        │   └─LogicalAgg { group_key: [f.k], aggs: [count filter((f.amt > 0:Int32)), count filter((f.st = 'back':Varchar))] }
+        │     └─LogicalScan { table: f, columns: [f.k, f.st, f.amt], predicate: ((f.amt > 0:Int32) OR (f.st = 'back':Varchar)) }
+        └─LogicalProject { exprs: [g.k, 'held':Varchar, 4:Int32] }
+          └─LogicalScan { table: g, columns: [g.k] }
+- name: GROUP BY branches by the same expression
+  before:
+  - setup
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select k % 3 as k, 'odd' as st, 1 as p from f where amt % 2 = 1 group by k % 3
+        union all select k % 3, 'back', 2 from f where st = 'back' group by k % 3
+      ) u
+    ) x where rn = 1;
+  optimized_logical_plan_for_stream: |-
+    LogicalProject { exprs: [$expr1, Case((count filter((f.st = 'back':Varchar)) > 0:Int64), 'back':Varchar, (count filter(((f.amt % 2:Int32) = 1:Int32)) > 0:Int64), 'odd':Varchar) as $expr2] }
+    └─LogicalFilter { predicate: ((count filter((f.st = 'back':Varchar)) > 0:Int64) OR (count filter(((f.amt % 2:Int32) = 1:Int32)) > 0:Int64)) }
+      └─LogicalAgg { group_key: [$expr1], aggs: [count filter(((f.amt % 2:Int32) = 1:Int32)), count filter((f.st = 'back':Varchar))] }
+        └─LogicalProject { exprs: [(f.k % 3:Int32) as $expr1, f.st, f.amt] }
+          └─LogicalScan { table: f, columns: [f.k, f.st, f.amt], predicate: (((f.amt % 2:Int32) = 1:Int32) OR (f.st = 'back':Varchar)) }
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchProject { exprs: [$expr1, Case((count filter((f.st = 'back':Varchar)) > 0:Int64), 'back':Varchar, (count filter(((f.amt % 2:Int32) = 1:Int32)) > 0:Int64), 'odd':Varchar) as $expr2] }
+      └─BatchFilter { predicate: ((count filter((f.st = 'back':Varchar)) > 0:Int64) OR (count filter(((f.amt % 2:Int32) = 1:Int32)) > 0:Int64)) }
+        └─BatchHashAgg { group_key: [$expr1], aggs: [count filter(((f.amt % 2:Int32) = 1:Int32)), count filter((f.st = 'back':Varchar))] }
+          └─BatchExchange { order: [], dist: HashShard($expr1) }
+            └─BatchProject { exprs: [(f.k % 3:Int32) as $expr1, f.st, f.amt] }
+              └─BatchFilter { predicate: (((f.amt % 2:Int32) = 1:Int32) OR (f.st = 'back':Varchar)) }
+                └─BatchScan { table: f, columns: [f.k, f.st, f.amt], distribution: SomeShard }
+- name: GROUP BY branches over the same shared join
+  before:
+  - setup
+  sql: |
+    with c as (select f.k, f.amt, f.st from f join g on f.k = g.k)
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select k, 'open' as st, 1 as p from c where amt > 0 group by k
+        union all select k, 'back', 2 from c where st = 'back' group by k
+        union all select id, 'new', 0 from e
+      ) u
+    ) x where rn = 1;
+  optimized_logical_plan_for_stream: |-
+    LogicalProject { exprs: [f.k, $expr1] }
+    └─LogicalTopN { order: [$expr2 DESC], limit: 1, offset: 0, group_key: [f.k] }
+      └─LogicalUnion { all: true }
+        ├─LogicalProject { exprs: [f.k, Case((count filter((f.st = 'back':Varchar)) > 0:Int64), 'back':Varchar, (count filter((f.amt > 0:Int32)) > 0:Int64), 'open':Varchar) as $expr1, Case((count filter((f.st = 'back':Varchar)) > 0:Int64), 2:Int32, (count filter((f.amt > 0:Int32)) > 0:Int64), 1:Int32) as $expr2] }
+        │ └─LogicalFilter { predicate: ((count filter((f.st = 'back':Varchar)) > 0:Int64) OR (count filter((f.amt > 0:Int32)) > 0:Int64)) }
+        │   └─LogicalAgg { group_key: [f.k], aggs: [count filter((f.amt > 0:Int32)), count filter((f.st = 'back':Varchar))] }
+        │     └─LogicalJoin { type: Inner, on: (f.k = g.k), output: [f.k, f.amt, f.st] }
+        │       ├─LogicalScan { table: f, columns: [f.k, f.st, f.amt], predicate: ((f.amt > 0:Int32) OR (f.st = 'back':Varchar)) }
+        │       └─LogicalScan { table: g, columns: [g.k] }
+        └─LogicalProject { exprs: [e.id, 'new':Varchar, 0:Int32] }
+          └─LogicalScan { table: e, columns: [e.id] }
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchProject { exprs: [f.k, $expr1] }
+      └─BatchFilter { predicate: (row_number = 1:Int32) }
+        └─BatchProject { exprs: [f.k, $expr1, row_number] }
+          └─BatchOverWindow { window_functions: [row_number() OVER(PARTITION BY f.k ORDER BY $expr2 DESC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)] }
+            └─BatchExchange { order: [f.k ASC, $expr2 DESC], dist: HashShard(f.k) }
+              └─BatchSort { order: [f.k ASC, $expr2 DESC] }
+                └─BatchUnion { all: true }
+                  ├─BatchExchange { order: [], dist: Single }
+                  │ └─BatchProject { exprs: [f.k, Case((count filter((f.st = 'back':Varchar)) > 0:Int64), 'back':Varchar, (count filter((f.amt > 0:Int32)) > 0:Int64), 'open':Varchar) as $expr1, Case((count filter((f.st = 'back':Varchar)) > 0:Int64), 2:Int32, (count filter((f.amt > 0:Int32)) > 0:Int64), 1:Int32) as $expr2] }
+                  │   └─BatchFilter { predicate: ((count filter((f.st = 'back':Varchar)) > 0:Int64) OR (count filter((f.amt > 0:Int32)) > 0:Int64)) }
+                  │     └─BatchHashAgg { group_key: [f.k], aggs: [count filter((f.amt > 0:Int32)), count filter((f.st = 'back':Varchar))] }
+                  │       └─BatchHashJoin { type: Inner, predicate: f.k = g.k, output: [f.k, f.amt, f.st] }
+                  │         ├─BatchExchange { order: [], dist: HashShard(f.k) }
+                  │         │ └─BatchFilter { predicate: ((f.amt > 0:Int32) OR (f.st = 'back':Varchar)) }
+                  │         │   └─BatchScan { table: f, columns: [f.k, f.st, f.amt], distribution: SomeShard }
+                  │         └─BatchExchange { order: [], dist: HashShard(g.k) }
+                  │           └─BatchScan { table: g, columns: [g.k], distribution: SomeShard }
+                  └─BatchExchange { order: [], dist: Single }
+                    └─BatchProject { exprs: [e.id, 'new':Varchar, 0:Int32] }
+                      └─BatchScan { table: e, columns: [e.id], distribution: UpstreamHashShard(e.id) }
+- name: GROUP BY branches over copies of the same join - merged after the sharing of widened copies
+  before:
+  - setup_share
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select f.k, 'matched' as st, 1 as p from f join g on f.k = g.k where g.r > 2 group by f.k
+        union all select f.k, 'paid', 2 from f join g on f.k = g.k where f.amt > 0 group by f.k
+      ) u
+    ) x where rn = 1;
+  optimized_logical_plan_for_stream: |-
+    LogicalProject { exprs: [f.k, Case((count filter((f.amt > 0:Int32)) > 0:Int64), 'paid':Varchar, (count filter((g.r > 2:Int32)) > 0:Int64), 'matched':Varchar) as $expr1] }
+    └─LogicalFilter { predicate: ((count filter((f.amt > 0:Int32)) > 0:Int64) OR (count filter((g.r > 2:Int32)) > 0:Int64)) }
+      └─LogicalAgg { group_key: [f.k], aggs: [count filter((g.r > 2:Int32)), count filter((f.amt > 0:Int32))] }
+        └─LogicalJoin { type: Inner, on: (f.k = g.k) AND ((g.r > 2:Int32) OR (f.amt > 0:Int32)), output: [f.k, f.amt, g.r] }
+          ├─LogicalScan { table: f, columns: [f.k, f.amt] }
+          └─LogicalScan { table: g, columns: [g.r, g.k] }
+  stream_plan: |-
+    StreamMaterialize { columns: [k, st], stream_key: [k], pk_columns: [k], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [f.k, Case((count filter((f.amt > 0:Int32)) > 0:Int64), 'paid':Varchar, (count filter((g.r > 2:Int32)) > 0:Int64), 'matched':Varchar) as $expr1] }
+      └─StreamFilter { predicate: ((count filter((f.amt > 0:Int32)) > 0:Int64) OR (count filter((g.r > 2:Int32)) > 0:Int64)) }
+        └─StreamProject { exprs: [f.k, count filter((g.r > 2:Int32)), count filter((f.amt > 0:Int32))] }
+          └─StreamHashAgg { group_key: [f.k], aggs: [count filter((g.r > 2:Int32)), count filter((f.amt > 0:Int32)), count] }
+            └─StreamProject { exprs: [f.k, f.amt, g.r, f.r] }
+              └─StreamFilter { predicate: ((g.r > 2:Int32) OR (f.amt > 0:Int32)) }
+                └─StreamHashJoin { type: Inner, predicate: f.k = g.k, output: all }
+                  ├─StreamExchange { dist: HashShard(f.k) }
+                  │ └─StreamTableScan { table: f, columns: [f.k, f.amt, f.r], stream_scan_type: SnapshotBackfill, stream_key: [f.r], pk: [r], dist: UpstreamHashShard(f.r) }
+                  └─StreamExchange { dist: HashShard(g.k) }
+                    └─StreamTableScan { table: g, columns: [g.r, g.k], stream_scan_type: SnapshotBackfill, stream_key: [g.r], pk: [r], dist: UpstreamHashShard(g.r) }
+- name: branches that join the same tables - one join after the factoring of the joins
+  before:
+  - setup_share
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select f.k, 'matched' as st, 1 as p from f join g on f.k = g.k where g.r > 2
+        union all select f.k, 'paid', 2 from f join g on f.k = g.k where f.amt > 0
+        union all select id, 'new', 0 from e
+      ) u
+    ) x where rn = 1;
+  optimized_logical_plan_for_stream: |-
+    LogicalProject { exprs: [f.k, $expr1] }
+    └─LogicalTopN { order: [$expr2 DESC], limit: 1, offset: 0, group_key: [f.k] }
+      └─LogicalUnion { all: true }
+        ├─LogicalProject { exprs: [f.k, Case((f.amt > 0:Int32), 'paid':Varchar, (g.r > 2:Int32), 'matched':Varchar) as $expr1, Case((f.amt > 0:Int32), 2:Int32, (g.r > 2:Int32), 1:Int32) as $expr2] }
+        │ └─LogicalJoin { type: Inner, on: (f.k = g.k) AND ((g.r > 2:Int32) OR (f.amt > 0:Int32)) AND ((f.amt > 0:Int32) OR (g.r > 2:Int32)), output: [f.k, f.amt, g.r] }
+        │   ├─LogicalScan { table: f, columns: [f.k, f.amt] }
+        │   └─LogicalScan { table: g, columns: [g.r, g.k] }
+        └─LogicalProject { exprs: [e.id, 'new':Varchar, 0:Int32] }
+          └─LogicalScan { table: e, columns: [e.id] }
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchProject { exprs: [e.id, 'new':Varchar] }
+      └─BatchFilter { predicate: (row_number = 1:Int32) }
+        └─BatchProject { exprs: [e.id, 'new':Varchar, row_number] }
+          └─BatchOverWindow { window_functions: [row_number() OVER(PARTITION BY e.id ORDER BY 0:Int32 DESC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)] }
+            └─BatchExchange { order: [e.id ASC, 0:Int32 DESC], dist: HashShard(e.id) }
+              └─BatchSort { order: [e.id ASC, 0:Int32 DESC] }
+                └─BatchUnion { all: true }
+                  ├─BatchExchange { order: [], dist: Single }
+                  │ └─BatchProject { exprs: [e.id, 'new':Varchar, 0:Int32] }
+                  │   └─BatchScan { table: e, columns: [e.id], distribution: UpstreamHashShard(e.id) }
+                  └─BatchExchange { order: [], dist: Single }
+                    └─BatchProject { exprs: [f.k, Case((0:Int32 = 0:Int32), 'matched':Varchar, (0:Int32 = 1:Int32), 'paid':Varchar) as $expr2, Case((0:Int32 = 0:Int32), 1:Int32, (0:Int32 = 1:Int32), 2:Int32) as $expr3] }
+                      └─BatchHashJoin { type: Inner, predicate: g.k = f.k AND ((0:Int32 = 0:Int32) OR ((0:Int32 = 1:Int32) AND $expr1)), output: [0:Int32, f.k] }
+                        ├─BatchExchange { order: [], dist: HashShard(g.k) }
+                        │ └─BatchUnion { all: true }
+                        │   ├─BatchExchange { order: [], dist: Single }
+                        │   │ └─BatchProject { exprs: [g.k, 0:Int32] }
+                        │   │   └─BatchScan { table: g, columns: [g.k], scan_ranges: [g.r > Int32(2)], distribution: SomeShard }
+                        │   └─BatchExchange { order: [], dist: Single }
+                        │     └─BatchProject { exprs: [g.k, 1:Int32] }
+                        │       └─BatchScan { table: g, columns: [g.k], distribution: SomeShard }
+                        └─BatchExchange { order: [], dist: HashShard(f.k) }
+                          └─BatchProject { exprs: [f.k, f.k, (f.amt > 0:Int32) as $expr1] }
+                            └─BatchScan { table: f, columns: [f.k, f.amt], distribution: SomeShard }
+  stream_plan: |-
+    StreamMaterialize { columns: [k, st], stream_key: [k], pk_columns: [k], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [f.k, $expr1] }
+      └─StreamGroupTopN { order: [$expr2 DESC], limit: 1, offset: 0, group_key: [f.k] }
+        └─StreamExchange { dist: HashShard(f.k) }
+          └─StreamUnion { all: true }
+            ├─StreamExchange { dist: HashShard(f.r, g.r, f.k, 0:Int32) }
+            │ └─StreamProject { exprs: [f.k, Case((f.amt > 0:Int32), 'paid':Varchar, (g.r > 2:Int32), 'matched':Varchar) as $expr1, Case((f.amt > 0:Int32), 2:Int32, (g.r > 2:Int32), 1:Int32) as $expr2, f.r, g.r, f.k, 0:Int32] }
+            │   └─StreamFilter { predicate: ((g.r > 2:Int32) OR (f.amt > 0:Int32)) AND ((f.amt > 0:Int32) OR (g.r > 2:Int32)) }
+            │     └─StreamHashJoin { type: Inner, predicate: f.k = g.k, output: all }
+            │       ├─StreamExchange { dist: HashShard(f.k) }
+            │       │ └─StreamTableScan { table: f, columns: [f.k, f.amt, f.r], stream_scan_type: SnapshotBackfill, stream_key: [f.r], pk: [r], dist: UpstreamHashShard(f.r) }
+            │       └─StreamExchange { dist: HashShard(g.k) }
+            │         └─StreamTableScan { table: g, columns: [g.r, g.k], stream_scan_type: SnapshotBackfill, stream_key: [g.r], pk: [r], dist: UpstreamHashShard(g.r) }
+            └─StreamExchange { dist: HashShard(e.id, null:Int32, null:Int32, 1:Int32) }
+              └─StreamProject { exprs: [e.id, 'new':Varchar, 0:Int32, e.id, null:Int32, null:Int32, 1:Int32] }
+                └─StreamTableScan { table: e, columns: [e.id], stream_scan_type: SnapshotBackfill, stream_key: [e.id], pk: [id], dist: UpstreamHashShard(e.id) }
+- name: kept - GROUP BY branches with different group keys
+  before:
+  - setup
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select k, 'active' as st, 2 as p from f where amt > 0 group by k
+        union all select k, 'closed', 3 from f where st = 'back' group by k, st
+      ) u
+    ) x where rn = 1;
+  optimized_logical_plan_for_stream: |-
+    LogicalProject { exprs: [f.k, 'active':Varchar] }
+    └─LogicalTopN { order: [2:Int32 DESC], limit: 1, offset: 0, group_key: [f.k] }
+      └─LogicalUnion { all: true }
+        ├─LogicalProject { exprs: [f.k, 'active':Varchar, 2:Int32] }
+        │ └─LogicalAgg { group_key: [f.k], aggs: [] }
+        │   └─LogicalScan { table: f, output_columns: [f.k], required_columns: [f.k, f.amt], predicate: (f.amt > 0:Int32) }
+        └─LogicalProject { exprs: [f.k, 'closed':Varchar, 3:Int32] }
+          └─LogicalAgg { group_key: [f.k, f.st], aggs: [] }
+            └─LogicalScan { table: f, columns: [f.k, f.st], predicate: (f.st = 'back':Varchar) }
+- name: kept - a GROUP BY branch with a distinct aggregate
+  before:
+  - setup
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select k, 'active' as st, 2 as p from f where amt > 0 group by k
+        union all select k, 'many', 3 from f group by k having count(distinct amt) > 1
+      ) u
+    ) x where rn = 1;
+  optimized_logical_plan_for_stream: |-
+    LogicalProject { exprs: [f.k, 'active':Varchar] }
+    └─LogicalTopN { order: [2:Int32 DESC], limit: 1, offset: 0, group_key: [f.k] }
+      └─LogicalUnion { all: true }
+        ├─LogicalProject { exprs: [f.k, 'active':Varchar, 2:Int32] }
+        │ └─LogicalAgg { group_key: [f.k], aggs: [] }
+        │   └─LogicalScan { table: f, output_columns: [f.k], required_columns: [f.k, f.amt], predicate: (f.amt > 0:Int32) }
+        └─LogicalProject { exprs: [f.k, 'many':Varchar, 3:Int32] }
+          └─LogicalFilter { predicate: (count(distinct f.amt) > 1:Int32) }
+            └─LogicalAgg { group_key: [f.k], aggs: [count(distinct f.amt)] }
+              └─LogicalScan { table: f, columns: [f.k, f.amt] }
+- name: kept - GROUP BY branches over different tables
+  before:
+  - setup
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select k, 'active' as st, 2 as p from f where amt > 0 group by k
+        union all select k, 'held', 3 from g where r > 1 group by k
+      ) u
+    ) x where rn = 1;
+  optimized_logical_plan_for_stream: |-
+    LogicalProject { exprs: [f.k, 'active':Varchar] }
+    └─LogicalTopN { order: [2:Int32 DESC], limit: 1, offset: 0, group_key: [f.k] }
+      └─LogicalUnion { all: true }
+        ├─LogicalProject { exprs: [f.k, 'active':Varchar, 2:Int32] }
+        │ └─LogicalAgg { group_key: [f.k], aggs: [] }
+        │   └─LogicalScan { table: f, output_columns: [f.k], required_columns: [f.k, f.amt], predicate: (f.amt > 0:Int32) }
+        └─LogicalProject { exprs: [g.k, 'held':Varchar, 3:Int32] }
+          └─LogicalAgg { group_key: [g.k], aggs: [] }
+            └─LogicalScan { table: g, output_columns: [g.k], required_columns: [g.k, g.r], predicate: (g.r > 1:Int32) }
+- name: kept - a GROUP BY branch with now() in streaming
+  before:
+  - setup
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select k, 'active' as st, 2 as p from f where amt > 0 group by k
+        union all select k, 'late', 3 from f where ts < now() group by k
+      ) u
+    ) x where rn = 1;
+  optimized_logical_plan_for_stream: |-
+    LogicalProject { exprs: [f.k, 'active':Varchar] }
+    └─LogicalTopN { order: [2:Int32 DESC], limit: 1, offset: 0, group_key: [f.k] }
+      └─LogicalUnion { all: true }
+        ├─LogicalProject { exprs: [f.k, 'active':Varchar, 2:Int32] }
+        │ └─LogicalAgg { group_key: [f.k], aggs: [] }
+        │   └─LogicalScan { table: f, output_columns: [f.k], required_columns: [f.k, f.amt], predicate: (f.amt > 0:Int32) }
+        └─LogicalProject { exprs: [f.k, 'late':Varchar, 3:Int32] }
+          └─LogicalAgg { group_key: [f.k], aggs: [] }
+            └─LogicalJoin { type: LeftSemi, on: (f.ts < now), output: [f.k] }
+              ├─LogicalScan { table: f, columns: [f.k, f.ts] }
+              └─LogicalNow { output: [now] }
