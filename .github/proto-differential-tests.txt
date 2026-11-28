@@ -1,1 +1,2 @@
-# Differential tests of the branch proto/plan-reduction-agg-join (none in this run).
+aggjoinbatch batch/push_agg_below_join 60
+aggjoinstream streaming/push_agg_below_join 60

@@ -23,12 +23,12 @@ use super::agg_join_transpose_rule::{
 };
 use super::prelude::{PlanRef, *};
 use super::unique_key_simplify_rule::{agg_over_one_row, unique_keys_of};
-use crate::expr::{Expr, ExprImpl, InputRef};
+use crate::expr::{ExprImpl, InputRef};
 use crate::optimizer::cardinality_learning::{
     CARDINALITY_LEARNING_STORE, RatioKind, learned_ratio,
 };
 use crate::optimizer::plan_node::generic::{Agg, GenericPlanRef};
-use crate::optimizer::plan_node::{LogicalProject, LogicalUnion, PlanTreeNodeUnary};
+use crate::optimizer::plan_node::{LogicalProject, LogicalUnion, PlanTreeNode, PlanTreeNodeUnary};
 use crate::utils::IndexSet;
 
 /// Aggregates each branch of a `UNION ALL` partially before the union, and finishes the

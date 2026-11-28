@@ -26,7 +26,8 @@ own rules.
 | 1 | Elimination of an unused outer join on a unique key | done (prototype) |
 | 2 | Elimination of an aggregation, `DISTINCT` or top-n on a key | done (prototype) |
 | 3 | Elimination of a self-join on a key | in progress: repeated lookups of a table done on the branch `proto/streaming-merge-repeated-lookups`, lookups nested in trees of joins and semi or anti joins answered by a carried row done on the branch `proto/plan-reduction-flat-lookups`, aggregations next |
-| 5 | Aggregation pushed below a join onto the unique side | selected, not started |
+| 5 | Aggregation pushed below a join onto the unique side | done (prototype, branch `proto/plan-reduction-agg-join`): exact form for streaming and batch (`streaming_push_agg_below_join`, `batch_push_agg_below_join`), partial form for batch chosen with the learned group ratios (`batch_partial_agg_below_join`), see 5 |
+| UA | Batch: partial aggregation in the branches of a `UNION ALL` (`batch_partial_agg_into_union`) | done (prototype, branch `proto/plan-reduction-agg-join`), see "UA" below |
 | 6 | Merge of two stacked aggregations | done (prototype, branch `proto/plan-reduction-shared-aggs`): stacked aggregations, through a `UNION ALL` too, and a dedup below a distinct count; a dedup below a top-1 or a semi join not done (see 6) |
 | 7 | Join common to the branches of a `UNION ALL` joined once above the union | done (prototype, branch of idea 3); derived joined side, several joins and semi or anti joins above the join on the branch `proto/plan-reduction-union-derived` |
 | 8 | Aggregate of a constant over a group | done (prototype, branch of idea 3) |
@@ -761,14 +762,86 @@ c.name` becomes `(SELECT cust_id, sum(amt) FROM f GROUP BY cust_id) LEFT JOIN c 
 
 - No operator is removed, but the state of the join drops from one row per fact to one row per
   group, and an update of the dimension becomes one change instead of one per fact.
-- Sound when the join columns of the fact side and the key of the dimension side are within the
-  group key, and every aggregated column comes from the fact side.
-- The general form (partial aggregation and scaling by a count) is rejected: it adds an operator
-  and can add state.
-- Yan and Larson, "Eager Aggregation and Lazy Aggregation", VLDB 1995; Materialize
-  (`reduction_pushdown`).
-- Status on 2026-11-25: still not started. The branch of 6 left it out: it moves an aggregation
-  rather than removing one, and needs the unique keys of the join sides (idea 4) at the same place.
+- Yan and Larson, "Eager Aggregation and Lazy Aggregation", VLDB 1995; Calcite
+  `AggregateJoinTransposeRule`; PostgreSQL eager aggregation (`setup_eager_aggregation`);
+  Materialize (`reduction_pushdown`).
+- Status on 2026-11-28: done on the branch `proto/plan-reduction-agg-join`, rule
+  `AggJoinTransposeRule` (`optimizer/rule/agg_join_transpose_rule.rs`).
+
+**Exact form** (`streaming_push_agg_below_join`, `batch_push_agg_below_join`, default false). `A` is
+the aggregated side, `B` the other one.
+
+```text
+Agg(group f.k, d.name: sum(f.x), count(*))       Project(f.k, d.name, s, n)
+└─Join(LeftOuter, f.k = d.id)              =>    └─Join(LeftOuter, f.k = d.id)
+  ├─f                                              ├─Agg(group f.k: s = sum(f.x), n = count(*))
+  └─d, with the key (id)                           │ └─f
+                                                   └─d
+```
+
+- Join: inner, or outer with `A` preserved (left join with `A` on the left, right join with `A` on
+  the right). An unmatched row of `A` is then in the output once, padded with `NULL`s, before and
+  after. Not full, semi, anti, as-of or temporal joins.
+- `B` is unique on the columns that the condition binds (`is_unique_on_compared_columns`, the
+  unique keys of idea 4): a row of `A` meets at most one row of `B`.
+- The new group key is the group keys from `A` and the join columns of `A`. Every join column of
+  `A` is a group key of the aggregation, or (inner join only) is compared with `=` or
+  `IS NOT DISTINCT FROM` to a column of `B` that is one (`GROUP BY d.id` over `f JOIN d ON f.k =
+  d.id`): the groups of the aggregation are then exactly the new groups, with the same rows of
+  `A`. A conjunct that reads a column of `A` otherwise than in such an equality must read group key
+  columns of simple types (two equal values are identical).
+- Every group key is a deterministic expression of one side; every aggregate reads `A` only
+  (arguments, `FILTER`, `ORDER BY`), or is `min`, `max` or `internal_last_seen_value` of a column of
+  `B` without `FILTER` (constant over a new group, emitted from `B` above the join).
+- Then every row of a new group meets the same row of `B`, or none: an inner join keeps or drops a
+  whole new group, so every aggregate (including `DISTINCT`, ordered and user-defined ones) gives
+  the same result before and after the join. The group key must not be empty (an empty input
+  still gives one row, which an inner join could drop). `NULL` keys: a `NULL` join column matches
+  nothing with `=`, for the whole new group, as for its rows before.
+- Skipped when `A` is unique on the new group key (nothing to reduce). Streaming: skipped when a
+  side reads a source or a table with a watermark (the aggregation of a job that emits on window
+  close is not moved below a join). Batch: an inner join only when `B` reads a whole table (a
+  filtered `B` may drop most rows of `A`, which aggregating first would read and group).
+- Applied top-down: the moved aggregation is moved again below the next join (a star of
+  dimensions). Streaming: after the other reductions, before the merge of stacked aggregations.
+  Batch: after join ordering.
+- Stream key: the materialized view keeps the group key as its key, but the key of `B` may be
+  added as hidden columns (the key of the join above the aggregation).
+- Expressions computed between the aggregation and the join are computed on the rows of `A`
+  before the join: below an inner join, also on rows that the join drops (as PostgreSQL's eager
+  aggregation does), so an expression that fails on such a row now fails the query.
+
+**Partial form** (`batch_partial_agg_below_join`, batch only). Same conditions without the
+uniqueness of `B` and without the group conditions; the aggregates of `A` must decompose (`count`,
+`sum` of an integer, decimal or interval, `min`, `max`, `bool_and`, `bool_or`, `bit_and`,
+`bit_or`; not `DISTINCT` `count` or `sum`, ordered, ordered-set, `first_value`, `string_agg`,
+user-defined aggregates, nor `sum` of a float, whose rounding depends on the order of the
+additions). The pushed aggregation computes them per new group; the final one, above the join,
+combines them with the same result type (`sum` of `sum`, `sum0` of `count`, `min` of `min`...;
+`sum(int)` is a `bigint` at both levels, as in the two-phase aggregation). A row of the pushed
+aggregation stands for all the rows of its new group, which meet the same rows of `B`: summing its
+partial sum once per row of `B` it meets is summing each of its rows once per row of `B`. `min`
+and `max` of `B` are computed above, as repeated rows do not change them; other aggregates of `B`
+stop the rule. Chosen by cost with the learned ratios (`batch_cardinality_feedback_learning`): the
+largest group ratio learned for the pushed aggregation must be at most 0.5 below an outer join, 0.1
+below an inner one (which may drop most rows of `A`); nothing learned, nothing pushed.
+
+Not done: semi joins (an aggregation over `A` semi-joined on group columns could also run first),
+the partial form in streaming (rejected: it adds an operator and state), and a cost for the exact
+form below an inner join with a filtered `B`.
+
+Tests: planner tests `stream_push_agg_below_join.yaml` and `batch_push_agg_below_join.yaml`
+(rewritten: left, inner, right joins, a key of `B` in the group key, two dimensions, distinct,
+ordered and filtered aggregates, `min`/`max` of `B`, `DISTINCT`, computed group keys, `HAVING`,
+non-equi conditions on grouped columns, null-safe equality; kept: `B` not unique, join column not
+grouped, aggregates of `B` or of both sides, full joins, `A` optional, no group key, non-equi
+conditions on other columns or on a decimal, `A` unique on the group key, watermarks, temporal
+joins, mixed group keys, volatile expressions, a filtered dimension in batch; partial form with
+and without learned ratios, distinct counts, float sums, sums of `B`, learning off), and the
+differential tests `e2e_test/streaming/push_agg_below_join.gen.py` (materialized with and without
+the variable, compared with each other and with the batch query after the backfill and after
+inserts, updates, deletes, an emptied and refilled dimension and an emptied fact table) and
+`e2e_test/batch/push_agg_below_join.gen.py` (with UA below).
 
 ### 6. Merge of two stacked aggregations
 
@@ -1399,6 +1472,44 @@ projection; without the variable, or without a union below, they convert their i
   empty branches, after updates and deletes, and with a single branch left).
 - Not done: a round-robin exchange, which would let a union with no requirement keep its inputs
   in their stages without hashing; a partial aggregation pushed into each branch.
+
+### UA. Batch: partial aggregation in the branches of a `UNION ALL` (added on 2026-11-28, done on the branch)
+
+Rule `AggUnionTransposeRule` (`optimizer/rule/agg_union_transpose_rule.rs`), variable
+`batch_partial_agg_into_union` (default false); Calcite `AggregateUnionTransposeRule`, PostgreSQL
+partitionwise aggregation.
+
+```text
+Agg(group k: count(*), sum(x))           Agg(group k: sum0(n), sum(s))
+└─Union all                         =>   └─Union all
+  ├─a                                      ├─Agg(group k: n = count(*), s = sum(x))
+  └─b                                      │ └─a
+                                           └─Project(k, 1, x::bigint)
+                                             └─b
+```
+
+- Every aggregate decomposes, as in the partial form of 5; the partial aggregate is the aggregate
+  itself over the rows of a branch, with its `FILTER`, and the final one combines the partial
+  results with the same type. A group of the union is the union of the groups with its key in the
+  branches. Without group key a branch gives one row even when empty (a count of 0, `NULL` for the
+  others), which the final aggregate adds as 0 or ignores: an empty union still gives one row with
+  the same values.
+- Per branch, by cost: a branch without a unique key within the group key is aggregated when there
+  is no group key (one row per branch, always worth it), or when the largest learned group ratio of
+  its partial aggregation is at most 0.5. Another branch gives each row as a partial result of its
+  own (`count(*)` is `1`, `count(x)` is `1` or `0`, `sum(x)` is `x` cast to the type of the sum,
+  `FILTER` as a `CASE`), so that the union stays uniform. At least one branch must be aggregated;
+  the rule then stops on what it built (the aggregated branches are unique on the group key).
+- Projections between the aggregation and the union must be deterministic; they are computed in
+  every branch. Not for grouping sets, unions with a source column or `UNION` (an aggregation over
+  a `UNION ALL` by then).
+- With BU, each branch then hashes its groups instead of its rows to the final aggregation.
+- Tests: `batch_partial_agg_into_union.yaml` (no group key, both or one branch learned, a
+  projection above the union, nothing learned, too many groups, a unique branch, distinct count,
+  float sum, ordered aggregate, `UNION`, off by default) and the differential
+  `e2e_test/batch/push_agg_below_join.gen.py` (all three batch variables off, then on, with the
+  group ratios learned from plain aggregations of the tables; empty tables, NULL keys,
+  duplicates, rows without match, updates and deletes, emptied sides).
 
 ## Not for now: sharing between materialized views
 
