@@ -540,6 +540,18 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_reduce_group_keys: bool,
 
+    // Rule `AggUnionNullBranchRule` (`*_prune_null_union_branches`).
+    /// In the plan of a new streaming job, remove the branches of a `UNION ALL` that only feed
+    /// `NULL` to the aggregation above (`sum`, `min`, `max`, `count(x)`... ignore them, no
+    /// `count(*)`), or with a group key the `GROUP BY` or `DISTINCT` at the top of such a branch.
+    /// Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    streaming_prune_null_union_branches: bool,
+
+    /// The same as `streaming_prune_null_union_branches`, for batch queries. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_prune_null_union_branches: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,

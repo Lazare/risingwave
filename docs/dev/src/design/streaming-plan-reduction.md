@@ -49,6 +49,7 @@ own rules.
 | S12 | `INTERSECT` / `EXCEPT` computed by one counting aggregation over a `UNION ALL` of the inputs (`streaming_set_operation_to_count`, `batch_set_operation_to_count`) | done (prototype, branch `proto/plan-reduction-setop-keys`), see "S12" below; `ALL` variants not supported by the binder |
 | S13 | `UNION` / `INTERSECT` / `EXCEPT` of filters over the same input become one filter (`streaming_merge_set_operation_filters`, `batch_merge_set_operation_filters`) | done (prototype, branch `proto/plan-reduction-setop-keys`), see "S13" below |
 | S9 | Group key columns that the other ones determine removed, `min` / `max` / `first_value` / `last_value` of a value of the group replaced (`streaming_reduce_group_keys`, `batch_reduce_group_keys`) | done for aggregations (prototype, branch `proto/plan-reduction-setop-keys`), see "S9" below; partition and order keys of windows and top-n not done |
+| S10 | Branches of a `UNION ALL` that only feed `NULL` to the aggregation above removed (`streaming_prune_null_union_branches`, `batch_prune_null_union_branches`) | done (prototype, branch `proto/plan-reduction-setop-keys`), see "S10" below |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -1524,6 +1525,42 @@ SELECT k, max(k), min(k) FROM t GROUP BY k                => GROUP BY k, project
   tests `e2e_test/streaming/reduce_group_keys` and `e2e_test/batch/reduce_group_keys`
   (determined columns updated, set to and from `NULL`, orders without items, left joins, keys of a
   sub-aggregation, kept cases).
+
+### S10. Branches of a `UNION ALL` that only feed `NULL` to an aggregation (added on 2026-11-28, done on the branch)
+
+Variables `streaming_prune_null_union_branches` and `batch_prune_null_union_branches`, rule
+`AggUnionNullBranchRule` (Calcite `AggregateUnionNullBranchRule`). "Metrics" views union per-kind
+branches that each fill one measure and leave the others `NULL`.
+
+```text
+SELECT sum(m) FROM (SELECT x AS m FROM a UNION ALL SELECT NULL::int FROM b) v
+  => SELECT sum(m) FROM (SELECT x AS m FROM a) v
+SELECT k, sum(m) FROM (... UNION ALL SELECT k, NULL FROM b GROUP BY k) v GROUP BY k
+  => the GROUP BY of the second branch becomes a projection
+```
+
+- A branch is irrelevant when every aggregate call ignores rows whose argument is `NULL` (`sum`,
+  `sum0`, `min`, `max`, `count(x)`, `avg`, `stddev_*`, `var_*`, `bit_*`, `bool_*`) and the argument
+  of every call is `NULL` in every row of the branch (`NULL` literals, `x IS NULL` filters, the
+  analysis of NK; the group key columns of a `DISTINCT` at the top of the branch). One `count(*)`,
+  `array_agg`, `string_agg`, `first_value`... keeps every branch, as does a branch that is `NULL`
+  for some calls only.
+- Without group key: irrelevant branches are removed; if none is left, the aggregation reads an
+  empty `VALUES` and returns its row over no input (`count` 0, the others `NULL`), the same values
+  as over rows whose arguments are all `NULL`.
+- With a group key, an irrelevant branch still creates groups and stays; the number of copies of
+  its rows does not matter (no call counts them), so an aggregation without calls at its top (a
+  `GROUP BY` or `DISTINCT`, under a projection or not) becomes a projection of its group key.
+- Streaming: a removed branch no longer scans, backfills or keeps state; a removed `DISTINCT` no
+  longer keeps its state, and its duplicates do not grow the state above (`min` and `max` skip
+  `NULL` arguments in their materialized input, the others keep a value per group).
+- Stage: `PRUNE_NULL_UNION_BRANCHES`, right before S9 in both pipelines, then column pruning.
+- Tests: planner tests `stream_prune_null_union_branches.yaml` (batch and streaming plans);
+  differential tests `e2e_test/streaming/prune_null_union_branches` and
+  `e2e_test/batch/prune_null_union_branches` (no group key, all branches `NULL`, a branch `NULL` by
+  its filter, a `GROUP BY` and a `DISTINCT` removed, kept cases with `count(*)`, `array_agg`, a
+  call per branch). Streaming sums are wrapped in `coalesce(.., 0)` (see the known quirk of a
+  streaming `sum` whose values were all retracted).
 
 ## Not for now: sharing between materialized views
 

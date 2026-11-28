@@ -493,6 +493,15 @@ static BATCH_REDUCE_GROUP_KEYS: LazyLock<OptimizationStage> = LazyLock::new(|| {
     )
 });
 
+// Rule `AggUnionNullBranchRule` (`*_prune_null_union_branches`).
+static PRUNE_NULL_UNION_BRANCHES: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Prune Null Union Branches",
+        vec![AggUnionNullBranchRule::create()],
+        ApplyOrder::TopDown,
+    )
+});
+
 static SET_OPERATION_MERGE: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Set Operation Merge",
@@ -1576,6 +1585,25 @@ impl LogicalOptimizer {
                 }
             }
         }
+        // Rule `AggUnionNullBranchRule` (`streaming_prune_null_union_branches`): after the final
+        // column pruning, which leaves in the branches of a union only the columns that the
+        // aggregation above reads, and before `AggGroupKeyReduceRule`. On demand only. The scans
+        // of a removed branch, and the columns that a removed `GROUP BY` read, are then pruned.
+        if ctx
+            .session_ctx()
+            .config()
+            .streaming_prune_null_union_branches()
+            && !ctx.is_stream_prune_baseline()
+        {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&PRUNE_NULL_UNION_BRANCHES)?;
+            let applied = ctx.total_rule_applied() - applied_before;
+            if applied > 0 {
+                ctx.add_stream_prune_rule_applied(applied);
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
+            }
+        }
         // Rule `AggGroupKeyReduceRule` (`streaming_reduce_group_keys`): after the final column
         // pruning, which leaves in the input of an aggregation only the columns that it reads, so
         // that the functional dependencies of the input are those of the columns read. On demand
@@ -1970,6 +1998,16 @@ impl LogicalOptimizer {
             }
         }
 
+        // Rule `AggUnionNullBranchRule` (`batch_prune_null_union_branches`): after the final column
+        // pruning, as for streaming. On demand.
+        if ctx.session_ctx().config().batch_prune_null_union_branches() {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&PRUNE_NULL_UNION_BRANCHES)?;
+            if ctx.total_rule_applied() != applied_before {
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
+            }
+        }
         // Rule `AggGroupKeyReduceRule` (`batch_reduce_group_keys`): after the final column pruning,
         // as for streaming. On demand.
         if ctx.session_ctx().config().batch_reduce_group_keys() {

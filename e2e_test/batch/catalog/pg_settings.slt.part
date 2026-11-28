@@ -39,6 +39,7 @@ user batch_merge_union_scans
 user batch_narrow_value_aggregates
 user batch_over_window_to_topn
 user batch_parallelism
+user batch_prune_null_union_branches
 user batch_reduce_group_keys
 user batch_reduce_keys_after_conversions
 user batch_rewrite_lag_duplicates
@@ -120,6 +121,7 @@ user streaming_parallelism_for_table
 user streaming_project_expr_concurrency
 user streaming_project_expr_inflight_request_concurrency
 user streaming_prune_empty_relation
+user streaming_prune_null_union_branches
 user streaming_reduce_group_keys
 user streaming_separate_consecutive_join
 user streaming_separate_sink
