@@ -45,8 +45,8 @@ CASES = [
      f"select o.id from {O} o where o.id in (select order_id from {S} where order_id > 11)"),
     ('anti_into', 'id',
      f"select o.id from {EU} o where not exists (select 1 from {S} s where s.order_id = o.id)"),
-    ('numeric_cmp', 'id, sid, w, sf',
-     f"select o.id, s.sid, s.w, s.f as sf from (select * from {O} "
+    ('numeric_cmp', 'id, sid, ks, sf',
+     f"select o.id, s.sid, s.k::varchar as ks, s.f as sf from (select * from {O} "
      f"where k > 1.2 and f between -1 and 1) o join {S} s on s.k = o.k and s.f = o.f"),
     ('indf_nonnull', 'id, sid',
      f"select o.id, s.sid from {EU} o join (select * from {S} where order_id is not null) s "
@@ -68,8 +68,8 @@ CASES = [
     ('now_kept', 'id, hid',
      f"select h.id, hs.id as hid from (select * from {H} where ts > now() - interval '1 hour') h "
      f"join {HS} hs on hs.ts = h.ts"),
-    ('numeric_text_kept', 'id, sid, w',
-     f"select o.id, s.sid, s.w from (select * from {O} where k::varchar = '1.0') o "
+    ('numeric_text_kept', 'id, sid, ks',
+     f"select o.id, s.sid, s.k::varchar as ks from (select * from {O} where k::varchar = '1.0') o "
      f"join {S} s on s.k = o.k"),
     ('float_text_kept', 'id, sid',
      f"select o.id, s.sid from (select * from {O} where f::varchar = '-0') o join {S} s on s.f = o.f"),
@@ -77,13 +77,6 @@ CASES = [
      f"select o.id, s.sid from (select * from {O} where id > 12 or id is null) o "
      f"join {S} s on s.order_id is not distinct from o.id"),
 ]
-
-# Compared with the materialized view without the rule only, not with the batch query: with a
-# filter on the text of a numeric column (1.0 and 1.00 are equal, with different texts), the
-# materialized views with and without the rule keep one row more than the batch query after the
-# rows of the left side are updated and deleted. The plan is the same with and without the rule
-# (the predicate is not copied), so this does not come from the rule.
-NOT_WITH_BATCH = {'numeric_text_kept'}
 
 out = []
 
@@ -111,8 +104,7 @@ def compare_all(title):
                f"the batch query.\n")
     for name, cols, sql in CASES:
         same_rows(f"tp_{name}_on", f"tp_{name}_off", cols)
-        if name not in NOT_WITH_BATCH:
-            same_rows(f"tp_{name}_on", f"({sql}) q", cols)
+        same_rows(f"tp_{name}_on", f"({sql}) q", cols)
 
 
 out.append("""# Differential test of `streaming_transitive_predicates`: every query is materialized twice,
@@ -131,8 +123,6 @@ stmt(f"create table {H} (id int primary key, ts timestamptz, v int)")
 stmt(f"create table {HS} (id int primary key, ts timestamptz, w int)")
 stmt(f"create view {EU} as select * from {O} where region = 'EU' and id > 10")
 out.append("# Rows present before the materialized views are created: they go through the backfill.\n"
-           "# The text of an equi-join key is not compared with the batch query: a streaming join may\n"
-           "# output the key of either side, which differ in text for equal numeric values.\n"
            "# Equal numeric values with different texts (1.0, 1.00), floats -0 and 0, NULL keys,\n"
            "# duplicate keys on the other side.\n")
 stmt(f"insert into {O} values (1, 'EU', 3, 1.0, -0.0), (11, 'EU', 7, 1.00, 0.0), (12, 'EU', 9, 1.5, 0.5), "
