@@ -197,7 +197,7 @@ impl Rule<Logical> for OrJoinToUnionRule {
                         right.clone(),
                         JoinType::LeftAnti,
                         cond(n - 1),
-                        output_indices.clone(),
+                        join.output_indices().clone(),
                     )
                     .into(),
                 )

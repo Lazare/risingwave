@@ -232,9 +232,9 @@ impl Rule<Logical> for ValuesJoinInlineRule {
                     let predicate = Condition {
                         conjunctions: kept_only.into_iter().chain([matched]).collect(),
                     };
-                    LogicalFilter::create(kept.clone(), predicate)
+                    LogicalFilter::create(kept, predicate)
                 } else {
-                    kept.clone()
+                    kept
                 };
                 Some(LogicalProject::create(input, exprs))
             }
