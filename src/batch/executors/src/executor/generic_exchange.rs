@@ -89,6 +89,8 @@ impl CreateSource for DefaultCreateSource {
 
         if context.is_local_addr(&peer_addr) && prost_source.local_execute_plan.is_none() {
             trace!("Exchange locally [{:?}]", task_output_id);
+            // The producer may be created after its consumer (`batch_phased_stages`).
+            context.wait_for_local_task(&task_id).await;
 
             Ok(ExchangeSourceImpl::Local(LocalExchangeSource::create(
                 task_output_id.try_into()?,

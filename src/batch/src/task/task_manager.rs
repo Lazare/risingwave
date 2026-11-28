@@ -15,6 +15,7 @@
 use std::collections::{HashMap, hash_map};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use parking_lot::Mutex;
@@ -26,6 +27,7 @@ use risingwave_pb::batch_plan::{PbTaskId, PbTaskOutputId, PlanFragment};
 use risingwave_pb::plan_common::ExprContext;
 use risingwave_pb::task_service::TaskInfoResponse;
 use risingwave_pb::task_service::task_info_response::TaskStatus;
+use tokio::sync::Notify;
 use tokio::sync::mpsc::Sender;
 
 use super::BatchTaskContext;
@@ -35,6 +37,14 @@ use crate::rpc::service::exchange::{GetDataItem, HeldExchangeWriter};
 use crate::task::output_buffer::HeldBytes;
 use crate::task::query_memory::{QueryMemory, QueryMemoryLimits, QueryMemoryRegistry};
 use crate::task::{BatchTaskExecution, StateReporter, TaskId, TaskOutput, TaskOutputId};
+
+/// How long a consumer waits for a producer task that does not exist yet on the node.
+///
+/// With `batch_phased_stages`, the frontend creates the tasks of the stages that feed the probe
+/// side of a hash join only after its build side finished, while their consumer already knows
+/// where they will run: it may ask for their output before they are created. Without it, a
+/// consumer only starts once its producers exist, and a missing task is one that was cancelled.
+pub const MISSING_TASK_WAIT: Duration = Duration::from_secs(120);
 
 pub mod await_tree_key {
     /// Await-tree key type for batch tasks.
@@ -47,6 +57,9 @@ pub mod await_tree_key {
 pub struct BatchManager {
     /// Every task id has a corresponding task execution.
     tasks: Arc<Mutex<HashMap<TaskId, Arc<BatchTaskExecution>>>>,
+
+    /// Notified each time a task is added to `tasks`.
+    task_created: Arc<Notify>,
 
     /// Runtime for the batch manager.
     runtime: Arc<BackgroundShutdownRuntime>,
@@ -90,6 +103,7 @@ impl BatchManager {
         let query_memories = QueryMemoryRegistry::new(mem_context.clone(), &config);
         BatchManager {
             tasks: Arc::new(Mutex::new(HashMap::new())),
+            task_created: Arc::new(Notify::new()),
             runtime: Arc::new(runtime.into()),
             config,
             metrics,
@@ -125,9 +139,29 @@ impl BatchManager {
         spillable_operator_instances: u32,
         spill_on_memory_wait: bool,
     ) -> Arc<QueryMemory> {
-        let query_memory = self
-            .query_memories
-            .get_or_create(query_id, spillable_operator_instances);
+        self.query_memory_with_extra(
+            query_id,
+            spillable_operator_instances,
+            spill_on_memory_wait,
+            0,
+        )
+    }
+
+    /// The same as [`Self::query_memory`], with `extra_reservation_bytes`
+    /// (`batch_admission_by_estimate`) reserved at admission on top of the pool of the spillable
+    /// operators, when this call creates the memory of the query.
+    pub fn query_memory_with_extra(
+        &self,
+        query_id: &str,
+        spillable_operator_instances: u32,
+        spill_on_memory_wait: bool,
+        extra_reservation_bytes: u64,
+    ) -> Arc<QueryMemory> {
+        let query_memory = self.query_memories.get_or_create_with_extra(
+            query_id,
+            spillable_operator_instances,
+            extra_reservation_bytes,
+        );
         if spill_on_memory_wait {
             query_memory.enable_spill_on_memory_wait();
         }
@@ -158,6 +192,7 @@ impl BatchManager {
         // it's possible do not found parent task id in theory.
         let ret = if let hash_map::Entry::Vacant(e) = self.tasks.lock().entry(task_id.clone()) {
             e.insert(task.clone());
+            self.task_created.notify_waiters();
 
             let this = self.clone();
             let task_id = task_id.clone();
@@ -266,6 +301,25 @@ impl BatchManager {
             }
         });
         Ok(())
+    }
+
+    /// Waits until the task exists on this node, at most `timeout` (see [`MISSING_TASK_WAIT`]).
+    /// Returns at once when it already exists; the caller then looks the task up as usual and
+    /// fails if it is still missing.
+    pub async fn wait_for_task(&self, task_id: &TaskId, timeout: Duration) {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            // Registered before the check, so that a task created in between is not missed.
+            let notified = self.task_created.notified();
+            let mut notified = std::pin::pin!(notified);
+            notified.as_mut().enable();
+            if self.tasks.lock().contains_key(task_id) {
+                return;
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                return;
+            }
+        }
     }
 
     pub fn take_output(&self, output_id: &PbTaskOutputId) -> Result<TaskOutput> {
@@ -540,5 +594,75 @@ mod tests {
             output_id: 0,
         };
         assert!(manager.take_output(&output_id).is_ok());
+    }
+
+    /// `batch_phased_stages`: a consumer may ask for the output of a task created later.
+    #[tokio::test]
+    async fn test_wait_for_a_task_created_later() {
+        use std::time::Duration;
+
+        let manager = Arc::new(BatchManager::new(
+            BatchConfig::default(),
+            BatchManagerMetrics::for_test(),
+            u64::MAX,
+            None,
+        ));
+        let pb_task_id = PbTaskId {
+            query_id: "later".to_owned(),
+            stage_id: 1,
+            task_id: 0,
+        };
+        let task_id = TaskId::from(&pb_task_id);
+
+        // A task that never comes: the wait ends at its bound.
+        let missing = TaskId {
+            query_id: "never".to_owned(),
+            stage_id: 1,
+            task_id: 0,
+        };
+        let start = std::time::Instant::now();
+        manager
+            .wait_for_task(&missing, Duration::from_millis(50))
+            .await;
+        assert!(start.elapsed() >= Duration::from_millis(50));
+
+        // A task created while the consumer waits: the wait ends when it is created.
+        let waiter = {
+            let manager = manager.clone();
+            let task_id = task_id.clone();
+            tokio::spawn(async move {
+                manager
+                    .wait_for_task(&task_id, Duration::from_secs(60))
+                    .await;
+                manager.tasks.lock().contains_key(&task_id)
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let plan = PlanFragment {
+            root: Some(PlanNode {
+                children: vec![],
+                identity: "".to_owned(),
+                node_body: Some(NodeBody::BusyLoopExecutor(false)),
+                cardinality_feedback_id: None,
+            }),
+            exchange_info: Some(ExchangeInfo {
+                mode: DistributionMode::Single as i32,
+                distribution: None,
+            }),
+        };
+        manager.fire_task_for_test(&pb_task_id, plan).await.unwrap();
+        let found = tokio::time::timeout(Duration::from_secs(10), waiter)
+            .await
+            .expect("the wait did not end when the task was created")
+            .unwrap();
+        assert!(found);
+
+        // An existing task: no wait at all.
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            manager.wait_for_task(&task_id, Duration::from_secs(60)),
+        )
+        .await
+        .expect("waited for an existing task");
     }
 }

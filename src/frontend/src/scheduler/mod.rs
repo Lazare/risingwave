@@ -30,6 +30,8 @@ pub mod cardinality_feedback;
 mod distributed;
 pub use distributed::*;
 pub mod batch_limits;
+// `batch_admission_by_estimate`.
+pub mod admission_estimate;
 pub mod plan_fragmenter;
 pub use plan_fragmenter::BatchPlanFragmenter;
 mod snapshot;

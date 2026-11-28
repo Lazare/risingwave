@@ -48,7 +48,7 @@ use crate::scheduler::cardinality_feedback::{QueryCardinalityFeedback, plan_card
 use crate::scheduler::plan_fragmenter::{Query, move_stateful_operators_out_of_root_stage};
 use crate::scheduler::{
     BatchPlanFragmenter, DistributedQueryStream, ExecutionContext, ExecutionContextRef,
-    LocalQueryExecution, LocalQueryStream,
+    LocalQueryExecution, LocalQueryStream, admission_estimate,
 };
 use crate::session::SessionImpl;
 
@@ -543,6 +543,19 @@ pub async fn create_stream(
     query.compact_shuffle_output = session.config().batch_compact_shuffle_output();
     query.exchange_buffer_max_bytes =
         (session.config().batch_exchange_buffer_max_mb() as u64) << 20;
+    // Distributed batch scheduler: phased stages and admission by estimate.
+    query.phased_stages = session.config().batch_phased_stages();
+    if session.config().batch_admission_by_estimate() {
+        let developer = &session.env().batch_config().developer;
+        query.extra_reservation_bytes = admission_estimate::extra_reservation_bytes(
+            &query.stage_graph,
+            admission_estimate::EstimateSettings {
+                output_channel_size: developer.output_channel_size,
+                chunk_size: developer.chunk_size,
+                exchange_buffer_max_bytes: query.exchange_buffer_max_bytes,
+            },
+        );
+    }
     tracing::trace!("Generated query after plan fragmenter: {:?}", &query);
 
     let pg_descs = schema

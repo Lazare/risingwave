@@ -1057,6 +1057,20 @@ impl QueryMemoryRegistry {
         query_id: &str,
         spillable_operator_instances: u32,
     ) -> Arc<QueryMemory> {
+        self.get_or_create_with_extra(query_id, spillable_operator_instances, 0)
+    }
+
+    /// The same as [`Self::get_or_create`], where the query also reserves
+    /// `extra_reservation_bytes` at admission (`batch_admission_by_estimate`): an estimate of the
+    /// memory of its exchange buffers and scans, which the pool of its spillable operators does
+    /// not cover. At most the limit of the query; the whole reservation is at most the usable
+    /// memory of the node.
+    pub fn get_or_create_with_extra(
+        &self,
+        query_id: &str,
+        spillable_operator_instances: u32,
+        extra_reservation_bytes: u64,
+    ) -> Arc<QueryMemory> {
         let mut queries = self.inner.queries.lock();
         if let Some(existing) = queries.get(query_id).and_then(Weak::upgrade) {
             return existing;
@@ -1098,7 +1112,12 @@ impl QueryMemoryRegistry {
             operator_reserved,
             spillable_operator_instances,
             // Never more than the whole semaphore, so that the query is eventually served.
-            reservation_mb: (limits.reservation(spillable_operator_instances) >> 20)
+            reservation_mb: (limits
+                .reservation(spillable_operator_instances)
+                .saturating_add(
+                    extra_reservation_bytes.min(limits.query_limit(spillable_operator_instances)),
+                )
+                >> 20)
                 .min(self.inner.budget.usable_mb)
                 .min(u32::MAX as u64) as u32,
             reservation: tokio::sync::Mutex::new(None),
@@ -1298,6 +1317,49 @@ mod tests {
         assert_eq!(registry.inner.budget.available_mb(), 3600 - 2 * 1800);
 
         drop((g1, g3));
+        assert_eq!(registry.inner.budget.available_mb(), 3600);
+    }
+
+    /// `batch_admission_by_estimate`: the estimate of the exchange buffers and scans of a query
+    /// is reserved on top of the pool of its spillable operators.
+    #[tokio::test]
+    async fn test_admission_with_extra_reservation() {
+        // Usable: 3600 MB, normal share 900 MB, largest share 1800 MB.
+        let (registry, _root) = registry(4000 * MB);
+        // 4 operators: a pool of 256 MB, plus 600 MB.
+        let a = registry.get_or_create_with_extra("a", 4, 600 * MB);
+        assert_eq!(a.reservation_mb, 256 + 600);
+        // No spillable operator: the estimate alone, at most the share of the query.
+        let b = registry.get_or_create_with_extra("b", 0, 2000 * MB);
+        assert_eq!(b.reservation_mb, 900);
+        // Nothing to reserve without operators and without estimate.
+        assert_eq!(
+            registry.get_or_create_with_extra("c", 0, 0).reservation_mb,
+            0
+        );
+        // The whole reservation never exceeds the usable memory of the node.
+        let d = registry.get_or_create_with_extra("d", 60, 1900 * MB);
+        assert_eq!(d.reservation_mb, 3600);
+        // An existing query keeps its reservation.
+        assert_eq!(
+            registry.get_or_create_with_extra("a", 4, 0).reservation_mb,
+            256 + 600
+        );
+
+        let ga = a.admit().await;
+        let gb = b.admit().await;
+        assert_eq!(registry.inner.budget.available_mb(), 3600 - 856 - 900);
+        // The query whose estimate does not fit waits for the others.
+        let waiter = {
+            let d = d.clone();
+            tokio::spawn(async move { d.admit().await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!waiter.is_finished());
+        drop((ga, gb));
+        let gd = waiter.await.unwrap();
+        assert_eq!(registry.inner.budget.available_mb(), 0);
+        drop(gd);
         assert_eq!(registry.inner.budget.available_mb(), 3600);
     }
     fn meter() -> MemoryContext {

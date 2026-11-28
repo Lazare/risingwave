@@ -30,7 +30,7 @@ use crate::error::Result;
 use crate::executor::CardinalityCounters;
 use crate::monitor::{BatchMetrics, BatchMetricsInner, BatchSpillMetrics};
 use crate::task::query_memory::{ExecutorMemory, QueryMemory};
-use crate::task::{BatchEnvironment, TaskOutput, TaskOutputId};
+use crate::task::{BatchEnvironment, MISSING_TASK_WAIT, TaskId, TaskOutput, TaskOutputId};
 use crate::worker_manager::worker_node_manager::WorkerNodeManagerRef;
 
 /// Context for batch task execution.
@@ -41,6 +41,12 @@ pub trait BatchTaskContext: Send + Sync + 'static {
     ///
     /// Returns error if the task of `task_output_id` doesn't run in same worker as current task.
     fn get_task_output(&self, task_output_id: TaskOutputId) -> Result<TaskOutput>;
+
+    /// Waits, for a bounded time, until the task `task_id` exists on this node: a consumer may
+    /// ask for the output of a task that the frontend creates later (`batch_phased_stages`).
+    fn wait_for_local_task(&self, _task_id: &TaskId) -> futures::future::BoxFuture<'static, ()> {
+        Box::pin(async {})
+    }
 
     /// Get system catalog reader, used to read system table.
     fn catalog_reader(&self) -> SysCatalogReaderRef;
@@ -136,6 +142,16 @@ impl BatchTaskContext for ComputeNodeContext {
         self.env
             .task_manager()
             .take_output(&task_output_id.to_prost())
+    }
+
+    fn wait_for_local_task(&self, task_id: &TaskId) -> futures::future::BoxFuture<'static, ()> {
+        let task_manager = self.env.task_manager();
+        let task_id = task_id.clone();
+        Box::pin(async move {
+            task_manager
+                .wait_for_task(&task_id, MISSING_TASK_WAIT)
+                .await
+        })
     }
 
     fn catalog_reader(&self) -> SysCatalogReaderRef {

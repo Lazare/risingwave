@@ -86,6 +86,9 @@ message AdmitQueryRequest {
   uint32 spillable_operator_instances = 2;
   // See `CreateTaskRequest.spill_on_memory_wait`.
   bool spill_on_memory_wait = 3;
+  // `batch_admission_by_estimate`: memory reserved on top of the pool of the spillable
+  // operators, estimated from the exchange buffers and scans of the query. 0 for none.
+  uint64 extra_reservation_bytes = 4;
 }
 
 // Sent once, when the query is admitted. The stream then stays open, and the node keeps the

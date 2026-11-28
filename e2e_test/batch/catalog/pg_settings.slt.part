@@ -23,6 +23,7 @@ user application_name
 user auto_locality_backfill_min_size
 user backfill_rate_limit
 user background_ddl
+user batch_admission_by_estimate
 user batch_cardinality_feedback
 user batch_cardinality_feedback_learning
 user batch_compact_shuffle_output
@@ -51,6 +52,7 @@ user batch_over_window_to_topn
 user batch_parallelism
 user batch_partial_agg_below_join
 user batch_partial_agg_into_union
+user batch_phased_stages
 user batch_prune_null_union_branches
 user batch_push_agg_below_join
 user batch_push_down_limit

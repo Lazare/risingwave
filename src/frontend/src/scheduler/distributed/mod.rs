@@ -21,4 +21,6 @@ use stage::*;
 mod query_manager;
 pub use query_manager::*;
 mod stats;
+// `batch_phased_stages`.
+mod phased_stages;
 pub use stats::*;

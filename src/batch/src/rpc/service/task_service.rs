@@ -142,11 +142,13 @@ impl TaskService for BatchServiceImpl {
             query_id,
             spillable_operator_instances,
             spill_on_memory_wait,
+            extra_reservation_bytes,
         } = request.into_inner();
-        let query_memory = self.mgr.query_memory(
+        let query_memory = self.mgr.query_memory_with_extra(
             &query_id,
             spillable_operator_instances,
             spill_on_memory_wait,
+            extra_reservation_bytes,
         );
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         self.mgr.runtime().spawn(async move {

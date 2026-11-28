@@ -281,7 +281,7 @@ impl QueryManager {
         query: &Query,
     ) -> SchedulerResult<QueryAdmission> {
         let spillable_operator_instances = query.spillable_operator_instances();
-        if spillable_operator_instances == 0 {
+        if spillable_operator_instances == 0 && query.extra_reservation_bytes == 0 {
             return Ok(QueryAdmission::default());
         }
         let mut workers = self.worker_node_manager.list_serving_worker_nodes();
@@ -297,6 +297,7 @@ impl QueryManager {
                         query.query_id.id.clone(),
                         spillable_operator_instances,
                         query.spill_on_memory_wait,
+                        query.extra_reservation_bytes,
                     )
                     .await
                 {

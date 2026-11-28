@@ -91,7 +91,7 @@ pub enum StageEvent {
         reason: SchedulerError,
     },
     /// All tasks in stage finished.
-    Completed(#[expect(dead_code)] StageId),
+    Completed(StageId),
 }
 
 #[derive(Clone)]
@@ -100,6 +100,10 @@ pub struct TaskStatus {
 
     // None before task is scheduled.
     location: Option<HostAddress>,
+
+    /// `batch_phased_stages`: the worker chosen before the task is created, so that the
+    /// consumers of a deferred stage know where its tasks will run.
+    preassigned: Option<WorkerNode>,
 }
 
 struct TaskStatusHolder {
@@ -144,6 +148,7 @@ impl TaskStatusHolder {
         let task_status = TaskStatus {
             _task_id: task_id,
             location: None,
+            preassigned: None,
         };
 
         Self {
@@ -310,6 +315,189 @@ impl StageExecution {
                 }
             })
             .collect()
+    }
+
+    /// `batch_phased_stages`: chooses now the workers of the tasks of this stage, which starts
+    /// later than its consumers. The consumers then find the location of each task in
+    /// [`Self::all_exchange_sources_for`], and the tasks are created on these workers. The choice
+    /// is the one that scheduling the tasks would make (`StageRunner::schedule_tasks`), task by
+    /// task.
+    pub fn preassign_workers(&self) -> SchedulerResult<()> {
+        let stage = self.query.stage(self.stage_id);
+        let lookup_join = find_distributed_lookup_join_in_stage(&stage.root);
+        let choose = |task_id: u32| {
+            choose_worker(
+                &self.query,
+                self.stage_id,
+                &self.worker_node_manager,
+                &self.catalog_reader,
+                lookup_join,
+                task_id,
+                stage.dml_table_id,
+            )
+        };
+        let mut workers: Vec<(u64, Option<WorkerNode>)> = vec![];
+        if let Some(table_scan_info) = stage.table_scan_info.as_ref()
+            && let Some(vnode_bitmaps) = table_scan_info.partitions()
+        {
+            // Same order as in `schedule_tasks`: the map is not modified in between.
+            let worker_slot_ids = vnode_bitmaps.keys().cloned().collect_vec();
+            let slot_workers = self
+                .worker_node_manager
+                .manager
+                .get_workers_by_worker_slot_ids(&worker_slot_ids)?;
+            for (i, worker) in slot_workers.into_iter().enumerate() {
+                workers.push((i as u64, Some(worker)));
+            }
+        } else if let Some(source_info) = stage.source_info.as_ref() {
+            let splits = source_info.split_info()?;
+            if splits.is_empty() {
+                workers.push((0, choose(0)?));
+            } else {
+                let chunk_size = ((splits.len() as f32 / stage.parallelism.unwrap() as f32).ceil()
+                    as usize)
+                    .max(1);
+                for id in 0..splits.chunks(chunk_size).len() {
+                    workers.push((id as u64, choose(id as u32)?));
+                }
+            }
+        } else if let Some(file_scan_info) = stage.file_scan_info.as_ref() {
+            let chunk_size = ((file_scan_info.file_location.len() as f32
+                / stage.parallelism.unwrap() as f32)
+                .ceil() as usize)
+                .max(1);
+            for id in 0..file_scan_info.file_location.chunks(chunk_size).len() {
+                workers.push((id as u64, choose(id as u32)?));
+            }
+        } else {
+            for id in 0..stage.parallelism.unwrap() {
+                workers.push((id as u64, choose(id)?));
+            }
+        }
+        for (task_id, worker) in workers {
+            let Some(holder) = self.tasks.get(&task_id) else {
+                continue;
+            };
+            let worker = match worker {
+                Some(worker) => worker,
+                None => self.worker_node_manager.next_random_worker()?,
+            };
+            holder.inner.store(Arc::new(TaskStatus {
+                _task_id: task_id,
+                location: worker.host.clone(),
+                preassigned: Some(worker),
+            }));
+        }
+        Ok(())
+    }
+}
+
+fn get_fragment_id(
+    catalog_reader: &CatalogReader,
+    table_id: TableId,
+) -> SchedulerResult<FragmentId> {
+    catalog_reader
+        .read_guard()
+        .get_any_table_by_id(table_id)
+        .map(|table| table.fragment_id)
+        .map_err(|e| SchedulerError::Internal(anyhow!(e)))
+}
+
+fn get_table_dml_vnode_mapping(
+    catalog_reader: &CatalogReader,
+    worker_node_manager: &WorkerNodeSelector,
+    table_id: TableId,
+) -> SchedulerResult<WorkerSlotMapping> {
+    let guard = catalog_reader.read_guard();
+
+    let table = guard
+        .get_any_table_by_id(table_id)
+        .map_err(|e| SchedulerError::Internal(anyhow!(e)))?;
+
+    let fragment_id = match table.dml_fragment_id.as_ref() {
+        Some(dml_fragment_id) => dml_fragment_id,
+        // Backward compatibility for those table without `dml_fragment_id`.
+        None => &table.fragment_id,
+    };
+
+    worker_node_manager
+        .manager
+        .get_streaming_fragment_mapping(fragment_id)
+        .map_err(|e| e.into())
+}
+
+/// The worker of a task of a stage when it is decided by the stage itself (DML, distributed
+/// lookup join); `None` when any worker fits.
+fn choose_worker(
+    query: &Query,
+    stage_id: StageId,
+    worker_node_manager: &WorkerNodeSelector,
+    catalog_reader: &CatalogReader,
+    distributed_lookup_join_node: Option<&DistributedLookupJoinNode>,
+    task_id: u32,
+    dml_table_id: Option<TableId>,
+) -> SchedulerResult<Option<WorkerNode>> {
+    if let Some(table_id) = dml_table_id {
+        let vnode_mapping =
+            get_table_dml_vnode_mapping(catalog_reader, worker_node_manager, table_id)?;
+        let worker_slot_ids = vnode_mapping.iter_unique().collect_vec();
+        let candidates = worker_node_manager
+            .manager
+            .get_workers_by_worker_slot_ids(&worker_slot_ids)?;
+        if candidates.is_empty() {
+            return Err(BatchError::EmptyWorkerNodes.into());
+        }
+        let stage = &query.stage(stage_id);
+        let candidate = if stage.batch_enable_distributed_dml {
+            // If distributed dml is enabled, we need to try our best to distribute dml tasks evenly to each worker.
+            // Using a `task_id` could be helpful in this case.
+            candidates[task_id as usize % candidates.len()].clone()
+        } else {
+            // If distributed dml is disabled, we need to guarantee that dml from the same session would be sent to a fixed worker/channel to provide a order guarantee.
+            candidates[stage.session_id.0 as usize % candidates.len()].clone()
+        };
+        return Ok(Some(candidate));
+    };
+
+    if let Some(distributed_lookup_join_node) = distributed_lookup_join_node {
+        let fragment_id = get_fragment_id(
+            catalog_reader,
+            distributed_lookup_join_node
+                .inner_side_table_desc
+                .as_ref()
+                .unwrap()
+                .table_id,
+        )?;
+        let id_to_worker_slots = worker_node_manager
+            .fragment_mapping(fragment_id, query.batch_parallelism())?
+            .iter_unique()
+            .collect_vec();
+
+        let worker_slot_id = id_to_worker_slots[task_id as usize];
+        let candidates = worker_node_manager
+            .manager
+            .get_workers_by_worker_slot_ids(&[worker_slot_id])?;
+        if candidates.is_empty() {
+            return Err(BatchError::EmptyWorkerNodes.into());
+        }
+        Ok(Some(candidates[0].clone()))
+    } else {
+        Ok(None)
+    }
+}
+
+/// The distributed lookup join of the plan of a stage, if any.
+fn find_distributed_lookup_join_in_stage(
+    node: &ExecutionPlanNode,
+) -> Option<&DistributedLookupJoinNode> {
+    match &node.node {
+        NodeBody::DistributedLookupJoin(distributed_lookup_join_node) => {
+            Some(distributed_lookup_join_node)
+        }
+        _ => node
+            .children
+            .iter()
+            .find_map(find_distributed_lookup_join_in_stage),
     }
 }
 
@@ -756,35 +944,6 @@ impl StageRunner {
         Ok(())
     }
 
-    #[inline(always)]
-    fn get_fragment_id(&self, table_id: TableId) -> SchedulerResult<FragmentId> {
-        self.catalog_reader
-            .read_guard()
-            .get_any_table_by_id(table_id)
-            .map(|table| table.fragment_id)
-            .map_err(|e| SchedulerError::Internal(anyhow!(e)))
-    }
-
-    #[inline(always)]
-    fn get_table_dml_vnode_mapping(&self, table_id: TableId) -> SchedulerResult<WorkerSlotMapping> {
-        let guard = self.catalog_reader.read_guard();
-
-        let table = guard
-            .get_any_table_by_id(table_id)
-            .map_err(|e| SchedulerError::Internal(anyhow!(e)))?;
-
-        let fragment_id = match table.dml_fragment_id.as_ref() {
-            Some(dml_fragment_id) => dml_fragment_id,
-            // Backward compatibility for those table without `dml_fragment_id`.
-            None => &table.fragment_id,
-        };
-
-        self.worker_node_manager
-            .manager
-            .get_streaming_fragment_mapping(fragment_id)
-            .map_err(|e| e.into())
-    }
-
     fn choose_worker(
         &self,
         plan_fragment: &PlanFragment,
@@ -792,57 +951,15 @@ impl StageRunner {
         dml_table_id: Option<TableId>,
     ) -> SchedulerResult<Option<WorkerNode>> {
         let plan_node = plan_fragment.root.as_ref().expect("fail to get plan node");
-
-        if let Some(table_id) = dml_table_id {
-            let vnode_mapping = self.get_table_dml_vnode_mapping(table_id)?;
-            let worker_slot_ids = vnode_mapping.iter_unique().collect_vec();
-            let candidates = self
-                .worker_node_manager
-                .manager
-                .get_workers_by_worker_slot_ids(&worker_slot_ids)?;
-            if candidates.is_empty() {
-                return Err(BatchError::EmptyWorkerNodes.into());
-            }
-            let stage = &self.query.stage(self.stage_id);
-            let candidate = if stage.batch_enable_distributed_dml {
-                // If distributed dml is enabled, we need to try our best to distribute dml tasks evenly to each worker.
-                // Using a `task_id` could be helpful in this case.
-                candidates[task_id as usize % candidates.len()].clone()
-            } else {
-                // If distributed dml is disabled, we need to guarantee that dml from the same session would be sent to a fixed worker/channel to provide a order guarantee.
-                candidates[stage.session_id.0 as usize % candidates.len()].clone()
-            };
-            return Ok(Some(candidate));
-        };
-
-        if let Some(distributed_lookup_join_node) =
-            Self::find_distributed_lookup_join_node(plan_node)
-        {
-            let fragment_id = self.get_fragment_id(
-                distributed_lookup_join_node
-                    .inner_side_table_desc
-                    .as_ref()
-                    .unwrap()
-                    .table_id,
-            )?;
-            let id_to_worker_slots = self
-                .worker_node_manager
-                .fragment_mapping(fragment_id, self.query.batch_parallelism())?
-                .iter_unique()
-                .collect_vec();
-
-            let worker_slot_id = id_to_worker_slots[task_id as usize];
-            let candidates = self
-                .worker_node_manager
-                .manager
-                .get_workers_by_worker_slot_ids(&[worker_slot_id])?;
-            if candidates.is_empty() {
-                return Err(BatchError::EmptyWorkerNodes.into());
-            }
-            Ok(Some(candidates[0].clone()))
-        } else {
-            Ok(None)
-        }
+        choose_worker(
+            &self.query,
+            self.stage_id,
+            &self.worker_node_manager,
+            &self.catalog_reader,
+            Self::find_distributed_lookup_join_node(plan_node),
+            task_id,
+            dml_table_id,
+        )
     }
 
     fn find_distributed_lookup_join_node(
@@ -958,7 +1075,14 @@ impl StageRunner {
         worker: Option<WorkerNode>,
         expr_context: ExprContext,
     ) -> SchedulerResult<Fuse<Streaming<TaskInfoResponse>>> {
-        let mut worker = worker.unwrap_or(self.worker_node_manager.next_random_worker()?);
+        // `batch_phased_stages`: the consumers already know where a deferred task runs.
+        let preassigned = self
+            .tasks
+            .get(&task_id.task_id)
+            .and_then(|holder| holder.get_status().preassigned.clone());
+        let mut worker = preassigned
+            .or(worker)
+            .unwrap_or(self.worker_node_manager.next_random_worker()?);
         let worker_node_addr = worker.host.take().unwrap();
         let compute_client = self
             .compute_client_pool
@@ -984,9 +1108,11 @@ impl StageRunner {
             .map_err(|e| anyhow!(e))?
             .fuse();
 
+        let preassigned = self.tasks[&t_id].get_status().preassigned.clone();
         self.tasks[&t_id].inner.store(Arc::new(TaskStatus {
             _task_id: t_id,
             location: Some(worker_node_addr),
+            preassigned,
         }));
 
         Ok(stream_status)

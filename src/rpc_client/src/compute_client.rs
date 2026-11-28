@@ -212,6 +212,7 @@ impl ComputeClient {
         query_id: String,
         spillable_operator_instances: u32,
         spill_on_memory_wait: bool,
+        extra_reservation_bytes: u64,
     ) -> Result<Streaming<AdmitQueryResponse>> {
         Ok(self
             .task_client
@@ -220,6 +221,7 @@ impl ComputeClient {
                 query_id,
                 spillable_operator_instances,
                 spill_on_memory_wait,
+                extra_reservation_bytes,
             })
             .await
             .map_err(RpcError::from_compute_status)?

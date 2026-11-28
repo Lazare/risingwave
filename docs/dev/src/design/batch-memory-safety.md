@@ -131,6 +131,9 @@ read from disk once. Risk: the snapshot of the query must stay pinned for the wh
 (already the case), and the admission reservation is held longer. Effort: large; it depends on
 section 4.
 
+**A lighter form is implemented** (`batch_phased_stages`, section 8): it needs no materialized
+output, because it only delays the stages that their consumer would not read yet anyway.
+
 ## 6. Order of work
 
 1. Count what escapes: storage prefetch on decoded sizes, task output channels (as
@@ -230,3 +233,94 @@ feedback store next to the row counts), else from the schema (fixed-size types e
 variable-size types at an assumed average). Gain: wide-row exchanges get a lower parallelism
 instead of filling the node. Risk: a wrong width estimate lowers the parallelism of a query that
 would have fit; the rule must only ever lower the parallelism chosen today, never raise it.
+
+## 8. Phased start of the stages (`batch_phased_stages`, implemented)
+
+**Problem.** The scheduler starts every stage as soon as its children have created their tasks.
+In a query with many stages, every scan runs at once (each holding its decoded blocks, section 2)
+and the producers of the probe side of each hash join fill their output channels (section 7)
+while the join still reads its build side: memory outside the operators grows with the number of
+open stages, not with what the query needs at a given time.
+
+**Mechanism** (`scheduler/distributed/phased_stages.rs`, `QueryRunner::run_phased`). A hash join
+reads its build input (right) to the end before it reads its probe input (left); a nested loop
+join buffers its left input before it streams its right one. For each such join of a stage
+whose build side reads child stages, the stages read by its probe side, and every stage below
+them, wait until the stages of the build side have finished. The stage of the join itself starts
+as before: the workers of the tasks of its deferred children are chosen in advance
+(`StageExecution::preassign_workers`, the same choice as when scheduling them), so its exchanges
+know where to read. Once a build stage has finished, the join has read (nearly) all its build
+input; the deferred stages are then created on their workers, and a consumer that asks for the
+output of a task not created yet waits for it on the compute node (`BatchManager::wait_for_task`,
+at most `MISSING_TASK_WAIT` = 120 s; without the variable a consumer only starts once its
+producers exist, so the wait never happens except for a cancelled task).
+
+Example: `SELECT .. FROM f JOIN d1 ON .. JOIN d2 ON ..` planned as two hash joins in one stage
+(probe `f`, builds `d1` and `d2`): `d2` starts first, `d1` once `d2` has finished, `f` once both
+have finished. The scan of `f` and its exchange buffers no longer overlap the builds.
+
+**No deadlock.**
+- A stage only waits for stages that feed the build side of a join of one of its ancestors:
+  never for an ancestor or a descendant of its own. A stage in the wait set of another has a
+  strictly smaller wait set: the waits form no cycle.
+- A build stage finishes once its consumer has read all its output, which needs nothing from
+  the deferred side. That holds only if every operator between the join and the build exchanges
+  reads its inputs to the end (project, filter, aggregations, sort, top-n, hash join, union...);
+  a `LIMIT` or a limited distinct on the build side may stop reading, so such a join is left
+  alone.
+- Operators that read several inputs at the same time get them together: a deferred subtree
+  starts as a whole (a union on the probe side starts all its inputs together), a merge sort
+  exchange reads one child stage, and only hash and nested loop joins defer anything. Batch has
+  no sort-merge join.
+
+**Stages that nobody reads any more.** With the variable, a stage whose consumers have all
+finished is stopped (its tasks cancelled), and recursively below it, instead of being waited for:
+a satisfied `LIMIT`, or the root stage that ended. Before, such a producer whose output was never
+taken (a consumer that ended before asking for it) blocked on its full channel, and the query
+waited for it until its timeout. The cardinality feedback ignores the counts of stopped stages
+(their counts are incomplete).
+
+**Not done: a bound on the number of running stages.** A plain bound would delay inputs that a
+consumer reads together (a union polls all its inputs, a nested loop or hash join needs its
+build side): the consumer would wait for a task that the bound holds back. The dependency order
+above already bounds what runs at once for join trees; a bound for union branches would need
+their consumer to read them one after another.
+
+**Cost.** Less pipelining: the probe side of each join starts only after its build side. The
+latency of a query grows by the time of its build sides when its probe scans are the slower
+part; queries whose builds are small are hardly affected. One more round of task creations per
+phase (a few milliseconds). Default off.
+
+## 9. Admission by estimate (`batch_admission_by_estimate`, implemented)
+
+**Problem.** Admission reserves the pool of the spillable operators of a query (section 1); a
+query without spillable operator reserves nothing. Three queries with wide rows and many stages
+are admitted together and then hold several times the budget in exchange buffers and scans,
+which are counted (section 7) only once allocated.
+
+**Mechanism** (`scheduler/admission_estimate.rs`). The frontend estimates, from the plan, what
+the query holds beyond its operators:
+
+    sum over non-root stages of  tasks x min(B, (output_channel_size + 1) x chunk_size x W)
+    + number of table scans x 256 vnodes x 2 levels x 64 KB
+
+with `W` the width of a row of the output of the stage from its schema (fixed-size types exact,
+`varchar` 36 bytes, `jsonb` 260 bytes, nested types 128 bytes, plus one byte per column) and `B`
+the bound `batch_exchange_buffer_max_mb` when set. Below 256 MB nothing is reserved, so small and
+narrow queries are not affected; above, the estimate is sent to every compute node in the
+admission request (`AdmitQueryRequest.extra_reservation_bytes`). The node reserves it on top of
+the pool, at most the limit of a query, the whole reservation at most its usable memory, and
+admits queries in arrival order as before: a query whose estimate does not fit beside the
+running ones waits. A query without spillable operator now goes through admission when its
+estimate is reserved.
+
+**Conservative.** Every buffer is assumed full at once and the estimate is not divided between
+the nodes (like the pool of the operators). With `batch_phased_stages`, the deferred stages do
+not fill their buffers while the builds run, so the estimate is higher than the real peak. The
+widths of the schema are guesses; the cardinality feedback does not record bytes per row yet.
+The parallelism is not lowered from the estimate (the loop of `batch_limits.rs` only counts
+the operators): reserving delays queries instead of slowing each of them.
+
+**Cost.** Queries with wide rows wait for each other instead of running together: higher latency
+under concurrency, fewer memory failures. Default off.
+

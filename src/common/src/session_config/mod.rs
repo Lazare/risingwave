@@ -773,6 +773,24 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     streaming_distributed_union: bool,
 
+    // Distributed batch scheduler (`QueryRunner`, `phased_stages.rs`).
+    /// In a distributed batch query, start the stages that feed the probe side of a hash join only
+    /// once the stages of its build side have finished (the join has then read its build side),
+    /// instead of starting all the stages at once; and stop the stages whose consumers have all
+    /// finished (a satisfied `LIMIT`, a consumer that stopped reading) instead of waiting for
+    /// them. Lowers the memory that open scans and full exchange buffers hold, at the cost of less
+    /// pipelining. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_phased_stages: bool,
+
+    /// In a distributed batch query, reserve at admission, on top of the memory of the spillable
+    /// operators, an estimate of the memory that the exchange buffers and table scans of the query
+    /// hold (from its stages, their parallelism and the widths of their rows), so that queries
+    /// whose estimates do not fit together on a compute node wait for each other instead of
+    /// running together. Small estimates reserve nothing. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_admission_by_estimate: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,

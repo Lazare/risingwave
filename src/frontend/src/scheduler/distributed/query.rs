@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Formatter};
 use std::mem;
 use std::sync::Arc;
@@ -33,6 +33,7 @@ use tokio::sync::{RwLock, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{Instrument, debug, error, info, warn};
 
+use super::phased_stages::{StagePhases, stages_to_stop};
 use super::{DistributedQueryMetrics, QueryExecutionInfoRef, QueryResultFetcher, StageEvent};
 use crate::catalog::catalog_service::CatalogReader;
 use crate::scheduler::distributed::StageEvent::Scheduled;
@@ -293,6 +294,10 @@ impl Debug for QueryRunner {
 impl QueryRunner {
     async fn run(mut self) {
         self.query_metrics.running_query_num.inc();
+        if self.query.phased_stages {
+            self.run_phased().await;
+            return;
+        }
         // Start leaf stages.
         let leaf_stages = self.query.leaf_stages();
         for stage_id in &leaf_stages {
@@ -376,6 +381,116 @@ impl QueryRunner {
                     // One stage failed, not necessary to execute schedule stages.
                     break;
                 }
+            }
+        }
+    }
+
+    /// `batch_phased_stages`: starts the stages in phases (see `phased_stages.rs`) and stops the
+    /// stages whose consumers have all finished.
+    async fn run_phased(mut self) {
+        let phases = StagePhases::new(&self.query.stage_graph);
+        // The consumers of the deferred stages start first: they must know where the tasks of
+        // these stages will run.
+        let deferred: Vec<StageId> = phases.deferred_stages().copied().collect();
+        for stage_id in &deferred {
+            if let Err(e) = self.stage_executions[stage_id].preassign_workers() {
+                self.clean_all_stages(Some(e)).await;
+                return;
+            }
+        }
+        if !deferred.is_empty() {
+            tracing::debug!(
+                query_id = ?self.query.query_id,
+                ?deferred,
+                "phased start of the stages of a batch query"
+            );
+        }
+
+        let query = self.query.clone();
+        let parents = |stage_id: &StageId| -> Vec<StageId> {
+            query.get_parents(stage_id).iter().copied().collect()
+        };
+        // The stages that finished, or that were stopped because nobody reads them any more.
+        let mut done: HashSet<StageId> = HashSet::new();
+        self.start_ready_stages(&phases, &done).await;
+        while let Some(msg_inner) = self.msg_receiver.recv().await {
+            match msg_inner {
+                Stage(Scheduled(stage_id)) => {
+                    tracing::trace!(
+                        "Query stage {:?}-{:?} scheduled.",
+                        self.query.query_id,
+                        stage_id
+                    );
+                    self.scheduled_stages_count += 1;
+                    self.start_ready_stages(&phases, &done).await;
+                }
+                Stage(ScheduledRoot(receiver)) => {
+                    self.send_root_stage_info(receiver);
+                }
+                Stage(StageEvent::Failed { id, reason }) => {
+                    error!(
+                        error = %reason.as_report(),
+                        query_id = ?self.query.query_id,
+                        stage_id = ?id,
+                        "query stage failed"
+                    );
+                    self.clean_all_stages(Some(reason)).await;
+                    break;
+                }
+                Stage(StageEvent::Completed(stage_id)) => {
+                    // A stage stopped below may still report that it finished.
+                    if !done.insert(stage_id) {
+                        continue;
+                    }
+                    for stopped in stages_to_stop(&query.stage_graph, parents, stage_id, &done) {
+                        tracing::debug!(
+                            query_id = ?self.query.query_id,
+                            stage_id = ?stopped,
+                            "stopping a batch stage whose consumers have all finished"
+                        );
+                        self.stage_executions[&stopped].stop(None).await;
+                        done.insert(stopped);
+                    }
+                    if done.len() == self.stage_executions.len() {
+                        tracing::trace!(
+                            "Query {:?} completed, starting to clean stage tasks.",
+                            &self.query.query_id
+                        );
+                        self.clean_all_stages(None).await;
+                        break;
+                    }
+                    self.start_ready_stages(&phases, &done).await;
+                }
+                QueryMessage::CancelQuery(reason) => {
+                    self.clean_all_stages(Some(SchedulerError::QueryCancelled(reason)))
+                        .await;
+                    break;
+                }
+            }
+        }
+    }
+
+    /// `batch_phased_stages`: starts every pending stage whose wait set is done and whose
+    /// children either run already or are deferred (their workers are chosen in advance).
+    async fn start_ready_stages(&self, phases: &StagePhases, done: &HashSet<StageId>) {
+        for stage_id in self.query.stage_graph.stage_ids_by_topo_order() {
+            if done.contains(&stage_id) || !phases.may_start(&stage_id, done) {
+                continue;
+            }
+            let stage_execution = &self.stage_executions[&stage_id];
+            if !stage_execution.is_pending().await {
+                continue;
+            }
+            let mut children_ready = true;
+            for child in self.query.stage_graph.get_child_stages_unchecked(&stage_id) {
+                if !phases.is_deferred(child) && !self.stage_executions[child].is_scheduled().await
+                {
+                    children_ready = false;
+                    break;
+                }
+            }
+            if children_ready {
+                stage_execution.start().await;
             }
         }
     }

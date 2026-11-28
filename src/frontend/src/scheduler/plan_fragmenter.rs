@@ -363,6 +363,12 @@ pub struct Query {
     /// `batch_exchange_buffer_max_mb`, in bytes: what the output channels of a task may hold at
     /// most, 0 for no bound beyond their number of chunks.
     pub exchange_buffer_max_bytes: u64,
+    /// `batch_phased_stages`: the stages feeding the probe side of a hash join start once its
+    /// build side has finished, and the stages whose consumers have all finished are stopped.
+    pub phased_stages: bool,
+    /// `batch_admission_by_estimate`: the memory, beyond the spillable operators, that the query
+    /// reserves on each compute node at admission. 0 for none.
+    pub extra_reservation_bytes: u64,
 }
 
 impl Query {
@@ -886,6 +892,62 @@ impl StageGraph {
             .fold(0, u32::saturating_add)
     }
 
+    /// The parallelism of the stages whose parallelism follows the query.
+    pub fn batch_parallelism(&self) -> usize {
+        self.batch_parallelism
+    }
+
+    /// A stage graph given as `(stage, root plan, child stages)`, stage 0 being the root stage,
+    /// with a parallelism of 4 per stage.
+    #[cfg(test)]
+    pub fn for_test(stages: Vec<(u32, ExecutionPlanNode, Vec<u32>)>) -> Self {
+        let mut graph = StageGraph {
+            root_stage_id: 0.into(),
+            stages: HashMap::new(),
+            child_edges: HashMap::new(),
+            parent_edges: HashMap::new(),
+            batch_parallelism: 4,
+        };
+        for (id, _, _) in &stages {
+            graph.child_edges.insert((*id).into(), HashSet::new());
+            graph.parent_edges.insert((*id).into(), HashSet::new());
+        }
+        for (id, root, children) in stages {
+            let id: StageId = id.into();
+            for child in children {
+                graph.child_edges.get_mut(&id).unwrap().insert(child.into());
+                graph
+                    .parent_edges
+                    .get_mut(&child.into())
+                    .unwrap()
+                    .insert(id);
+            }
+            graph.stages.insert(
+                id,
+                QueryStage {
+                    id,
+                    root,
+                    exchange_info: None,
+                    parallelism: Some(if id == 0.into() { 1 } else { 4 }),
+                    table_scan_info: None,
+                    source_info: None,
+                    file_scan_info: None,
+                    has_lookup_join: false,
+                    dml_table_id: None,
+                    session_id: (0, 0),
+                    batch_enable_distributed_dml: false,
+                    children_exchange_distribution: None,
+                },
+            );
+        }
+        graph
+    }
+
+    #[cfg(test)]
+    pub fn parents_for_test(&self, stage_id: &StageId) -> Vec<StageId> {
+        self.parent_edges[stage_id].iter().copied().collect()
+    }
+
     pub fn get_child_stages_unchecked(&self, stage_id: &StageId) -> &HashSet<StageId> {
         self.child_edges.get(stage_id).unwrap()
     }
@@ -1160,6 +1222,8 @@ impl BatchPlanFragmenter {
             spill_on_memory_wait: false,
             compact_shuffle_output: false,
             exchange_buffer_max_bytes: 0,
+            phased_stages: false,
+            extra_reservation_bytes: 0,
         })
     }
 
