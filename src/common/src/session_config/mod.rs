@@ -532,6 +532,32 @@ pub struct SessionConfig {
     #[parameter(default = 0u32, flags = "SESSION_INIT")]
     batch_exchange_buffer_max_mb: u32,
 
+    // Memory of the storage reads of batch scans (`scan_memory.rs`).
+    /// In a batch query, the memory, in MB, of decoded blocks that the storage iterators of one
+    /// table scan may hold before they stop prefetching and read one block at a time. The blocks
+    /// are counted in the memory of the query whether or not they are bounded. 0 for no budget.
+    /// Defaults to 0.
+    #[parameter(default = 0u32, flags = "SESSION_INIT")]
+    batch_scan_prefetch_budget_mb: u32,
+
+    /// In a batch query, the storage iterators of a table scan stop prefetching and read one
+    /// block at a time while the memory of the query, or the batch memory of the node, is over its
+    /// limit. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_scan_prefetch_within_query_limit: bool,
+
+    /// In a batch query, once the consumers of a task have not read its output for this many
+    /// milliseconds, the table scans of the task drop the blocks they prefetched and do not
+    /// prefetch until the output moves again. 0 for never. Defaults to 0.
+    #[parameter(default = 0u32, flags = "SESSION_INIT")]
+    batch_scan_release_prefetch_after_ms: u32,
+
+    /// In a batch query, a table scan that does not need the order of the table keeps at most
+    /// this many vnode iterators open at once, opening the next vnode when one is exhausted,
+    /// instead of opening all the vnodes of the scan at once. 0 for all at once. Defaults to 0.
+    #[parameter(default = 0u32, flags = "SESSION_INIT")]
+    batch_scan_max_open_vnode_iterators: u32,
+
     // Batch spool (`share_identical_batch_subplans`).
     /// In a batch query, compute once per task the identical sub-plans of a stage that aggregate
     /// or join, keep their rows in memory (spilled to disk when the memory of the query is

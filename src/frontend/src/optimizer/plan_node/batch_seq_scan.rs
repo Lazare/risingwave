@@ -229,6 +229,8 @@ impl ToDistributedBatch for BatchSeqScan {
 
 impl TryToBatchPb for BatchSeqScan {
     fn try_to_batch_prost_body(&self) -> SchedulerResult<NodeBody> {
+        let ctx = self.base.ctx();
+        let config = ctx.session_ctx().config();
         Ok(NodeBody::RowSeqScan(RowSeqScanNode {
             table_desc: Some(self.core.table_catalog.table_desc().try_to_protobuf()?),
             column_ids: self
@@ -243,6 +245,11 @@ impl TryToBatchPb for BatchSeqScan {
             ordered: !self.order().is_any(),
             limit: *self.limit(),
             query_epoch: to_batch_query_epoch(&self.as_of)?,
+            // Memory of the storage reads of the scan.
+            prefetch_budget_bytes: (config.batch_scan_prefetch_budget_mb() as u64) << 20,
+            prefetch_within_query_limit: config.batch_scan_prefetch_within_query_limit(),
+            release_prefetch_after_ms: config.batch_scan_release_prefetch_after_ms(),
+            max_open_vnode_iterators: config.batch_scan_max_open_vnode_iterators(),
         }))
     }
 }

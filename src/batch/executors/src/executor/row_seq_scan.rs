@@ -28,6 +28,7 @@ use risingwave_common::util::chunk_coalesce::DataChunkBuilder;
 use risingwave_pb::batch_plan::plan_node::NodeBody;
 use risingwave_pb::common::BatchQueryEpoch;
 use risingwave_pb::plan_common::StorageTableDesc;
+use risingwave_storage::hummock::{ScanReadMemory, ScanReadSettings, evicted_held_block_bytes};
 use risingwave_storage::store::PrefetchOptions;
 use risingwave_storage::table::batch_table::BatchTable;
 use risingwave_storage::{StateStore, dispatch_state_store};
@@ -54,6 +55,35 @@ pub struct RowSeqScanExecutor<S: StateStore> {
     ordered: bool,
     query_epoch: BatchQueryEpoch,
     limit: Option<u64>,
+    /// The memory of the storage reads of the scan, reported when the scan ends.
+    scan_memory: Option<ScanReadMemory>,
+}
+
+/// The least peak of the blocks held by a scan for which the scan is reported in the logs.
+const SCAN_MEMORY_REPORT_BYTES: usize = 8 << 20;
+
+/// Reports the memory of the storage reads of a scan when it ends, if it held enough.
+struct ScanMemoryReport {
+    identity: String,
+    memory: ScanReadMemory,
+}
+
+impl Drop for ScanMemoryReport {
+    fn drop(&mut self) {
+        let memory = &self.memory;
+        if memory.peak_bytes() >= SCAN_MEMORY_REPORT_BYTES {
+            tracing::info!(
+                identity = %self.identity,
+                peak_bytes = memory.peak_bytes(),
+                held_bytes = memory.held_bytes(),
+                prefetch_fallbacks = memory.prefetch_fallbacks(),
+                released_bytes = memory.released_bytes(),
+                evicted_held_block_bytes = evicted_held_block_bytes(),
+                settings = ?memory.settings(),
+                "batch scan storage reads"
+            );
+        }
+    }
 }
 
 impl<S: StateStore> RowSeqScanExecutor<S> {
@@ -76,7 +106,14 @@ impl<S: StateStore> RowSeqScanExecutor<S> {
             ordered,
             query_epoch,
             limit,
+            scan_memory: None,
         }
+    }
+
+    /// Reports the memory of the storage reads of the scan when it ends.
+    pub fn with_scan_memory(mut self, scan_memory: ScanReadMemory) -> Self {
+        self.scan_memory = Some(scan_memory);
+        self
     }
 }
 
@@ -125,20 +162,41 @@ impl BoxedExecutorBuilder for RowSeqScanExecutorBuilder {
         };
         let metrics = source.context().batch_metrics();
 
+        // The blocks that the storage iterators of the scan hold are counted in the memory of the
+        // query; the settings decide when they stop prefetching.
+        let scan_memory = ScanReadMemory::new(
+            source
+                .context()
+                .create_executor_mem_context(source.plan_node().get_identity()),
+            ScanReadSettings {
+                prefetch_budget_bytes: seq_scan_node.prefetch_budget_bytes,
+                prefetch_within_query_limit: seq_scan_node.prefetch_within_query_limit,
+                release_prefetch_after_ms: seq_scan_node.release_prefetch_after_ms,
+                max_open_vnode_iterators: seq_scan_node.max_open_vnode_iterators,
+            },
+        );
+        if let Some(scan_reads) = source.context().scan_reads() {
+            scan_reads.register(&scan_memory);
+        }
+
         dispatch_state_store!(source.context().state_store(), state_store, {
-            let table = BatchTable::new_partial(state_store, column_ids, vnodes, table_desc);
+            let table = BatchTable::new_partial(state_store, column_ids, vnodes, table_desc)
+                .with_scan_memory(scan_memory.clone());
             // The scan may start long after the task: keep the version that the query reads.
             table.pin_batch_query_snapshot(query_epoch.into()).await?;
-            Ok(Box::new(RowSeqScanExecutor::new(
-                table,
-                scan_ranges,
-                ordered,
-                query_epoch,
-                chunk_size as usize,
-                source.plan_node().get_identity().clone(),
-                limit,
-                metrics,
-            )))
+            Ok(Box::new(
+                RowSeqScanExecutor::new(
+                    table,
+                    scan_ranges,
+                    ordered,
+                    query_epoch,
+                    chunk_size as usize,
+                    source.plan_node().get_identity().clone(),
+                    limit,
+                    metrics,
+                )
+                .with_scan_memory(scan_memory.clone()),
+            ))
         })
     }
 }
@@ -162,15 +220,17 @@ impl<S: StateStore> RowSeqScanExecutor<S> {
     async fn do_execute(self: Box<Self>) {
         let Self {
             chunk_size,
+            identity,
             metrics,
             table,
             scan_ranges,
             ordered,
             query_epoch,
             limit,
-            ..
+            scan_memory,
         } = *self;
         let table = Arc::new(table);
+        let _report = scan_memory.map(|memory| ScanMemoryReport { identity, memory });
 
         // Create collector.
         let histogram = metrics

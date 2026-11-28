@@ -50,6 +50,7 @@ pub use vector_index_reader::VectorIndexReader;
 use crate::StateStore;
 use crate::error::{StorageError, StorageResult};
 use crate::hummock::CachePolicy;
+use crate::hummock::scan_memory::ScanReadMemory;
 use crate::row_serde::row_serde_util::{serialize_pk, serialize_pk_with_vnode};
 use crate::row_serde::value_serde::{ValueRowSerde, ValueRowSerdeNew};
 use crate::row_serde::{ColumnMapping, find_columns_by_ids};
@@ -314,6 +315,9 @@ pub struct BatchTableInner<S: StateStore, SD: ValueRowSerde> {
     /// and its clones: it holds the storage version that the query reads, which the node would
     /// otherwise drop from its recent versions while a long query is still running.
     batch_query_snapshot: BatchQuerySnapshot<S>,
+
+    /// The memory of the batch scan that reads the table, see [`Self::with_scan_memory`].
+    scan_memory: Option<ScanReadMemory>,
 }
 
 /// The epoch of a batch query and the snapshot that reads a table at this epoch, shared by the
@@ -536,11 +540,20 @@ impl<S: StateStore> BatchTableInner<S, EitherSerde> {
             table_option,
             read_prefix_len_hint,
             batch_query_snapshot: Default::default(),
+            scan_memory: None,
         }
     }
 }
 
 impl<S: StateStore, SD: ValueRowSerde> BatchTableInner<S, SD> {
+    /// The reads of the table are those of a batch scan: the blocks that its storage iterators
+    /// hold are charged to `memory`, which also decides whether they may prefetch, and an
+    /// unordered scan keeps at most `max_open_vnode_iterators` vnode iterators open at once.
+    pub fn with_scan_memory(mut self, memory: ScanReadMemory) -> Self {
+        self.scan_memory = Some(memory);
+        self
+    }
+
     pub fn pk_serializer(&self) -> &OrderedRowSerde {
         &self.pk_serializer
     }
@@ -869,7 +882,24 @@ impl<S: StateStore, SD: ValueRowSerde> BatchTableInner<S, SD> {
 
         let read_snapshot = self.read_snapshot(wait_epoch).await?;
 
-        build_vnode_stream(
+        // A scan that does not keep the order may read the vnodes a few at a time.
+        let max_open = self.scan_memory.as_ref().map_or(0, |memory| {
+            memory.settings().max_open_vnode_iterators as usize
+        });
+        if !ordered && max_open > 0 && vnodes.len() > max_open {
+            return Ok(self
+                .bounded_vnode_stream(
+                    read_snapshot,
+                    prefix_hint,
+                    (start_bound, end_bound),
+                    vnodes,
+                    prefetch_options,
+                    max_open,
+                )
+                .left_stream());
+        }
+
+        let stream = build_vnode_stream(
             |vnode| {
                 self.iter_vnode_with_encoded_key_range(
                     &read_snapshot,
@@ -891,7 +921,52 @@ impl<S: StateStore, SD: ValueRowSerde> BatchTableInner<S, SD> {
             &vnodes,
             ordered,
         )
-        .await
+        .await?;
+        Ok(stream.right_stream())
+    }
+
+    /// Reads `vnodes` in any order, with at most `max_open` vnode iterators open at once: each
+    /// iterator is opened when a previous one is exhausted, and holds its blocks only while open.
+    fn bounded_vnode_stream(
+        &self,
+        read_snapshot: S::ReadSnapshot,
+        prefix_hint: Option<Bytes>,
+        (start_bound, end_bound): (Bound<Bytes>, Bound<Bytes>),
+        vnodes: Vec<VirtualNode>,
+        prefetch_options: PrefetchOptions,
+        max_open: usize,
+    ) -> impl Stream<Item = StorageResult<OwnedRow>> + Send + 'static + use<S, SD> {
+        let read_contexts = vnodes
+            .into_iter()
+            .map(|vnode| {
+                self.vnode_read_context(
+                    prefix_hint.clone(),
+                    (start_bound.as_ref(), end_bound.as_ref()),
+                    vnode,
+                    prefetch_options,
+                )
+            })
+            .collect_vec();
+        let rows = Arc::new(RowStreamTemplate {
+            mapping: self.mapping.clone(),
+            epoch_idx: self.epoch_idx,
+            row_deserializer: self.row_serde.clone(),
+            output_indices: self.output_indices.clone(),
+            key_output_indices: self.key_output_indices.clone(),
+            value_output_indices: self.value_output_indices.clone(),
+            output_row_in_key_indices: self.output_row_in_key_indices.clone(),
+        });
+        futures::stream::iter(read_contexts)
+            .then(move |(table_key_range, read_options, pk_serializer)| {
+                let read_snapshot = read_snapshot.clone();
+                let rows = rows.clone();
+                async move {
+                    let iter = read_snapshot.iter(table_key_range, read_options).await?;
+                    let stream = rows.row_stream::<(), _>(iter, pk_serializer);
+                    StorageResult::Ok(Box::pin(stream.map_ok(|(_, row)| row)))
+                }
+            })
+            .try_flatten_unordered(max_open)
     }
 
     async fn iter_vnode_with_encoded_key_range<K: CopyFromSlice>(
@@ -931,6 +1006,7 @@ impl<S: StateStore, SD: ValueRowSerde> BatchTableInner<S, SD> {
                     prefix_hint,
                     prefetch_options,
                     cache_policy,
+                    scan_memory: self.scan_memory.clone(),
                 };
                 let pk_serializer = match self.output_row_in_key_indices.is_empty() {
                     true => None,
@@ -1402,6 +1478,39 @@ struct BatchTableInnerIterInner<SI: StateStoreIter, SD: ValueRowSerde> {
 
     /// used for deserializing key part of output row from pk.
     output_row_in_key_indices: Vec<usize>,
+}
+
+/// What turns the iterators of the vnodes of a bounded scan into rows (see
+/// `bounded_vnode_stream`): the fields of [`BatchTableInnerIterInner`] other than its iterator.
+struct RowStreamTemplate<SD: ValueRowSerde> {
+    mapping: Arc<ColumnMapping>,
+    epoch_idx: Option<usize>,
+    row_deserializer: Arc<SD>,
+    output_indices: Vec<usize>,
+    key_output_indices: Option<Vec<usize>>,
+    value_output_indices: Vec<usize>,
+    output_row_in_key_indices: Vec<usize>,
+}
+
+impl<SD: ValueRowSerde> RowStreamTemplate<SD> {
+    fn row_stream<K: CopyFromSlice, SI: StateStoreIter + Send>(
+        &self,
+        iter: SI,
+        pk_serializer: Option<Arc<OrderedRowSerde>>,
+    ) -> impl Stream<Item = StorageResult<(K, OwnedRow)>> + Send + use<K, SI, SD> {
+        BatchTableInnerIterInner {
+            iter,
+            mapping: self.mapping.clone(),
+            epoch_idx: self.epoch_idx,
+            row_deserializer: self.row_deserializer.clone(),
+            pk_serializer,
+            output_indices: self.output_indices.clone(),
+            key_output_indices: self.key_output_indices.clone(),
+            value_output_indices: self.value_output_indices.clone(),
+            output_row_in_key_indices: self.output_row_in_key_indices.clone(),
+        }
+        .into_stream::<K>()
+    }
 }
 
 impl<SI: StateStoreIter, SD: ValueRowSerde> BatchTableInnerIterInner<SI, SD> {

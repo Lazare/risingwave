@@ -593,6 +593,10 @@ impl BatchTaskExecution {
         let mut data_chunk_stream = root.execute();
         let mut state;
         let mut error = None;
+        // `batch_scan_release_prefetch_after_ms`: the table scans of the task, held back while its
+        // consumers do not read its output. Registered when the executors were built.
+        let scan_reads = self.context.scan_reads();
+        let release_after = scan_reads.as_ref().and_then(|reads| reads.release_delay());
 
         let mut shutdown_rx = self.shutdown_rx.clone();
         loop {
@@ -620,11 +624,28 @@ impl BatchTaskExecution {
                         Some(Ok(data_chunk)) => {
                             // A consumer may stop reading without closing the channel: the send
                             // must not outlive the cancellation of the task.
-                            let sent = select! {
-                                biased;
-                                _ = shutdown_rx.cancelled() => None,
-                                sent = sender.send(data_chunk) => Some(sent),
+                            let mut send = std::pin::pin!(sender.send(data_chunk));
+                            let mut held_back = false;
+                            let sent = loop {
+                                select! {
+                                    biased;
+                                    _ = shutdown_rx.cancelled() => break None,
+                                    sent = &mut send => break Some(sent),
+                                    // The consumers do not read: the scans drop their
+                                    // prefetched blocks until the output moves again.
+                                    _ = tokio::time::sleep(release_after.unwrap_or_default()),
+                                        if release_after.is_some() && !held_back =>
+                                    {
+                                        if let Some(reads) = &scan_reads {
+                                            reads.hold_back();
+                                        }
+                                        held_back = true;
+                                    }
+                                }
                             };
+                            if held_back && let Some(reads) = &scan_reads {
+                                reads.resume();
+                            }
                             let Some(sent) = sent else {
                                 state = match self.shutdown_rx.message() {
                                     ShutdownMsg::Abort(e) => {

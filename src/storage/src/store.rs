@@ -42,6 +42,7 @@ use risingwave_pb::hummock::{PbVnodeWatermark, PbWatermarkSerdeType};
 
 use crate::error::{StorageError, StorageResult};
 use crate::hummock::CachePolicy;
+use crate::hummock::scan_memory::ScanReadMemory;
 use crate::monitor::{MonitoredStateStore, MonitoredStorageMetrics};
 pub(crate) use crate::vector::{OnNearestItem, Vector};
 
@@ -512,6 +513,9 @@ pub struct ReadOptions {
     pub prefix_hint: Option<Bytes>,
     pub prefetch_options: PrefetchOptions,
     pub cache_policy: CachePolicy,
+    /// The memory of the batch scan that reads, if any: the blocks that its iterators hold are
+    /// charged to it, and it decides whether they may prefetch.
+    pub scan_memory: Option<ScanReadMemory>,
 }
 
 impl From<TracedReadOptions> for ReadOptions {
@@ -520,6 +524,7 @@ impl From<TracedReadOptions> for ReadOptions {
             prefix_hint: value.prefix_hint.map(|b| b.into()),
             prefetch_options: value.prefetch_options.into(),
             cache_policy: value.cache_policy.into(),
+            scan_memory: None,
         }
     }
 }

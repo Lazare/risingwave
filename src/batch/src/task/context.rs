@@ -25,6 +25,7 @@ use risingwave_connector::source::monitor::SourceMetrics;
 use risingwave_dml::dml_manager::DmlManagerRef;
 use risingwave_rpc_client::ComputeClientPoolRef;
 use risingwave_storage::StateStoreImpl;
+use risingwave_storage::hummock::TaskScanReads;
 
 use crate::error::Result;
 use crate::executor::CardinalityCounters;
@@ -101,6 +102,12 @@ pub trait BatchTaskContext: Send + Sync + 'static {
     fn exchange_settings(&self) -> ExchangeSettings {
         ExchangeSettings::default()
     }
+
+    /// The table scans of the task, held back while the consumers of the task do not read its
+    /// output. `None` when the task does not hold its scans back.
+    fn scan_reads(&self) -> Option<Arc<TaskScanReads>> {
+        None
+    }
 }
 
 /// How a task sends its output, from the session variables of its query.
@@ -129,6 +136,9 @@ pub struct ComputeNodeContext {
     cardinality_counters: Option<Arc<CardinalityCounters>>,
 
     exchange_settings: ExchangeSettings,
+
+    /// The table scans of the task.
+    scan_reads: Arc<TaskScanReads>,
 }
 
 impl BatchTaskContext for ComputeNodeContext {
@@ -217,6 +227,10 @@ impl BatchTaskContext for ComputeNodeContext {
     fn exchange_settings(&self) -> ExchangeSettings {
         self.exchange_settings
     }
+
+    fn scan_reads(&self) -> Option<Arc<TaskScanReads>> {
+        Some(self.scan_reads.clone())
+    }
 }
 
 impl ComputeNodeContext {
@@ -228,6 +242,7 @@ impl ComputeNodeContext {
             query_memory: None,
             cardinality_counters: None,
             exchange_settings: ExchangeSettings::default(),
+            scan_reads: Default::default(),
         })
     }
 
@@ -262,6 +277,7 @@ impl ComputeNodeContext {
             query_memory: Some(query_memory),
             cardinality_counters,
             exchange_settings,
+            scan_reads: Default::default(),
         })
     }
 }

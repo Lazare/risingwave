@@ -29,6 +29,20 @@ message RowSeqScanNode {
   // The pushed down `batch_limit`. Max rows needed to return.
   optional uint64 limit = 6;
   common.BatchQueryEpoch query_epoch = 7;
+
+  // Memory of the storage reads of the scan, from the session variables of the query.
+  // `batch_scan_prefetch_budget_mb`, in bytes: the storage iterators of the scan stop prefetching
+  // while the blocks they hold exceed it. 0: no budget.
+  uint64 prefetch_budget_bytes = 8;
+  // `batch_scan_prefetch_within_query_limit`: the iterators stop prefetching while the memory of
+  // the query, or the batch memory of the node, is over its limit.
+  bool prefetch_within_query_limit = 9;
+  // `batch_scan_release_prefetch_after_ms`: once the output of the task has been held back for
+  // this long, the iterators drop their prefetched blocks until it moves again. 0: never.
+  uint32 release_prefetch_after_ms = 10;
+  // `batch_scan_max_open_vnode_iterators`: an unordered scan keeps at most this many vnode
+  // iterators open at once. 0: all at once.
+  uint32 max_open_vnode_iterators = 11;
 }
 
 message SysRowSeqScanNode {

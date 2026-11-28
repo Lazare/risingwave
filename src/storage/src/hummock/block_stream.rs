@@ -29,6 +29,12 @@ pub trait BlockStream: Send + Sync + 'static {
     /// left to read.
     async fn next_block(&mut self) -> HummockResult<Option<BlockHolder>>;
     fn next_block_index(&self) -> usize;
+
+    /// The decoded bytes of the blocks that the stream read ahead and holds until
+    /// [`next_block`](Self::next_block) returns them.
+    fn buffered_bytes(&self) -> usize {
+        0
+    }
 }
 
 pub struct MemoryUsageTracker {
@@ -40,6 +46,13 @@ impl MemoryUsageTracker {
     pub fn new(total_usage: Arc<AtomicUsize>, usage: usize) -> Self {
         total_usage.fetch_add(usage, Ordering::SeqCst);
         Self { total_usage, usage }
+    }
+
+    /// Releases up to `bytes` of the usage before the tracker is dropped.
+    pub fn release(&mut self, bytes: usize) {
+        let bytes = bytes.min(self.usage);
+        self.total_usage.fetch_sub(bytes, Ordering::SeqCst);
+        self.usage -= bytes;
     }
 }
 
@@ -164,19 +177,25 @@ impl BlockDataStream {
 pub struct PrefetchBlockStream {
     blocks: VecDeque<BlockHolder>,
     block_index: usize,
-    _tracker: Option<MemoryUsageTracker>,
+    /// The decoded bytes of `blocks`.
+    buffered_bytes: usize,
+    /// The share of the blocks in the prefetch buffer of the node, released block by block as
+    /// they are returned.
+    tracker: Option<MemoryUsageTracker>,
 }
 
 impl PrefetchBlockStream {
     pub fn new(
         blocks: VecDeque<BlockHolder>,
         block_index: usize,
-        _tracker: Option<MemoryUsageTracker>,
+        tracker: Option<MemoryUsageTracker>,
     ) -> Self {
+        let buffered_bytes = blocks.iter().map(|block| block.capacity()).sum();
         Self {
             blocks,
             block_index,
-            _tracker,
+            buffered_bytes,
+            tracker,
         }
     }
 }
@@ -190,8 +209,17 @@ impl BlockStream for PrefetchBlockStream {
     async fn next_block(&mut self) -> HummockResult<Option<BlockHolder>> {
         if let Some(block) = self.blocks.pop_front() {
             self.block_index += 1;
+            let bytes = block.capacity();
+            self.buffered_bytes = self.buffered_bytes.saturating_sub(bytes);
+            if let Some(tracker) = &mut self.tracker {
+                tracker.release(bytes);
+            }
             return Ok(Some(block));
         }
         Ok(None)
+    }
+
+    fn buffered_bytes(&self) -> usize {
+        self.buffered_bytes
     }
 }

@@ -54,6 +54,12 @@ pub use recent_filter::*;
 pub mod block_stream;
 mod time_travel_version_cache;
 
+// Memory of the storage reads of batch scans.
+pub mod scan_memory;
+pub use scan_memory::{
+    PrefetchSlot, ScanReadCharge, ScanReadMemory, ScanReadSettings, TaskScanReads,
+};
+
 pub(crate) mod vector;
 
 mod object_id_manager;

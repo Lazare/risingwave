@@ -17,6 +17,7 @@ use std::fmt::Debug;
 use std::io::{Read, Write};
 use std::mem::size_of;
 use std::ops::Range;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering as AtomicOrdering};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use risingwave_common::catalog::TableId;
@@ -140,6 +141,16 @@ impl RestartPoint {
     }
 }
 
+/// Bytes of the blocks that left the block cache and are not dropped yet: blocks that iterators
+/// (or the disk cache writer) still hold after the cache evicted them, which the cache no longer
+/// counts.
+static EVICTED_HELD_BLOCK_BYTES: AtomicI64 = AtomicI64::new(0);
+
+/// Bytes of the blocks that left the block cache while something still holds them.
+pub fn evicted_held_block_bytes() -> i64 {
+    EVICTED_HELD_BLOCK_BYTES.load(AtomicOrdering::Relaxed)
+}
+
 pub struct Block {
     /// Uncompressed entries data, with restart encoded restart points info.
     data: Bytes,
@@ -153,6 +164,10 @@ pub struct Block {
     restart_points: Vec<RestartPoint>,
 
     hitmap: Hitmap<{ Self::HITMAP_ELEMS }>,
+
+    /// The block left the block cache: it is counted in [`evicted_held_block_bytes`] until it is
+    /// dropped.
+    left_cache: AtomicBool,
 }
 
 impl Clone for Block {
@@ -163,6 +178,18 @@ impl Clone for Block {
             table_id: self.table_id,
             restart_points: self.restart_points.clone(),
             hitmap: self.hitmap.clone(),
+            left_cache: AtomicBool::new(false),
+        }
+    }
+}
+
+impl Drop for Block {
+    fn drop(&mut self) {
+        if *self.left_cache.get_mut() {
+            EVICTED_HELD_BLOCK_BYTES.fetch_sub(
+                self.estimated_memory_weight() as i64,
+                AtomicOrdering::Relaxed,
+            );
         }
     }
 }
@@ -295,6 +322,7 @@ impl Block {
             restart_points,
             table_id: TableId::new(table_id),
             hitmap: Hitmap::default(),
+            left_cache: AtomicBool::new(false),
         }
     }
 
@@ -354,6 +382,7 @@ impl Block {
             restart_points,
             table_id: TableId::new(table_id),
             hitmap: Hitmap::default(),
+            left_cache: AtomicBool::new(false),
         }
     }
 
@@ -413,6 +442,17 @@ impl Block {
 
     pub fn efficiency(&self) -> f64 {
         self.hitmap.ratio()
+    }
+
+    /// The block left the block cache: counts it in [`evicted_held_block_bytes`] until it is
+    /// dropped.
+    pub fn mark_left_cache(&self) {
+        if !self.left_cache.swap(true, AtomicOrdering::Relaxed) {
+            EVICTED_HELD_BLOCK_BYTES.fetch_add(
+                self.estimated_memory_weight() as i64,
+                AtomicOrdering::Relaxed,
+            );
+        }
     }
 }
 
@@ -953,6 +993,26 @@ mod tests {
 
     use super::*;
     use crate::hummock::{BlockHolder, BlockIterator};
+
+    #[test]
+    fn test_block_left_cache_counted_until_dropped() {
+        let mut builder = BlockBuilder::new(BlockBuilderOptions::default());
+        builder.add_for_test(construct_full_key_struct_for_test(0, b"k1", 1), b"v01");
+        let capacity = builder.uncompressed_block_size();
+        let buf = builder.build().to_vec();
+        let block = Block::decode(buf.into(), capacity).unwrap();
+        let weight = block.estimated_memory_weight() as i64;
+        block.mark_left_cache();
+        // Marked twice, counted once. Other tests only add the blocks they hold.
+        block.mark_left_cache();
+        assert!(evicted_held_block_bytes() >= weight);
+        assert!(block.left_cache.load(AtomicOrdering::Relaxed));
+        // A copy is a new block, not evicted from anywhere.
+        let copy = block.clone();
+        assert!(!copy.left_cache.load(AtomicOrdering::Relaxed));
+        drop(copy);
+        drop(block);
+    }
 
     #[test]
     fn test_block_enc_dec() {

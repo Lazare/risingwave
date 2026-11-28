@@ -525,6 +525,7 @@ impl From<StateStoreTestReadOptions> for crate::store::ReadOptions {
             prefix_hint: val.prefix_hint,
             prefetch_options: val.prefetch_options,
             cache_policy: val.cache_policy,
+            scan_memory: None,
         }
     }
 }

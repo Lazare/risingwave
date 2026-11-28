@@ -58,6 +58,10 @@ user batch_reduce_group_keys
 user batch_reduce_keys_after_conversions
 user batch_reduce_outer_joins
 user batch_rewrite_lag_duplicates
+user batch_scan_max_open_vnode_iterators
+user batch_scan_prefetch_budget_mb
+user batch_scan_prefetch_within_query_limit
+user batch_scan_release_prefetch_after_ms
 user batch_semi_join_ordering
 user batch_set_operation_to_count
 user batch_share_identical_subplans

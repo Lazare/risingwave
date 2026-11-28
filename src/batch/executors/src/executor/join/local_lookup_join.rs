@@ -111,6 +111,11 @@ impl InnerSideExecutorBuilder {
             vnode_bitmap: Some(vnode_bitmap.finish().to_protobuf()),
             limit: None,
             query_epoch: Some(self.query_epoch),
+            // The inner side of a lookup join reads with the defaults.
+            prefetch_budget_bytes: 0,
+            prefetch_within_query_limit: false,
+            release_prefetch_after_ms: 0,
+            max_open_vnode_iterators: 0,
         });
 
         Ok(row_seq_scan_node)

@@ -145,6 +145,13 @@ jobs:
           cargo nextest run --locked --no-fail-fast --lib \
             -p risingwave_batch_executors -E 'test(spool)'
 
+      # Memory of the storage reads of batch scans (`scan_memory.rs`, SST iterators, blocks).
+      - name: Storage scan memory unit tests
+        if: ${{ !cancelled() && steps.planner.outcome != 'skipped' }}
+        run: |
+          cargo nextest run --locked --no-fail-fast --lib -p risingwave_storage \
+            -E 'test(scan_memory) | test(/hummock::sstable::/) | test(/table::batch_table/)'
+
   clippy:
     name: Clippy on the frontend
     runs-on: ubuntu-24.04
@@ -314,6 +321,9 @@ jobs:
           grep -a -c 'pruned the sub-plans proven empty' "$RUNNER_TEMP/e2e/node.log" || true
           echo "memory contexts dropped with a negative usage:"
           grep -a -c 'memory context dropped with a negative usage' "$RUNNER_TEMP/e2e/node.log" || true
+          echo "batch scans that held at least 8 MB of blocks:"
+          grep -a -c 'batch scan storage reads' "$RUNNER_TEMP/e2e/node.log" || true
+          grep -a 'batch scan storage reads' "$RUNNER_TEMP/e2e/node.log" | tail -40 || true
 
       - name: Upload the logs
         if: ${{ always() }}

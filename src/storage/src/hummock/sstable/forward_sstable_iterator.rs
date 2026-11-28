@@ -24,6 +24,7 @@ use thiserror_ext::AsReport;
 use super::super::{HummockResult, HummockValue};
 use crate::hummock::block_stream::BlockStream;
 use crate::hummock::iterator::{Forward, HummockIterator, ValueMeta};
+use crate::hummock::scan_memory::{PrefetchSlot, ScanReadCharge};
 use crate::hummock::sstable::SstableIteratorReadOptions;
 use crate::hummock::{BlockIterator, SstableStoreRef, TableHolder};
 use crate::monitor::StoreLocalStatistic;
@@ -60,6 +61,13 @@ pub struct SstableIterator {
     // precisely inside the boundary block.
     block_start_idx_inclusive: usize,
     block_end_idx_exclusive: usize,
+
+    // Memory of a batch scan (`options.scan_memory`): the current block and the prefetched blocks
+    // charged at their decoded size, and the slot that holds the prefetched blocks between two
+    // reads so that they can be dropped while the output of the scan is held back.
+    block_charge: Option<ScanReadCharge>,
+    prefetch_charge: Option<ScanReadCharge>,
+    prefetch_slot: Option<Arc<PrefetchSlot>>,
 }
 
 impl SstableIterator {
@@ -181,6 +189,9 @@ impl SstableIterator {
             preload_retry_times: 0,
             block_start_idx_inclusive,
             block_end_idx_exclusive,
+            block_charge: None,
+            prefetch_charge: None,
+            prefetch_slot: None,
         }
     }
 
@@ -200,11 +211,75 @@ impl SstableIterator {
         }
     }
 
+    /// Charges the current block, of `bytes` decoded bytes, to the memory of the batch scan.
+    fn charge_block(&mut self, bytes: usize) {
+        if let Some(memory) = &self.options.scan_memory {
+            if let Some(charge) = &mut self.block_charge {
+                charge.set(bytes);
+            } else {
+                self.block_charge = Some(memory.charge(bytes));
+            }
+        }
+    }
+
     /// Seeks to a block, and then seeks to the key if `seek_key` is given.
+    ///
+    /// For a batch scan, also charges the blocks that the iterator holds to the memory of the scan
+    /// and gives up prefetching when the scan may not prefetch.
     async fn seek_idx(
         &mut self,
         idx: usize,
         seek_key: Option<FullKey<&[u8]>>,
+    ) -> HummockResult<()> {
+        let Some(memory) = self.options.scan_memory.clone() else {
+            return self.seek_idx_inner(idx, seek_key, true).await;
+        };
+        // Take back the prefetched blocks, unless they were dropped while the output was held
+        // back.
+        if let Some(slot) = &self.prefetch_slot {
+            let (stream, charge) = slot.take().unzip();
+            self.preload_stream = stream;
+            self.prefetch_charge = charge.flatten();
+        }
+        let may_prefetch = memory.may_prefetch();
+        if !may_prefetch && self.preload_stream.take().is_some() {
+            self.prefetch_charge = None;
+            memory.record_fallback();
+        }
+
+        let result = self.seek_idx_inner(idx, seek_key, may_prefetch).await;
+
+        let buffered = self
+            .preload_stream
+            .as_ref()
+            .map_or(0, |stream| stream.buffered_bytes());
+        if let Some(charge) = &mut self.prefetch_charge {
+            charge.set(buffered);
+        } else if buffered > 0 {
+            self.prefetch_charge = Some(memory.charge(buffered));
+        }
+        // Put the prefetched blocks where the scan can drop them while its output is held back.
+        if memory.releases_prefetch() && self.preload_stream.is_some() {
+            if self.prefetch_slot.is_none() {
+                self.prefetch_slot = memory.new_prefetch_slot();
+            }
+            if let Some(slot) = &self.prefetch_slot
+                && let Some(stream) = self.preload_stream.take()
+            {
+                slot.put(stream, self.prefetch_charge.take());
+            }
+        }
+        if self.preload_stream.is_none() {
+            self.prefetch_charge = None;
+        }
+        result
+    }
+
+    async fn seek_idx_inner(
+        &mut self,
+        idx: usize,
+        seek_key: Option<FullKey<&[u8]>>,
+        may_prefetch: bool,
     ) -> HummockResult<()> {
         tracing::debug!(
             target: "events::storage::sstable::block_seek",
@@ -221,10 +296,19 @@ impl SstableIterator {
         let mut hit_cache = false;
         if idx >= self.block_end_idx_exclusive {
             self.block_iter = None;
+            self.block_charge = None;
             return Ok(());
         }
+        // A batch scan over its memory budget reads single blocks.
+        if !may_prefetch
+            && self.preload_stream.is_none()
+            && idx + 1 < self.preload_end_block_idx
+            && let Some(memory) = &self.options.scan_memory
+        {
+            memory.record_fallback();
+        }
         // Maybe the previous preload stream breaks on some cached block, so here we can try to preload some data again
-        if self.preload_stream.is_none() && idx + 1 < self.preload_end_block_idx {
+        if may_prefetch && self.preload_stream.is_none() && idx + 1 < self.preload_end_block_idx {
             match self
                 .sstable_store
                 .prefetch_blocks(
@@ -252,18 +336,31 @@ impl SstableIterator {
         {
             while let Some(preload_stream) = self.preload_stream.as_mut() {
                 let mut ret = Ok(());
+                let mut ended_early = false;
                 while preload_stream.next_block_index() < idx {
-                    if let Err(e) = preload_stream.next_block().await {
-                        ret = Err(e);
-                        break;
+                    match preload_stream.next_block().await {
+                        Ok(Some(_)) => {}
+                        // The stream ends before `idx`: the block is read without it.
+                        Ok(None) => {
+                            ended_early = true;
+                            break;
+                        }
+                        Err(e) => {
+                            ret = Err(e);
+                            break;
+                        }
                     }
                 }
-                assert_eq!(preload_stream.next_block_index(), idx);
-                if ret.is_ok() {
+                if ended_early {
+                    self.preload_stream.take();
+                } else if ret.is_ok() {
+                    assert_eq!(preload_stream.next_block_index(), idx);
                     match preload_stream.next_block().await {
                         Ok(Some(block)) => {
                             hit_cache = true;
+                            let bytes = block.capacity();
                             self.block_iter = Some(BlockIterator::new(block));
+                            self.charge_block(bytes);
                             break;
                         }
                         Ok(None) => {
@@ -277,7 +374,10 @@ impl SstableIterator {
                 } else {
                     self.preload_stream.take();
                 }
-                if self.preload_stream.is_none() && idx + 1 < self.preload_end_block_idx {
+                if may_prefetch
+                    && self.preload_stream.is_none()
+                    && idx + 1 < self.preload_end_block_idx
+                {
                     if let Err(e) = ret {
                         tracing::warn!(error = %e.as_report(), "recreate stream because the connection to remote storage has closed");
                         if self.preload_retry_times >= self.options.max_preload_retry_times {
@@ -314,7 +414,9 @@ impl SstableIterator {
                 .sstable_store
                 .get(&self.sst, idx, self.options.cache_policy, &mut self.stats)
                 .await?;
+            let bytes = block.capacity();
             self.block_iter = Some(BlockIterator::new(block));
+            self.charge_block(bytes);
         };
         let block_iter = self.block_iter.as_mut().unwrap();
         if let Some(key) = seek_key {
@@ -373,6 +475,7 @@ impl HummockIterator for SstableIterator {
     async fn rewind(&mut self) -> HummockResult<()> {
         if self.block_start_idx_inclusive >= self.block_end_idx_exclusive {
             self.block_iter = None;
+            self.block_charge = None;
             return Ok(());
         }
         self.init_block_prefetch_range(self.block_start_idx_inclusive);
@@ -384,6 +487,7 @@ impl HummockIterator for SstableIterator {
     async fn seek<'a>(&'a mut self, key: FullKey<&'a [u8]>) -> HummockResult<()> {
         if self.block_start_idx_inclusive >= self.block_end_idx_exclusive {
             self.block_iter = None;
+            self.block_charge = None;
             return Ok(());
         }
         let block_idx = self.calculate_block_idx_by_key(key);
@@ -605,6 +709,7 @@ mod tests {
             scan_end_user_key: Some(Bound::Included(uk.clone())),
             prefetch: true,
             max_preload_retry_times: 0,
+            scan_memory: None,
         });
         let mut stats = StoreLocalStatistic::default();
         let mut sstable_iter = SstableIterator::create(
@@ -647,6 +752,144 @@ mod tests {
             sstable_iter.next().await.unwrap();
         }
         assert_eq!(cnt, TEST_KEYS_COUNT);
+    }
+
+    /// Reads the whole test SST with prefetch and the given scan memory, checking every key, and
+    /// calls `at` with the number of keys read after each key.
+    async fn read_all_with_scan_memory(
+        memory: crate::hummock::ScanReadMemory,
+        mut at: impl FnMut(usize),
+    ) {
+        let sstable_store = mock_sstable_store().await;
+        let kv_iter =
+            (0..TEST_KEYS_COUNT).map(|i| (test_key_of(i), HummockValue::put(test_value_of(i))));
+        let sst_info = gen_test_sstable_info(
+            default_builder_opt_for_test(),
+            0,
+            kv_iter,
+            sstable_store.clone(),
+        )
+        .await;
+        let options = Arc::new(SstableIteratorReadOptions {
+            // Not filled: every prefetch reads several blocks.
+            cache_policy: CachePolicy::NotFill,
+            prefetch: true,
+            scan_memory: Some(memory),
+            ..Default::default()
+        });
+        let mut stats = StoreLocalStatistic::default();
+        let mut sstable_iter = SstableIterator::create(
+            sstable_store.sstable(&sst_info, &mut stats).await.unwrap(),
+            sstable_store,
+            options,
+            &sst_info,
+        );
+        assert!(sstable_iter.sst.meta.block_metas.len() > 10);
+        sstable_iter.rewind().await.unwrap();
+        let mut cnt = 0;
+        while sstable_iter.is_valid() {
+            assert_eq!(sstable_iter.key(), test_key_of(cnt).to_ref());
+            assert_bytes_eq!(
+                sstable_iter.value().into_user_value().unwrap(),
+                test_value_of(cnt)
+            );
+            cnt += 1;
+            at(cnt);
+            sstable_iter.next().await.unwrap();
+        }
+        assert_eq!(cnt, TEST_KEYS_COUNT);
+    }
+
+    fn scan_memory_context() -> risingwave_common::memory::MemoryContext {
+        risingwave_common::memory::MemoryContext::root(
+            risingwave_common::metrics::LabelGuardedIntGauge::test_int_gauge::<4>(),
+            u64::MAX,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_scan_memory_counts_held_and_prefetched_blocks() {
+        use crate::hummock::{ScanReadMemory, ScanReadSettings};
+        let ctx = scan_memory_context();
+        let memory = ScanReadMemory::new(ctx.clone(), ScanReadSettings::default());
+        let max_block = 1 << 20;
+        let mut peak_in_context = 0;
+        read_all_with_scan_memory(memory.clone(), |_| {
+            // The context sees what the iterator holds, at decoded size.
+            assert_eq!(ctx.get_bytes_used(), memory.held_bytes() as i64);
+            assert!(memory.held_bytes() > 0);
+            peak_in_context = peak_in_context.max(ctx.get_bytes_used());
+        })
+        .await;
+        // Released exactly once the iterator is dropped.
+        assert_eq!(ctx.get_bytes_used(), 0);
+        assert_eq!(memory.held_bytes(), 0);
+        assert!(peak_in_context > 0 && peak_in_context < 64 * max_block);
+        // More than one block: the prefetched blocks are counted too.
+        assert!(memory.peak_bytes() > 2 * default_builder_opt_for_test().block_capacity);
+        assert_eq!(memory.prefetch_fallbacks(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_scan_memory_budget_falls_back_to_single_blocks() {
+        use crate::hummock::{ScanReadMemory, ScanReadSettings};
+        let ctx = scan_memory_context();
+        let unbounded = ScanReadMemory::new(scan_memory_context(), ScanReadSettings::default());
+        read_all_with_scan_memory(unbounded.clone(), |_| {}).await;
+
+        let memory = ScanReadMemory::new(
+            ctx.clone(),
+            ScanReadSettings {
+                prefetch_budget_bytes: 1,
+                ..Default::default()
+            },
+        );
+        let mut late_peak = 0;
+        read_all_with_scan_memory(memory.clone(), |cnt| {
+            // Past the first blocks, only the current block is held.
+            if cnt > TEST_KEYS_COUNT / 2 {
+                late_peak = late_peak.max(memory.held_bytes());
+            }
+        })
+        .await;
+        assert!(memory.prefetch_fallbacks() > 0);
+        assert!(late_peak > 0);
+        assert!(late_peak < unbounded.peak_bytes());
+        assert_eq!(ctx.get_bytes_used(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_scan_memory_hold_back_drops_prefetched_blocks() {
+        use crate::hummock::{ScanReadMemory, ScanReadSettings, TaskScanReads};
+        let ctx = scan_memory_context();
+        let memory = ScanReadMemory::new(
+            ctx.clone(),
+            ScanReadSettings {
+                release_prefetch_after_ms: 1,
+                ..Default::default()
+            },
+        );
+        let task = TaskScanReads::default();
+        task.register(&memory);
+        let mut hold_backs = 0;
+        read_all_with_scan_memory(memory.clone(), |cnt| {
+            // Held back now and then, for a few keys.
+            if cnt % 997 == 0 {
+                let before = memory.held_bytes();
+                task.hold_back();
+                hold_backs += 1;
+                assert!(!memory.may_prefetch());
+                assert!(memory.held_bytes() <= before);
+                assert_eq!(ctx.get_bytes_used(), memory.held_bytes() as i64);
+            }
+            if cnt % 997 == 300 {
+                task.resume();
+            }
+        })
+        .await;
+        assert!(hold_backs >= 10);
+        assert!(memory.released_bytes() > 0);
+        assert_eq!(ctx.get_bytes_used(), 0);
     }
 
     #[tokio::test]
@@ -706,6 +949,7 @@ mod tests {
                 scan_end_user_key: Some(Bound::Excluded(table_3_start.clone())),
                 prefetch,
                 max_preload_retry_times: 0,
+                scan_memory: None,
             });
             let mut sstable_iter = SstableIterator::create(
                 sstable.clone(),
@@ -756,6 +1000,7 @@ mod tests {
             scan_end_user_key: None,
             prefetch: false,
             max_preload_retry_times: 0,
+            scan_memory: None,
         });
         let mut sstable_iter = SstableIterator::create(
             sstable.clone(),
@@ -807,6 +1052,7 @@ mod tests {
             scan_end_user_key: Some(Bound::Excluded(table_2_start)),
             prefetch: false,
             max_preload_retry_times: 0,
+            scan_memory: None,
         });
         let mut sstable_iter =
             SstableIterator::create(sstable, sstable_store, options, &table_2_sstable_info);

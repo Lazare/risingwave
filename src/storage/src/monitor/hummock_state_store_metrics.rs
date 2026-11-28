@@ -91,6 +91,9 @@ pub struct HummockStateStoreMetrics {
 
     // block statistics
     pub block_efficiency_histogram: Histogram,
+    /// Bytes of blocks that left the block cache while something still holds them (iterators,
+    /// the disk cache writer): memory that the block cache no longer counts.
+    pub block_cache_evicted_held_bytes: IntGauge,
 
     pub event_handler_pending_event: IntGaugeVec,
     pub event_handler_latency: HistogramVec,
@@ -592,6 +595,13 @@ impl HummockStateStoreMetrics {
         );
         let block_efficiency_histogram = register_histogram_with_registry!(opts, registry).unwrap();
 
+        let block_cache_evicted_held_bytes = register_int_gauge_with_registry!(
+            "state_store_block_cache_evicted_held_bytes",
+            "Bytes of blocks that left the block cache while they are still held",
+            registry
+        )
+        .unwrap();
+
         let event_handler_pending_event = register_int_gauge_vec_with_registry!(
             "state_store_event_handler_pending_event",
             "The number of sent but unhandled events",
@@ -667,6 +677,7 @@ impl HummockStateStoreMetrics {
             old_value_size,
 
             block_efficiency_histogram,
+            block_cache_evicted_held_bytes,
             event_handler_pending_event,
             event_handler_latency,
             safe_version_hit,

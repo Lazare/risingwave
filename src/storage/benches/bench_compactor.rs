@@ -358,6 +358,7 @@ fn bench_merge_iterator_compactor(c: &mut Criterion) {
         scan_end_user_key: None,
         prefetch: false,
         max_preload_retry_times: 0,
+        scan_memory: None,
     });
     c.bench_function("bench_union_merge_iterator", |b| {
         b.to_async(FuturesExecutor).iter(|| {

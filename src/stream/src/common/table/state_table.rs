@@ -468,6 +468,7 @@ impl<LS: LocalStateStore, SD: ValueRowSerde> StateTableRowStore<LS, SD> {
                                     prefix_hint: None,
                                     prefetch_options: Default::default(),
                                     cache_policy: Default::default(),
+                                    scan_memory: None,
                                 },
                             )
                             .await?,
@@ -1911,6 +1912,7 @@ where
                     prefix_hint: None,
                     prefetch_options,
                     cache_policy: CachePolicy::Fill(Hint::Normal),
+                    scan_memory: None,
                 },
             )
             .await?;
@@ -2039,6 +2041,7 @@ impl<LS: LocalStateStore, SD: ValueRowSerde> StateTableRowStore<LS, SD> {
             prefix_hint,
             prefetch_options,
             cache_policy: CachePolicy::Fill(Hint::Normal),
+            scan_memory: None,
         };
 
         Ok(futures::future::Either::Right(
@@ -2128,6 +2131,7 @@ impl<LS: LocalStateStore, SD: ValueRowSerde> StateTableRowStore<LS, SD> {
             prefix_hint,
             prefetch_options,
             cache_policy: CachePolicy::Fill(Hint::Normal),
+            scan_memory: None,
         };
 
         Ok(futures::future::Either::Right(

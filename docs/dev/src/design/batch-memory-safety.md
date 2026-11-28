@@ -22,9 +22,9 @@ Sizes below use a query with parallelism `P` on one node, chunks of 1024 rows of
 |---|---|---|---|
 | Task output channels (`output_channel_size` = 64 chunks per output) | no | `64 x 1024 x R` per output channel; an exchange `Single` with `P` producers holds up to `P x 64` chunks, e.g. 16 x 64 x 3 MB = 3 GB for rows of 3 KB | **counted** (section 7); bound in bytes with `batch_exchange_buffer_max_mb` |
 | Hash shuffle: each output gets the whole chunk with a visibility bitmap (`hash_shuffle_channel.rs`) | no | a chunk stays alive until the slowest of the `P` consumers reads its part: up to 64 full chunks per slow consumer | **counted once**; compact mode `batch_compact_shuffle_output` (section 7) |
-| Storage scans: one iterator per vnode (256), all polled at once (`flatten_unordered(1024)` in `batch_table/mod.rs`) | no | at least one decoded block per SST level per vnode: 256 x levels x 64 KB, i.e. 80 MB per active scan with 5 levels | open |
-| Storage prefetch (`prefetch_blocks`, up to 16 blocks per iterator) | node-wide cap = block cache capacity, counted on the **compressed** size while the **decoded** blocks are held | decoded size is 2-5 times the cap for compressible rows (JSON) | open: count `uncompressed_size` |
-| Blocks pinned by iterators and evicted from the block cache | foyer subtracts evicted entries from its usage even when they are still referenced | as much as the iterators hold | open |
+| Storage scans: one iterator per vnode (256), all polled at once (`flatten_unordered(1024)` in `batch_table/mod.rs`) | no | at least one decoded block per SST level per vnode: 256 x levels x 64 KB, i.e. 80 MB per active scan with 5 levels | **counted** in the query (section 8); bound with `batch_scan_max_open_vnode_iterators` |
+| Storage prefetch (`prefetch_blocks`, up to 16 blocks per iterator) | node-wide cap = block cache capacity, counted on the **compressed** size while the **decoded** blocks are held | decoded size is 2-5 times the cap for compressible rows (JSON) | **counted** on the decoded size, in the node cap and in the query (section 8); `batch_scan_prefetch_budget_mb`, `batch_scan_prefetch_within_query_limit`, `batch_scan_release_prefetch_after_ms` |
+| Blocks pinned by iterators and evicted from the block cache | foyer subtracts evicted entries from its usage even when they are still referenced | as much as the iterators hold | **counted**: metric `state_store_block_cache_evicted_held_bytes` (section 8); those of batch scans are in their query |
 | `MonitoredGlobalAlloc` (hash tables, vectors of operators): an allocation refused by the context was not counted, its deallocation was | under-counted, then negative | a hash table that grows near the limit: its new table (2x the old one) is not counted and the old one is subtracted: 3x the old table missing, and the counters of the query and of the node go below what is held | **fixed**: `MemoryContext::force_add` |
 | `MemMonitoredHeap`, merge sort: same asymmetry | under-counted | small | **fixed** |
 | Sort that spills: the buffered chunks stay counted after they are written to disk, and its sub-sorts share the context | over-counted, then sub-sorts spill again or run uncounted | the whole buffer of the sort (its share of the pool) for the rest of the sort | **fixed**: released after the spill and at the end |
@@ -133,8 +133,8 @@ section 4.
 
 ## 6. Order of work
 
-1. Count what escapes: storage prefetch on decoded sizes, task output channels (as
-   `ExecutorMemory` of the task), the outer batch of the lookup join.
+1. Count what escapes: storage prefetch on decoded sizes (done, section 8), task output channels
+   (done, section 7), the outer batch of the lookup join.
 2. Spilling output channels (section 4).
 3. Phased execution as an option for the heaviest queries (section 5).
 
@@ -230,3 +230,94 @@ feedback store next to the row counts), else from the schema (fixed-size types e
 variable-size types at an assumed average). Gain: wide-row exchanges get a lower parallelism
 instead of filling the node. Risk: a wrong width estimate lowers the parallelism of a query that
 would have fit; the rule must only ever lower the parallelism chosen today, never raise it.
+
+## 8. Storage reads of batch scans (implemented)
+
+**Where the memory is.** A batch table scan (`RowSeqScanExecutor`, `BatchTable::iter_with_encoded_key_range`)
+opens one storage iterator per vnode of its task, all at once when the order of the keys is not
+needed (`flatten_unordered`), and merges them when it is. Each vnode iterator holds one SST
+iterator per overlapping SST (L0) or level (a concat iterator over the SSTs of a level), and each
+SST iterator holds its current block and, with prefetch on (full scans without a limit), the
+blocks it read ahead: up to `max_prefetch_block_number` (16) blocks, read in one request
+(`SstableStore::prefetch_blocks`, `PrefetchBlockStream`), decoded at once. The blocks are those of
+the block cache (`CachePolicy::Fill(Hint::Low)` for unbounded scans) or owned copies. Until now
+nothing of this was counted in the memory of the query; the node-wide prefetch cap
+(`prefetch_buffer_capacity_mb`) counted the compressed size of the request for as long as the
+stream lived, while the decoded blocks were held (zstd on JSON: 3 to 8 times more); and blocks
+evicted from the block cache while an iterator holds them were counted nowhere.
+
+**What is counted now (always on, pure accounting).**
+
+- Each scan gets a memory context, child of the context of its query (`ScanReadMemory`,
+  `src/storage/src/hummock/scan_memory.rs`), passed to storage through `ReadOptions::scan_memory`
+  and from there to the SST iterators (`SstableIteratorReadOptions::scan_memory`).
+- Each SST iterator charges its current block (`Block::capacity`, the decoded size) and the
+  decoded size of the blocks its prefetch stream still holds (`BlockStream::buffered_bytes`). The
+  charge is forced (the blocks are already read: like the exchange buffers, a query whose scans
+  hold more leaves less room to its spillable operators, which then spill) and released when the
+  iterator moves to another block, drops its stream, or is dropped. A block that the block cache
+  also holds is charged all the same: the cache may evict it at any time while the iterator
+  keeps it.
+- The node-wide prefetch cap counts the decoded size of a request (sum of `uncompressed_size` of
+  its blocks, at least the size read), and each block leaves the count when the iterator takes it
+  from the stream instead of when the whole stream is dropped.
+- Blocks that leave the block cache (eviction, replacement, removal) are counted, at their cache
+  weight, until they are dropped (`Block::mark_left_cache` from the cache event listener, `Drop for
+  Block`): the gauge `state_store_block_cache_evicted_held_bytes` shows the memory held by
+  iterators (streaming and batch) and by the disk cache writer that the block cache no longer
+  counts. Blocks that nobody holds are dropped right after their eviction and leave the count at
+  once.
+- A scan that held at least 8 MB of blocks at its peak writes one INFO line when it ends
+  (`batch scan storage reads`: peak, held, prefetches given up, prefetched bytes released, the
+  evicted-held gauge, its settings).
+
+**What the scan can do about it (session variables, all off by default).** They travel in
+`RowSeqScanNode` (fields 8 to 11), so they apply in the local and in the distributed mode.
+
+- `batch_scan_prefetch_budget_mb` (0 = none): while the blocks held by the iterators of the scan
+  exceed the budget, the SST iterators drop their prefetched blocks and read one block at a time
+  (`SstableStore::get`). They prefetch again once the scan holds less.
+- `batch_scan_prefetch_within_query_limit` (false): the same while the memory of the query, or
+  the batch memory of the node, is over its limit (`MemoryContext::check_memory_usage`).
+- `batch_scan_release_prefetch_after_ms` (0 = never): when the output of the task has been blocked
+  for this long (its consumers do not read: the send to the output channels did not complete), the
+  scans of the task drop their prefetched blocks and do not prefetch until the send completes. The
+  task cannot run its scans while it waits, so the blocks are dropped from outside: each SST
+  iterator keeps its prefetch stream, between two reads, in a slot registered with its scan
+  (`PrefetchSlot`), and the task clears the slots (`TaskScanReads::hold_back`). An iterator that
+  is in the middle of a read (waiting for object storage) holds its stream outside of the slot and
+  keeps it until its next read. The delay avoids dropping and reading again the prefetched blocks
+  each time a channel is full for a moment.
+- `batch_scan_max_open_vnode_iterators` (0 = all at once): a scan that does not need the order
+  of the keys opens its vnode iterators lazily, at most this many at a time
+  (`try_flatten_unordered`), the next one when one is exhausted. The blocks of a scan are then
+  bounded by the bound times the levels times (1 + 16) blocks, instead of 256 times. Ordered
+  scans still merge all their vnodes.
+
+**Costs and risks.**
+
+- Counting: queries whose scans hold a lot of blocks now count them: their spillable operators
+  spill earlier, and operators that cannot spill may wait for memory, or fail, where they did not
+  before (the memory was there, just not counted). This is the purpose, but a node whose batch
+  budget was sized on the old counts may need more batch memory. The cost of the counting itself is
+  a few atomic operations per block read.
+- Prefetch cap on decoded sizes: with compressible rows the cap is reached several times sooner,
+  so the node prefetches less (streaming backfills included); single block reads are slower on
+  object storage. Raise `prefetch_buffer_capacity_mb` to keep the old decoded volume.
+- Fewer open vnode iterators: less parallelism in reads; a scan over many small vnodes opens them
+  one after another (each open reads the first block of each SST). With prefetch on, each open
+  iterator still streams its blocks. How many open iterators keep the throughput depends on the
+  latency of the store and was not measured; with high-latency object storage and no prefetch a
+  scan with few open iterators becomes latency bound.
+- No prefetch over the budget, or while held back: blocks are read one request each; dropping the
+  prefetched blocks of a held-back scan may mean reading them again when the output moves (they may
+  still be in the block cache).
+- The released prefetch only frees memory if nothing else holds the blocks (the block cache may
+  keep them, counted there).
+
+**Not done.** The inner side of lookup joins and the other storage readers of batch (log scans,
+point gets) do not pass a scan memory: they read few blocks at a time. The per-query share used
+by `batch_scan_prefetch_within_query_limit` is the limit of the query; a finer share per scan
+(the limit divided by the number of scans of the query) would need the number of scans of the
+query, which the compute node does not know.
+

@@ -53,7 +53,10 @@ use crate::hummock::block_stream::{
 use crate::hummock::none::NoneRecentFilter;
 use crate::hummock::vector::file::{VectorBlock, VectorBlockMeta, VectorFileMeta};
 use crate::hummock::vector::monitor::VectorStoreCacheStats;
-use crate::hummock::{BlockEntry, BlockHolder, HummockError, HummockResult, RecentFilterTrait};
+use crate::hummock::{
+    BlockEntry, BlockHolder, HummockError, HummockResult, RecentFilterTrait,
+    evicted_held_block_bytes,
+};
 use crate::monitor::{HummockStateStoreMetrics, StoreLocalStatistic};
 
 macro_rules! impl_vector_index_meta_file {
@@ -147,6 +150,11 @@ impl EventListener for BlockCacheEventListener {
         self.metrics
             .block_efficiency_histogram
             .observe(value.efficiency());
+        // The cache no longer counts the block, which stays in memory as long as it is held.
+        value.mark_left_cache();
+        self.metrics
+            .block_cache_evicted_held_bytes
+            .set(evicted_held_block_bytes());
     }
 }
 
@@ -403,7 +411,13 @@ impl SstableStore {
                 .map(|meta| meta.len as usize)
                 .sum::<usize>();
         let data_path = self.get_sst_data_path(object_id);
-        let memory_usage = end_offset - start_offset;
+        // The prefetch buffer holds the decoded blocks: count their decoded size, which is several
+        // times the size read for compressible rows.
+        let memory_usage = sst.meta.block_metas[block_index..end_index]
+            .iter()
+            .map(|meta| meta.uncompressed_size as usize)
+            .sum::<usize>()
+            .max(end_offset - start_offset);
         let tracker = MemoryUsageTracker::new(self.prefetch_buffer_usage.clone(), memory_usage);
         let span = await_tree::span!("Prefetch SST-{}", object_id).verbose();
         let store = self.store.clone();

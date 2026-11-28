@@ -69,6 +69,7 @@ pub async fn validate_ssts(task: ValidationTask, sstable_store: SstableStoreRef)
                 scan_end_user_key: None,
                 prefetch: false,
                 max_preload_retry_times: 0,
+                scan_memory: None,
             }),
             &sstable_info,
         );

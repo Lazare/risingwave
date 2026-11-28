@@ -58,6 +58,7 @@ use xxhash_rust::xxh64;
 
 use super::{HummockError, HummockResult};
 use crate::hummock::CachePolicy;
+use crate::hummock::scan_memory::ScanReadMemory;
 use crate::store::ReadOptions;
 
 const MAGIC: u32 = 0x5785ab73;
@@ -549,6 +550,9 @@ pub struct SstableIteratorReadOptions {
     /// Whether to prefetch blocks within the already-bounded scan window.
     pub prefetch: bool,
     pub max_preload_retry_times: usize,
+    /// The memory of the batch scan that reads: charged with the blocks that the iterators hold,
+    /// and deciding whether they may prefetch.
+    pub scan_memory: Option<ScanReadMemory>,
 }
 
 impl SstableIteratorReadOptions {
@@ -561,6 +565,7 @@ impl SstableIteratorReadOptions {
             scan_end_user_key: None,
             prefetch: false,
             max_preload_retry_times: 0,
+            scan_memory: read_options.scan_memory.clone(),
         }
     }
 }
