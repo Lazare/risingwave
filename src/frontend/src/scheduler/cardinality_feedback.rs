@@ -46,7 +46,10 @@ use parking_lot::Mutex;
 use risingwave_batch::executor::CardinalityCounters;
 use risingwave_common::log::LogSuppressor;
 
-use crate::optimizer::cardinality_feedback::{FeedbackOperator, feedback_operators, hex};
+use crate::optimizer::cardinality_feedback::{FeedbackOperator, FeedbackPlan, feedback_plan, hex};
+use crate::optimizer::cardinality_learning::{
+    CARDINALITY_LEARNING_STORE, LearnSpec, LearningStore,
+};
 use crate::optimizer::plan_node::{BatchPlanRef, PlanNodeId};
 use crate::optimizer::{PlanVisitor, SysTableVisitor};
 use crate::scheduler::plan_fragmenter::ExecutionPlanNode;
@@ -67,30 +70,43 @@ const WARN_ROWS: f64 = 100_000.0;
 
 static WARN_SUPPRESSOR: LazyLock<LogSuppressor> = LazyLock::new(|| LogSuppressor::per_minute(10));
 
-/// The cardinality feedback of the final batch plan `plan`, if the session asks for it. Queries
-/// that read system catalogs are not observed: they have no statistics, and reading the records
-/// is one of them.
+/// The cardinality feedback of the final batch plan `plan`, if the session asks for it
+/// (`batch_cardinality_feedback`, or `batch_cardinality_feedback_learning`, which also learns
+/// ratios from the counts). Queries that read system catalogs are not observed: they have no
+/// statistics, and reading the records is one of them.
 pub fn plan_cardinality_feedback(
     session: &SessionImpl,
     plan: &BatchPlanRef,
 ) -> Option<Arc<QueryCardinalityFeedback>> {
-    if !session.config().batch_cardinality_feedback() {
+    let (observe, learn) = {
+        let config = session.config();
+        (
+            config.batch_cardinality_feedback(),
+            config.batch_cardinality_feedback_learning(),
+        )
+    };
+    if !observe && !learn {
         return None;
     }
     if SysTableVisitor::default().visit(plan.clone()) {
         return None;
     }
-    let operators = {
+    let FeedbackPlan {
+        operators,
+        learning,
+    } = {
         let catalog = session.env().catalog_reader().read_guard();
-        feedback_operators(plan, catalog.table_stats())
+        feedback_plan(plan, catalog.table_stats())
     };
     if operators.is_empty() {
         return None;
     }
-    Some(Arc::new(QueryCardinalityFeedback::new(
-        operators,
-        CARDINALITY_FEEDBACK_STORE.clone(),
-    )))
+    // The ratios are learned whichever of the two variables is on: a session that uses them
+    // also benefits from the queries of the sessions that only observe.
+    Some(Arc::new(
+        QueryCardinalityFeedback::new(operators, CARDINALITY_FEEDBACK_STORE.clone())
+            .with_learning(learning, CARDINALITY_LEARNING_STORE.clone()),
+    ))
 }
 
 /// The cardinality feedback of one execution of a query.
@@ -102,6 +118,9 @@ pub struct QueryCardinalityFeedback {
     expected_instances: Mutex<HashMap<u32, u32>>,
     succeeded: AtomicBool,
     store: Arc<CardinalityFeedbackStore>,
+    /// The ratios to learn from the counts (`optimizer::cardinality_learning`).
+    learning: Vec<LearnSpec>,
+    learning_store: Option<Arc<LearningStore>>,
 }
 
 impl std::fmt::Debug for QueryCardinalityFeedback {
@@ -134,7 +153,21 @@ impl QueryCardinalityFeedback {
             expected_instances: Mutex::new(HashMap::new()),
             succeeded: AtomicBool::new(false),
             store,
+            learning: vec![],
+            learning_store: None,
         }
+    }
+
+    /// Also learns the ratios `learning` from the counts, into `store`.
+    pub fn with_learning(mut self, learning: Vec<LearnSpec>, store: Arc<LearningStore>) -> Self {
+        self.learning = learning;
+        self.learning_store = Some(store);
+        self
+    }
+
+    /// The kind of the counted operator of the plan node `node_id`, if it is counted.
+    pub fn operator_kind(&self, node_id: u32) -> Option<&'static str> {
+        self.operators.get(&node_id).map(|operator| operator.kind)
     }
 
     /// The id under which the executors of the plan node `id` count their rows, if counted.
@@ -166,6 +199,39 @@ impl QueryCardinalityFeedback {
     /// The query returned all its rows.
     pub fn set_succeeded(&self) {
         self.succeeded.store(true, Ordering::Relaxed);
+    }
+
+    /// The rows counted for each counted plan node, and whether the count is partial.
+    fn counts_by_node(&self) -> HashMap<u32, (u64, bool)> {
+        let succeeded = self.succeeded.load(Ordering::Relaxed);
+        let expected = self.expected_instances.lock();
+        self.counters
+            .to_protobuf()
+            .iter()
+            .filter(|count| count.instances > 0 && self.operators.contains_key(&count.node_id))
+            .map(|count| {
+                let expected = expected.get(&count.node_id).copied().unwrap_or(0);
+                let partial =
+                    !succeeded || count.completed < count.instances || count.instances < expected;
+                (count.node_id, (count.rows, partial))
+            })
+            .collect()
+    }
+
+    /// Learns the ratios of the query from its complete counts.
+    fn learn(&self) {
+        let Some(store) = &self.learning_store else {
+            return;
+        };
+        if self.learning.is_empty() {
+            return;
+        }
+        let counts = self.counts_by_node();
+        for spec in &self.learning {
+            if let Some(ratio) = spec.ratio(&counts) {
+                store.observe(spec.kind, spec.key, ratio);
+            }
+        }
     }
 
     /// What the execution observed, operator by operator.
@@ -203,6 +269,7 @@ impl Drop for QueryCardinalityFeedback {
             warn_if_far_from_estimate(&outcome);
             self.store.record(&outcome, now);
         }
+        self.learn();
     }
 }
 
@@ -467,6 +534,58 @@ mod tests {
         assert_eq!(record.partial_executions, 3);
         assert!(record.last_partial);
         assert_eq!(record.mean_log10_ratio(), None);
+    }
+
+    #[test]
+    fn test_ratios_are_learned_from_complete_counts_only() {
+        use crate::optimizer::cardinality_learning::{RatioKind, RowSource};
+
+        let store = Arc::new(CardinalityFeedbackStore::new(100));
+        let learning = Arc::new(LearningStore::new(100));
+        // The filter (node 2) keeps a quarter of the rows of the scan (node 1).
+        let spec = LearnSpec {
+            kind: RatioKind::Selectivity,
+            key: 5,
+            output: 2,
+            inputs: vec![RowSource::Node(1)],
+        };
+
+        let complete = feedback(&store).with_learning(vec![spec.clone()], learning.clone());
+        complete.expect_instances(1, 1);
+        complete.expect_instances(2, 1);
+        complete
+            .counters()
+            .merge(&[count(1, 1000, true), count(2, 250, true)]);
+        complete.set_succeeded();
+        drop(complete);
+        let learned = learning.get(RatioKind::Selectivity, 5).unwrap();
+        assert_eq!(learned.observations, 1);
+        assert_eq!((learned.min, learned.max), (0.25, 0.25));
+
+        // The scan was stopped before the end of its output: nothing is learned.
+        let stopped = feedback(&store).with_learning(vec![spec.clone()], learning.clone());
+        stopped
+            .counters()
+            .merge(&[count(1, 10, false), count(2, 10, true)]);
+        stopped.set_succeeded();
+        drop(stopped);
+
+        // The query failed: nothing is learned.
+        let failed = feedback(&store).with_learning(vec![spec], learning.clone());
+        failed
+            .counters()
+            .merge(&[count(1, 1000, true), count(2, 10, true)]);
+        drop(failed);
+
+        assert_eq!(
+            learning
+                .get(RatioKind::Selectivity, 5)
+                .unwrap()
+                .observations,
+            1
+        );
+        // The counts are recorded by the feedback all the same.
+        assert!(!store.records().is_empty());
     }
 
     #[test]

@@ -1,9 +1,11 @@
 batchfeedback batch/cardinality_feedback 60
 batchgrouptopn batch/top_n/group_top_n 30
 batchjoinorder batch/cost_based_join_ordering 60
+batchfeedback batch/cardinality_feedback 60
 batchkeys batch/plan_reduction_keys 60
 batchladder batch/status_ladder_case 60
 batchlag batch/rewrite_lag_duplicates 60
+batchlearning batch/cardinality_feedback_learning 60
 batchmem batch/spill_on_memory_wait 60
 batchnarrowvalue batch/narrow_value_aggregates 60
 batchpass2 batch/reduce_keys_after_conversions 60

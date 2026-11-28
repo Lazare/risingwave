@@ -25,6 +25,7 @@ on:
       - 'proto/streaming-simplify-subquery-unnesting-*'
       - 'proto/plan-reduction-**'
       - 'proto/batch-cardinality-feedback'
+      - 'proto/batch-cardinality-feedback-learning'
 
 concurrency:
   group: proto-streaming-prune-check-${{ github.ref }}

@@ -50,6 +50,17 @@
 //! After the column pruning, [`CostBasedOuterJoinSidesRule`] also swaps the sides of a left outer,
 //! semi or anti join into the right join of the other side, when its right side holds far more
 //! bytes than its left side (a hash join builds its right side).
+//!
+//! With `batch_cardinality_feedback_learning`, the ratios measured by earlier executions
+//! (`optimizer::cardinality_learning`) replace the fixed guesses: the selectivity of the filters
+//! of an input, the groups of an aggregation, the fan-out of a join between two inputs, each
+//! blended with the guess according to the number of observations. The bytes of a side are its
+//! rows times its width; the build side of a hash join is costed with its pessimistic rows, from
+//! the largest ratios observed (its memory), times its width. The join tree of the learned
+//! estimates replaces the one of the fixed guesses only when, with the learned estimates, it costs
+//! less by more than [`PLAN_CHANGE_FACTOR`]; without learned ratios the plan is the one above. The
+//! sides of outer, semi and anti joins use the learned estimates the same way, under their own
+//! margin.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
@@ -64,6 +75,10 @@ use super::join_commute_rule::swap_join_sides;
 use super::prelude::{PlanRef, *};
 use super::unique_key_simplify_rule::unique_keys_of;
 use crate::expr::{Expr, ExprImpl};
+use crate::optimizer::cardinality_learning::{
+    CARDINALITY_LEARNING_STORE, LearnInfo, LearnedRatio, LearningStore, PLAN_CHANGE_FACTOR,
+    RatioKind, edge_key_of, learned_ratio, logical_relation,
+};
 use crate::optimizer::plan_node::generic::GenericPlanRef;
 use crate::optimizer::plan_node::{
     EqJoinPredicate, LogicalJoin, LogicalMultiJoin, LogicalMultiJoinBuilder, LogicalScan,
@@ -193,18 +208,26 @@ impl Rule<Logical> for CostBasedOuterJoinSidesRule {
                 return None;
             }
         }
+        let learning = ctx
+            .session_ctx()
+            .config()
+            .batch_cardinality_feedback_learning();
         let catalog_reader = ctx.session_ctx().env().catalog_reader().read_guard();
+        // With `batch_cardinality_feedback_learning`, the learned estimates, the build side with
+        // its pessimistic rows; the same as the fixed guesses when nothing is learned.
         let estimator = Estimator {
             stats: catalog_reader.table_stats(),
             lookup_join_enabled,
+            learned: learning.then_some(&**CARDINALITY_LEARNING_STORE),
         };
         let l = estimator.input_estimate(&left)?;
         let r = estimator.input_estimate(&right)?;
-        let l_bytes = l.rows * estimator.row_width(&left, None);
-        let r_bytes = r.rows * estimator.row_width(&right, None);
+        let l_width = estimator.row_width(&left, None);
+        let r_width = estimator.row_width(&right, None);
         drop(catalog_reader);
-        let as_is = l_bytes * PROBE_COST + r_bytes * BUILD_COST;
-        let swapped = r_bytes * PROBE_COST + l_bytes * BUILD_COST;
+        let (l_bytes, r_bytes) = (l.rows * l_width, r.rows * r_width);
+        let as_is = l_bytes * PROBE_COST + r.hi * r_width * BUILD_COST;
+        let swapped = r_bytes * PROBE_COST + l.hi * l_width * BUILD_COST;
         if swapped * OUTER_SWAP_MARGIN >= as_is {
             return None;
         }
@@ -237,15 +260,52 @@ fn cost_based_join(
 ) -> Option<PlanRef> {
     let ctx = join.base.ctx();
     let lookup_join_enabled = ctx.session_ctx().config().batch_enable_lookup_join();
+    let learning = ctx
+        .session_ctx()
+        .config()
+        .batch_cardinality_feedback_learning();
     let catalog_reader = ctx.session_ctx().env().catalog_reader().read_guard();
     let estimator = Estimator {
         stats: catalog_reader.table_stats(),
         lookup_join_enabled,
+        learned: None,
     };
-    let graph = estimator.graph(join, required)?;
+    let mut graph = estimator.graph(join, required)?;
+    let mut tree = graph.best_tree(heuristic)?;
+
+    // The learned estimates (`batch_cardinality_feedback_learning`): their join tree replaces the
+    // one of the fixed guesses only when it costs clearly less with the learned estimates.
+    if learning {
+        let learned_estimator = Estimator {
+            stats: catalog_reader.table_stats(),
+            lookup_join_enabled,
+            learned: Some(&**CARDINALITY_LEARNING_STORE),
+        };
+        if let Some(learned_graph) = learned_estimator.graph(join, required)
+            && let Some(candidate) = learned_graph.best_tree(heuristic)
+            && candidate != tree
+        {
+            let current_cost = learned_graph.planned(&tree).cost;
+            let candidate_cost = learned_graph.planned(&candidate).cost;
+            let change = current_cost > PLAN_CHANGE_FACTOR * candidate_cost;
+            if ctx.is_explain_trace() {
+                ctx.trace(format!(
+                    "Cost-based join ordering with learned estimates: join tree {} of learned cost {} instead of {} of learned cost {}: {}",
+                    candidate,
+                    candidate_cost.round(),
+                    tree,
+                    current_cost.round(),
+                    if change { "changed" } else { "kept" }
+                ));
+            }
+            if change {
+                tree = candidate;
+                graph = learned_graph;
+            }
+        }
+    }
     drop(catalog_reader);
 
-    let tree = graph.best_tree(heuristic)?;
     let mut ordering = vec![];
     tree.leaves(&mut ordering);
     let left_deep = JoinTree::left_deep(heuristic);
@@ -329,6 +389,9 @@ struct Estimate {
     domain: f64,
     /// Rows read to produce the relation: its cost when it is not read by key.
     read: f64,
+    /// Pessimistic rows, with the largest learned ratios (`batch_cardinality_feedback_learning`),
+    /// for the memory of a build side; the same as `rows` when nothing is learned.
+    hi: f64,
 }
 
 impl Estimate {
@@ -338,6 +401,16 @@ impl Estimate {
             rows,
             domain: rows,
             read: rows,
+            hi: rows,
+        }
+    }
+
+    /// Estimated rows and pessimistic rows (at least the estimated ones).
+    fn of_rows_hi(rows: f64, hi: f64) -> Self {
+        let estimate = Self::of_rows(rows);
+        Estimate {
+            hi: hi.max(estimate.rows),
+            ..estimate
         }
     }
 
@@ -345,8 +418,26 @@ impl Estimate {
         let rows = conjunctions
             .iter()
             .fold(self.rows, |rows, expr| rows * conjunct_selectivity(expr));
+        let hi = conjunctions
+            .iter()
+            .fold(self.hi, |rows, expr| rows * conjunct_selectivity(expr));
+        let rows = rows.max(1.0);
         Estimate {
-            rows: rows.max(1.0),
+            rows,
+            hi: hi.max(rows),
+            ..self
+        }
+    }
+
+    /// The relation is `base` (`base_rows` rows, `base_hi` pessimistic rows) times a ratio whose
+    /// fixed guess gave this estimate, and that was learned as `learned`.
+    fn with_learned_ratio(self, base_rows: f64, base_hi: f64, learned: &LearnedRatio) -> Self {
+        let guess = self.rows / base_rows.max(1.0);
+        let ratio = learned.blend(guess);
+        let rows = (base_rows * ratio).max(1.0);
+        Estimate {
+            rows,
+            hi: (base_hi * ratio.max(learned.max)).max(rows),
             ..self
         }
     }
@@ -386,19 +477,30 @@ fn has_key_within(keys: &[BTreeSet<usize>], columns: &BTreeSet<usize>) -> bool {
 struct Estimator<'a> {
     stats: &'a HummockVersionStats,
     lookup_join_enabled: bool,
+    /// The learned ratios, when used (`batch_cardinality_feedback_learning`).
+    learned: Option<&'a LearningStore>,
 }
 
 impl Estimator<'_> {
+    /// The ratio learned for the relation `plan`, if used and known.
+    fn learned(&self, kind: RatioKind, plan: &PlanRef) -> Option<LearnedRatio> {
+        learned_ratio(self.learned?, kind, plan)
+    }
+
     /// The estimate of an input of a join: [`Self::estimate`], bounded by the cardinality that
     /// the plan proves (at most one row for an aggregation without group, a `LIMIT`...). A plan
     /// without estimate but with a proven bound is estimated at that bound.
     fn input_estimate(&self, plan: &PlanRef) -> Option<Estimate> {
         let bound = CardinalityVisitor.visit(plan.clone()).hi();
         match (self.estimate(plan), bound) {
-            (Some(estimate), Some(bound)) => Some(Estimate {
-                rows: estimate.rows.min(bound as f64).max(1.0),
-                ..estimate
-            }),
+            (Some(estimate), Some(bound)) => {
+                let rows = estimate.rows.min(bound as f64).max(1.0);
+                Some(Estimate {
+                    rows,
+                    hi: estimate.hi.min(bound as f64).max(rows),
+                    ..estimate
+                })
+            }
             (Some(estimate), None) => Some(estimate),
             (None, Some(bound)) => Some(Estimate::of_rows(bound as f64)),
             (None, None) => None,
@@ -413,20 +515,30 @@ impl Estimator<'_> {
                 rows: table_rows,
                 domain: table_rows,
                 read: table_rows,
+                hi: table_rows,
             }
             .filtered(&scan.predicate().conjunctions);
+            if !scan.predicate().always_true()
+                && let Some(learned) = self.learned(RatioKind::Selectivity, plan)
+            {
+                estimate = estimate.with_learned_ratio(table_rows, table_rows, &learned);
+            }
             if unique_keys_of(plan).iter().any(|key| key.is_empty()) {
                 // The filter fixes a unique key.
                 estimate.rows = 1.0;
+                estimate.hi = 1.0;
             }
             return Some(estimate);
         }
         if let Some(filter) = plan.as_logical_filter() {
-            let mut estimate = self
-                .estimate(&filter.input())?
-                .filtered(&filter.predicate().conjunctions);
+            let input = self.estimate(&filter.input())?;
+            let mut estimate = input.filtered(&filter.predicate().conjunctions);
+            if let Some(learned) = self.learned(RatioKind::Selectivity, plan) {
+                estimate = estimate.with_learned_ratio(input.rows, input.hi, &learned);
+            }
             if unique_keys_of(plan).iter().any(|key| key.is_empty()) {
                 estimate.rows = 1.0;
+                estimate.hi = 1.0;
             }
             return Some(estimate);
         }
@@ -441,38 +553,46 @@ impl Estimator<'_> {
         }
         if let Some(agg) = plan.as_logical_agg() {
             let input = self.estimate(&agg.input())?;
-            let rows = if agg.group_key().is_empty() {
-                1.0
+            let (rows, hi) = if agg.group_key().is_empty() {
+                (1.0, 1.0)
             } else if unique_keys_of(&agg.input())
                 .iter()
                 .any(|key| key.iter().all(|column| agg.group_key().contains(*column)))
             {
-                input.rows
+                (input.rows, input.hi)
+            } else if let Some(learned) = self.learned(RatioKind::GroupRatio, plan) {
+                let ratio = learned.blend(AGG_GROUP_FRACTION);
+                (input.rows * ratio, input.hi * ratio.max(learned.max))
             } else {
-                input.rows * AGG_GROUP_FRACTION
+                (
+                    input.rows * AGG_GROUP_FRACTION,
+                    input.hi * AGG_GROUP_FRACTION,
+                )
             };
             return Some(Estimate {
                 read: input.read,
-                ..Estimate::of_rows(rows)
+                ..Estimate::of_rows_hi(rows, hi)
             });
         }
         if let Some(limit) = plan.as_logical_limit() {
             let input = self.estimate(&limit.input())?;
+            let limit = limit.limit() as f64;
             return Some(Estimate {
                 read: input.read,
-                ..Estimate::of_rows(input.rows.min(limit.limit() as f64))
+                ..Estimate::of_rows_hi(input.rows.min(limit), input.hi.min(limit))
             });
         }
         if let Some(top_n) = plan.as_logical_top_n() {
             let input = self.estimate(&top_n.input())?;
-            let rows = if top_n.group_key().is_empty() {
-                input.rows.min(top_n.limit_attr().limit() as f64)
+            let (rows, hi) = if top_n.group_key().is_empty() {
+                let limit = top_n.limit_attr().limit() as f64;
+                (input.rows.min(limit), input.hi.min(limit))
             } else {
-                input.rows
+                (input.rows, input.hi)
             };
             return Some(Estimate {
                 read: input.read,
-                ..Estimate::of_rows(rows)
+                ..Estimate::of_rows_hi(rows, hi)
             });
         }
         if let Some(over_window) = plan.as_logical_over_window() {
@@ -480,14 +600,14 @@ impl Estimator<'_> {
             let input = self.estimate(&over_window.input())?;
             return Some(Estimate {
                 read: input.read,
-                ..Estimate::of_rows(input.rows)
+                ..Estimate::of_rows_hi(input.rows, input.hi)
             });
         }
         if let Some(dedup) = plan.as_logical_dedup() {
             let input = self.estimate(&dedup.input())?;
             return Some(Estimate {
                 read: input.read,
-                ..Estimate::of_rows(input.rows)
+                ..Estimate::of_rows_hi(input.rows, input.hi)
             });
         }
         if let Some(union) = plan.as_logical_union() {
@@ -498,7 +618,10 @@ impl Estimator<'_> {
                 .collect::<Option<_>>()?;
             return Some(Estimate {
                 read: inputs.iter().map(|e| e.read).sum(),
-                ..Estimate::of_rows(inputs.iter().map(|e| e.rows).sum())
+                ..Estimate::of_rows_hi(
+                    inputs.iter().map(|e| e.rows).sum(),
+                    inputs.iter().map(|e| e.hi).sum(),
+                )
             });
         }
         if let Some(join) = plan.as_logical_join() {
@@ -509,7 +632,7 @@ impl Estimator<'_> {
             let all = (1u64 << graph.estimates.len()) - 1;
             return Some(Estimate {
                 read: graph.estimates.iter().map(|e| e.read).sum(),
-                ..Estimate::of_rows(graph.rows(all))
+                ..Estimate::of_rows_hi(graph.rows(all), graph.rows_hi(all))
             });
         }
         None
@@ -517,30 +640,46 @@ impl Estimator<'_> {
 
     fn join_estimate(&self, plan: &PlanRef, join: &LogicalJoin) -> Option<Estimate> {
         let side = |input: PlanRef| self.estimate(&input);
-        let rows = match join.join_type() {
+        let (rows, hi) = match join.join_type() {
             JoinType::Inner => {
                 let builder = LogicalMultiJoinBuilder::new(plan.clone());
                 if builder.inputs().len() < 2 {
                     // A temporal join: one row of the right side per row of the left side, at
                     // most.
-                    side(join.left())?.rows
+                    let left = side(join.left())?;
+                    (left.rows, left.hi)
                 } else {
                     let graph = self.graph(&builder.build(), None)?;
-                    graph.rows((1u64 << graph.estimates.len()) - 1)
+                    let all = (1u64 << graph.estimates.len()) - 1;
+                    (graph.rows(all), graph.rows_hi(all))
                 }
             }
             JoinType::LeftOuter | JoinType::AsofInner | JoinType::AsofLeftOuter => {
-                side(join.left())?.rows
+                let left = side(join.left())?;
+                (left.rows, left.hi)
             }
-            JoinType::RightOuter => side(join.right())?.rows,
-            JoinType::FullOuter => side(join.left())?.rows + side(join.right())?.rows,
-            JoinType::LeftSemi | JoinType::LeftAnti => side(join.left())?.rows * SEMI_JOIN_FRACTION,
+            JoinType::RightOuter => {
+                let right = side(join.right())?;
+                (right.rows, right.hi)
+            }
+            JoinType::FullOuter => {
+                let (left, right) = (side(join.left())?, side(join.right())?);
+                (left.rows + right.rows, left.hi + right.hi)
+            }
+            JoinType::LeftSemi | JoinType::LeftAnti => {
+                let left = side(join.left())?;
+                (left.rows * SEMI_JOIN_FRACTION, left.hi * SEMI_JOIN_FRACTION)
+            }
             JoinType::RightSemi | JoinType::RightAnti => {
-                side(join.right())?.rows * SEMI_JOIN_FRACTION
+                let right = side(join.right())?;
+                (
+                    right.rows * SEMI_JOIN_FRACTION,
+                    right.hi * SEMI_JOIN_FRACTION,
+                )
             }
             JoinType::Unspecified => return None,
         };
-        Some(Estimate::of_rows(rows))
+        Some(Estimate::of_rows_hi(rows, hi))
     }
 
     /// Bytes of a row of `plan`, for the given output columns (all if `None`).
@@ -712,6 +851,10 @@ impl Estimator<'_> {
             .map(|input| self.input_estimate(input))
             .collect::<Option<_>>()?;
         let keys: Vec<Vec<BTreeSet<usize>>> = inputs.iter().map(unique_keys_of).collect();
+        // What the learning knows of each input, when learned ratios are used.
+        let relations: Option<Vec<(LearnInfo, Vec<u64>)>> = self
+            .learned
+            .map(|_| inputs.iter().map(logical_relation).collect());
 
         // The input of each column of the multi-join, and its index in that input.
         let col_nums = join.input_col_nums();
@@ -737,7 +880,7 @@ impl Estimator<'_> {
             for conjunct in &condition.conjunctions {
                 let Some((x, y)) = conjunct.as_eq_cond() else {
                     // Not expected: only equalities are split by pairs of inputs.
-                    factors.push((mask_of(conjunct), FILTER_SELECTIVITY));
+                    factors.push((mask_of(conjunct), FILTER_SELECTIVITY, FILTER_SELECTIVITY));
                     continue;
                 };
                 let (x_input, x_column) = column_input[x.index()];
@@ -752,12 +895,43 @@ impl Estimator<'_> {
             let (ea, eb) = (estimates[a], estimates[b]);
             let selectivity =
                 equi_join_selectivity((a_key, ea.rows, ea.domain), (b_key, eb.rows, eb.domain));
-            factors.push(((1 << a) | (1 << b), selectivity));
+            // A learned fan-out of the edge: output rows per row of the larger input, so a
+            // selectivity of the fan-out over the rows of the smaller input.
+            let learned = relations.as_ref().and_then(|relations| {
+                let a_columns = columns[0].iter().copied().collect_vec();
+                let b_columns = columns[1].iter().copied().collect_vec();
+                let key = edge_key_of(
+                    (
+                        &relations[a].0,
+                        relations[a].1.as_slice(),
+                        a_columns.as_slice(),
+                    ),
+                    (
+                        &relations[b].0,
+                        relations[b].1.as_slice(),
+                        b_columns.as_slice(),
+                    ),
+                )?;
+                self.learned?.get(RatioKind::FanOut, key)
+            });
+            let (selectivity, selectivity_hi) = match learned {
+                Some(learned) => {
+                    let smaller = ea.rows.min(eb.rows).max(1.0);
+                    let fan_out = learned.blend(selectivity * smaller);
+                    (
+                        (fan_out / smaller).min(1.0),
+                        (fan_out.max(learned.max) / smaller).min(1.0),
+                    )
+                }
+                None => (selectivity, selectivity),
+            };
+            factors.push(((1 << a) | (1 << b), selectivity, selectivity_hi));
         }
         for conjunct in &others.conjunctions {
             let mask = mask_of(conjunct);
             if mask != 0 {
-                factors.push((mask, conjunct_selectivity(conjunct)));
+                let selectivity = conjunct_selectivity(conjunct);
+                factors.push((mask, selectivity, selectivity));
             }
         }
 
@@ -833,8 +1007,9 @@ struct JoinGraph {
     widths: Vec<f64>,
     /// The inputs linked to each input by an equality, as a bit set.
     neighbours: Vec<u64>,
-    /// The selectivity of the conditions, with the inputs they refer to as a bit set.
-    factors: Vec<(u64, f64)>,
+    /// The selectivity of the conditions, with the inputs they refer to as a bit set, and the
+    /// pessimistic selectivity (the same unless learned).
+    factors: Vec<(u64, f64, f64)>,
     /// `eq_columns[r][i]`: the columns of input `r` equal to a column of input `i`.
     eq_columns: Vec<Vec<BTreeSet<usize>>>,
     /// The columns of each input that a lookup into it needs, if it can be read by key.
@@ -847,6 +1022,8 @@ struct Planned {
     inputs: u64,
     cost: f64,
     rows: f64,
+    /// Pessimistic rows, for the memory of a build side.
+    rows_hi: f64,
     tree: JoinTree,
 }
 
@@ -858,7 +1035,19 @@ impl JoinGraph {
     /// Estimated rows of the join of a set of inputs, the same whatever the order of the joins.
     fn rows(&self, inputs: u64) -> f64 {
         let mut rows: f64 = bits(inputs).map(|i| self.estimates[i].rows).product();
-        for (mask, selectivity) in &self.factors {
+        for (mask, selectivity, _) in &self.factors {
+            if mask & inputs == *mask {
+                rows *= selectivity;
+            }
+        }
+        rows.max(1.0)
+    }
+
+    /// Pessimistic rows of the join of a set of inputs: the same as [`Self::rows`] unless
+    /// ratios are learned.
+    fn rows_hi(&self, inputs: u64) -> f64 {
+        let mut rows: f64 = bits(inputs).map(|i| self.estimates[i].hi).product();
+        for (mask, _, selectivity) in &self.factors {
             if mask & inputs == *mask {
                 rows *= selectivity;
             }
@@ -896,7 +1085,16 @@ impl JoinGraph {
             inputs: 1 << input,
             cost: self.estimates[input].read * self.widths[input],
             rows: self.estimates[input].rows,
+            rows_hi: self.estimates[input].hi,
             tree: JoinTree::Leaf(input),
+        }
+    }
+
+    /// The cost and rows of the join tree `tree`.
+    fn planned(&self, tree: &JoinTree) -> Planned {
+        match tree {
+            JoinTree::Leaf(input) => self.leaf(*input),
+            JoinTree::Join(left, right) => self.join(&self.planned(left), &self.planned(right)),
         }
     }
 
@@ -911,7 +1109,7 @@ impl JoinGraph {
             left.cost
                 + right.cost
                 + left.rows * left_width * PROBE_COST
-                + right.rows * right_width * BUILD_COST
+                + right.rows_hi * right_width * BUILD_COST
                 + output
         }
     }
@@ -923,6 +1121,7 @@ impl JoinGraph {
             inputs,
             cost: self.join_cost(left, right, rows),
             rows,
+            rows_hi: self.rows_hi(inputs),
             tree: JoinTree::Join(Box::new(left.tree.clone()), Box::new(right.tree.clone())),
         }
     }
@@ -978,6 +1177,7 @@ impl JoinGraph {
                 continue;
             }
             let rows = self.rows(global(set));
+            let rows_hi = self.rows_hi(global(set));
             let mut chosen: Option<Planned> = None;
             let mut left = (set - 1) & set;
             while left > 0 {
@@ -991,6 +1191,7 @@ impl JoinGraph {
                             inputs: l.inputs | r.inputs,
                             cost,
                             rows,
+                            rows_hi,
                             tree: JoinTree::Join(
                                 Box::new(l.tree.clone()),
                                 Box::new(r.tree.clone()),

@@ -42,6 +42,7 @@ own rules.
 | BJ | Batch: cost-based ordering of the inner joins from the row counts of the tables (`batch_cost_based_join_ordering`) | first version (prototype, branch `proto/plan-reduction-batch-joinorder`, see "BJ" below); index lookups and column statistics not done |
 | BJ | Batch: cost-based ordering of the inner joins from the row counts and sizes of the tables (`batch_cost_based_join_ordering`) | first version (prototype, branch `proto/plan-reduction-batch-joinorder`, see "BJ" below), width-aware since 2026-11-27 (the build side is the side with fewer bytes; left outer, semi and anti joins can become right joins); index lookups and column statistics not done |
 | BF | Batch: cardinality feedback, step 1: count the rows of the operators at execution and compare them with the estimates (`batch_cardinality_feedback`) | first version (prototype, branch `proto/batch-cardinality-feedback`, see "BF" below): observation only, no plan changes |
+| BL2 | Batch: cardinality feedback, step 2: learn ratios (selectivity, groups, join fan-out) from the counts and use them in the estimates of BJ and in the limit of BT (`batch_cardinality_feedback_learning`) | first version (prototype, branch `proto/batch-cardinality-feedback-learning`, see "BF step 2" below); plan regression guard (step 4) not done |
 | BP | Batch: second pass of the reductions on keys after the stages that create aggregations (`batch_reduce_keys_after_conversions`) | done (prototype, branch `proto/plan-reduction-batch-pass2`, see "BP and BT" below) |
 | BT | Batch: `row_number() <= n` per partition becomes a top-n per group, small `n` only (`batch_over_window_to_topn`) | done (prototype, branch `proto/plan-reduction-batch-pass2`, see "BP and BT" below) |
 | BU | Batch: `UNION ALL` run in parallel tasks instead of one (`batch_distributed_union`) | done (prototype, branch `proto/plan-reduction-batch-union-dist`, see "BU" below) |
@@ -1192,6 +1193,71 @@ show the same plans with the variable on and off).
 - **Not done.** Other operators (union, top-n, table functions, sources) are not counted; the
   records are per frontend and lost on restart; the estimates of the plan are not shown in
   `EXPLAIN`; nothing uses the records yet (step 2).
+
+### BF step 2. Batch: learning from the counts (added on 2026-11-26)
+
+With `batch_cardinality_feedback_learning` (default false, `SESSION_INIT`), the counts of step 1
+become ratios that the estimates of BJ use instead of their fixed guesses
+(`optimizer/cardinality_learning.rs`). The session observes its batch queries as with
+`batch_cardinality_feedback` (either variable observes; the learned ratios are shared by the
+sessions of the frontend).
+
+- **Ratios, not rows**, so that they hold when the tables grow: `selectivity` (rows kept by the
+  predicate of a scan per row of the table, or by a filter per input row), `group_ratio` (groups of
+  an aggregation per input row), `fan_out` (output rows of an inner join per row of its larger
+  input). The input rows are counted too: the child operator, or the table for a scan (the count
+  of the scan when it reads the whole table, the storage statistics when it reads key ranges; the
+  rows of the table read by a lookup join come from the estimate). Only complete counts are
+  learned: a partial count (failure, cancellation, limit above) is ignored.
+- **Keys shared by planning and execution.** A ratio is keyed by its relation, computed the same
+  way from the logical plan (planning) and from the final batch plan (execution): a leaf is a
+  table and the predicate of its logical scan, before it is split into key ranges and a filter
+  (the batch scan carries the key computed from the logical scan, `BatchSeqScan::learning_leaf`);
+  a filter, an aggregation (input and sorted group columns) and an inner join (sorted base
+  relations and conjuncts, whatever the join order) are keyed from their inputs; columns are
+  identified by table and column id and constants are placeholders, so one key covers every
+  literal. The fan-out belongs to the edge between two base relations: the pair of relations and
+  of compared columns, learned from any join whose equalities compare one base relation on each
+  side. Outer joins, unions, sources... have no key: nothing above them is learned.
+- **Distribution.** Per key: number of observations, minimum, maximum, and a mean of
+  `log10(ratio)` that decays (plain mean of the first 5 observations, then weight 0.2 per new
+  one). The estimate blends the fixed guess and the learned mean in log space, the guess weighing
+  `0.25^n` after `n` observations (1/4 after one, 1/16 after two). Memory decisions use the
+  maximum: each estimate also carries pessimistic rows (largest learned ratios), and the build
+  side of a hash join is costed with them; the top-n guard uses the largest group ratio.
+- **Join ordering (BJ).** The join tree is computed with the fixed guesses, as before, and with the
+  learned estimates; the learned tree replaces the other one only when, with the learned
+  estimates, it costs less by more than `PLAN_CHANGE_FACTOR` = 1.5 (a factor of 2 could never swap
+  the two sides of a join: the build side costs 3 per row, the probe side 1). Without learned
+  ratios the plan is the one of BJ. The plan of the previous execution is not kept (step 4).
+- **Top-n per group (BT).** A `row_number() <= n` with `n` (limit + offset) above 10 becomes a
+  top-n per group when the largest group ratio learned for the input of the window and its
+  partition columns, times `n`, is at most 1 (the heaps then hold no more rows than the input,
+  which the sort holds anyway), up to `n` = 1000. The group ratio comes from aggregations of the
+  same input by the same columns (the window itself does not count its groups).
+- **Exposure.** At most 10 000 ratios per frontend (least recently observed tenth evicted when
+  full): system view `rw_catalog.rw_batch_cardinality_learning` (key in hex, kind, observations,
+  mean, minimum and maximum ratio). Ratios and hashes only.
+- **Tests.** Unit tests: distribution, decay and confidence, bounded store, partial counts ignored,
+  order-independent keys and edges (`cardinality_learning.rs`), the ratios to learn from batch
+  plans (`cardinality_feedback.rs`), complete counts only (`src/frontend/src/scheduler/cardinality_feedback.rs`).
+  Planner tests `batch_cardinality_feedback_learning.yaml`, through the test hook
+  `cardinality_observations` that records a query as executed with given counts: a two-way and a
+  three-way join that change once an aggregation is observed with one group per row, one key for
+  every literal, a small learned change kept by the change factor, the variable off, a top-n per
+  group allowed by 100 observed groups and kept as a window with 5000 groups, a too large limit or
+  other partition columns. End to end: `e2e_test/batch/cardinality_feedback_learning.slt` runs a
+  join and a window several times, checks with `EXPLAIN` that the plan changes only after an
+  execution was observed, and that the results stay the same.
+- **Not done / limits.** The learned ratios are per frontend and lost on restart. Scans of indexes
+  (index selection happens when the batch plan is built) and lookup joins into a table with a
+  predicate (the predicate moves into the join) are not matched with the logical plan, nor is a
+  sub-plan rewritten between join ordering and the batch plan (e.g. join conditions computed in a
+  projection by `PUSH_CALC_OF_JOIN`). Join fan-outs are attributed to one edge when a join
+  compares several pairs of relations or has other conditions: such joins are not learned. A
+  learned ratio does not depend on the literal (one distribution per key). The group ratio of a
+  window partition is learned from aggregations only. Step 3 (estimate intervals, gain of 2 in
+  the worst case) and step 4 (plan regression guard, previous plan per query) are not done.
 
 ### BP and BT. Batch: second pass of the reductions on keys, window top-n (added on 2026-11-26)
 

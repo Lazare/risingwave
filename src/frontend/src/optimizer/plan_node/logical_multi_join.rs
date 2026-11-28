@@ -325,7 +325,7 @@ impl LogicalMultiJoin {
     }
 
     /// The output columns, as indices into the columns of all the inputs.
-    pub(crate) fn output_indices(&self) -> &[usize] {
+    pub fn output_indices(&self) -> &[usize] {
         &self.output_indices
     }
 
