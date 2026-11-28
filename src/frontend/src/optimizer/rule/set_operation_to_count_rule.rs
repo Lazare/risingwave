@@ -48,6 +48,7 @@
 //! binder, so they never reach the rule.
 
 use risingwave_common::types::DataType;
+use risingwave_common::util::iter_util::ZipEqFast;
 use risingwave_expr::aggregate::PbAggKind;
 
 use super::prelude::{PlanRef, *};
@@ -87,13 +88,12 @@ impl Rule<Logical> for SetOperationToCountRule {
                 return None;
             }
             true
-        } else if let Some(except) = plan.as_logical_except() {
+        } else {
+            let except = plan.as_logical_except()?;
             if except.all() {
                 return None;
             }
             false
-        } else {
-            return None;
         };
         let inputs = plan.inputs();
         let fields = plan.schema().fields().to_vec();
@@ -109,7 +109,7 @@ impl Rule<Logical> for SetOperationToCountRule {
         if !inputs.iter().all(|input| {
             input.schema().len() == fields.len()
                 && (input.schema().fields().iter())
-                    .zip(&fields)
+                    .zip_eq_fast(&fields)
                     .all(|(field, other)| field.data_type() == other.data_type())
         }) {
             return None;
