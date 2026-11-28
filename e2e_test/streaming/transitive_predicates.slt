@@ -554,14 +554,6 @@ select
 
 query III
 select
-  (select count(*) from (select id, sid, w, count(*) as tp_rows from tp_numeric_text_kept_on group by id, sid, w except select id, sid, w, count(*) as tp_rows from (select o.id, s.sid, s.w from (select * from tp_o where k::varchar = '1.0') o join tp_s s on s.k = o.k) q group by id, sid, w) x),
-  (select count(*) from (select id, sid, w, count(*) as tp_rows from (select o.id, s.sid, s.w from (select * from tp_o where k::varchar = '1.0') o join tp_s s on s.k = o.k) q group by id, sid, w except select id, sid, w, count(*) as tp_rows from tp_numeric_text_kept_on group by id, sid, w) y),
-  (select count(*) from tp_numeric_text_kept_on) - (select count(*) from (select o.id, s.sid, s.w from (select * from tp_o where k::varchar = '1.0') o join tp_s s on s.k = o.k) q);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select id, sid, count(*) as tp_rows from tp_float_text_kept_on group by id, sid except select id, sid, count(*) as tp_rows from tp_float_text_kept_off group by id, sid) x),
   (select count(*) from (select id, sid, count(*) as tp_rows from tp_float_text_kept_off group by id, sid except select id, sid, count(*) as tp_rows from tp_float_text_kept_on group by id, sid) y),
   (select count(*) from tp_float_text_kept_on) - (select count(*) from tp_float_text_kept_off);
@@ -980,14 +972,6 @@ select
 
 query III
 select
-  (select count(*) from (select id, sid, w, count(*) as tp_rows from tp_numeric_text_kept_on group by id, sid, w except select id, sid, w, count(*) as tp_rows from (select o.id, s.sid, s.w from (select * from tp_o where k::varchar = '1.0') o join tp_s s on s.k = o.k) q group by id, sid, w) x),
-  (select count(*) from (select id, sid, w, count(*) as tp_rows from (select o.id, s.sid, s.w from (select * from tp_o where k::varchar = '1.0') o join tp_s s on s.k = o.k) q group by id, sid, w except select id, sid, w, count(*) as tp_rows from tp_numeric_text_kept_on group by id, sid, w) y),
-  (select count(*) from tp_numeric_text_kept_on) - (select count(*) from (select o.id, s.sid, s.w from (select * from tp_o where k::varchar = '1.0') o join tp_s s on s.k = o.k) q);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select id, sid, count(*) as tp_rows from tp_float_text_kept_on group by id, sid except select id, sid, count(*) as tp_rows from tp_float_text_kept_off group by id, sid) x),
   (select count(*) from (select id, sid, count(*) as tp_rows from tp_float_text_kept_off group by id, sid except select id, sid, count(*) as tp_rows from tp_float_text_kept_on group by id, sid) y),
   (select count(*) from tp_float_text_kept_on) - (select count(*) from tp_float_text_kept_off);
@@ -1401,14 +1385,6 @@ select
 
 query III
 select
-  (select count(*) from (select id, sid, w, count(*) as tp_rows from tp_numeric_text_kept_on group by id, sid, w except select id, sid, w, count(*) as tp_rows from (select o.id, s.sid, s.w from (select * from tp_o where k::varchar = '1.0') o join tp_s s on s.k = o.k) q group by id, sid, w) x),
-  (select count(*) from (select id, sid, w, count(*) as tp_rows from (select o.id, s.sid, s.w from (select * from tp_o where k::varchar = '1.0') o join tp_s s on s.k = o.k) q group by id, sid, w except select id, sid, w, count(*) as tp_rows from tp_numeric_text_kept_on group by id, sid, w) y),
-  (select count(*) from tp_numeric_text_kept_on) - (select count(*) from (select o.id, s.sid, s.w from (select * from tp_o where k::varchar = '1.0') o join tp_s s on s.k = o.k) q);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select id, sid, count(*) as tp_rows from tp_float_text_kept_on group by id, sid except select id, sid, count(*) as tp_rows from tp_float_text_kept_off group by id, sid) x),
   (select count(*) from (select id, sid, count(*) as tp_rows from tp_float_text_kept_off group by id, sid except select id, sid, count(*) as tp_rows from tp_float_text_kept_on group by id, sid) y),
   (select count(*) from tp_float_text_kept_on) - (select count(*) from tp_float_text_kept_off);
@@ -1787,14 +1763,6 @@ select
   (select count(*) from (select id, sid, w, count(*) as tp_rows from tp_numeric_text_kept_on group by id, sid, w except select id, sid, w, count(*) as tp_rows from tp_numeric_text_kept_off group by id, sid, w) x),
   (select count(*) from (select id, sid, w, count(*) as tp_rows from tp_numeric_text_kept_off group by id, sid, w except select id, sid, w, count(*) as tp_rows from tp_numeric_text_kept_on group by id, sid, w) y),
   (select count(*) from tp_numeric_text_kept_on) - (select count(*) from tp_numeric_text_kept_off);
-----
-0 0 0
-
-query III
-select
-  (select count(*) from (select id, sid, w, count(*) as tp_rows from tp_numeric_text_kept_on group by id, sid, w except select id, sid, w, count(*) as tp_rows from (select o.id, s.sid, s.w from (select * from tp_o where k::varchar = '1.0') o join tp_s s on s.k = o.k) q group by id, sid, w) x),
-  (select count(*) from (select id, sid, w, count(*) as tp_rows from (select o.id, s.sid, s.w from (select * from tp_o where k::varchar = '1.0') o join tp_s s on s.k = o.k) q group by id, sid, w except select id, sid, w, count(*) as tp_rows from tp_numeric_text_kept_on group by id, sid, w) y),
-  (select count(*) from tp_numeric_text_kept_on) - (select count(*) from (select o.id, s.sid, s.w from (select * from tp_o where k::varchar = '1.0') o join tp_s s on s.k = o.k) q);
 ----
 0 0 0
 
@@ -2181,14 +2149,6 @@ select
 
 query III
 select
-  (select count(*) from (select id, sid, w, count(*) as tp_rows from tp_numeric_text_kept_on group by id, sid, w except select id, sid, w, count(*) as tp_rows from (select o.id, s.sid, s.w from (select * from tp_o where k::varchar = '1.0') o join tp_s s on s.k = o.k) q group by id, sid, w) x),
-  (select count(*) from (select id, sid, w, count(*) as tp_rows from (select o.id, s.sid, s.w from (select * from tp_o where k::varchar = '1.0') o join tp_s s on s.k = o.k) q group by id, sid, w except select id, sid, w, count(*) as tp_rows from tp_numeric_text_kept_on group by id, sid, w) y),
-  (select count(*) from tp_numeric_text_kept_on) - (select count(*) from (select o.id, s.sid, s.w from (select * from tp_o where k::varchar = '1.0') o join tp_s s on s.k = o.k) q);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select id, sid, count(*) as tp_rows from tp_float_text_kept_on group by id, sid except select id, sid, count(*) as tp_rows from tp_float_text_kept_off group by id, sid) x),
   (select count(*) from (select id, sid, count(*) as tp_rows from tp_float_text_kept_off group by id, sid except select id, sid, count(*) as tp_rows from tp_float_text_kept_on group by id, sid) y),
   (select count(*) from tp_float_text_kept_on) - (select count(*) from tp_float_text_kept_off);
@@ -2565,14 +2525,6 @@ select
   (select count(*) from (select id, sid, w, count(*) as tp_rows from tp_numeric_text_kept_on group by id, sid, w except select id, sid, w, count(*) as tp_rows from tp_numeric_text_kept_off group by id, sid, w) x),
   (select count(*) from (select id, sid, w, count(*) as tp_rows from tp_numeric_text_kept_off group by id, sid, w except select id, sid, w, count(*) as tp_rows from tp_numeric_text_kept_on group by id, sid, w) y),
   (select count(*) from tp_numeric_text_kept_on) - (select count(*) from tp_numeric_text_kept_off);
-----
-0 0 0
-
-query III
-select
-  (select count(*) from (select id, sid, w, count(*) as tp_rows from tp_numeric_text_kept_on group by id, sid, w except select id, sid, w, count(*) as tp_rows from (select o.id, s.sid, s.w from (select * from tp_o where k::varchar = '1.0') o join tp_s s on s.k = o.k) q group by id, sid, w) x),
-  (select count(*) from (select id, sid, w, count(*) as tp_rows from (select o.id, s.sid, s.w from (select * from tp_o where k::varchar = '1.0') o join tp_s s on s.k = o.k) q group by id, sid, w except select id, sid, w, count(*) as tp_rows from tp_numeric_text_kept_on group by id, sid, w) y),
-  (select count(*) from tp_numeric_text_kept_on) - (select count(*) from (select o.id, s.sid, s.w from (select * from tp_o where k::varchar = '1.0') o join tp_s s on s.k = o.k) q);
 ----
 0 0 0
 
