@@ -47,21 +47,23 @@
   stream_plan: |-
     StreamMaterialize { columns: [u, x, ea.k(hidden)], stream_key: [ea.k], pk_columns: [ea.k], pk_conflict: NoCheck }
     └─StreamExchange { dist: HashShard(ea.k) }
-      └─StreamHashJoin { type: Inner, predicate: ea.k = d.u, output: [d.u, $expr1, ea.k] }
-        ├─StreamProject { exprs: [ea.k, JsonbAccessStr(JsonbAccess(last_value(ea.doc order_by(ea.ts ASC)), 'a':Varchar), 'b':Varchar) as $expr1], noop_update_hint: true }
+      └─StreamHashJoin { type: Inner, predicate: ea.k = d.u, output: [d.u, last_value($expr1 order_by(ea.ts ASC)), ea.k] }
+        ├─StreamProject { exprs: [ea.k, max(ea.ts), last_value($expr1 order_by(ea.ts ASC))] }
         │ └─StreamGroupTopN { order: [ea.k ASC, max(ea.ts) DESC], limit: 1, offset: 0, group_key: [ea.k] }
         │   └─StreamExchange { dist: HashShard(ea.k) }
         │     └─StreamUnion { all: true }
         │       ├─StreamExchange { dist: HashShard(ea.k, 0:Int32) }
-        │       │ └─StreamProject { exprs: [ea.k, last_value(ea.doc order_by(ea.ts ASC)), max(ea.ts), 0:Int32] }
-        │       │   └─StreamHashAgg { group_key: [ea.k], aggs: [last_value(ea.doc order_by(ea.ts ASC)), max(ea.ts), count] }
+        │       │ └─StreamProject { exprs: [ea.k, max(ea.ts), last_value($expr1 order_by(ea.ts ASC)), 0:Int32] }
+        │       │   └─StreamHashAgg { group_key: [ea.k], aggs: [last_value($expr1 order_by(ea.ts ASC)), max(ea.ts), count] }
         │       │     └─StreamExchange { dist: HashShard(ea.k) }
-        │       │       └─StreamTableScan { table: ea, columns: [ea.k, ea.ts, ea.doc, ea.id], stream_scan_type: SnapshotBackfill, stream_key: [ea.id], pk: [id], dist: UpstreamHashShard(ea.id) }
+        │       │       └─StreamProject { exprs: [ea.k, ea.ts, JsonbAccessStr(JsonbAccess(ea.doc, 'a':Varchar), 'b':Varchar) as $expr1, ea.id], noop_update_hint: true }
+        │       │         └─StreamTableScan { table: ea, columns: [ea.k, ea.ts, ea.doc, ea.id], stream_scan_type: SnapshotBackfill, stream_key: [ea.id], pk: [id], dist: UpstreamHashShard(ea.id) }
         │       └─StreamExchange { dist: HashShard(eb.k, 1:Int32) }
-        │         └─StreamProject { exprs: [eb.k, last_value(eb.doc order_by(eb.ts ASC)), max(eb.ts), 1:Int32] }
-        │           └─StreamHashAgg { group_key: [eb.k], aggs: [last_value(eb.doc order_by(eb.ts ASC)), max(eb.ts), count] }
+        │         └─StreamProject { exprs: [eb.k, max(eb.ts), last_value($expr2 order_by(eb.ts ASC)), 1:Int32] }
+        │           └─StreamHashAgg { group_key: [eb.k], aggs: [last_value($expr2 order_by(eb.ts ASC)), max(eb.ts), count] }
         │             └─StreamExchange { dist: HashShard(eb.k) }
-        │               └─StreamTableScan { table: eb, columns: [eb.k, eb.ts, eb.doc, eb.id], stream_scan_type: SnapshotBackfill, stream_key: [eb.id], pk: [id], dist: UpstreamHashShard(eb.id) }
+        │               └─StreamProject { exprs: [eb.k, eb.ts, JsonbAccessStr(JsonbAccess(eb.doc, 'a':Varchar), 'b':Varchar) as $expr2, eb.id], noop_update_hint: true }
+        │                 └─StreamTableScan { table: eb, columns: [eb.k, eb.ts, eb.doc, eb.id], stream_scan_type: SnapshotBackfill, stream_key: [eb.id], pk: [id], dist: UpstreamHashShard(eb.id) }
         └─StreamExchange { dist: HashShard(d.u) }
           └─StreamProject { exprs: [d.u] }
             └─StreamFilter { predicate: (d.state = 'open':Varchar) }
@@ -74,20 +76,22 @@
     select k, doc->>'c' as c, doc->'a'->>'b' as b, (doc->>'n')::int as n from vu;
   stream_plan: |-
     StreamMaterialize { columns: [k, c, b, n], stream_key: [k], pk_columns: [k], pk_conflict: NoCheck }
-    └─StreamProject { exprs: [ea.k, JsonbAccessStr(last_value(ea.doc order_by(ea.ts ASC)), 'c':Varchar) as $expr1, JsonbAccessStr(JsonbAccess(last_value(ea.doc order_by(ea.ts ASC)), 'a':Varchar), 'b':Varchar) as $expr2, JsonbAccessStr(last_value(ea.doc order_by(ea.ts ASC)), 'n':Varchar)::Int32 as $expr3], noop_update_hint: true }
+    └─StreamProject { exprs: [ea.k, $expr2, $expr3, $expr4::Int32 as $expr9] }
       └─StreamGroupTopN { order: [ea.k ASC, max(ea.ts) DESC], limit: 1, offset: 0, group_key: [ea.k] }
         └─StreamExchange { dist: HashShard(ea.k) }
           └─StreamUnion { all: true }
             ├─StreamExchange { dist: HashShard(ea.k, 0:Int32) }
-            │ └─StreamProject { exprs: [ea.k, last_value(ea.doc order_by(ea.ts ASC)), max(ea.ts), 0:Int32] }
-            │   └─StreamHashAgg { group_key: [ea.k], aggs: [last_value(ea.doc order_by(ea.ts ASC)), max(ea.ts), count] }
+            │ └─StreamProject { exprs: [ea.k, max(ea.ts), Field(last_value($expr1 order_by(ea.ts ASC)), 0:Int32) as $expr2, Field(last_value($expr1 order_by(ea.ts ASC)), 1:Int32) as $expr3, Field(last_value($expr1 order_by(ea.ts ASC)), 2:Int32) as $expr4, 0:Int32] }
+            │   └─StreamHashAgg { group_key: [ea.k], aggs: [last_value($expr1 order_by(ea.ts ASC)), max(ea.ts), count] }
             │     └─StreamExchange { dist: HashShard(ea.k) }
-            │       └─StreamTableScan { table: ea, columns: [ea.k, ea.ts, ea.doc, ea.id], stream_scan_type: SnapshotBackfill, stream_key: [ea.id], pk: [id], dist: UpstreamHashShard(ea.id) }
+            │       └─StreamProject { exprs: [ea.k, ea.ts, Row(JsonbAccessStr(ea.doc, 'c':Varchar), JsonbAccessStr(JsonbAccess(ea.doc, 'a':Varchar), 'b':Varchar), JsonbAccessStr(ea.doc, 'n':Varchar)) as $expr1, ea.id] }
+            │         └─StreamTableScan { table: ea, columns: [ea.k, ea.ts, ea.doc, ea.id], stream_scan_type: SnapshotBackfill, stream_key: [ea.id], pk: [id], dist: UpstreamHashShard(ea.id) }
             └─StreamExchange { dist: HashShard(eb.k, 1:Int32) }
-              └─StreamProject { exprs: [eb.k, last_value(eb.doc order_by(eb.ts ASC)), max(eb.ts), 1:Int32] }
-                └─StreamHashAgg { group_key: [eb.k], aggs: [last_value(eb.doc order_by(eb.ts ASC)), max(eb.ts), count] }
+              └─StreamProject { exprs: [eb.k, max(eb.ts), Field(last_value($expr5 order_by(eb.ts ASC)), 0:Int32) as $expr6, Field(last_value($expr5 order_by(eb.ts ASC)), 1:Int32) as $expr7, Field(last_value($expr5 order_by(eb.ts ASC)), 2:Int32) as $expr8, 1:Int32] }
+                └─StreamHashAgg { group_key: [eb.k], aggs: [last_value($expr5 order_by(eb.ts ASC)), max(eb.ts), count] }
                   └─StreamExchange { dist: HashShard(eb.k) }
-                    └─StreamTableScan { table: eb, columns: [eb.k, eb.ts, eb.doc, eb.id], stream_scan_type: SnapshotBackfill, stream_key: [eb.id], pk: [id], dist: UpstreamHashShard(eb.id) }
+                    └─StreamProject { exprs: [eb.k, eb.ts, Row(JsonbAccessStr(eb.doc, 'c':Varchar), JsonbAccessStr(JsonbAccess(eb.doc, 'a':Varchar), 'b':Varchar), JsonbAccessStr(eb.doc, 'n':Varchar)) as $expr5, eb.id] }
+                      └─StreamTableScan { table: eb, columns: [eb.k, eb.ts, eb.doc, eb.id], stream_scan_type: SnapshotBackfill, stream_key: [eb.id], pk: [id], dist: UpstreamHashShard(eb.id) }
 - name: top-n per group ordered by a field of the value
   before:
   - tables
@@ -169,20 +173,22 @@
     select k, c from (select k, doc->>'c' as c, row_number() over (partition by k order by ts desc) as rn from vab) s where rn = 1;
   stream_plan: |-
     StreamMaterialize { columns: [k, c], stream_key: [k], pk_columns: [k], pk_conflict: NoCheck }
-    └─StreamProject { exprs: [ea.k, JsonbAccessStr(last_value(ea.doc order_by(ea.ts ASC)), 'c':Varchar) as $expr1], noop_update_hint: true }
+    └─StreamProject { exprs: [ea.k, last_value($expr1 order_by(ea.ts ASC))] }
       └─StreamGroupTopN { order: [max(ea.ts) DESC], limit: 1, offset: 0, group_key: [ea.k] }
         └─StreamExchange { dist: HashShard(ea.k) }
           └─StreamUnion { all: true }
             ├─StreamExchange { dist: HashShard(ea.k, 0:Int32) }
-            │ └─StreamProject { exprs: [ea.k, last_value(ea.doc order_by(ea.ts ASC)), max(ea.ts), 0:Int32] }
-            │   └─StreamHashAgg { group_key: [ea.k], aggs: [last_value(ea.doc order_by(ea.ts ASC)), max(ea.ts), count] }
+            │ └─StreamProject { exprs: [ea.k, max(ea.ts), last_value($expr1 order_by(ea.ts ASC)), 0:Int32] }
+            │   └─StreamHashAgg { group_key: [ea.k], aggs: [last_value($expr1 order_by(ea.ts ASC)), max(ea.ts), count] }
             │     └─StreamExchange { dist: HashShard(ea.k) }
-            │       └─StreamTableScan { table: ea, columns: [ea.k, ea.ts, ea.doc, ea.id], stream_scan_type: SnapshotBackfill, stream_key: [ea.id], pk: [id], dist: UpstreamHashShard(ea.id) }
+            │       └─StreamProject { exprs: [ea.k, ea.ts, JsonbAccessStr(ea.doc, 'c':Varchar) as $expr1, ea.id], noop_update_hint: true }
+            │         └─StreamTableScan { table: ea, columns: [ea.k, ea.ts, ea.doc, ea.id], stream_scan_type: SnapshotBackfill, stream_key: [ea.id], pk: [id], dist: UpstreamHashShard(ea.id) }
             └─StreamExchange { dist: HashShard(eb.k, 1:Int32) }
-              └─StreamProject { exprs: [eb.k, last_value(eb.doc order_by(eb.ts ASC)), max(eb.ts), 1:Int32] }
-                └─StreamHashAgg { group_key: [eb.k], aggs: [last_value(eb.doc order_by(eb.ts ASC)), max(eb.ts), count] }
+              └─StreamProject { exprs: [eb.k, max(eb.ts), last_value($expr2 order_by(eb.ts ASC)), 1:Int32] }
+                └─StreamHashAgg { group_key: [eb.k], aggs: [last_value($expr2 order_by(eb.ts ASC)), max(eb.ts), count] }
                   └─StreamExchange { dist: HashShard(eb.k) }
-                    └─StreamTableScan { table: eb, columns: [eb.k, eb.ts, eb.doc, eb.id], stream_scan_type: SnapshotBackfill, stream_key: [eb.id], pk: [id], dist: UpstreamHashShard(eb.id) }
+                    └─StreamProject { exprs: [eb.k, eb.ts, JsonbAccessStr(eb.doc, 'c':Varchar) as $expr2, eb.id], noop_update_hint: true }
+                      └─StreamTableScan { table: eb, columns: [eb.k, eb.ts, eb.doc, eb.id], stream_scan_type: SnapshotBackfill, stream_key: [eb.id], pk: [id], dist: UpstreamHashShard(eb.id) }
 - name: window that is not a top-n
   before:
   - tables

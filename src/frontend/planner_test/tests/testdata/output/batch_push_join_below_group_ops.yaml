@@ -50,20 +50,20 @@
     select d.u, d.w, vu.doc->'a'->>'b' as x, vu.ts from vu join d on vu.k = d.u where d.state = 'open';
   batch_plan: |-
     BatchExchange { order: [], dist: Single }
-    └─BatchProject { exprs: [ea.k, d.w, JsonbAccessStr(JsonbAccess(last_value(ea.doc order_by(ea.ts ASC)), 'a':Varchar), 'b':Varchar) as $expr1, max(ea.ts)] }
+    └─BatchProject { exprs: [ea.k, internal_last_seen_value(d.w), JsonbAccessStr(JsonbAccess(last_value(ea.doc order_by(ea.ts ASC)), 'a':Varchar), 'b':Varchar) as $expr1, max(ea.ts)] }
       └─BatchGroupTopN { order: [ea.k ASC, max(ea.ts) DESC], limit: 1, offset: 0, group_key: [ea.k] }
         └─BatchExchange { order: [], dist: HashShard(ea.k) }
           └─BatchUnion { all: true }
             ├─BatchExchange { order: [], dist: Single }
-            │ └─BatchProject { exprs: [ea.k, last_value(ea.doc order_by(ea.ts ASC)), max(ea.ts), ea.k, d.w] }
-            │   └─BatchHashAgg { group_key: [ea.k, d.state, d.w, d._rw_timestamp], aggs: [last_value(ea.doc order_by(ea.ts ASC)), max(ea.ts)] }
-            │     └─BatchLookupJoin { type: Inner, predicate: ea.k = d.u AND (d.state = 'open':Varchar), output: [ea.k, ea.doc, ea.ts, d.state, d.w, d._rw_timestamp], lookup table: d }
+            │ └─BatchProject { exprs: [ea.k, last_value(ea.doc order_by(ea.ts ASC)), max(ea.ts), ea.k, internal_last_seen_value(d.w)] }
+            │   └─BatchHashAgg { group_key: [ea.k], aggs: [last_value(ea.doc order_by(ea.ts ASC)), max(ea.ts), internal_last_seen_value(d.w)] }
+            │     └─BatchLookupJoin { type: Inner, predicate: ea.k = d.u AND (d.state = 'open':Varchar), output: [ea.k, ea.doc, ea.ts, d.w], lookup table: d }
             │       └─BatchExchange { order: [], dist: UpstreamHashShard(ea.k) }
             │         └─BatchScan { table: ea, columns: [ea.k, ea.ts, ea.doc], distribution: SomeShard }
             └─BatchExchange { order: [], dist: Single }
-              └─BatchProject { exprs: [eb.k, last_value(eb.doc order_by(eb.ts ASC)), max(eb.ts), eb.k, d.w] }
-                └─BatchHashAgg { group_key: [eb.k, d.state, d.w, d._rw_timestamp], aggs: [last_value(eb.doc order_by(eb.ts ASC)), max(eb.ts)] }
-                  └─BatchLookupJoin { type: Inner, predicate: eb.k = d.u AND (d.state = 'open':Varchar), output: [eb.k, eb.doc, eb.ts, d.state, d.w, d._rw_timestamp], lookup table: d }
+              └─BatchProject { exprs: [eb.k, last_value(eb.doc order_by(eb.ts ASC)), max(eb.ts), eb.k, internal_last_seen_value(d.w)] }
+                └─BatchHashAgg { group_key: [eb.k], aggs: [last_value(eb.doc order_by(eb.ts ASC)), max(eb.ts), internal_last_seen_value(d.w)] }
+                  └─BatchLookupJoin { type: Inner, predicate: eb.k = d.u AND (d.state = 'open':Varchar), output: [eb.k, eb.doc, eb.ts, d.w], lookup table: d }
                     └─BatchExchange { order: [], dist: UpstreamHashShard(eb.k) }
                       └─BatchScan { table: eb, columns: [eb.k, eb.ts, eb.doc], distribution: SomeShard }
 - name: semi join, the other side is not unique
@@ -118,28 +118,26 @@
     select sel.x, vu.doc->>'c' as c from vu join sel on vu.k = sel.aid;
   batch_plan: |-
     BatchExchange { order: [], dist: Single }
-    └─BatchProject { exprs: [att.x, JsonbAccessStr(last_value(ea.doc order_by(ea.ts ASC)), 'c':Varchar) as $expr1] }
+    └─BatchProject { exprs: [internal_last_seen_value(att.x), JsonbAccessStr(last_value(ea.doc order_by(ea.ts ASC)), 'c':Varchar) as $expr1] }
       └─BatchGroupTopN { order: [ea.k ASC, max(ea.ts) DESC], limit: 1, offset: 0, group_key: [ea.k] }
         └─BatchExchange { order: [], dist: HashShard(ea.k) }
           └─BatchUnion { all: true }
             ├─BatchExchange { order: [], dist: Single }
-            │ └─BatchProject { exprs: [ea.k, last_value(ea.doc order_by(ea.ts ASC)), max(ea.ts), att.x] }
-            │   └─BatchHashAgg { group_key: [ea.k, att.x], aggs: [last_value(ea.doc order_by(ea.ts ASC)), max(ea.ts)] }
-            │     └─BatchExchange { order: [], dist: HashShard(ea.k, att.x) }
-            │       └─BatchLookupJoin { type: Inner, predicate: att.tid = tk.tid AND (tk.kind = 'a':Varchar), output: [ea.k, ea.doc, ea.ts, att.x], lookup table: tk }
-            │         └─BatchExchange { order: [], dist: UpstreamHashShard(att.tid) }
-            │           └─BatchLookupJoin { type: Inner, predicate: ea.k = att.aid, output: [ea.k, ea.ts, ea.doc, att.tid, att.x], lookup table: att }
-            │             └─BatchExchange { order: [], dist: UpstreamHashShard(ea.k) }
-            │               └─BatchScan { table: ea, columns: [ea.k, ea.ts, ea.doc], distribution: SomeShard }
+            │ └─BatchHashAgg { group_key: [ea.k], aggs: [last_value(ea.doc order_by(ea.ts ASC)), max(ea.ts), internal_last_seen_value(att.x)] }
+            │   └─BatchExchange { order: [], dist: HashShard(ea.k) }
+            │     └─BatchLookupJoin { type: Inner, predicate: att.tid = tk.tid AND (tk.kind = 'a':Varchar), output: [ea.k, ea.doc, ea.ts, att.x], lookup table: tk }
+            │       └─BatchExchange { order: [], dist: UpstreamHashShard(att.tid) }
+            │         └─BatchLookupJoin { type: Inner, predicate: ea.k = att.aid, output: [ea.k, ea.ts, ea.doc, att.tid, att.x], lookup table: att }
+            │           └─BatchExchange { order: [], dist: UpstreamHashShard(ea.k) }
+            │             └─BatchScan { table: ea, columns: [ea.k, ea.ts, ea.doc], distribution: SomeShard }
             └─BatchExchange { order: [], dist: Single }
-              └─BatchProject { exprs: [eb.k, last_value(eb.doc order_by(eb.ts ASC)), max(eb.ts), att.x] }
-                └─BatchHashAgg { group_key: [eb.k, att.x], aggs: [last_value(eb.doc order_by(eb.ts ASC)), max(eb.ts)] }
-                  └─BatchExchange { order: [], dist: HashShard(eb.k, att.x) }
-                    └─BatchLookupJoin { type: Inner, predicate: att.tid = tk.tid AND (tk.kind = 'a':Varchar), output: [eb.k, eb.doc, eb.ts, att.x], lookup table: tk }
-                      └─BatchExchange { order: [], dist: UpstreamHashShard(att.tid) }
-                        └─BatchLookupJoin { type: Inner, predicate: eb.k = att.aid, output: [eb.k, eb.ts, eb.doc, att.tid, att.x], lookup table: att }
-                          └─BatchExchange { order: [], dist: UpstreamHashShard(eb.k) }
-                            └─BatchScan { table: eb, columns: [eb.k, eb.ts, eb.doc], distribution: SomeShard }
+              └─BatchHashAgg { group_key: [eb.k], aggs: [last_value(eb.doc order_by(eb.ts ASC)), max(eb.ts), internal_last_seen_value(att.x)] }
+                └─BatchExchange { order: [], dist: HashShard(eb.k) }
+                  └─BatchLookupJoin { type: Inner, predicate: att.tid = tk.tid AND (tk.kind = 'a':Varchar), output: [eb.k, eb.doc, eb.ts, att.x], lookup table: tk }
+                    └─BatchExchange { order: [], dist: UpstreamHashShard(att.tid) }
+                      └─BatchLookupJoin { type: Inner, predicate: eb.k = att.aid, output: [eb.k, eb.ts, eb.doc, att.tid, att.x], lookup table: att }
+                        └─BatchExchange { order: [], dist: UpstreamHashShard(eb.k) }
+                          └─BatchScan { table: eb, columns: [eb.k, eb.ts, eb.doc], distribution: SomeShard }
 - name: window partitioned by the key, filtered on its row number
   before:
   - tables
@@ -179,9 +177,9 @@
     select va.k, d.w, va.doc->>'c' as c from va join d on va.k = d.u where d.state = 'open';
   batch_plan: |-
     BatchExchange { order: [], dist: Single }
-    └─BatchProject { exprs: [ea.k, d.w, JsonbAccessStr(last_value(ea.doc order_by(ea.ts ASC)), 'c':Varchar) as $expr1] }
-      └─BatchHashAgg { group_key: [ea.k, d.state, d.w, d._rw_timestamp], aggs: [last_value(ea.doc order_by(ea.ts ASC))] }
-        └─BatchLookupJoin { type: Inner, predicate: ea.k = d.u AND (d.state = 'open':Varchar), output: [ea.k, ea.doc, ea.ts, d.state, d.w, d._rw_timestamp], lookup table: d }
+    └─BatchProject { exprs: [ea.k, internal_last_seen_value(d.w), JsonbAccessStr(last_value(ea.doc order_by(ea.ts ASC)), 'c':Varchar) as $expr1] }
+      └─BatchHashAgg { group_key: [ea.k], aggs: [last_value(ea.doc order_by(ea.ts ASC)), internal_last_seen_value(d.w)] }
+        └─BatchLookupJoin { type: Inner, predicate: ea.k = d.u AND (d.state = 'open':Varchar), output: [ea.k, ea.doc, ea.ts, d.w], lookup table: d }
           └─BatchExchange { order: [], dist: UpstreamHashShard(ea.k) }
             └─BatchScan { table: ea, columns: [ea.k, ea.ts, ea.doc], distribution: SomeShard }
 - name: condition with a constant comparison of the other side and a group column
@@ -196,17 +194,15 @@
       └─BatchExchange { order: [], dist: HashShard(ea.k) }
         └─BatchUnion { all: true }
           ├─BatchExchange { order: [], dist: Single }
-          │ └─BatchProject { exprs: [ea.k, max(ea.ts)] }
-          │   └─BatchHashAgg { group_key: [ea.k, d.state, d.w, d._rw_timestamp], aggs: [max(ea.ts)] }
-          │     └─BatchLookupJoin { type: Inner, predicate: ea.k = d.u AND (d.w > ea.k) AND (d.state = 'open':Varchar), output: [ea.k, ea.ts, d.state, d.w, d._rw_timestamp], lookup table: d }
-          │       └─BatchExchange { order: [], dist: UpstreamHashShard(ea.k) }
-          │         └─BatchScan { table: ea, columns: [ea.k, ea.ts], distribution: SomeShard }
+          │ └─BatchHashAgg { group_key: [ea.k], aggs: [max(ea.ts)] }
+          │   └─BatchLookupJoin { type: Inner, predicate: ea.k = d.u AND (d.w > ea.k) AND (d.state = 'open':Varchar), output: [ea.k, ea.ts], lookup table: d }
+          │     └─BatchExchange { order: [], dist: UpstreamHashShard(ea.k) }
+          │       └─BatchScan { table: ea, columns: [ea.k, ea.ts], distribution: SomeShard }
           └─BatchExchange { order: [], dist: Single }
-            └─BatchProject { exprs: [eb.k, max(eb.ts)] }
-              └─BatchHashAgg { group_key: [eb.k, d.state, d.w, d._rw_timestamp], aggs: [max(eb.ts)] }
-                └─BatchLookupJoin { type: Inner, predicate: eb.k = d.u AND (d.w > eb.k) AND (d.state = 'open':Varchar), output: [eb.k, eb.ts, d.state, d.w, d._rw_timestamp], lookup table: d }
-                  └─BatchExchange { order: [], dist: UpstreamHashShard(eb.k) }
-                    └─BatchScan { table: eb, columns: [eb.k, eb.ts], distribution: SomeShard }
+            └─BatchHashAgg { group_key: [eb.k], aggs: [max(eb.ts)] }
+              └─BatchLookupJoin { type: Inner, predicate: eb.k = d.u AND (d.w > eb.k) AND (d.state = 'open':Varchar), output: [eb.k, eb.ts], lookup table: d }
+                └─BatchExchange { order: [], dist: UpstreamHashShard(eb.k) }
+                  └─BatchScan { table: eb, columns: [eb.k, eb.ts], distribution: SomeShard }
 - name: with statistics, a small selection of a large input
   before:
   - tables
@@ -221,14 +217,14 @@
           └─BatchUnion { all: true }
             ├─BatchExchange { order: [], dist: Single }
             │ └─BatchProject { exprs: [ea.k, last_value(ea.doc order_by(ea.ts ASC)), max(ea.ts), ea.k] }
-            │   └─BatchHashAgg { group_key: [ea.k, d.state, d.w, d._rw_timestamp], aggs: [last_value(ea.doc order_by(ea.ts ASC)), max(ea.ts)] }
-            │     └─BatchLookupJoin { type: Inner, predicate: ea.k = d.u AND (d.state = 'open':Varchar), output: [ea.k, ea.doc, ea.ts, d.state, d.w, d._rw_timestamp], lookup table: d }
+            │   └─BatchHashAgg { group_key: [ea.k], aggs: [last_value(ea.doc order_by(ea.ts ASC)), max(ea.ts)] }
+            │     └─BatchLookupJoin { type: Inner, predicate: ea.k = d.u AND (d.state = 'open':Varchar), output: [ea.k, ea.doc, ea.ts], lookup table: d }
             │       └─BatchExchange { order: [], dist: UpstreamHashShard(ea.k) }
             │         └─BatchScan { table: ea, columns: [ea.k, ea.ts, ea.doc], distribution: SomeShard }
             └─BatchExchange { order: [], dist: Single }
               └─BatchProject { exprs: [eb.k, last_value(eb.doc order_by(eb.ts ASC)), max(eb.ts), eb.k] }
-                └─BatchHashAgg { group_key: [eb.k, d.state, d.w, d._rw_timestamp], aggs: [last_value(eb.doc order_by(eb.ts ASC)), max(eb.ts)] }
-                  └─BatchLookupJoin { type: Inner, predicate: eb.k = d.u AND (d.state = 'open':Varchar), output: [eb.k, eb.doc, eb.ts, d.state, d.w, d._rw_timestamp], lookup table: d }
+                └─BatchHashAgg { group_key: [eb.k], aggs: [last_value(eb.doc order_by(eb.ts ASC)), max(eb.ts)] }
+                  └─BatchLookupJoin { type: Inner, predicate: eb.k = d.u AND (d.state = 'open':Varchar), output: [eb.k, eb.doc, eb.ts], lookup table: d }
                     └─BatchExchange { order: [], dist: UpstreamHashShard(eb.k) }
                       └─BatchScan { table: eb, columns: [eb.k, eb.ts, eb.doc], distribution: SomeShard }
   table_row_counts:
@@ -243,11 +239,10 @@
     select d.u, vg.g from vg join d on vg.k = d.u where d.state = 'open';
   batch_plan: |-
     BatchExchange { order: [], dist: Single }
-    └─BatchProject { exprs: [ea.k, ea.g] }
-      └─BatchHashAgg { group_key: [ea.k, ea.g, d.state, d.w, d._rw_timestamp], aggs: [] }
-        └─BatchLookupJoin { type: Inner, predicate: ea.k = d.u AND (d.state = 'open':Varchar), output: [ea.k, ea.g, d.state, d.w, d._rw_timestamp], lookup table: d }
-          └─BatchExchange { order: [], dist: UpstreamHashShard(ea.k) }
-            └─BatchScan { table: ea, columns: [ea.k, ea.g], distribution: SomeShard }
+    └─BatchHashAgg { group_key: [ea.k, ea.g], aggs: [] }
+      └─BatchLookupJoin { type: Inner, predicate: ea.k = d.u AND (d.state = 'open':Varchar), output: [ea.k, ea.g], lookup table: d }
+        └─BatchExchange { order: [], dist: UpstreamHashShard(ea.k) }
+          └─BatchScan { table: ea, columns: [ea.k, ea.g], distribution: SomeShard }
   table_row_counts:
     d: 1000
     ea: 1000000
@@ -374,7 +369,7 @@
         └─BatchHashAgg { group_key: [ea.k, ea.g], aggs: [] }
           └─BatchExchange { order: [], dist: HashShard(ea.k, ea.g) }
             └─BatchScan { table: ea, columns: [ea.k, ea.g], distribution: SomeShard }
-- name: kept - with statistics, the other side is larger than the input of the operator
+- name: with statistics, a filtered other side larger than the input of the operator
   before:
   - tables
   - setup
@@ -388,21 +383,21 @@
           └─BatchUnion { all: true }
             ├─BatchExchange { order: [], dist: Single }
             │ └─BatchProject { exprs: [ea.k, last_value(ea.doc order_by(ea.ts ASC)), max(ea.ts), ea.k] }
-            │   └─BatchHashAgg { group_key: [ea.k, d.state, d.w, d._rw_timestamp], aggs: [last_value(ea.doc order_by(ea.ts ASC)), max(ea.ts)] }
-            │     └─BatchLookupJoin { type: Inner, predicate: ea.k = d.u AND (d.state = 'open':Varchar), output: [ea.k, ea.doc, ea.ts, d.state, d.w, d._rw_timestamp], lookup table: d }
+            │   └─BatchHashAgg { group_key: [ea.k], aggs: [last_value(ea.doc order_by(ea.ts ASC)), max(ea.ts)] }
+            │     └─BatchLookupJoin { type: Inner, predicate: ea.k = d.u AND (d.state = 'open':Varchar), output: [ea.k, ea.doc, ea.ts], lookup table: d }
             │       └─BatchExchange { order: [], dist: UpstreamHashShard(ea.k) }
             │         └─BatchScan { table: ea, columns: [ea.k, ea.ts, ea.doc], distribution: SomeShard }
             └─BatchExchange { order: [], dist: Single }
               └─BatchProject { exprs: [eb.k, last_value(eb.doc order_by(eb.ts ASC)), max(eb.ts), eb.k] }
-                └─BatchHashAgg { group_key: [eb.k, d.state, d.w, d._rw_timestamp], aggs: [last_value(eb.doc order_by(eb.ts ASC)), max(eb.ts)] }
-                  └─BatchLookupJoin { type: Inner, predicate: eb.k = d.u AND (d.state = 'open':Varchar), output: [eb.k, eb.doc, eb.ts, d.state, d.w, d._rw_timestamp], lookup table: d }
+                └─BatchHashAgg { group_key: [eb.k], aggs: [last_value(eb.doc order_by(eb.ts ASC)), max(eb.ts)] }
+                  └─BatchLookupJoin { type: Inner, predicate: eb.k = d.u AND (d.state = 'open':Varchar), output: [eb.k, eb.doc, eb.ts], lookup table: d }
                     └─BatchExchange { order: [], dist: UpstreamHashShard(eb.k) }
                       └─BatchScan { table: eb, columns: [eb.k, eb.ts, eb.doc], distribution: SomeShard }
   table_row_counts:
     d: 1000000
     ea: 100
     eb: 100
-- name: kept - volatile condition
+- name: a volatile condition stays above the operator, as a filter
   before:
   - tables
   - setup
@@ -417,16 +412,41 @@
             └─BatchUnion { all: true }
               ├─BatchExchange { order: [], dist: Single }
               │ └─BatchProject { exprs: [ea.k, max(ea.ts), ea.k] }
-              │   └─BatchHashAgg { group_key: [ea.k, d.state, d.w, d._rw_timestamp], aggs: [max(ea.ts)] }
-              │     └─BatchLookupJoin { type: Inner, predicate: ea.k = d.u AND (d.state = 'open':Varchar), output: [ea.k, ea.ts, d.state, d.w, d._rw_timestamp], lookup table: d }
+              │   └─BatchHashAgg { group_key: [ea.k], aggs: [max(ea.ts)] }
+              │     └─BatchLookupJoin { type: Inner, predicate: ea.k = d.u AND (d.state = 'open':Varchar), output: [ea.k, ea.ts], lookup table: d }
               │       └─BatchExchange { order: [], dist: UpstreamHashShard(ea.k) }
               │         └─BatchScan { table: ea, columns: [ea.k, ea.ts], distribution: SomeShard }
               └─BatchExchange { order: [], dist: Single }
                 └─BatchProject { exprs: [eb.k, max(eb.ts), eb.k] }
-                  └─BatchHashAgg { group_key: [eb.k, d.state, d.w, d._rw_timestamp], aggs: [max(eb.ts)] }
-                    └─BatchLookupJoin { type: Inner, predicate: eb.k = d.u AND (d.state = 'open':Varchar), output: [eb.k, eb.ts, d.state, d.w, d._rw_timestamp], lookup table: d }
+                  └─BatchHashAgg { group_key: [eb.k], aggs: [max(eb.ts)] }
+                    └─BatchLookupJoin { type: Inner, predicate: eb.k = d.u AND (d.state = 'open':Varchar), output: [eb.k, eb.ts], lookup table: d }
                       └─BatchExchange { order: [], dist: UpstreamHashShard(eb.k) }
                         └─BatchScan { table: eb, columns: [eb.k, eb.ts], distribution: SomeShard }
+- name: kept - with statistics, a join that keeps every row
+  before:
+  - tables
+  - setup
+  sql: |
+    select d.u, vu.ts from vu join d on vu.k = d.u;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchLookupJoin { type: Inner, predicate: ea.k = d.u, output: [d.u, max(ea.ts)], lookup table: d }
+      └─BatchExchange { order: [], dist: UpstreamHashShard(ea.k) }
+        └─BatchGroupTopN { order: [ea.k ASC, max(ea.ts) DESC], limit: 1, offset: 0, group_key: [ea.k] }
+          └─BatchExchange { order: [], dist: HashShard(ea.k) }
+            └─BatchUnion { all: true }
+              ├─BatchExchange { order: [], dist: Single }
+              │ └─BatchHashAgg { group_key: [ea.k], aggs: [max(ea.ts)] }
+              │   └─BatchExchange { order: [], dist: HashShard(ea.k) }
+              │     └─BatchScan { table: ea, columns: [ea.k, ea.ts], distribution: SomeShard }
+              └─BatchExchange { order: [], dist: Single }
+                └─BatchHashAgg { group_key: [eb.k], aggs: [max(eb.ts)] }
+                  └─BatchExchange { order: [], dist: HashShard(eb.k) }
+                    └─BatchScan { table: eb, columns: [eb.k, eb.ts], distribution: SomeShard }
+  table_row_counts:
+    d: 1000000
+    ea: 1000000
+    eb: 1000000
 - name: kept - group column of a type whose equal values may differ (numeric)
   before:
   - tables

@@ -147,8 +147,6 @@ fn swap(join: &LogicalJoin) -> LogicalJoin {
 fn push_left(join: &LogicalJoin) -> Option<PlanRef> {
     let left = join.left();
     let right = join.right();
-    let left_len = left.schema().len();
-    let right_len = right.schema().len();
     let inner = join.join_type() == JoinType::Inner;
     let push = Push {
         join_type: join.join_type(),
