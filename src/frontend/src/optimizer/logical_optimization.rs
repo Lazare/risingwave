@@ -450,6 +450,15 @@ static STATUS_LADDER_CASE: LazyLock<OptimizationStage> = LazyLock::new(|| {
     )
 });
 
+// Rule `SetOperationToCountRule` (`*_set_operation_to_count`).
+static SET_OPERATION_TO_COUNT: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Set Operation To Count",
+        vec![SetOperationToCountRule::create()],
+        ApplyOrder::BottomUp,
+    )
+});
+
 static SET_OPERATION_MERGE: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Set Operation Merge",
@@ -1160,6 +1169,22 @@ impl LogicalOptimizer {
             }
         }
         plan = plan.optimize_by_rules(&SET_OPERATION_MERGE)?;
+        // Rule `SetOperationToCountRule` (`streaming_set_operation_to_count`): `INTERSECT` and
+        // `EXCEPT` become one counting aggregation before they become semi and anti joins. On
+        // demand only: the plan of a streaming job is frozen when the job is created.
+        if ctx
+            .session_ctx()
+            .config()
+            .streaming_set_operation_to_count()
+            && !ctx.is_stream_prune_baseline()
+        {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&SET_OPERATION_TO_COUNT)?;
+            let applied = ctx.total_rule_applied() - applied_before;
+            if applied > 0 {
+                ctx.add_stream_prune_rule_applied(applied);
+            }
+        }
         plan = plan.optimize_by_rules(&SET_OPERATION_TO_JOIN)?;
         // Convert `generate_series` ends with `now()` to a `Now` source. Only for streaming mode.
         // Should be applied before converting table function to project set.
@@ -1636,6 +1661,11 @@ impl LogicalOptimizer {
         plan = plan.optimize_by_rules(&GROUPING_SETS)?;
         plan = plan.optimize_by_rules(&REWRITE_LIKE_EXPR)?;
         plan = plan.optimize_by_rules(&SET_OPERATION_MERGE)?;
+        // Rule `SetOperationToCountRule` (`batch_set_operation_to_count`): `INTERSECT` and `EXCEPT`
+        // become one counting aggregation before they become semi and anti joins. On demand.
+        if ctx.session_ctx().config().batch_set_operation_to_count() {
+            plan = plan.optimize_by_rules(&SET_OPERATION_TO_COUNT)?;
+        }
         plan = plan.optimize_by_rules(&SET_OPERATION_TO_JOIN)?;
         plan = plan.optimize_by_rules(&ALWAYS_FALSE_FILTER)?;
         // Table function should be converted into `file_scan` before `project_set`.

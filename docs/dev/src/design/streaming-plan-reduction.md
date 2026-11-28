@@ -46,6 +46,7 @@ own rules.
 | BP | Batch: second pass of the reductions on keys after the stages that create aggregations (`batch_reduce_keys_after_conversions`) | done (prototype, branch `proto/plan-reduction-batch-pass2`, see "BP and BT" below) |
 | BT | Batch: `row_number() <= n` per partition becomes a top-n per group, small `n` only (`batch_over_window_to_topn`) | done (prototype, branch `proto/plan-reduction-batch-pass2`, see "BP and BT" below) |
 | BU | Batch: `UNION ALL` run in parallel tasks instead of one (`batch_distributed_union`) | done (prototype, branch `proto/plan-reduction-batch-union-dist`, see "BU" below) |
+| S12 | `INTERSECT` / `EXCEPT` computed by one counting aggregation over a `UNION ALL` of the inputs (`streaming_set_operation_to_count`, `batch_set_operation_to_count`) | done (prototype, branch `proto/plan-reduction-setop-keys`), see "S12" below; `ALL` variants not supported by the binder |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -1399,6 +1400,46 @@ projection; without the variable, or without a union below, they convert their i
   empty branches, after updates and deletes, and with a single branch left).
 - Not done: a round-robin exchange, which would let a union with no requirement keep its inputs
   in their stages without hashing; a partial aggregation pushed into each branch.
+
+### S12. `INTERSECT` / `EXCEPT` as a counting aggregation (added on 2026-11-28, done on the branch)
+
+Variables `streaming_set_operation_to_count` and `batch_set_operation_to_count`, rule
+`SetOperationToCountRule` (Calcite `IntersectToDistinctRule`, `MinusToDistinctRule`). Without it,
+`INTERSECT` and `EXCEPT` (distinct) become left semi or anti joins on `IS NOT DISTINCT FROM` of
+every column, followed by a `DISTINCT` (`IntersectToSemiJoinRule`, `ExceptToAntiJoinRule`).
+
+```text
+SELECT a, b FROM t INTERSECT SELECT a, b FROM u
+
+Project(a, b)
+└─Filter(c0 > 0 AND c1 > 0)                  -- EXCEPT: c0 > 0 AND c1 = 0
+  └─Agg(group by a, b: count(m0) AS c0, count(m1) AS c1)
+    └─Union(all)
+      ├─Project(a, b, m0 = 1, m1 = NULL) <- t
+      └─Project(a, b, m0 = NULL, m1 = 1) <- u
+```
+
+- A group is a distinct row of the inputs (grouping treats `NULL`s as equal, as the set
+  operations do); `c i` counts its copies in input `i`. The row is output once when it is in every
+  input (`INTERSECT`), or in the first one and in no other one (`EXCEPT`). More than two inputs
+  (after the merge of stacked set operations) get one count each.
+- Only when every column has a type in which equal values are identical (integers, `varchar`,
+  `bytea`, `boolean`, dates and times): the value that a group outputs is that of one of its rows,
+  possibly from another input than the first one (in streaming, the row that created the group).
+  With `numeric` (`1.0` and `1.00`), floats (`0.0` and `-0.0`) or intervals, the joins output the
+  value of the first input; the aggregation may not, so the rule is not applied.
+- Streaming: one aggregation state with each distinct row of the inputs once, instead of the two
+  join states (every row of each input), the degree table and the state of the `DISTINCT`. The
+  counts are value states (`count`), retractable. Batch: one hash aggregation instead of a hash
+  join and a hash aggregation; no clear gain is expected, the variable exists for symmetry.
+- Stage: `SET_OPERATION_TO_COUNT`, right after `SET_OPERATION_MERGE` and before
+  `SET_OPERATION_TO_JOIN`, in both pipelines.
+- `INTERSECT ALL` and `EXCEPT ALL` are rejected by the binder ("not implemented"); their rewrite
+  (a `generate_series` over the smallest count or the difference) is not done.
+- Tests: planner tests `stream_set_operation_to_count.yaml` (batch and streaming plans);
+  differential tests `e2e_test/streaming/set_operation_to_count` and
+  `e2e_test/batch/set_operation_to_count` (NULLs, duplicates, three inputs, `EXCEPT` then
+  `INTERSECT`, under `IN`, inputs emptied and filled again, a `numeric` case left as it is).
 
 ## Not for now: sharing between materialized views
 

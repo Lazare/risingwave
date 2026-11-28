@@ -260,6 +260,9 @@ mod unused_join_under_dedup_rule;
 pub use unused_join_under_dedup_rule::*;
 mod unique_key_simplify_rule;
 pub use unique_key_simplify_rule::*;
+// Rule `SetOperationToCountRule` (`*_set_operation_to_count`).
+mod set_operation_to_count_rule;
+pub use set_operation_to_count_rule::*;
 mod join_project_transpose_rule;
 pub use join_project_transpose_rule::*;
 mod limit_push_down_rule;
@@ -474,6 +477,7 @@ macro_rules! for_all_rules {
             , { TopNToVectorSearchRule }
             , { CorrelatedTopNToVectorSearchRule }
             , { MvSelectionRule }
+            , { SetOperationToCountRule }
         }
     };
 }

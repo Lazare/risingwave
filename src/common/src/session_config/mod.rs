@@ -504,6 +504,18 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_spill_on_memory_wait: bool,
 
+    // Rule `SetOperationToCountRule` (`*_set_operation_to_count`).
+    /// In the plan of a new streaming job, compute `INTERSECT` and `EXCEPT` with one aggregation
+    /// that counts the copies of each distinct row in each input, over a `UNION ALL` of the inputs,
+    /// instead of semi or anti joins and a `DISTINCT`: one state keeps each distinct row once. Only
+    /// when every column has a type whose equal values are identical. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    streaming_set_operation_to_count: bool,
+
+    /// The same as `streaming_set_operation_to_count`, for batch queries. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_set_operation_to_count: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,
