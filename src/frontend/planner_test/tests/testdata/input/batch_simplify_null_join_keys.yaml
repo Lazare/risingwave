@@ -244,3 +244,67 @@
   - batch_plan
   - logical_plan
   - optimized_logical_plan_for_batch
+
+# Expressions of columns known to be `NULL` (added on 2026-11-28): a projection or a join condition
+# that computes a value from them. A left join whose optional side matches nothing pads its
+# columns with `NULL`, and a second join on an expression of a padded column matches nothing too
+# (the shape of a `not_null` test over a view of chained left joins).
+- id: setup_expr
+  sql: |
+    set batch_simplify_null_join_keys = true;
+    create table a (id int primary key, bk int, x int);
+    create table b (id int primary key, k int, label varchar);
+    create table e (p int primary key, u int, w int);
+    create view ej as select p, u, w, jsonb_build_object('w', w) as doc from e;
+    create view chain as select a.id, a.bk, b.label from a
+      left join ej on a.bk = ej.p left join b on (ej.doc->>'w')::int = b.k;
+  expected_outputs: []
+- id: setup_expr_off
+  sql: |
+    create table a (id int primary key, bk int, x int);
+    create table b (id int primary key, k int, label varchar);
+    create table e (p int primary key, u int, w int);
+    create view ej as select p, u, w, jsonb_build_object('w', w) as doc from e;
+    create view chain as select a.id, a.bk, b.label from a
+      left join ej on a.bk = ej.p left join b on (ej.doc->>'w')::int = b.k;
+  expected_outputs: []
+- name: off by default - left join on an expression of a padded column
+  before: [setup_expr_off]
+  sql: |
+    select * from chain where bk is null;
+  expected_outputs:
+  - batch_plan
+- name: left join on a jsonb field of a padded column, through a view
+  before: [setup_expr]
+  sql: |
+    select * from chain where bk is null;
+  expected_outputs:
+  - batch_plan
+- name: left join on a strict expression of a padded column and another column
+  before: [setup_expr]
+  sql: |
+    select a.id, b.label from a left join e on a.bk = e.p left join b on e.w + a.x = b.k
+    where a.bk is null;
+  expected_outputs:
+  - batch_plan
+- name: inner join with a comparison other than equality on a column known to be null
+  before: [setup_expr]
+  sql: |
+    select a.id, b.label from (select * from a where x is null) a join b on a.bk = b.k and b.id > a.x;
+  expected_outputs:
+  - batch_plan
+- name: kept - coalesce of a padded column can match
+  before: [setup_expr]
+  sql: |
+    select a.id, b.label from a left join e on a.bk = e.p left join b on coalesce(e.w, 0) = b.k
+    where a.bk is null;
+  expected_outputs:
+  - batch_plan
+- name: kept - an expression that is not null when its column is null
+  before: [setup_expr]
+  sql: |
+    select a.id, b.label from a left join e on a.bk = e.p
+    left join b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k
+    where a.bk is null;
+  expected_outputs:
+  - batch_plan
