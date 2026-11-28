@@ -725,12 +725,12 @@ fn merged_aggregation(members: &[&AggBranch]) -> Vec<Branch> {
                     .into(),
                 );
             }
-            predicate.extend(member.predicate.iter().map(on_core));
+            predicate.extend(member.predicate.iter().map(&on_core));
             Branch {
                 base: Base::Share(core.id()),
                 plan: core.clone(),
                 predicate,
-                exprs: member.exprs.iter().map(on_core).collect(),
+                exprs: member.exprs.iter().map(&on_core).collect(),
             }
         })
         .collect()

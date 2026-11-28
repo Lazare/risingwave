@@ -36,7 +36,7 @@ own rules.
 | BK | Column facts (A to G, 8), unique keys (1, 2) and repeated lookups (3) in batch queries | done (prototype, branch `proto/plan-reduction-batch-keys`, variables `batch_simplify_column_facts`, `batch_simplify_on_unique_key`, `batch_merge_repeated_lookups`) |
 | BL | Batch: duplicates found with `lag` over a window ordered by the column, counted per value instead (`batch_rewrite_lag_duplicates`) | done (prototype, branch `proto/plan-reduction-batch-lag`) |
 | B | Batch counterparts of 9, 9b, 9c, 7 and US, each behind a `batch_` variable | done (prototype, branch `proto/plan-reduction-batch-unnest`), see "Batch counterparts" |
-| SL | Status ladder: the branches of a top-1 by priority that read the same relation picked with one `CASE` | done (prototype, branch `proto/plan-reduction-union-scans`); default branch rewritten into a join not done |
+| SL | Status ladder: the branches of a top-1 by priority that read the same relation picked with one `CASE` | done (prototype, branch `proto/plan-reduction-union-scans`); `GROUP BY` branches of the same relation merged into one aggregation and second pass after the sharing of widened copies done (branch `proto/plan-reduction-ladder-ext`); default branch rewritten into a join not done (not beneficial) |
 | NK | Join on a column known to be `NULL` matches nothing (`batch_simplify_null_join_keys`, `streaming_simplify_null_join_keys`) | done (prototype, branch `proto/plan-reduction-nullkey`), see "NK" below |
 | NV | `first_value` / `last_value` keep only the functions of the value that are read (`batch_narrow_value_aggregates`, `streaming_narrow_value_aggregates`) | done (prototype, branch `proto/plan-reduction-narrow-value`), see "NV" below |
 | BJ | Batch: cost-based ordering of the inner joins from the row counts of the tables (`batch_cost_based_join_ordering`) | first version (prototype, branch `proto/plan-reduction-batch-joinorder`, see "BJ" below); index lookups and column statistics not done |
@@ -627,6 +627,74 @@ per group over the union.
   but in streaming both keep every row of a group in their state, nothing saved); turning a
   default branch read from the entity table into a left join of that table (a join replaces a
   union branch, no operator saved).
+
+#### SL, extension (2026-11-28): `GROUP BY` branches, joins, second pass
+
+Why the first version missed most ladders: in the usual way of writing the idiom, each state is
+its own view, and the views of one ladder rarely read the same relation as plain filters. A state
+is typically "the keys that have an event of some kind" (`SELECT k FROM events WHERE kind = 'x'
+GROUP BY k`, or `SELECT DISTINCT`, or a `UNION` of such views), "the keys whose balance satisfies
+a condition" (a filter over an aggregation view), or a join of several tables; the ladder itself
+is written with `row_number() ... = 1`, `DISTINCT ON` (both a top-1 per key) or `max(row(priority,
+status))`. When two states read the same relation, it is usually through their own aggregation
+or join, which the first version did not look into.
+
+- *`GROUP BY` branches of the same relation.* Branches `(Project | Filter)* <- Agg(group key G) <-
+  (Project | Filter)* <- base` whose bases are the same table or the same shared sub-plan and whose
+  group keys are the same expressions of the base, the key of the ladder being made of group key
+  columns and the other columns literals, become branches over one aggregation:
+
+  ```text
+  Agg(group: G, c_i: count(*) FILTER (WHERE f_i) for each branch i with its own filter f_i,
+      the calls of branch i with FILTER (WHERE f_i) added)
+  └─Filter(common conjuncts AND (f_1 OR f_2 ...))
+    └─base
+  ```
+
+  and branch `i` keeps the groups where `c_i > 0`, with its own conditions above its
+  aggregation (`HAVING`). Exact: a group has rows of branch `i` exactly when `c_i > 0`, and the
+  calls of branch `i` see exactly the rows its own aggregation saw (a `NULL` filter drops the row
+  from the `FILTER` as from the `WHERE`). The branches then read the same relation and the `CASE`
+  of the first version applies; when they make the whole union and the key is the group key, the
+  top-1 is removed. A group key column that is a literal (`SELECT DISTINCT k, 'x'`) is left out
+  of the group key (it does not change the groups). State: one group per key of any of the
+  branches in one aggregation, where each branch kept one group per key in its own, and one row
+  per group in the top-1 instead of one per branch; one read of the base. Not merged: different
+  group keys, a distinct call (one set of distinct values would serve several branches), a branch
+  with `now()` or over a table with a watermark (as in the first version), an aggregation without
+  group key.
+- *Second pass after the sharing of widened copies* (streaming, with
+  `streaming_share_identical_subplans`). Copies of the same join or aggregation that differ by
+  their columns and filters (two state views over the same base view) are merged late into one
+  shared core by `share_widened_subplans`, after this rule ran: each copy becomes `Filter(c_i > 0)
+  <- Share(core)`. The rule runs again right after, and the branches over the core become one
+  `CASE` (and the top-1 is removed when the core is the whole union, unique on the key).
+- *Branches that join the same tables* (the user's case "every branch joins, but the joins could
+  be shared"). With `streaming_factor_union_join` (`batch_factor_union_join`), whose stage runs
+  before this rule, the join common to the branches is computed once above the union and the
+  branches become filters of one join, which the first version already merges with a `CASE`:
+  one join instead of one per branch. Nothing is added for this case. Copies of a join under a
+  `GROUP BY` are merged by the second pass. State of the factored join, checked on synthetic
+  plans: when the branches filter the same side (`d.cat = 'x'`, `d.cat = 'y'`), the disjunction is
+  pushed below the join, which keeps the rows of that side that some branch reads, fewer than the
+  copies together; when one branch filters one side and another the other side, each side is kept
+  whole, as one of the copies already kept it. When every branch filters both sides
+  (`d.cat = 'x' AND e.ok` and `d.cat = 'y' AND e.kind = 'q'`), the disjunction
+  `(x AND ok) OR (y AND q)` stays above the join, and the join keeps both sides whole where the
+  copies kept filtered rows: a possible regression of the factoring, not of this rule. The exact
+  fix is to also push the implied per-side disjunctions `(x OR y)` and `(ok OR q)` (not done).
+- Not done, and why:
+  - branches over different relations (the most common case, each state from its own events): no
+    exact rewrite saves anything in streaming. The top-1 keeps one row per candidate; a chain of
+    left joins from the entity table keeps the same rows in its join states and adds operators,
+    `max(priority)` keeps every candidate too, a count per (key, priority) adds a state.
+  - removing a `GROUP BY` / `DISTINCT` directly under a branch (exact under the top-1, duplicates
+    of a key give the same candidate): it removes an operator but the top-1 then keeps every
+    duplicate, unbounded in general.
+  - `max(row(priority, status))` as the top-1 (an aggregation instead of a top-n): rare, and the
+    same merge would apply; not matched.
+  - branches that join the same tables with different join types (inner in one, left in another):
+    a left join with a "matched" flag would be exact, but no workload showed it.
 
 ### NK. Join on a column known to be `NULL` (added on 2026-11-26, done on the branch)
 
