@@ -487,13 +487,13 @@ select
 
 query I
 select count(*) from gt_distinct_on_union_on x where not exists (
-  select 1 from gt_distinct_on_union_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_union_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
 query I
 select count(*) from gt_distinct_on_union_off x where not exists (
-  select 1 from gt_distinct_on_union_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_union_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
@@ -507,13 +507,13 @@ select
 
 query I
 select count(*) from gt_distinct_on_union_by_key_on x where not exists (
-  select 1 from gt_distinct_on_union_by_key_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_union_by_key_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
 query I
 select count(*) from gt_distinct_on_union_by_key_off x where not exists (
-  select 1 from gt_distinct_on_union_by_key_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_union_by_key_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
@@ -527,13 +527,13 @@ select
 
 query I
 select count(*) from gt_distinct_on_two_keys_on x where not exists (
-  select 1 from gt_distinct_on_two_keys_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_two_keys_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
 query I
 select count(*) from gt_distinct_on_two_keys_off x where not exists (
-  select 1 from gt_distinct_on_two_keys_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_two_keys_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
@@ -547,13 +547,13 @@ select
 
 query I
 select count(*) from gt_distinct_on_rows_on x where not exists (
-  select 1 from gt_distinct_on_rows_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_distinct_on_rows_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
 query I
 select count(*) from gt_distinct_on_rows_off x where not exists (
-  select 1 from gt_distinct_on_rows_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_distinct_on_rows_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
@@ -567,13 +567,13 @@ select
 
 query I
 select count(*) from gt_window_by_key_on x where not exists (
-  select 1 from gt_window_by_key_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_window_by_key_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
 query I
 select count(*) from gt_window_by_key_off x where not exists (
-  select 1 from gt_window_by_key_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_window_by_key_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
@@ -587,13 +587,13 @@ select
 
 query I
 select count(*) from gt_window_by_key_offset_on x where not exists (
-  select 1 from gt_window_by_key_offset_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_window_by_key_offset_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
 query I
 select count(*) from gt_window_by_key_offset_off x where not exists (
-  select 1 from gt_window_by_key_offset_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_window_by_key_offset_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
@@ -1023,13 +1023,13 @@ select
 
 query I
 select count(*) from gt_distinct_on_union_on x where not exists (
-  select 1 from gt_distinct_on_union_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_union_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
 query I
 select count(*) from gt_distinct_on_union_off x where not exists (
-  select 1 from gt_distinct_on_union_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_union_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
@@ -1043,13 +1043,13 @@ select
 
 query I
 select count(*) from gt_distinct_on_union_by_key_on x where not exists (
-  select 1 from gt_distinct_on_union_by_key_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_union_by_key_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
 query I
 select count(*) from gt_distinct_on_union_by_key_off x where not exists (
-  select 1 from gt_distinct_on_union_by_key_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_union_by_key_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
@@ -1063,13 +1063,13 @@ select
 
 query I
 select count(*) from gt_distinct_on_two_keys_on x where not exists (
-  select 1 from gt_distinct_on_two_keys_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_two_keys_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
 query I
 select count(*) from gt_distinct_on_two_keys_off x where not exists (
-  select 1 from gt_distinct_on_two_keys_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_two_keys_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
@@ -1083,13 +1083,13 @@ select
 
 query I
 select count(*) from gt_distinct_on_rows_on x where not exists (
-  select 1 from gt_distinct_on_rows_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_distinct_on_rows_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
 query I
 select count(*) from gt_distinct_on_rows_off x where not exists (
-  select 1 from gt_distinct_on_rows_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_distinct_on_rows_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
@@ -1103,13 +1103,13 @@ select
 
 query I
 select count(*) from gt_window_by_key_on x where not exists (
-  select 1 from gt_window_by_key_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_window_by_key_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
 query I
 select count(*) from gt_window_by_key_off x where not exists (
-  select 1 from gt_window_by_key_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_window_by_key_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
@@ -1123,13 +1123,13 @@ select
 
 query I
 select count(*) from gt_window_by_key_offset_on x where not exists (
-  select 1 from gt_window_by_key_offset_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_window_by_key_offset_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
 query I
 select count(*) from gt_window_by_key_offset_off x where not exists (
-  select 1 from gt_window_by_key_offset_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_window_by_key_offset_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
@@ -1564,13 +1564,13 @@ select
 
 query I
 select count(*) from gt_distinct_on_union_on x where not exists (
-  select 1 from gt_distinct_on_union_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_union_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
 query I
 select count(*) from gt_distinct_on_union_off x where not exists (
-  select 1 from gt_distinct_on_union_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_union_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
@@ -1584,13 +1584,13 @@ select
 
 query I
 select count(*) from gt_distinct_on_union_by_key_on x where not exists (
-  select 1 from gt_distinct_on_union_by_key_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_union_by_key_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
 query I
 select count(*) from gt_distinct_on_union_by_key_off x where not exists (
-  select 1 from gt_distinct_on_union_by_key_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_union_by_key_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
@@ -1604,13 +1604,13 @@ select
 
 query I
 select count(*) from gt_distinct_on_two_keys_on x where not exists (
-  select 1 from gt_distinct_on_two_keys_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_two_keys_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
 query I
 select count(*) from gt_distinct_on_two_keys_off x where not exists (
-  select 1 from gt_distinct_on_two_keys_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_two_keys_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
@@ -1624,13 +1624,13 @@ select
 
 query I
 select count(*) from gt_distinct_on_rows_on x where not exists (
-  select 1 from gt_distinct_on_rows_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_distinct_on_rows_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
 query I
 select count(*) from gt_distinct_on_rows_off x where not exists (
-  select 1 from gt_distinct_on_rows_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_distinct_on_rows_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
@@ -1644,13 +1644,13 @@ select
 
 query I
 select count(*) from gt_window_by_key_on x where not exists (
-  select 1 from gt_window_by_key_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_window_by_key_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
 query I
 select count(*) from gt_window_by_key_off x where not exists (
-  select 1 from gt_window_by_key_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_window_by_key_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
@@ -1664,13 +1664,13 @@ select
 
 query I
 select count(*) from gt_window_by_key_offset_on x where not exists (
-  select 1 from gt_window_by_key_offset_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_window_by_key_offset_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
 query I
 select count(*) from gt_window_by_key_offset_off x where not exists (
-  select 1 from gt_window_by_key_offset_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_window_by_key_offset_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
@@ -2100,13 +2100,13 @@ select
 
 query I
 select count(*) from gt_distinct_on_union_on x where not exists (
-  select 1 from gt_distinct_on_union_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_union_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
 query I
 select count(*) from gt_distinct_on_union_off x where not exists (
-  select 1 from gt_distinct_on_union_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_union_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
@@ -2120,13 +2120,13 @@ select
 
 query I
 select count(*) from gt_distinct_on_union_by_key_on x where not exists (
-  select 1 from gt_distinct_on_union_by_key_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_union_by_key_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
 query I
 select count(*) from gt_distinct_on_union_by_key_off x where not exists (
-  select 1 from gt_distinct_on_union_by_key_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_union_by_key_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
@@ -2140,13 +2140,13 @@ select
 
 query I
 select count(*) from gt_distinct_on_two_keys_on x where not exists (
-  select 1 from gt_distinct_on_two_keys_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_two_keys_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
 query I
 select count(*) from gt_distinct_on_two_keys_off x where not exists (
-  select 1 from gt_distinct_on_two_keys_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_two_keys_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
@@ -2160,13 +2160,13 @@ select
 
 query I
 select count(*) from gt_distinct_on_rows_on x where not exists (
-  select 1 from gt_distinct_on_rows_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_distinct_on_rows_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
 query I
 select count(*) from gt_distinct_on_rows_off x where not exists (
-  select 1 from gt_distinct_on_rows_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_distinct_on_rows_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
@@ -2180,13 +2180,13 @@ select
 
 query I
 select count(*) from gt_window_by_key_on x where not exists (
-  select 1 from gt_window_by_key_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_window_by_key_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
 query I
 select count(*) from gt_window_by_key_off x where not exists (
-  select 1 from gt_window_by_key_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_window_by_key_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
@@ -2200,13 +2200,13 @@ select
 
 query I
 select count(*) from gt_window_by_key_offset_on x where not exists (
-  select 1 from gt_window_by_key_offset_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_window_by_key_offset_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
 query I
 select count(*) from gt_window_by_key_offset_off x where not exists (
-  select 1 from gt_window_by_key_offset_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_window_by_key_offset_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
@@ -2641,13 +2641,13 @@ select
 
 query I
 select count(*) from gt_distinct_on_union_on x where not exists (
-  select 1 from gt_distinct_on_union_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_union_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
 query I
 select count(*) from gt_distinct_on_union_off x where not exists (
-  select 1 from gt_distinct_on_union_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_union_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
@@ -2661,13 +2661,13 @@ select
 
 query I
 select count(*) from gt_distinct_on_union_by_key_on x where not exists (
-  select 1 from gt_distinct_on_union_by_key_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_union_by_key_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
 query I
 select count(*) from gt_distinct_on_union_by_key_off x where not exists (
-  select 1 from gt_distinct_on_union_by_key_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_union_by_key_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
@@ -2681,13 +2681,13 @@ select
 
 query I
 select count(*) from gt_distinct_on_two_keys_on x where not exists (
-  select 1 from gt_distinct_on_two_keys_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_two_keys_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
 query I
 select count(*) from gt_distinct_on_two_keys_off x where not exists (
-  select 1 from gt_distinct_on_two_keys_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_two_keys_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
@@ -2701,13 +2701,13 @@ select
 
 query I
 select count(*) from gt_distinct_on_rows_on x where not exists (
-  select 1 from gt_distinct_on_rows_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_distinct_on_rows_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
 query I
 select count(*) from gt_distinct_on_rows_off x where not exists (
-  select 1 from gt_distinct_on_rows_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_distinct_on_rows_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
@@ -2721,13 +2721,13 @@ select
 
 query I
 select count(*) from gt_window_by_key_on x where not exists (
-  select 1 from gt_window_by_key_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_window_by_key_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
 query I
 select count(*) from gt_window_by_key_off x where not exists (
-  select 1 from gt_window_by_key_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_window_by_key_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
@@ -2741,13 +2741,13 @@ select
 
 query I
 select count(*) from gt_window_by_key_offset_on x where not exists (
-  select 1 from gt_window_by_key_offset_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_window_by_key_offset_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
 query I
 select count(*) from gt_window_by_key_offset_off x where not exists (
-  select 1 from gt_window_by_key_offset_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_window_by_key_offset_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
@@ -3177,13 +3177,13 @@ select
 
 query I
 select count(*) from gt_distinct_on_union_on x where not exists (
-  select 1 from gt_distinct_on_union_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_union_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
 query I
 select count(*) from gt_distinct_on_union_off x where not exists (
-  select 1 from gt_distinct_on_union_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_union_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
@@ -3197,13 +3197,13 @@ select
 
 query I
 select count(*) from gt_distinct_on_union_by_key_on x where not exists (
-  select 1 from gt_distinct_on_union_by_key_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_union_by_key_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
 query I
 select count(*) from gt_distinct_on_union_by_key_off x where not exists (
-  select 1 from gt_distinct_on_union_by_key_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_union_by_key_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
@@ -3217,13 +3217,13 @@ select
 
 query I
 select count(*) from gt_distinct_on_two_keys_on x where not exists (
-  select 1 from gt_distinct_on_two_keys_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_two_keys_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
 query I
 select count(*) from gt_distinct_on_two_keys_off x where not exists (
-  select 1 from gt_distinct_on_two_keys_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_two_keys_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
@@ -3237,13 +3237,13 @@ select
 
 query I
 select count(*) from gt_distinct_on_rows_on x where not exists (
-  select 1 from gt_distinct_on_rows_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_distinct_on_rows_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
 query I
 select count(*) from gt_distinct_on_rows_off x where not exists (
-  select 1 from gt_distinct_on_rows_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_distinct_on_rows_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
@@ -3257,13 +3257,13 @@ select
 
 query I
 select count(*) from gt_window_by_key_on x where not exists (
-  select 1 from gt_window_by_key_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_window_by_key_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
 query I
 select count(*) from gt_window_by_key_off x where not exists (
-  select 1 from gt_window_by_key_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_window_by_key_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
@@ -3277,13 +3277,13 @@ select
 
 query I
 select count(*) from gt_window_by_key_offset_on x where not exists (
-  select 1 from gt_window_by_key_offset_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_window_by_key_offset_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
 query I
 select count(*) from gt_window_by_key_offset_off x where not exists (
-  select 1 from gt_window_by_key_offset_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_window_by_key_offset_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
@@ -3731,13 +3731,13 @@ select
 
 query I
 select count(*) from gt_distinct_on_union_on x where not exists (
-  select 1 from gt_distinct_on_union_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_union_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
 query I
 select count(*) from gt_distinct_on_union_off x where not exists (
-  select 1 from gt_distinct_on_union_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_union_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
@@ -3751,13 +3751,13 @@ select
 
 query I
 select count(*) from gt_distinct_on_union_by_key_on x where not exists (
-  select 1 from gt_distinct_on_union_by_key_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_union_by_key_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
 query I
 select count(*) from gt_distinct_on_union_by_key_off x where not exists (
-  select 1 from gt_distinct_on_union_by_key_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_union_by_key_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
@@ -3771,13 +3771,13 @@ select
 
 query I
 select count(*) from gt_distinct_on_two_keys_on x where not exists (
-  select 1 from gt_distinct_on_two_keys_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_two_keys_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
 query I
 select count(*) from gt_distinct_on_two_keys_off x where not exists (
-  select 1 from gt_distinct_on_two_keys_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_two_keys_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
@@ -3791,13 +3791,13 @@ select
 
 query I
 select count(*) from gt_distinct_on_rows_on x where not exists (
-  select 1 from gt_distinct_on_rows_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_distinct_on_rows_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
 query I
 select count(*) from gt_distinct_on_rows_off x where not exists (
-  select 1 from gt_distinct_on_rows_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_distinct_on_rows_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
@@ -3811,13 +3811,13 @@ select
 
 query I
 select count(*) from gt_window_by_key_on x where not exists (
-  select 1 from gt_window_by_key_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_window_by_key_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
 query I
 select count(*) from gt_window_by_key_off x where not exists (
-  select 1 from gt_window_by_key_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_window_by_key_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
@@ -3831,13 +3831,13 @@ select
 
 query I
 select count(*) from gt_window_by_key_offset_on x where not exists (
-  select 1 from gt_window_by_key_offset_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_window_by_key_offset_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
 query I
 select count(*) from gt_window_by_key_offset_off x where not exists (
-  select 1 from gt_window_by_key_offset_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_window_by_key_offset_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
@@ -4267,13 +4267,13 @@ select
 
 query I
 select count(*) from gt_distinct_on_union_on x where not exists (
-  select 1 from gt_distinct_on_union_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_union_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
 query I
 select count(*) from gt_distinct_on_union_off x where not exists (
-  select 1 from gt_distinct_on_union_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_union_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
@@ -4287,13 +4287,13 @@ select
 
 query I
 select count(*) from gt_distinct_on_union_by_key_on x where not exists (
-  select 1 from gt_distinct_on_union_by_key_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_union_by_key_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
 query I
 select count(*) from gt_distinct_on_union_by_key_off x where not exists (
-  select 1 from gt_distinct_on_union_by_key_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_union_by_key_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
@@ -4307,13 +4307,13 @@ select
 
 query I
 select count(*) from gt_distinct_on_two_keys_on x where not exists (
-  select 1 from gt_distinct_on_two_keys_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_two_keys_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
 query I
 select count(*) from gt_distinct_on_two_keys_off x where not exists (
-  select 1 from gt_distinct_on_two_keys_cand c where c.k::varchar is not distinct from x.k::varchar and c.src::varchar is not distinct from x.src::varchar and c.doc::varchar is not distinct from x.doc::varchar);
+  select 1 from gt_distinct_on_two_keys_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.src::varchar is not distinct from x.src::varchar) and (c.doc::varchar is not distinct from x.doc::varchar));
 ----
 0
 
@@ -4327,13 +4327,13 @@ select
 
 query I
 select count(*) from gt_distinct_on_rows_on x where not exists (
-  select 1 from gt_distinct_on_rows_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_distinct_on_rows_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
 query I
 select count(*) from gt_distinct_on_rows_off x where not exists (
-  select 1 from gt_distinct_on_rows_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_distinct_on_rows_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
@@ -4347,13 +4347,13 @@ select
 
 query I
 select count(*) from gt_window_by_key_on x where not exists (
-  select 1 from gt_window_by_key_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_window_by_key_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
 query I
 select count(*) from gt_window_by_key_off x where not exists (
-  select 1 from gt_window_by_key_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_window_by_key_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
@@ -4367,13 +4367,13 @@ select
 
 query I
 select count(*) from gt_window_by_key_offset_on x where not exists (
-  select 1 from gt_window_by_key_offset_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_window_by_key_offset_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 
 query I
 select count(*) from gt_window_by_key_offset_off x where not exists (
-  select 1 from gt_window_by_key_offset_cand c where c.k::varchar is not distinct from x.k::varchar and c.v::varchar is not distinct from x.v::varchar and c.payload::varchar is not distinct from x.payload::varchar);
+  select 1 from gt_window_by_key_offset_cand c where (c.k::varchar is not distinct from x.k::varchar) and (c.v::varchar is not distinct from x.v::varchar) and (c.payload::varchar is not distinct from x.payload::varchar));
 ----
 0
 

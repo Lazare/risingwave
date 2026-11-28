@@ -107,7 +107,7 @@ def same_rows(a, b, cols):
 
 
 def valid(table, cols, candidates):
-    cond = ' and '.join(f"c.{c}::varchar is not distinct from x.{c}::varchar" for c in cols)
+    cond = ' and '.join(f"(c.{c}::varchar is not distinct from x.{c}::varchar)" for c in cols)
     query('I',
           f"select count(*) from {table} x where not exists (\n"
           f"  select 1 from {candidates} c where {cond})",

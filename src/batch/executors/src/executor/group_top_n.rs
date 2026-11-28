@@ -34,7 +34,6 @@ use risingwave_common::util::chunk_coalesce::DataChunkBuilder;
 use risingwave_common::util::iter_util::ZipEqFast;
 use risingwave_common::util::memcmp_encoding::encode_chunk;
 use risingwave_common::util::sort_util::ColumnOrder;
-use risingwave_common_estimate_size::EstimateSize;
 use risingwave_pb::Message;
 use risingwave_pb::batch_plan::plan_node::NodeBody;
 use risingwave_pb::data::DataChunk as PbDataChunk;
@@ -208,7 +207,7 @@ impl BoxedExecutorBuilder for GroupTopNExecutorBuilder {
             group_key,
             group_key_types,
             with_ties,
-            identity: identity.clone(),
+            identity,
             chunk_size: context.get_config().developer.chunk_size,
             memory,
             spill,
@@ -319,9 +318,9 @@ impl ChargedMemory {
         Self { ctx, charged: 0 }
     }
 
-    /// Charges `used` bytes in all. Returns `false` when the context refuses more and the heaps must be
-    /// spilled: only when `spillable` and they hold at least `min_bytes`. Otherwise the memory is
-    /// counted whatever the limits, since it is already used.
+    /// Charges `used` bytes in all. Returns `false` when the context refuses more and the heaps
+    /// must be spilled: only when `spillable` and they hold at least `min_bytes`. Otherwise the
+    /// memory is counted whatever the limits, since it is already used.
     fn charge(&mut self, used: i64, spillable: bool, min_bytes: i64) -> bool {
         let diff = used - self.charged;
         if diff <= 0 || self.ctx.add(diff) {
@@ -1090,7 +1089,7 @@ mod tests {
             1,
         )
         .execute();
-        heaps.next().await.unwrap().unwrap();
+        let _first = heaps.next().await.unwrap().unwrap();
         let heaps_peak = heaps_ctx.get_bytes_used();
         let mut rows = 1;
         while let Some(chunk) = heaps.next().await {
