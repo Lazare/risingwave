@@ -40,6 +40,7 @@ user batch_null_safe_eq_to_eq
 user batch_over_window_to_topn
 user batch_parallelism
 user batch_reduce_keys_after_conversions
+user batch_reduce_outer_joins
 user batch_rewrite_lag_duplicates
 user batch_simplify_column_facts
 user batch_simplify_exists_subquery
@@ -119,6 +120,7 @@ user streaming_parallelism_for_table
 user streaming_project_expr_concurrency
 user streaming_project_expr_inflight_request_concurrency
 user streaming_prune_empty_relation
+user streaming_reduce_outer_joins
 user streaming_separate_consecutive_join
 user streaming_separate_sink
 user streaming_share_identical_subplans

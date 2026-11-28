@@ -531,6 +531,20 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_simplify_exists_subquery: bool,
 
+    // Rule `OuterJoinReduceRule`.
+    /// In the plan of a new streaming job, turn an outer join into an inner (or a full join into
+    /// a left or right) join when a filter or a join condition right above it can not be true on
+    /// its rows padded with `NULL`s (a function of a padded column, `IS NOT NULL`, `IN`, `OR` of
+    /// such conditions...), and `LEFT JOIN r ... WHERE r.c IS NULL` into a left anti join when
+    /// `r.c` is never `NULL` in a matched row (a `NOT NULL` column, a column compared with `=` in
+    /// the join condition). Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    streaming_reduce_outer_joins: bool,
+
+    /// The same as `streaming_reduce_outer_joins`, for batch queries. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_reduce_outer_joins: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,

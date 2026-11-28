@@ -226,6 +226,9 @@ pub use null_safe_eq_to_eq_rule::*;
 // `streaming_simplify_exists_subquery`).
 mod exists_subquery_simplify_rule;
 pub use exists_subquery_simplify_rule::*;
+// Rule `OuterJoinReduceRule` (`batch_reduce_outer_joins`, `streaming_reduce_outer_joins`).
+mod outer_join_reduce_rule;
+pub use outer_join_reduce_rule::*;
 // Rule `NullKeyJoinRule` (`batch_simplify_null_join_keys`, `streaming_simplify_null_join_keys`).
 mod null_key_join_rule;
 pub use null_key_join_rule::*;
@@ -420,6 +423,7 @@ macro_rules! for_all_rules {
             , { ApplyOneRowJoinSplitRule }
             , { NullSafeEqToEqRule }
             , { ExistsSubquerySimplifyRule }
+            , { OuterJoinReduceRule }
             , { NullKeyJoinRule }
             , { NarrowValueAggRule }
             , { NarrowValuePushRule }

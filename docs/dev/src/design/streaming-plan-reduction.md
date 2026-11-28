@@ -48,6 +48,7 @@ own rules.
 | BU | Batch: `UNION ALL` run in parallel tasks instead of one (`batch_distributed_union`) | done (prototype, branch `proto/plan-reduction-batch-union-dist`, see "BU" below) |
 | NE | `a IS NOT DISTINCT FROM b` becomes `a = b` when an operand is never `NULL` (`batch_null_safe_eq_to_eq`, `streaming_null_safe_eq_to_eq`) | done (prototype, branch `proto/plan-reduction-null-rules`, see "NE" below) |
 | SE | Simplification of the subquery of a correlated `EXISTS` / `IN`: no limit, `DISTINCT` or `GROUP BY` without aggregates (`batch_simplify_exists_subquery`, `streaming_simplify_exists_subquery`) | done (prototype, branch `proto/plan-reduction-null-rules`, see "SE" below) |
+| RO | Outer join reduction with a null-rejection test, and `LEFT JOIN ... WHERE r.c IS NULL` as an anti join (`batch_reduce_outer_joins`, `streaming_reduce_outer_joins`) | done (prototype, branch `proto/plan-reduction-null-rules`, see "RO" below) |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -844,6 +845,59 @@ Join(LeftSemi, t.k IS NOT DISTINCT FROM u.k)        Join(LeftSemi, t.k = u.k)
   (several rows per key with ties, NULL keys and values, duplicates on the outer side, `NOT IN`,
   updates and deletes, emptied tables).
 
+### RO. Outer join reduction (added on 2026-11-28, done on the branch)
+
+Variables `batch_reduce_outer_joins` and `streaming_reduce_outer_joins`, rule
+`OuterJoinReduceRule`, after PostgreSQL's `reduce_outer_joins`. Predicate pushdown turns an outer
+join into an inner one with `LogicalJoin::simplify_outer`, which only recognizes a comparison
+(`=`, `<`, ...) with a plain column of the padded side among the conjuncts of the filter above.
+Two reductions are missing:
+
+```text
+SELECT t.*, r.name FROM t LEFT JOIN r ON t.k = r.id WHERE lower(r.name) LIKE 'a%'
+Filter(Lower(r.name) LIKE 'a%')               Filter(Lower(r.name) LIKE 'a%')
+└─Join(LeftOuter, t.k = r.id)           =>    └─Join(Inner, t.k = r.id)
+
+SELECT t.* FROM t LEFT JOIN r ON t.k = r.k WHERE r.k IS NULL
+Filter(IsNull(r.k))                           Project(t.*, NULL)
+└─Join(LeftOuter, t.k = r.k)            =>    └─Join(LeftAnti, t.k = r.k)
+```
+
+- Outer to inner (or full to left / right): a conjunct of the filter right above the join, or of
+  the condition of a join whose input the outer join is and which does not keep the rows of that
+  input that match nothing (inner and semi joins, the optional side of an outer join, the right
+  side of a left anti join), can not be `TRUE` when all the columns of a padded side are `NULL`.
+  The test: `Strong` (the expression is `NULL`; except over `greatest` / `least`, which skip
+  `NULL`s in RisingWave although `Strong` lists them as strict), `FALSE`, `AND` with one such
+  conjunct, `OR` with all, `IS TRUE`, `IS NOT NULL`, `NOT (e IS NULL)`, `IN`, `IS NOT DISTINCT
+  FROM` a non-`NULL` constant. Functions of the column, `LIKE`, `IN`, `OR` and the conditions of
+  a join above are now recognized. Valid: every padded row is rejected, so the join need not
+  produce it; an identity for every content of the inputs, hence for a frozen streaming plan.
+- Outer to anti: a top-level conjunct `r.c IS NULL` above a left join where `r.c` is never `NULL`
+  in a matched row: the column facts of the right input say so (a `NOT NULL` column, a count, a
+  filter below), or the join condition rejects a `NULL` `r.c` (`t.k = r.c`). The filter then
+  keeps exactly the unmatched left rows, each once: a left anti join, the right columns output as
+  `NULL`, the other conjuncts kept above (evaluated on those `NULL`s), the `IS NULL` conjuncts of
+  the right side removed. Symmetric for a right join. For a full join only the column facts
+  count (the unmatched right rows keep their own `r.c`), and the result is the anti join of the
+  other side.
+- Not rewritten: conjuncts with `now()`, as-of joins, an anti join over a temporal join (`FOR
+  SYSTEM_TIME AS OF`), `r.c IS NULL` on a column a matched row may hold `NULL` in (a nullable
+  column outside the condition; a column only compared with `IS NOT DISTINCT FROM` or inside
+  `coalesce`), `IS NULL`, `IS NOT TRUE`, `coalesce(r.c, 0)`, `CASE`, and a join above that keeps
+  the unmatched rows of the outer join (a left join on its preserved side, an anti join).
+- Streaming gain: an inner join has no degree table and emits no padded rows to retract when a
+  match appears; it enters the multi-join and the key rules. An anti join keeps only the key
+  columns of the right side, and the matched pairs (the fan-out) are no longer emitted to be
+  filtered out.
+- Stages: `REDUCE_OUTER_JOINS` (top-down) right after the first predicate pushdown, before
+  `NullSafeEqToEqRule` and join ordering, in up to three rounds, each followed by predicate
+  pushdown (a reduced join lets conjuncts through to the joins below).
+- Tests: planner tests `batch_reduce_outer_joins.yaml`, `stream_reduce_outer_joins.yaml`;
+  differential tests `e2e_test/batch/reduce_outer_joins` and `e2e_test/streaming/reduce_outer_joins`
+  (NULL keys and values on both sides, duplicates on both sides, left, right and full joins, joins
+  above, updates to and from `NULL`, emptied sides).
+
 ### 5. Aggregation pushed below a join onto the unique side
 
 `SELECT f.cust_id, c.name, sum(f.amt) FROM f LEFT JOIN c ON f.cust_id = c.id GROUP BY f.cust_id,
@@ -1519,9 +1573,7 @@ Decision of 2026-11-25: too large for now.
   uncertain gain.
 - **Aggregate then join back, to a top-n with ties.** `t JOIN (SELECT k, max(ts) ... GROUP BY k)`
   on `k` and `ts` becomes `rank() ... = 1`. Narrow pattern.
-- **Null rejection as an analysis.** Replace the syntactic test of the conversion of an outer join
-  to an inner join (`simplify_outer`) with an evaluation of the predicate with `NULL` for the
-  optional side.
+- **Null rejection as an analysis.** Done: see RO.
 - **Sharing sub-plans again after normalization**, within one query. Must run after 1 and 2,
   which need per-consumer plans. Done for stateful sub-plans: see 10.
 - **Semi join simplifications.** `(A semi B) semi B`; `k IN (SELECT k FROM A)` on `A` itself.

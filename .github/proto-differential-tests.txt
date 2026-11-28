@@ -3,3 +3,5 @@ nullsafeeq batch/null_safe_eq_to_eq 60
 nullsafeeqstream streaming/null_safe_eq_to_eq 60
 simplifyexists batch/simplify_exists_subquery 60
 simplifyexistsstream streaming/simplify_exists_subquery 60
+reduceouter batch/reduce_outer_joins 60
+reduceouterstream streaming/reduce_outer_joins 60
