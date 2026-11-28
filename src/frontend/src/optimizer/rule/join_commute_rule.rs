@@ -38,7 +38,8 @@ impl Rule<Logical> for JoinCommuteRule {
                 let left_len = left.schema().len();
                 let right_len = right.schema().len();
 
-                let new_output_indices = swapped_output_indices(join_type, output_indices, left_len, right_len);
+                let new_output_indices =
+                    swapped_output_indices(join_type, output_indices, left_len, right_len);
 
                 let mut condition_rewriter = Rewriter {
                     join_left_len: left_len,
@@ -206,7 +207,11 @@ mod tests {
 
     fn output_names(join: &LogicalJoin) -> Vec<String> {
         let plan: PlanRef = join.clone().into();
-        plan.schema().fields().iter().map(|f| f.name.clone()).collect()
+        plan.schema()
+            .fields()
+            .iter()
+            .map(|f| f.name.clone())
+            .collect()
     }
 
     #[test]
