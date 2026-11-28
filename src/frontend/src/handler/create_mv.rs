@@ -401,6 +401,8 @@ pub(crate) fn gen_create_mv_graph(
             || config.streaming_or_join_to_union()
             // Rule `TransitivePredicateRule`.
             || config.streaming_transitive_predicates()
+            // Rule `AggJoinTransposeRule`.
+            || config.streaming_push_agg_below_join()
     };
     let baseline_args = prune_enabled.then(|| {
         (

@@ -651,6 +651,36 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_transitive_predicates: bool,
 
+    // Rules `AggJoinTransposeRule` and `AggUnionTransposeRule`.
+    /// In the plan of a new streaming job, compute an aggregation over a join on one side of the
+    /// join, before the join, when the other side is unique on the join columns and the group key
+    /// holds the join columns of the aggregated side (`GROUP BY f.k, d.name` over `f LEFT JOIN d ON
+    /// f.k = d.id`, with `d.id` a key): the join keeps one row per group instead of one per row,
+    /// and a change of the other side changes one row per group. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    streaming_push_agg_below_join: bool,
+
+    /// The same as `streaming_push_agg_below_join`, for batch queries: the aggregation runs on one
+    /// side before an outer join, or before an inner join with a whole table. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_push_agg_below_join: bool,
+
+    /// In a batch query, aggregate partially one side of a join (`count`, `sum`, `min`, `max`,
+    /// `bool_and`, `bool_or`...) grouped by its group key and join columns, before the join, and
+    /// finish the aggregation above it, when the cardinality feedback learning
+    /// (`batch_cardinality_feedback_learning`) has seen that this grouping reduces the rows enough.
+    /// Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_partial_agg_below_join: bool,
+
+    /// In a batch query, aggregate partially each branch of a `UNION ALL` under an aggregation
+    /// (`count`, `sum`, `min`, `max`, `bool_and`, `bool_or`...) and finish the aggregation above the
+    /// union: always without group key, otherwise for the branches whose grouping the cardinality
+    /// feedback learning (`batch_cardinality_feedback_learning`) has seen reduce the rows enough.
+    /// Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_partial_agg_into_union: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,

@@ -1,0 +1,189 @@
+# Tests for `streaming_push_agg_below_join` (`AggJoinTransposeRule`, exact form): an aggregation
+# over a join whose other side is unique on the join columns is computed before the join, on the
+# aggregated side, when its group key holds the join columns of that side.
+- id: setup_off
+  sql: |
+    create table f (id int primary key, k int, k2 int, x int, y bigint);
+    create table d (id int primary key, name varchar, region int);
+  expected_outputs: []
+- id: setup
+  sql: |
+    set streaming_push_agg_below_join = true;
+    create table f (id int primary key, k int, k2 int, x int, y bigint);
+    create table d (id int primary key, name varchar, region int);
+    create table d2 (id int, ver int, w int, primary key (id, ver));
+    create table e (k int, w int);
+    create table nd (id numeric primary key, name varchar);
+    create table nf (id int primary key, k numeric, x int);
+    create table t (k int, x int, ts timestamp, watermark for ts as ts - interval '5 minutes') append only;
+    create table ta (k int, x int) append only;
+  expected_outputs: []
+
+# The variable is off by default: nothing changes.
+- name: off by default - left join to a unique side is kept
+  before: [setup_off]
+  sql: |
+    select f.k, d.name, sum(f.x) as s, count(*) as n from f left join d on f.k = d.id group by f.k, d.name;
+  expected_outputs:
+  - stream_plan
+
+# Rewritten.
+
+- name: left join to a unique side, grouped by the join column and a column of the unique side
+  before: [setup]
+  sql: |
+    select f.k, d.name, sum(f.x) as s, count(*) as n from f left join d on f.k = d.id group by f.k, d.name;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: inner join to a filtered unique side, aggregates of expressions
+  before: [setup]
+  sql: |
+    select f.k, sum(f.x * 2) as s, count(f.y) as n from f join d on f.k = d.id where d.region = 3 group by f.k;
+  expected_outputs:
+  - stream_plan
+- name: inner join grouped by the key of the unique side only (equal to the join column)
+  before: [setup]
+  sql: |
+    select d.id, d.name, max(f.x) as m from f join d on f.k = d.id group by d.id, d.name;
+  expected_outputs:
+  - stream_plan
+- name: right join with the aggregated side on the right
+  before: [setup]
+  sql: |
+    select f.k, d.name, sum(f.x) as s from d right join f on f.k = d.id group by f.k, d.name;
+  expected_outputs:
+  - stream_plan
+- name: two unique sides, pushed below both joins
+  before: [setup]
+  sql: |
+    select f.k, f.k2, d.name, d2.w, sum(f.x) as s from f join d on f.k = d.id
+    left join d2 on f.k2 = d2.id and d2.ver = 1 group by f.k, f.k2, d.name, d2.w;
+  expected_outputs:
+  - stream_plan
+- name: distinct and ordered aggregates and filter clauses (exact form, any aggregate)
+  before: [setup]
+  sql: |
+    select f.k, count(distinct f.x) as c, string_agg(f.x::varchar, ',' order by f.id) as l,
+      count(*) filter (where f.x > 0) as p
+    from f left join d on f.k = d.id group by f.k;
+  expected_outputs:
+  - stream_plan
+- name: min and max of a column of the unique side
+  before: [setup]
+  sql: |
+    select f.k, min(d.name) as mn, max(d.region) as mx, sum(f.x) as s from f left join d on f.k = d.id group by f.k;
+  expected_outputs:
+  - stream_plan
+- name: distinct without aggregate
+  before: [setup]
+  sql: |
+    select distinct f.k, d.name from f left join d on f.k = d.id;
+  expected_outputs:
+  - stream_plan
+- name: a group key computed from the aggregated side and a having clause
+  before: [setup]
+  sql: |
+    select f.k, f.x % 10 as b, d.name, count(*) as n from f left join d on f.k = d.id
+    group by f.k, f.x % 10, d.name having count(*) > 1;
+  expected_outputs:
+  - stream_plan
+- name: a non-equi condition on a grouped column of a simple type
+  before: [setup]
+  sql: |
+    select f.k, f.x, d.name, count(*) as n from f left join d on f.k = d.id and f.x > d.region group by f.k, f.x, d.name;
+  expected_outputs:
+  - stream_plan
+- name: null-safe equality with the unique side
+  before: [setup]
+  sql: |
+    select f.k, d.name, sum(f.x) as s from f left join d on f.k is not distinct from d.id group by f.k, d.name;
+  expected_outputs:
+  - stream_plan
+
+# Left as they are.
+
+- name: the other side is not unique on the join column
+  before: [setup]
+  sql: |
+    select f.k, sum(f.x) as s from f join e on f.k = e.k group by f.k;
+  expected_outputs:
+  - stream_plan
+- name: the join column of the aggregated side is not in the group key (left join)
+  before: [setup]
+  sql: |
+    select d.name, sum(f.x) as s from f left join d on f.k = d.id group by d.name;
+  expected_outputs:
+  - stream_plan
+- name: the join column is only equal to a grouped column of the other side in a left join
+  before: [setup]
+  sql: |
+    select d.id, sum(f.x) as s from f left join d on f.k = d.id group by d.id;
+  expected_outputs:
+  - stream_plan
+- name: an aggregate reads the other side
+  before: [setup]
+  sql: |
+    select f.k, sum(d.region) as s from f left join d on f.k = d.id group by f.k;
+  expected_outputs:
+  - stream_plan
+- name: an aggregate reads both sides
+  before: [setup]
+  sql: |
+    select f.k, sum(f.x + d.region) as s from f join d on f.k = d.id group by f.k;
+  expected_outputs:
+  - stream_plan
+- name: full join
+  before: [setup]
+  sql: |
+    select f.k, d.name, sum(f.x) as s from f full join d on f.k = d.id group by f.k, d.name;
+  expected_outputs:
+  - stream_plan
+- name: left join with the aggregated side optional
+  before: [setup]
+  sql: |
+    select d.id, d.name, sum(f.x) as s from d left join f on f.k = d.id group by d.id, d.name;
+  expected_outputs:
+  - stream_plan
+- name: no group key
+  before: [setup]
+  sql: |
+    select count(*) as n, sum(f.x) as s from f join d on f.k = d.id;
+  expected_outputs:
+  - stream_plan
+- name: a non-equi condition on a column that is not grouped
+  before: [setup]
+  sql: |
+    select f.k, count(*) as n from f left join d on f.k = d.id and f.x > d.region group by f.k;
+  expected_outputs:
+  - stream_plan
+- name: a non-equi condition on a grouped column of a type whose equal values may differ
+  before: [setup]
+  sql: |
+    select nf.k, nd.name, count(*) as n from nf left join nd on nf.k = nd.id and nf.k::varchar <> nd.name group by nf.k, nd.name;
+  expected_outputs:
+  - stream_plan
+- name: the aggregated side is unique on the new group key (nothing to reduce)
+  before: [setup]
+  sql: |
+    select f.id, f.k, d.name, sum(f.x) as s from f left join d on f.k = d.id group by f.id, f.k, d.name;
+  expected_outputs:
+  - stream_plan
+- name: a table with a watermark (an aggregation that may emit on window close)
+  before: [setup]
+  sql: |
+    select t.k, d.name, count(*) as n from t left join d on t.k = d.id group by t.k, d.name;
+  expected_outputs:
+  - stream_plan
+- name: temporal join
+  before: [setup]
+  sql: |
+    select ta.k, d.name, sum(ta.x) as s from ta left join d for system_time as of proctime() on ta.k = d.id group by ta.k, d.name;
+  expected_outputs:
+  - stream_plan
+- name: a group key that mixes both sides
+  before: [setup]
+  sql: |
+    select f.k + d.region as g, count(*) as n from f join d on f.k = d.id group by f.k + d.region;
+  expected_outputs:
+  - stream_plan

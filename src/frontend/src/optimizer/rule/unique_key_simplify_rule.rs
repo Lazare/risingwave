@@ -433,7 +433,7 @@ fn case_when(condition: ExprImpl, then: ExprImpl, otherwise: ExprImpl) -> ExprIm
 /// With a `FILTER` clause that is not `TRUE` for the row, the group is empty for the call: a
 /// `count` is `0`, the others are `NULL`. The `DISTINCT` and `ORDER BY` clauses do not change the
 /// result over one row.
-fn agg_over_one_row(call: &PlanAggCall) -> Option<ExprImpl> {
+pub(super) fn agg_over_one_row(call: &PlanAggCall) -> Option<ExprImpl> {
     let AggType::Builtin(kind) = &call.agg_type else {
         return None;
     };

@@ -282,6 +282,13 @@ mod transitive_predicate_rule;
 pub use transitive_predicate_rule::*;
 mod unique_key_simplify_rule;
 pub use unique_key_simplify_rule::*;
+// Aggregation pushed below a join (`streaming_push_agg_below_join`, `batch_push_agg_below_join`,
+// `batch_partial_agg_below_join`) and into the branches of a `UNION ALL`
+// (`batch_partial_agg_into_union`).
+mod agg_join_transpose_rule;
+pub use agg_join_transpose_rule::*;
+mod agg_union_transpose_rule;
+pub use agg_union_transpose_rule::*;
 mod join_project_transpose_rule;
 pub use join_project_transpose_rule::*;
 mod limit_push_down_rule;
@@ -460,6 +467,8 @@ macro_rules! for_all_rules {
             , { OrRestrictionDeriveRule }
             , { OrJoinToUnionRule }
             , { TransitivePredicateRule }
+            , { AggJoinTransposeRule }
+            , { AggUnionTransposeRule }
             , { BushyTreeJoinOrderingRule }
             , { StreamProjectMergeRule }
             , { StreamProjectSplitRule }
