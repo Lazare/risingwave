@@ -45,6 +45,8 @@ jobs:
         branch:
           - fix-snapshot-backfill
           - fix-batch-hash-agg-spill
+          - fix-last-seen-value-null
+          - fix-webhook-unready-worker
           - optimizer
           - selective-barriers
           - pg-cdc-native-engine
