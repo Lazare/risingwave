@@ -64,9 +64,7 @@ use crate::expr::{
     CorrelatedInputRef, Expr, ExprImpl, ExprType, ExprVisitor, FunctionCall, InputRef, Subquery,
 };
 use crate::optimizer::plan_node::generic::{Agg, GenericPlanRef};
-use crate::optimizer::plan_node::{
-    LogicalExcept, LogicalIntersect, LogicalProject, LogicalUnion, PlanTreeNode,
-};
+use crate::optimizer::plan_node::{LogicalExcept, LogicalIntersect, LogicalProject, LogicalUnion};
 
 #[derive(Clone, Copy, PartialEq)]
 enum SetOp {
