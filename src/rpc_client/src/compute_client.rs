@@ -96,11 +96,22 @@ impl ComputeClient {
     }
 
     pub async fn get_data(&self, output_id: TaskOutputId) -> Result<Streaming<GetDataResponse>> {
+        self.get_data_with_wait(output_id, false).await
+    }
+
+    /// Same as [`Self::get_data`]; with `wait_for_producer`, the producer node waits (bounded)
+    /// for a producer task created later (`batch_phased_stages`).
+    pub async fn get_data_with_wait(
+        &self,
+        output_id: TaskOutputId,
+        wait_for_producer: bool,
+    ) -> Result<Streaming<GetDataResponse>> {
         Ok(self
             .batch_exchange_client
             .clone()
             .get_data(GetDataRequest {
                 task_output_id: Some(output_id),
+                wait_for_producer,
             })
             .await
             .map_err(RpcError::from_compute_status)?

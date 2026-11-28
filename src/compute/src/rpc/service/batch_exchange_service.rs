@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use risingwave_batch::rpc::service::exchange::GetDataItem;
-use risingwave_batch::task::{BatchManager, MISSING_TASK_WAIT, TaskId};
+use risingwave_batch::task::{BatchManager, TaskId};
 use risingwave_common_service::GrpcCall;
 use risingwave_pb::task_service::batch_exchange_service_server::BatchExchangeService;
 use risingwave_pb::task_service::{GetDataRequest, GetDataResponse};
@@ -83,16 +83,18 @@ impl BatchExchangeService for BatchExchangeServiceImpl {
         let peer_addr = request
             .remote_addr()
             .ok_or_else(|| Status::unavailable("connection unestablished"))?;
-        let pb_task_output_id = request
-            .into_inner()
-            .task_output_id
-            .expect("Failed to get task output id.");
+        let GetDataRequest {
+            task_output_id,
+            wait_for_producer,
+        } = request.into_inner();
+        let pb_task_output_id = task_output_id.expect("Failed to get task output id.");
         let (tx, rx) =
             tokio::sync::mpsc::channel(self.batch_mgr.config().developer.receiver_channel_size);
-        // The producer may be created after its consumer (`batch_phased_stages`).
+        // The producer of a deferred stage may be created after its consumer
+        // (`batch_phased_stages`); any other missing producer fails at once.
         if let Ok(task_id) = pb_task_output_id.get_task_id() {
             self.batch_mgr
-                .wait_for_task(&TaskId::from(task_id), MISSING_TASK_WAIT)
+                .wait_for_producer(&TaskId::from(task_id), wait_for_producer)
                 .await;
         }
         if let Err(e) = self.batch_mgr.get_data(tx, peer_addr, &pb_task_output_id) {

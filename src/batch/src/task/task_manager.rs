@@ -303,6 +303,15 @@ impl BatchManager {
         Ok(())
     }
 
+    /// Waits for the producer task `task_id` (at most [`MISSING_TASK_WAIT`]) only when
+    /// `wait_for_producer` is set, i.e. the producer belongs to a deferred stage
+    /// (`batch_phased_stages`). Otherwise returns at once, and a missing task fails at once.
+    pub async fn wait_for_producer(&self, task_id: &TaskId, wait_for_producer: bool) {
+        if wait_for_producer {
+            self.wait_for_task(task_id, MISSING_TASK_WAIT).await;
+        }
+    }
+
     /// Waits until the task exists on this node, at most `timeout` (see [`MISSING_TASK_WAIT`]).
     /// Returns at once when it already exists; the caller then looks the task up as usual and
     /// fails if it is still missing.
@@ -664,5 +673,69 @@ mod tests {
         )
         .await
         .expect("waited for an existing task");
+    }
+
+    /// The wait for a missing producer happens only for the sources of a deferred stage
+    /// (`wait_for_producer`); any other missing task fails at once, as without phased stages.
+    #[tokio::test]
+    async fn test_wait_for_producer_only_when_asked() {
+        use std::time::Duration;
+
+        let manager = Arc::new(BatchManager::new(
+            BatchConfig::default(),
+            BatchManagerMetrics::for_test(),
+            u64::MAX,
+            None,
+        ));
+        let pb_task_id = PbTaskId {
+            query_id: "deferred".to_owned(),
+            stage_id: 2,
+            task_id: 0,
+        };
+        let task_id = TaskId::from(&pb_task_id);
+        let output_id = PbTaskOutputId {
+            task_id: Some(pb_task_id.clone()),
+            output_id: 0,
+        };
+
+        // Without the flag: no wait, the missing task fails at once.
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            manager.wait_for_producer(&task_id, false),
+        )
+        .await
+        .expect("waited for a producer without the flag");
+        let error = manager.take_output(&output_id).unwrap_err();
+        assert!(error.to_string().contains("not found"), "{:?}", error);
+
+        // With the flag: a task created while the consumer waits is found.
+        let waiter = {
+            let manager = manager.clone();
+            let task_id = task_id.clone();
+            let output_id = output_id.clone();
+            tokio::spawn(async move {
+                manager.wait_for_producer(&task_id, true).await;
+                manager.take_output(&output_id).is_ok()
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let plan = PlanFragment {
+            root: Some(PlanNode {
+                children: vec![],
+                identity: "".to_owned(),
+                node_body: Some(NodeBody::BusyLoopExecutor(false)),
+                cardinality_feedback_id: None,
+            }),
+            exchange_info: Some(ExchangeInfo {
+                mode: DistributionMode::Single as i32,
+                distribution: None,
+            }),
+        };
+        manager.fire_task_for_test(&pb_task_id, plan).await.unwrap();
+        let found = tokio::time::timeout(Duration::from_secs(10), waiter)
+            .await
+            .expect("the wait did not end when the producer was created")
+            .unwrap();
+        assert!(found);
     }
 }

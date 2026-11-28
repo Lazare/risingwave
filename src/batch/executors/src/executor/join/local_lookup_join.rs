@@ -154,6 +154,7 @@ impl InnerSideExecutorBuilder {
             }),
             host: Some(worker.host.as_ref().unwrap().clone()),
             local_execute_plan: Some(Plan(local_execute_plan)),
+            wait_for_producer: false,
         };
 
         Ok(prost_exchange_source)

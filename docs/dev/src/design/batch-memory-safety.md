@@ -252,8 +252,11 @@ as before: the workers of the tasks of its deferred children are chosen in advan
 know where to read. Once a build stage has finished, the join has read (nearly) all its build
 input; the deferred stages are then created on their workers, and a consumer that asks for the
 output of a task not created yet waits for it on the compute node (`BatchManager::wait_for_task`,
-at most `MISSING_TASK_WAIT` = 120 s; without the variable a consumer only starts once its
-producers exist, so the wait never happens except for a cancelled task).
+at most `MISSING_TASK_WAIT` = 120 s). Only the sources of a deferred stage wait: the frontend
+sets `ExchangeSource.wait_for_producer` on the exchange sources whose task had its worker chosen
+in advance, the consumer forwards it in `GetDataRequest.wait_for_producer`, and the producer node
+(or the local exchange path) waits only when it is set. Any other missing task, such as a
+cancelled one, fails at once as before, with or without the variable.
 
 Example: `SELECT .. FROM f JOIN d1 ON .. JOIN d2 ON ..` planned as two hash joins in one stage
 (probe `f`, builds `d1` and `d2`): `d2` starts first, `d1` once `d2` has finished, `f` once both

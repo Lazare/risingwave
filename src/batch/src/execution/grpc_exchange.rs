@@ -50,17 +50,25 @@ impl GrpcExchangeSource {
         task_output_id: TaskOutputId,
         local_execute_plan: Option<LocalExecutePlan>,
     ) -> Result<Self> {
-        Self::create_with_cardinality_counters(client, task_output_id, local_execute_plan, None)
-            .await
+        Self::create_with_cardinality_counters(
+            client,
+            task_output_id,
+            local_execute_plan,
+            None,
+            false,
+        )
+        .await
     }
 
     /// Same as [`Self::create`], adding to `cardinality_counters` the rows counted by the plan of
-    /// `local_execute_plan`.
+    /// `local_execute_plan`. With `wait_for_producer`, the producer node waits (bounded) for a
+    /// producer task created later (`batch_phased_stages`).
     pub async fn create_with_cardinality_counters(
         client: ComputeClient,
         task_output_id: TaskOutputId,
         local_execute_plan: Option<LocalExecutePlan>,
         cardinality_counters: Option<Arc<CardinalityCounters>>,
+        wait_for_producer: bool,
     ) -> Result<Self> {
         let task_id = task_output_id.get_task_id()?.clone();
         let take_data_span = await_tree::span!(
@@ -83,7 +91,11 @@ impl GrpcExchangeSource {
                 };
                 client.execute(execute_request).await?
             }
-            None => client.get_data(task_output_id.clone()).await?,
+            None => {
+                client
+                    .get_data_with_wait(task_output_id.clone(), wait_for_producer)
+                    .await?
+            }
         };
         let source = Self {
             stream,

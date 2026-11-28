@@ -211,6 +211,8 @@ service TaskService {
 
 message GetDataRequest {
   batch_plan.TaskOutputId task_output_id = 1;
+  // See `ExchangeSource.wait_for_producer`. When false, a missing producer task fails at once.
+  bool wait_for_producer = 2;
 }
 
 // The structure for permit-based back-pressure.

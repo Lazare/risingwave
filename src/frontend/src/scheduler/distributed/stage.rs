@@ -299,6 +299,7 @@ impl StageExecution {
         self.tasks
             .iter()
             .map(|(task_id, status_holder)| {
+                let status = status_holder.inner.load_full();
                 let task_output_id = TaskOutputId {
                     task_id: Some(PbTaskId {
                         query_id: self.query.query_id.id.clone(),
@@ -310,8 +311,11 @@ impl StageExecution {
 
                 ExchangeSource {
                     task_output_id: Some(task_output_id),
-                    host: Some(status_holder.inner.load_full().location.clone().unwrap()),
+                    host: Some(status.location.clone().unwrap()),
                     local_execute_plan: None,
+                    // `batch_phased_stages`: a task whose worker was chosen in advance belongs to
+                    // a deferred stage and may not exist yet when its consumer asks for it.
+                    wait_for_producer: status.preassigned.is_some(),
                 }
             })
             .collect()

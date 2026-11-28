@@ -377,6 +377,7 @@ impl LocalQueryExecution {
                             }),
                             host: Some(worker_node.host.as_ref().unwrap().clone()),
                             local_execute_plan: Some(Plan(local_execute_plan)),
+                            wait_for_producer: false,
                         };
                         sources.push(exchange_source);
                     }
@@ -422,6 +423,7 @@ impl LocalQueryExecution {
                             }),
                             host: Some(worker_node.host.as_ref().unwrap().clone()),
                             local_execute_plan: Some(Plan(local_execute_plan)),
+                            wait_for_producer: false,
                         };
                         sources.push(exchange_source);
                     }
@@ -460,6 +462,7 @@ impl LocalQueryExecution {
                             }),
                             host: Some(worker_node.host.as_ref().unwrap().clone()),
                             local_execute_plan: Some(Plan(local_execute_plan)),
+                            wait_for_producer: false,
                         };
                         sources.push(exchange_source);
                     }
@@ -498,6 +501,7 @@ impl LocalQueryExecution {
                             }),
                             host: Some(worker_node.host.as_ref().unwrap().clone()),
                             local_execute_plan: Some(Plan(local_execute_plan.clone())),
+                            wait_for_producer: false,
                         })
                         .collect();
                 }

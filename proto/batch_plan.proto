@@ -387,6 +387,9 @@ message ExchangeSource {
   oneof local_execute_plan {
     LocalExecutePlan plan = 3;
   }
+  // `batch_phased_stages`: the producer task belongs to a deferred stage and may be created after
+  // its consumer, so the producer node waits (bounded) for it instead of failing at once.
+  bool wait_for_producer = 4;
 }
 
 message ExchangeNode {
