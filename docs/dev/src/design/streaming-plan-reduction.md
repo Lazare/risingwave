@@ -1421,7 +1421,8 @@ select * from t where t.code in (select c from (values ('a'), ('b')) v(c));
 
 **Rule** (`ValuesJoinInlineRule`, variables `batch_inline_values_join` and
 `streaming_inline_values_join`, default false). One side of the join is a `LogicalValues` of 1 to
-64 rows of constants of the declared types (read directly or through a share); it must be the side
+64 rows of constants of the declared types, read directly, through a share (a CTE read twice) or
+through projections (the column a subquery selects, computed on each row); it must be the side
 whose rows are neither preserved nor output on their own: either side of an inner join, the right
 side of a left outer, left semi or left anti join, the left side of their right counterparts. Let
 `cond_i` be the conjuncts of the condition that refer to the constant side, with the values of row
@@ -1460,7 +1461,7 @@ input; the new filter is pushed down right after. The result has no join state, 
 no fragment for the constant rows; the constant side has no watermark, the kept side keeps its own.
 
 - Not done: inner and outer joins without a key of distinct literals (a range join, or duplicate
-  keys, would multiply rows: the join is kept); a constant side under a projection or a filter;
+  keys, would multiply rows: the join is kept); a constant side under a filter;
   `decimal`, floats, intervals as keys of inner and outer joins (equal values may print
   differently, so the key column could not be replaced by `k`); full joins and the preserved side
   of an outer join (every constant row must be output).
@@ -1560,7 +1561,9 @@ equality; every conjunct is pure (evaluated in several joins). Let `r` be the ot
   the definition of the outer join (matched pairs, plus the unmatched rows padded).
 - In streaming, the sides and the `R_i` read twice are shared (`LogicalShare`, when the plan may
   share sub-plans): each is computed once, each equi-join keeps its own state (the price, hence the
-  cap of 4 disjuncts). In batch the sides are read once per join. Right outer, right semi and right
+  cap of 4 disjuncts). In batch the sides are read once per join, so the rule requires that two
+  reads give the same rows: no volatile expression (a `random()` filter pushed into a side would
+  otherwise be drawn again in each branch) and no source. Right outer, right semi and right
   anti joins, full joins and temporal joins are left untouched.
 - Placement: batch and streaming, after the first predicate pushdown and after rule OR (whose
   restrictions are then below the shared sides), before join ordering, which then orders the

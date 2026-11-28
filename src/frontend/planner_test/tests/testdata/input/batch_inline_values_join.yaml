@@ -95,10 +95,10 @@
     select t.k, v.label from t join (values (1, 10, 'low'), (5, 20, 'high')) v(lo, hi, label) on t.x between v.lo and v.hi;
   expected_outputs:
   - batch_plan
-- name: kept - volatile condition
+- name: kept - volatile condition on both sides
   before: [setup]
   sql: |
     with m(code, label) as (values ('a', 'Alpha'), ('b', 'Beta'))
-    select t.k, m.label from t join m on t.code = m.code and random() < 0.5;
+    select t.k, m.label from t join m on t.code = m.code and t.x > random() * length(m.label);
   expected_outputs:
   - batch_plan

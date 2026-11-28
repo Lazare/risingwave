@@ -134,6 +134,13 @@
   expected_outputs:
   - stream_plan
 
+- name: semi join - in over the column selected from the constant rows, through a projection
+  before: [setup]
+  sql: |
+    select * from t where t.x in (select c + 1 from (values (1), (2)) v(c));
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+
 # Left as they are.
 
 - name: kept - inner join with a duplicate key would multiply rows

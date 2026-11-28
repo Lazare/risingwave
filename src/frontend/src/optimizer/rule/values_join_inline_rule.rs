@@ -29,8 +29,9 @@ use crate::utils::Condition;
 const MAX_ROWS: usize = 64;
 
 /// Replaces a join with a small relation of constant rows (a `LogicalValues` of at most 64 rows of
-/// constants) with a filter and a projection of the other side, as PostgreSQL 18 turns
-/// `x IN (VALUES ...)` into `x = ANY(...)` (`convert_VALUES_to_ANY`). It extends
+/// constants, possibly under projections and shares) with a filter and a projection of the other
+/// side, as PostgreSQL 18 turns `x IN (VALUES ...)` into `x = ANY(...)` (`convert_VALUES_to_ANY`).
+/// It extends
 /// [`ConstantRowJoinRule`], which handles one row and inner joins only.
 ///
 /// ```text
@@ -243,15 +244,12 @@ impl Rule<Logical> for ValuesJoinInlineRule {
     }
 }
 
-/// Returns the rows of a `LogicalValues` of at most [`MAX_ROWS`] rows of constants, read directly
-/// or through a share (a common table expression read several times).
+/// Returns the rows of a relation of at most [`MAX_ROWS`] rows of constants: a `LogicalValues`,
+/// read directly, through a share (a common table expression read several times) or through
+/// projections (the columns that a subquery selects), whose expressions are then computed on the
+/// constants of each row.
 fn constant_rows(plan: &PlanRef) -> Option<Vec<Vec<ExprImpl>>> {
-    let plan = match plan.as_logical_share() {
-        Some(share) => share.input(),
-        None => plan.clone(),
-    };
-    let values = plan.as_logical_values()?;
-    let rows = values.rows();
+    let rows = rows_of(plan)?;
     if rows.is_empty() || rows.len() > MAX_ROWS {
         return None;
     }
@@ -264,7 +262,41 @@ fn constant_rows(plan: &PlanRef) -> Option<Vec<Vec<ExprImpl>>> {
                     .zip_eq_fast(fields.iter())
                     .all(|(expr, field)| expr.is_const() && expr.return_type() == field.data_type)
         })
-        .then(|| rows.to_vec())
+        .then_some(rows)
+}
+
+fn rows_of(plan: &PlanRef) -> Option<Vec<Vec<ExprImpl>>> {
+    if let Some(values) = plan.as_logical_values() {
+        return (values.rows().len() <= MAX_ROWS).then(|| values.rows().to_vec());
+    }
+    if let Some(share) = plan.as_logical_share() {
+        return rows_of(&share.input());
+    }
+    let project = plan.as_logical_project()?;
+    let rows = rows_of(&project.input())?;
+    Some(
+        rows.iter()
+            .map(|row| {
+                let mut rewriter = ConstantRowRewriter { row };
+                project
+                    .exprs()
+                    .iter()
+                    .map(|expr| rewriter.rewrite_expr(expr.clone()))
+                    .collect()
+            })
+            .collect(),
+    )
+}
+
+/// Replaces the references to the columns of a row of constants with their values.
+struct ConstantRowRewriter<'a> {
+    row: &'a [ExprImpl],
+}
+
+impl ExprRewriter for ConstantRowRewriter<'_> {
+    fn rewrite_input_ref(&mut self, input_ref: InputRef) -> ExprImpl {
+        self.row[input_ref.index()].clone()
+    }
 }
 
 /// Whether the expressions are literals with pairwise distinct values.
