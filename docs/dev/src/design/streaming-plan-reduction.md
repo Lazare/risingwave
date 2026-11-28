@@ -48,6 +48,7 @@ own rules.
 | BU | Batch: `UNION ALL` run in parallel tasks instead of one (`batch_distributed_union`) | done (prototype, branch `proto/plan-reduction-batch-union-dist`, see "BU" below) |
 | IV | Join with a small constant `VALUES` becomes a filter (`IN` list) and a `CASE` (`batch_inline_values_join`, `streaming_inline_values_join`; survey rule 8) | done (prototype, branch `proto/plan-reduction-or-values`), see "IV" below |
 | OR | Restrictions of each side derived from an `OR` of a join condition (`batch_derive_or_restrictions`, `streaming_derive_or_restrictions`; survey rule 6) | done (prototype, branch `proto/plan-reduction-or-values`), see "OR" below |
+| OU | Join on an `OR` of equi-conditions as equi-joins combined with `UNION ALL` or anti joins (`batch_or_join_to_union`, `streaming_or_join_to_union`; survey rule 7) | done (prototype, branch `proto/plan-reduction-or-values`), see "OU" below |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -1525,6 +1526,57 @@ into the other side when it may).
   `e2e_test/streaming/derive_or_restrictions.gen.py` (17 and 16 queries compared with the variable
   off and on, and with batch, over `NULL` keys and compared columns, duplicates, upserts, updates of
   the compared columns and of the keys, deletes and empty sides).
+
+### OU. Join on an `OR` of equi-conditions (added on 2026-11-28, survey rule 7)
+
+Source: Calcite `JoinExpandOrToUnionRule`. A join whose condition has no equality between its
+sides, such as `a.id = b.id1 OR a.id = b.id2`, can only be a nested-loop join: batch compares every
+pair of rows, streaming refuses the query ("streaming nested-loop join").
+
+```sql
+create table a (id int primary key, k int, x int);
+create table b (id int primary key, id1 int, id2 int, y int);
+select a.id, b.y from a join b on a.id = b.id1 or a.id = b.id2;
+-- OU: Join(a.id = b.id1) UNION ALL Join(a.id = b.id2 AND (a.id = b.id1) IS NOT TRUE)
+```
+
+**Rule** (`OrJoinToUnionRule`, variables `batch_or_join_to_union` and `streaming_or_join_to_union`,
+default false). The condition has no equality between the sides (`=` or `IS NOT DISTINCT FROM`
+between a column of each), but a conjunct `d_1 OR ... OR d_n`, 2 to 4 disjuncts, each with such an
+equality; every conjunct is pure (evaluated in several joins). Let `r` be the other conjuncts and
+`c_i = d_i AND r`, so that the condition is `c_1 OR ... OR c_n`.
+
+- Inner join: `UNION ALL` over `i` of `A JOIN B ON c_i AND d_1 IS NOT TRUE AND ... AND
+  d_{i-1} IS NOT TRUE`. A pair satisfies the condition iff some `c_i` is true; it is output by the
+  branch of the first such `i` and by no other (in branch `i`, `r` is true, so excluding `c_j` is
+  excluding `d_j`). `IS NOT TRUE` lets through a pair for which `d_j` is `NULL` (it does not satisfy
+  `d_j` either), where `NOT d_j` would lose it: each pair is output exactly once.
+- Left semi join: `UNION ALL` over `i` of `R_{i-1} SEMI JOIN B ON c_i`, with `R_0 = A` and
+  `R_i = R_{i-1} ANTI JOIN B ON c_i` (the rows of `A` with no match on `c_1`, ..., `c_i`). A row of
+  `A` is in the result iff it matches some `c_i`; it is output by the branch of the first such `i`
+  only, whatever the duplicates of `A` or `B`.
+- Left anti join: `R_n`: a row has no match on `c_1 OR ... OR c_n` iff it has none on any `c_i`.
+- Left outer join: the inner join above `UNION ALL` the rows of `R_n` padded with `NULL`s, which is
+  the definition of the outer join (matched pairs, plus the unmatched rows padded).
+- In streaming, the sides and the `R_i` read twice are shared (`LogicalShare`, when the plan may
+  share sub-plans): each is computed once, each equi-join keeps its own state (the price, hence the
+  cap of 4 disjuncts). In batch the sides are read once per join. Right outer, right semi and right
+  anti joins, full joins and temporal joins are left untouched.
+- Placement: batch and streaming, after the first predicate pushdown and after rule OR (whose
+  restrictions are then below the shared sides), before join ordering, which then orders the
+  joins of each branch; predicate pushdown right after.
+- Not done: right joins (rare: written as left joins), full joins (`FULL JOIN` would need the
+  unmatched rows of both sides), disjuncts without an equality, more than 4 disjuncts. Rows that
+  match through `IS NOT DISTINCT FROM` work like any other equality.
+- Tests: `stream_or_join_to_union.yaml`, `batch_or_join_to_union.yaml` (inner joins with 2 or 3
+  disjuncts, an extra conjunct, disjuncts of several conjuncts, the `OR` in a `WHERE` clause, an
+  aggregation above, left, semi and anti joins; kept: a disjunct without equality, five disjuncts,
+  full join, an equality outside the `OR`, a volatile condition; off by default), and the
+  differentials `e2e_test/batch/or_join_to_union.gen.py` (19 queries, nested loop against the
+  rewrite) and `e2e_test/streaming/or_join_to_union.gen.py` (the same 19 queries materialized with
+  the variable and compared with batch; the query refused without the variable is checked to fail),
+  over pairs matched by one disjunct, by both (`id1 = id2`), by none, `NULL` keys, duplicate rows on
+  the left, upserts, keys moved between the disjuncts, deletes and empty sides.
 
 ## Not for now: sharing between materialized views
 

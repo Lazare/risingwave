@@ -1226,6 +1226,27 @@ impl LogicalOptimizer {
             }
         }
 
+        // Rule `OrJoinToUnionRule` (`streaming_or_join_to_union`): a join without equality whose
+        // condition is an `OR` of equi-conditions becomes equi-joins on the disjuncts (a `UNION ALL`
+        // for inner and left joins, a chain of anti joins for semi and anti joins), instead of a
+        // nested-loop join that streaming refuses. After the restrictions derived from the `OR`
+        // above, which are then pushed below the shared sides. On demand only.
+        if ctx.session_ctx().config().streaming_or_join_to_union()
+            && !ctx.is_stream_prune_baseline()
+        {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&OptimizationStage::new(
+                "Or Join To Union For Stream",
+                vec![OrJoinToUnionRule::create_for_stream()],
+                ApplyOrder::BottomUp,
+            ))?;
+            let applied = ctx.total_rule_applied() - applied_before;
+            if applied > 0 {
+                ctx.add_stream_prune_rule_applied(applied);
+                plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+            }
+        }
+
         if plan.ctx().session_ctx().config().enable_join_ordering() {
             // Merge inner joins and intermediate filters into multijoin
             // This rule assumes that filters have already been pushed down near to
@@ -1767,6 +1788,22 @@ impl LogicalOptimizer {
                 "Derive Or Restrictions For Batch",
                 vec![OrRestrictionDeriveRule::create()],
                 ApplyOrder::TopDown,
+            ))?;
+            if ctx.total_rule_applied() != applied_before {
+                plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+            }
+        }
+
+        // Rule `OrJoinToUnionRule` (`batch_or_join_to_union`): a join without equality whose
+        // condition is an `OR` of equi-conditions becomes hash joins on the disjuncts (a
+        // `UNION ALL` for inner and left joins, a chain of anti joins for semi and anti joins)
+        // instead of a nested-loop join, before join ordering.
+        if ctx.session_ctx().config().batch_or_join_to_union() {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&OptimizationStage::new(
+                "Or Join To Union For Batch",
+                vec![OrJoinToUnionRule::create()],
+                ApplyOrder::BottomUp,
             ))?;
             if ctx.total_rule_applied() != applied_before {
                 plan = Self::predicate_pushdown(plan, explain_trace, &ctx);

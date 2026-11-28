@@ -530,6 +530,21 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_derive_or_restrictions: bool,
 
+    // Rule `OrJoinToUnionRule`.
+    /// In the plan of a new streaming job, split a join whose condition has no equality between
+    /// its sides, but an `OR` of 2 to 4 disjuncts that each have one (`a.id = b.id1 OR a.id =
+    /// b.id2`), into equi-joins on the disjuncts combined with `UNION ALL` (inner and left outer
+    /// joins) or chained (semi and anti joins), each pair of rows matched once. Such a join can
+    /// not be planned in streaming otherwise (nested-loop join). Each equi-join keeps its own
+    /// state. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    streaming_or_join_to_union: bool,
+
+    /// The same as `streaming_or_join_to_union`, for batch queries: hash joins instead of a
+    /// nested-loop join. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_or_join_to_union: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,
