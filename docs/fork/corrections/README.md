@@ -22,6 +22,7 @@ without conflicts. Each file gives:
 |---|---|---|
 | [not-in-null-semantics.md](not-in-null-semantics.md) | `NOT IN (subquery)` ignored NULL values | upstream |
 | [derived-predicate-equal-values.md](derived-predicate-equal-values.md) | predicates derived through `a = b` on types whose equal values differ | upstream |
+| [in-subquery-in-having.md](in-subquery-in-having.md) | `IN (subquery)` in `HAVING` compared the wrong column | upstream |
 | [exists-scalar-aggregate.md](exists-scalar-aggregate.md) | `EXISTS` over a correlated scalar aggregation was not always true | upstream |
 | [semi-anti-join-swap-output.md](semi-anti-join-swap-output.md) | swapping the sides of a semi or anti join shifted its output columns | upstream and fork |
 | [group-key-of-single-row-input.md](group-key-of-single-row-input.md) | `GROUP BY` / `DISTINCT` over an input of at most one row returned a row of NULLs on an empty input | upstream |
