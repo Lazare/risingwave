@@ -3,3 +3,4 @@
 batchsemijoin batch/inner_join_to_semi_join 60
 batchkeysnotnull batch/join_keys_not_null 60
 batchdaterange batch/date_range_predicates 60
+batchsemiorder batch/semi_join_ordering 60

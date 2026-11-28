@@ -409,6 +409,16 @@ static BATCH_DATE_RANGE_PREDICATES: LazyLock<OptimizationStage> = LazyLock::new(
     )
 });
 
+// Rule `SemiJoinPlacementRule` (`batch_semi_join_ordering`): bottom-up, so that a semi join
+// stacked over another one sees the inner joins that the lower one was pushed into.
+static BATCH_SEMI_JOIN_PLACEMENT: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Semi Join Placement For Batch",
+        vec![SemiJoinPlacementRule::create()],
+        ApplyOrder::BottomUp,
+    )
+});
+
 // Rule `UnionScanMergeRule` (`streaming_merge_union_scans`).
 static STREAM_MERGE_UNION_SCANS: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
@@ -1758,6 +1768,12 @@ impl LogicalOptimizer {
                 .config()
                 .batch_cost_based_join_ordering()
             {
+                // Semi and anti joins placed by the cost-based ordering
+                // (`batch_semi_join_ordering`): pushed into an input of the inner joins below
+                // them, or merged as one more inner join, before the inner joins are ordered.
+                if plan.ctx().session_ctx().config().batch_semi_join_ordering() {
+                    plan = plan.optimize_by_rules(&BATCH_SEMI_JOIN_PLACEMENT)?;
+                }
                 // The columns that the plan reads, for the widths of the inputs of the joins:
                 // the scans still read all the columns of their tables at this point.
                 let required = Arc::new(required_output_columns(&plan));

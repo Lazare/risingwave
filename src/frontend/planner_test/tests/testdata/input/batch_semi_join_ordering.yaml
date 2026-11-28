@@ -1,0 +1,138 @@
+# Semi and anti joins placed by the cost-based ordering of the inner joins
+# (`batch_semi_join_ordering`, rule `SemiJoinPlacementRule`, with `batch_cost_based_join_ordering`).
+# `table_row_counts` is test only (see `batch_cost_based_join_ordering.yaml`).
+- id: tables
+  sql: |
+    create table sjo_f (id int primary key, d1_id int, d2_id int, v int, w int);
+    create table sjo_d1 (id int primary key, a int, k int);
+    create table sjo_d2 (id int primary key, b int, k int);
+    create table sjo_g (id int primary key, x int, y int);
+    create table sjo_h (x int, y int);
+  expected_outputs: []
+- name: variable off by default (the semi join stays above the inner joins)
+  before:
+  - tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select f.* from sjo_f f join sjo_d1 d1 on f.d1_id = d1.id join sjo_d2 d2 on f.d2_id = d2.id
+    where exists (select 1 from sjo_h h where h.x = f.v);
+  table_row_counts:
+    sjo_f: 1000000
+    sjo_d1: 100
+    sjo_d2: 1000
+    sjo_h: 100
+  expected_outputs:
+  - batch_plan
+- name: semi join on the fact table pushed below the inner joins
+  before:
+  - tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    set batch_semi_join_ordering = true;
+    select f.* from sjo_f f join sjo_d1 d1 on f.d1_id = d1.id join sjo_d2 d2 on f.d2_id = d2.id
+    where exists (select 1 from sjo_h h where h.x = f.v);
+  table_row_counts:
+    sjo_f: 1000000
+    sjo_d1: 100
+    sjo_d2: 1000
+    sjo_h: 100
+  expected_outputs:
+  - batch_plan
+- name: anti join on the fact table pushed below a two-way inner join
+  before:
+  - tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    set batch_semi_join_ordering = true;
+    select f.*, d1.a from sjo_f f join sjo_d1 d1 on f.d1_id = d1.id
+    where not exists (select 1 from sjo_h h where h.x = f.v);
+  table_row_counts:
+    sjo_f: 1000000
+    sjo_d1: 100
+    sjo_h: 100
+  expected_outputs:
+  - batch_plan
+- name: semi join on a unique side merged as an inner join
+  before:
+  - tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    set batch_semi_join_ordering = true;
+    select f.* from sjo_f f join sjo_d1 d1 on f.d1_id = d1.id join sjo_d2 d2 on f.d2_id = d2.id
+    where f.w in (select g.id from sjo_g g where g.x = 1);
+  table_row_counts:
+    sjo_f: 1000000
+    sjo_d1: 100
+    sjo_d2: 1000
+    sjo_g: 100000
+  expected_outputs:
+  - batch_plan
+- name: kept, the condition reads two inputs of the inner joins
+  before:
+  - tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    set batch_semi_join_ordering = true;
+    select f.* from sjo_f f join sjo_d1 d1 on f.d1_id = d1.id join sjo_d2 d2 on f.d2_id = d2.id
+    where exists (select 1 from sjo_h h where h.x = f.v and h.y = d1.a);
+  table_row_counts:
+    sjo_f: 1000000
+    sjo_d1: 100
+    sjo_d2: 1000
+    sjo_h: 100
+  expected_outputs:
+  - batch_plan
+- name: kept without statistics
+  before:
+  - tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    set batch_semi_join_ordering = true;
+    select f.* from sjo_f f join sjo_d1 d1 on f.d1_id = d1.id join sjo_d2 d2 on f.d2_id = d2.id
+    where exists (select 1 from sjo_h h where h.x = f.v);
+  expected_outputs:
+  - batch_plan
+- name: kept without the cost-based ordering
+  before:
+  - tables
+  sql: |
+    set batch_semi_join_ordering = true;
+    select f.* from sjo_f f join sjo_d1 d1 on f.d1_id = d1.id join sjo_d2 d2 on f.d2_id = d2.id
+    where exists (select 1 from sjo_h h where h.x = f.v);
+  table_row_counts:
+    sjo_f: 1000000
+    sjo_d1: 100
+    sjo_d2: 1000
+    sjo_h: 100
+  expected_outputs:
+  - batch_plan
+- name: semi join on a dimension pushed to it
+  before:
+  - tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    set batch_semi_join_ordering = true;
+    select f.v, d2.b from sjo_f f join sjo_d1 d1 on f.d1_id = d1.id join sjo_d2 d2 on f.d2_id = d2.id
+    where d2.k in (select h.y from sjo_h h where h.x = 1);
+  table_row_counts:
+    sjo_f: 1000000
+    sjo_d1: 100
+    sjo_d2: 100000
+    sjo_h: 100
+  expected_outputs:
+  - batch_plan
+- name: two semi joins stacked
+  before:
+  - tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    set batch_semi_join_ordering = true;
+    select f.id from sjo_f f join sjo_d1 d1 on f.d1_id = d1.id join sjo_d2 d2 on f.d2_id = d2.id
+    where exists (select 1 from sjo_h h where h.x = f.v) and d1.k in (select h.y from sjo_h h);
+  table_row_counts:
+    sjo_f: 1000000
+    sjo_d1: 100
+    sjo_d2: 1000
+    sjo_h: 100
+  expected_outputs:
+  - batch_plan

@@ -527,6 +527,14 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_date_range_predicates: bool,
 
+    /// In a batch query whose inner joins are ordered by cost (`batch_cost_based_join_ordering`),
+    /// also place the semi and anti joins above them: push one into the input of the inner joins
+    /// whose columns it tests, or join a semi join whose other side is unique on the compared
+    /// columns as one more inner join, when the estimates say that it costs less. Defaults to
+    /// false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_semi_join_ordering: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,

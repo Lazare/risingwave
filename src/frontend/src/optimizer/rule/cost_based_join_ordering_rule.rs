@@ -1430,3 +1430,60 @@ pub(super) fn may_be_lookup_join_side(plan: &PlanRef, columns: &BTreeSet<usize>)
     scan_lookup_columns(scan).is_some_and(|key| key.is_subset(columns))
         || !scan.table_indexes().is_empty()
 }
+
+/// What the cost-based ordering estimates of a relation, for `SemiJoinPlacementRule`.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct RelationCost {
+    /// Estimated rows.
+    pub(super) rows: f64,
+    /// Pessimistic rows, for the memory of a build side.
+    pub(super) rows_hi: f64,
+    /// Bytes of a row.
+    pub(super) width: f64,
+    /// Cost of producing the relation: the bytes its inputs read, and the cost of its joins.
+    pub(super) cost: f64,
+}
+
+/// The estimate of a relation as an input of a join (all its columns), or `None` without an
+/// estimate.
+pub(super) fn relation_cost(plan: &PlanRef) -> Option<RelationCost> {
+    with_estimator(&plan.ctx(), |estimator| {
+        let estimate = estimator.input_estimate(plan)?;
+        let width = estimator.row_width(plan, None);
+        Some(RelationCost {
+            rows: estimate.rows,
+            rows_hi: estimate.hi,
+            width,
+            cost: estimate.read * width,
+        })
+    })
+}
+
+/// The estimate of the join tree that the cost-based ordering would choose for a multi-join (its
+/// cost includes the reading of its inputs), or `None` without estimates for all its inputs.
+pub(super) fn multi_join_cost(join: &LogicalMultiJoin) -> Option<RelationCost> {
+    let heuristic = join.heuristic_ordering().ok()?;
+    with_estimator(&join.base.ctx(), |estimator| {
+        let graph = estimator.graph(join, None)?;
+        let tree = graph.best_tree(&heuristic)?;
+        let planned = graph.planned(&tree);
+        Some(RelationCost {
+            rows: planned.rows,
+            rows_hi: planned.rows_hi,
+            width: graph.width(planned.inputs),
+            cost: planned.cost,
+        })
+    })
+}
+
+/// The cost of a hash join that probes with `probe` and builds `build`, as in the join tree costs.
+pub(super) fn hash_join_cost(
+    probe: &RelationCost,
+    build: &RelationCost,
+    output_rows: f64,
+    output_width: f64,
+) -> f64 {
+    probe.rows * probe.width * PROBE_COST
+        + build.rows_hi * build.width * BUILD_COST
+        + output_rows * output_width * OUTPUT_COST
+}

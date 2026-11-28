@@ -1,0 +1,146 @@
+"""Generates `e2e_test/batch/semi_join_ordering.slt`, the differential test of
+`batch_semi_join_ordering` (rule `SemiJoinPlacementRule`: semi and anti joins pushed into an input
+of the inner joins below them, or merged as an inner join on a unique side, by the cost-based join
+ordering). Both runs have `batch_cost_based_join_ordering` on. Every query runs twice, with and
+without the variable, through `INSERT ... SELECT` (the batch plan), and both results must hold the
+same rows with the same multiplicities, after each round of changes of the data. A pause after
+each change lets the storage statistics reach the frontend, so that the estimates exist.
+
+Usage: python3 e2e_test/batch/semi_join_ordering.gen.py e2e_test/batch/semi_join_ordering.slt
+"""
+import sys
+
+F, D1, D2, G, H = 'sjo_f', 'sjo_d1', 'sjo_d2', 'sjo_g', 'sjo_h'
+P = 'sjo'
+VAR = 'batch_semi_join_ordering'
+SETTINGS = ['batch_cost_based_join_ordering']
+
+# (name, columns of the result, query)
+CASES = [
+    ('exists_fact', 'id int, v int, w int',
+     f"select f.id, f.v, f.w from {F} f join {D1} d1 on f.d1_id = d1.id join {D2} d2 on f.d2_id = d2.id "
+     f"where exists (select 1 from {H} h where h.x = f.v)"),
+    ('not_exists_fact', 'id int, a int',
+     f"select f.id, d1.a from {F} f join {D1} d1 on f.d1_id = d1.id "
+     f"where not exists (select 1 from {H} h where h.x = f.v)"),
+    ('not_exists_three', 'id int, b int',
+     f"select f.id, d2.b from {F} f join {D1} d1 on f.d1_id = d1.id join {D2} d2 on f.d2_id = d2.id "
+     f"where not exists (select 1 from {H} h where h.x = f.v and h.y > f.w)"),
+    ('in_unique', 'id int, v int',
+     f"select f.id, f.v from {F} f join {D1} d1 on f.d1_id = d1.id join {D2} d2 on f.d2_id = d2.id "
+     f"where f.w in (select g.id from {G} g where g.x = 1)"),
+    ('in_unique_extra', 'id int, v int',
+     f"select f.id, f.v from {F} f join {D1} d1 on f.d1_id = d1.id join {D2} d2 on f.d2_id = d2.id "
+     f"where exists (select 1 from {G} g where g.id = f.w and g.y > f.v)"),
+    ('in_dimension', 'v int, b int',
+     f"select f.v, d2.b from {F} f join {D1} d1 on f.d1_id = d1.id join {D2} d2 on f.d2_id = d2.id "
+     f"where d2.k in (select h.y from {H} h where h.x < 5)"),
+    ('two_inputs', 'id int',
+     f"select f.id from {F} f join {D1} d1 on f.d1_id = d1.id join {D2} d2 on f.d2_id = d2.id "
+     f"where exists (select 1 from {H} h where h.x = f.v and h.y = d1.a)"),
+    ('stacked', 'id int',
+     f"select f.id from {F} f join {D1} d1 on f.d1_id = d1.id join {D2} d2 on f.d2_id = d2.id "
+     f"where exists (select 1 from {H} h where h.x = f.v) and d1.k in (select h.y from {H} h)"),
+    ('stacked_anti', 'id int, k int',
+     f"select f.id, d1.k from {F} f join {D1} d1 on f.d1_id = d1.id "
+     f"where not exists (select 1 from {H} h where h.x = f.v) and not exists (select 1 from {G} g where g.id = d1.k)"),
+    ('not_in', 'id int',
+     f"select f.id from {F} f join {D1} d1 on f.d1_id = d1.id where f.v not in (select h.x from {H} h where h.x is not null)"),
+    ('agg_above', 'a int, n bigint',
+     f"select d1.a, count(*) from {F} f join {D1} d1 on f.d1_id = d1.id join {D2} d2 on f.d2_id = d2.id "
+     f"where f.w in (select g.id from {G} g where g.x = 1) group by d1.a"),
+    ('duplicated_columns', 'id int, v int, v2 int',
+     f"select f.id, f.v, f.v from {F} f join {D1} d1 on f.d1_id = d1.id "
+     f"where exists (select 1 from {H} h where h.x = f.v)"),
+]
+
+out = []
+
+
+def stmt(sql):
+    out.append(f"statement ok\n{sql};\n")
+
+
+def query(types, sql, rows):
+    out.append(f"query {types}\n{sql};\n----\n" + "\n".join(rows) + "\n")
+
+
+def columns(cols):
+    return ', '.join(col.split()[0] for col in cols.split(', '))
+
+
+def run_all(title):
+    out.append("sleep 5s\n")
+    out.append(f"# {title}: every query runs without, then with the variable.\n")
+    for name, _, sql in CASES:
+        stmt(f"delete from {P}_{name}_off")
+        stmt(f"delete from {P}_{name}_on")
+        stmt(f"insert into {P}_{name}_off {sql}")
+        stmt(f"set {VAR} = true")
+        stmt(f"insert into {P}_{name}_on {sql}")
+        stmt(f"set {VAR} = false")
+    out.append(f"# {title}: both results hold the same rows, each the same number of times.\n")
+    for name, cols, _ in CASES:
+        a, b, c = f"{P}_{name}_on", f"{P}_{name}_off", columns(cols)
+        grouped = lambda t: f"select {c}, count(*) as {P}_rows from {t} group by {c}"
+        query('III',
+              f"select\n  (select count(*) from ({grouped(a)} except {grouped(b)}) x),\n"
+              f"  (select count(*) from ({grouped(b)} except {grouped(a)}) y),\n"
+              f"  (select count(*) from {a}) - (select count(*) from {b})",
+              ["0 0 0"])
+
+
+out.append(f"""# Differential test of `{VAR}`: every query runs through `INSERT ... SELECT` without, then
+# with the variable, and both results must hold the same rows with the same multiplicities, after
+# each round of changes of the data.
+#
+# Generated by `python3 e2e_test/batch/semi_join_ordering.gen.py <this file>`: edit the list of
+# queries there and regenerate rather than editing by hand.
+""")
+stmt("SET RW_IMPLICIT_FLUSH TO true")
+for setting in SETTINGS:
+    stmt(f"set {setting} = true")
+stmt(f"create table {F} (id int primary key, d1_id int, d2_id int, v int, w int)")
+stmt(f"create table {D1} (id int primary key, a int, k int)")
+stmt(f"create table {D2} (id int primary key, b int, k int)")
+stmt(f"create table {G} (id int primary key, x int, y int)")
+stmt(f"create table {H} (x int, y int)")
+for name, cols, _ in CASES:
+    stmt(f"create table {P}_{name}_off ({cols})")
+    stmt(f"create table {P}_{name}_on ({cols})")
+
+run_all("Empty tables")
+
+out.append("# First data: a large fact table, small dimensions, duplicates and NULLs in h.\n")
+stmt(f"insert into {F} select i, i % 20, i % 50, i % 37, i % 300 from generate_series(1, 5000) as s(i)")
+stmt(f"insert into {F} values (5001, null, 1, null, null), (5002, 1, null, 3, 7)")
+stmt(f"insert into {D1} select i, i % 3, i % 7 from generate_series(0, 19) as s(i)")
+stmt(f"insert into {D2} select i, i % 4, i % 9 from generate_series(0, 49) as s(i)")
+stmt(f"insert into {G} select i, i % 5, i % 11 from generate_series(0, 299) as s(i)")
+stmt(f"insert into {H} values (1, 1), (1, 1), (3, 2), (5, null), (null, 3), (null, null), (7, 0), "
+     f"(11, 4), (36, 6), (2, 5)")
+run_all("First data")
+
+out.append("# Second data: more rows in h (the semi joins keep more rows), changed keys.\n")
+stmt(f"insert into {H} select i % 37, i % 9 from generate_series(1, 400) as s(i)")
+stmt(f"update {F} set v = null where id % 97 = 0")
+stmt(f"update {D1} set k = null where id = 3")
+stmt(f"delete from {G} where id % 10 = 0")
+run_all("Second data")
+
+out.append("# Third data: h emptied, then the fact table emptied.\n")
+stmt(f"delete from {H}")
+run_all("Empty h")
+stmt(f"insert into {H} values (1, 1), (null, null)")
+stmt(f"delete from {F}")
+run_all("Empty fact table")
+
+out.append("# Cleanup.\n")
+for name, _, _ in reversed(CASES):
+    stmt(f"drop table {P}_{name}_on")
+    stmt(f"drop table {P}_{name}_off")
+for table in (H, G, D2, D1, F):
+    stmt(f"drop table {table}")
+
+open(sys.argv[1], 'w').write("\n".join(out))
+print(len(CASES), 'cases,', sum(1 for o in out if o.startswith(('statement', 'query'))), 'records')

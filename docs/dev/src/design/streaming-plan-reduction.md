@@ -49,6 +49,7 @@ own rules.
 | SJ17 | Batch: inner join to semi join on a unique side that is not read; `DISTINCT` removed under a semi or anti join by estimates (`batch_inner_join_to_semi_join`) | done (prototype, branch `proto/plan-reduction-batch-joins`, see "SJ" below) |
 | SJ18 | Batch: `IS NOT NULL` on equi-join keys, on the sides whose unmatched rows are not output (`batch_join_keys_not_null`) | done (prototype, branch `proto/plan-reduction-batch-joins`, see "SJ" below) |
 | SJ15 | Batch: range form of `date_trunc`, `::date`, `extract(year ...)` compared with constants (`batch_date_range_predicates`) | done for `date`, `timestamp` and `timestamptz` in `UTC` (prototype, branch `proto/plan-reduction-batch-joins`, see "SJ" below); other time zones not done |
+| SJ14 | Batch: semi and anti joins pushed into an input of the inner joins or merged as an inner join on a unique side, by the costs of BJ (`batch_semi_join_ordering`) | first version (prototype, branch `proto/plan-reduction-batch-joins`, see "SJ" below); semi joins reading several inputs not done |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -1526,6 +1527,57 @@ when `x` leads the key of the table.
   default); differential test `e2e_test/batch/date_range_predicates.gen.py` (26 queries on values
   on, one microsecond before and after each boundary, in `UTC` and in `Europe/Paris`, after
   updates to `NULL`, deletes and inserts).
+
+**14. Semi and anti joins in the cost-based ordering (`batch_semi_join_ordering`, Calcite
+`SemiJoinJoinTransposeRule`, PostgreSQL `reduce_unique_semijoins`).** With
+`batch_cost_based_join_ordering`, BJ orders the inner joins and leaves every semi or anti join
+where the binder put it, above all the inner joins of the `FROM` clause. `SemiJoinPlacementRule`,
+in its own bottom-up stage just before the stages of BJ, looks at a left semi or anti join whose
+left side is the multi-join of those inner joins (or a two-way inner join), and compares the
+estimated cost of three placements:
+
+```sql
+select f.* from f join d1 on f.d1_id = d1.id join d2 on f.d2_id = d2.id
+where exists (select 1 from h where h.x = f.v);
+-- kept:   LeftSemi(f.v = h.x) <- [Join(f, d1, d2)], h
+-- pushed: Join(LeftSemi(f.v = h.x) <- f, h ; d1 ; d2), ordered by BJ
+select ... where f.w in (select g.id from g where g.x = 1);
+-- merged: Join(f, d1, d2, g) on ... AND f.w = g.id, ordered by BJ (g unique on id)
+```
+
+- Pushed into the input of the multi-join that holds all the left columns its condition reads
+  (exact for semi and anti joins: they keep a row according to those columns only, so filtering
+  that input first keeps the same rows of the join, with their multiplicities). The condition is
+  remapped to the input, the multi-join keeps its condition and output.
+- Merged as one more input of the multi-join (semi joins only): when its right side is unique on
+  the columns its condition binds and the condition has an equality between the sides, the semi
+  join is an inner join whose right columns are not output; its condition joins the condition of
+  the multi-join, and BJ may then join the right side anywhere (a small filtered table early, a
+  lookup).
+- Costs: those of BJ (rows from the storage statistics, learned ratios with
+  `batch_cardinality_feedback_learning`, widths, probe 1, build 3, output 1 per byte; the rows
+  kept by a semi or anti join are half of its left side). Kept: the best join tree of the
+  multi-join plus the reading of the right side and the hash semi join above it. Pushed: the best
+  tree with the pushed input (which BJ counts as an input reading half of its rows), corrected to
+  count the reading of the original input and of the right side and the hash semi join over them.
+  Merged: the best tree of the multi-join with the right side. A placement replaces the kept one
+  only when cheaper by a factor 1.25; without an estimate for every input nothing moves. Bottom-up,
+  so that a semi join stacked over another sees the multi-join the lower one went into.
+- Behaviour with the variable off: the stage does not run, BJ is unchanged. The rule never runs
+  without BJ (it is inside its block) or without estimates.
+- Not done: a semi join whose condition reads several inputs of the multi-join (it could go into
+  the smallest sub-join holding them: an extension of the enumeration, below); semi joins on a
+  non-unique side turned into inner joins over a `DISTINCT` of that side (PostgreSQL's
+  unique-ification, which BJ could cost); lookup semi joins are costed as hash joins; right semi
+  and anti joins (none exist at this point of the pipeline).
+- Tests: planner tests `batch_semi_join_ordering.yaml` (semi join pushed below a multi-join, anti
+  join below a two-way join, semi join on a unique side merged, semi join on a dimension, two
+  stacked semi joins; kept: condition reading two inputs, no statistics, no cost-based ordering;
+  off by default); differential test `e2e_test/batch/semi_join_ordering.gen.py` (12 queries with
+  `batch_cost_based_join_ordering` on in both runs, a large fact table and small dimensions,
+  duplicates and `NULL`s in the tested side, stacked semi and anti joins, `NOT IN`, aggregation
+  above, after updates, deletes and with a side emptied; a pause after each change for the
+  statistics).
 
 ## Not for now: sharing between materialized views
 

@@ -242,6 +242,9 @@ pub use join_key_not_null_rule::*;
 // Range form of date predicates (`batch_date_range_predicates`).
 mod date_range_predicate_rule;
 pub use date_range_predicate_rule::*;
+// Semi and anti joins placed by the cost-based ordering (`batch_semi_join_ordering`).
+mod semi_join_placement_rule;
+pub use semi_join_placement_rule::*;
 // Rule `UnionScanMergeRule` (`streaming_merge_union_scans`).
 mod union_scan_merge_rule;
 pub use union_scan_merge_rule::*;
@@ -433,6 +436,7 @@ macro_rules! for_all_rules {
             , { SemiJoinDistinctRemoveRule }
             , { JoinKeyNotNullRule }
             , { DateRangePredicateRule }
+            , { SemiJoinPlacementRule }
             , { UnionScanMergeRule }
             , { StackedAggMergeRule }
             , { LateralTableFunctionRule }
