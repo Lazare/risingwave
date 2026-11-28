@@ -306,6 +306,28 @@ evicted from the block cache while an iterator holds them were counted nowhere.
   lookup join...) is assumed to use the order of its input. A marked scan is sent unordered: it
   reads its vnodes in any order (a few at a time with the bound), without the merge.
 
+**Measured on CI** (`e2e_test/batch/scan_read_memory.slt`, single node, debug build, 30 000 rows
+of about 3 KB of JSON flushed into L0, four tasks per scan; peaks of the blocks held by one scan
+of one task, from the log lines):
+
+| Settings | Median peak | Largest peak |
+|---|---|---|
+| no change of the reads (`batch_scan_prefetch_within_query_limit` or `batch_scan_release_prefetch_after_ms` alone, which did not act; without variables only peaks of 8 MB or more are logged) | 9.7 MB | 12.5 MB |
+| `batch_scan_max_open_vnode_iterators = 8` | 1.57 MB | 12.5 MB (ordered scans) |
+| `batch_scan_max_open_vnode_iterators = 1` | 0.20 MB | 12.5 MB (ordered scans) |
+| all four variables (bound 4, budget 1 MB) | 0.78 MB | 12.5 MB (ordered scans) |
+| `batch_scan_prefetch_budget_mb = 1` alone | 9.7 MB | 12.5 MB |
+
+The peak of a full scan is mostly the current block of each SST iterator of each open vnode
+(one per L0 SST and per level): only fewer open vnode iterators reduce it. The prefetch budget
+turns prefetches into single block reads (39 270 times over the test) but does not lower the
+peak here, since the prefetch window of a vnode is small (its blocks in one SST); it matters with
+larger vnodes. The scans that keep the largest peak are the ordered ones (`ORDER BY` the key with
+a limit, a grouping on the key): they merge all their vnodes. The release of prefetched blocks on
+held back output did not trigger in this test (no consumer blocked a task for 1 ms while it had
+prefetched blocks), and no block was evicted while held (large block cache). All results were
+identical with the variables off and on.
+
 **Costs and risks.**
 
 - Counting: queries whose scans hold a lot of blocks now count them: their spillable operators
