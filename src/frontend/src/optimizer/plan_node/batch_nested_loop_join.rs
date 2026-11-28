@@ -15,6 +15,7 @@
 use pretty_xmlish::{Pretty, XmlNode};
 use risingwave_pb::batch_plan::NestedLoopJoinNode;
 use risingwave_pb::batch_plan::plan_node::NodeBody;
+use risingwave_pb::plan_common::JoinType;
 
 use super::batch::prelude::*;
 use super::utils::{Distill, childless_record};
@@ -53,8 +54,29 @@ impl BatchNestedLoopJoin {
     fn derive_dist(left: &Distribution, right: &Distribution) -> Distribution {
         match (left, right) {
             (Distribution::Single, Distribution::Single) => Distribution::Single,
+            // `batch_broadcast_cross_join`: each task joins every row of the left side with its
+            // share of the rows of the right side.
+            (Distribution::Broadcast, right) if *right != Distribution::Single => {
+                Distribution::SomeShard
+            }
             (_, _) => unreachable!("{}{}", left, right),
         }
+    }
+
+    /// Whether each task may join a copy of every row of the left side with its share of the
+    /// right side (`batch_broadcast_cross_join`): the join outputs nothing for a left row on its
+    /// own (no left row padded with `NULL`s, no left row tested for a match), so that the copies
+    /// of a left row in the tasks that do not hold its matches output nothing.
+    fn may_broadcast_left(&self) -> bool {
+        self.base
+            .ctx()
+            .session_ctx()
+            .config()
+            .batch_broadcast_cross_join()
+            && matches!(
+                self.core.join_type,
+                JoinType::Inner | JoinType::RightOuter | JoinType::RightSemi | JoinType::RightAnti
+            )
     }
 }
 
@@ -104,6 +126,19 @@ impl_plan_tree_node_for_binary! { Batch, BatchNestedLoopJoin }
 
 impl ToDistributedBatch for BatchNestedLoopJoin {
     fn to_distributed(&self) -> Result<PlanRef> {
+        // `batch_broadcast_cross_join`: the right side keeps its distribution, and the left side,
+        // which the executor buffers, is copied to every task, instead of gathering both sides
+        // into one task.
+        if self.may_broadcast_left() {
+            let right = self.right().to_distributed()?;
+            if *right.distribution() != Distribution::Single {
+                let left = self.left().to_distributed_with_required(
+                    &Order::any(),
+                    &RequiredDist::PhysicalDist(Distribution::Broadcast),
+                )?;
+                return Ok(self.clone_with_left_right(left, right).into());
+            }
+        }
         let left = self
             .left()
             .to_distributed_with_required(&Order::any(), &RequiredDist::single())?;

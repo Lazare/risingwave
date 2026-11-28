@@ -2541,6 +2541,17 @@ impl LogicalOptimizer {
         // `batch_fold_null_contradictions`).
         plan = Self::simplify_conjunctions_for_batch(plan, explain_trace, &ctx)?;
 
+        // Rule `ConstantKeyJoinRule` (`batch_broadcast_cross_join`): after the last change of the
+        // joins, an equality of the same constant on both sides is removed, and the smaller side
+        // of a cross join is put on the left, which `BatchNestedLoopJoin` copies to every task.
+        if ctx.session_ctx().config().batch_broadcast_cross_join() {
+            plan = plan.optimize_by_rules(&OptimizationStage::new(
+                "Constant Key Join For Batch",
+                vec![ConstantKeyJoinRule::create()],
+                ApplyOrder::BottomUp,
+            ))?;
+        }
+
         // After the final predicate pushdown, contradictory conjuncts like
         // `x IS NULL AND x IN (...)` have been merged into the same filter or scan. Remove the
         // sub-plans that are proven to be empty. Only for batch queries.

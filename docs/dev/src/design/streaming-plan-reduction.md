@@ -74,6 +74,7 @@ default.
 | NC | `e IS NULL` together with a conjunct that is strict in `e` (comparison, `LIKE`, regular expression, arithmetic, cast...), for any deterministic `e` (a `COALESCE` of columns...): the filter, scan or join matches nothing (`batch_fold_null_contradictions`, `streaming_fold_null_contradictions`) | done (prototype, branch `proto/plan-reduction-contradictions`), see "NC" below |
 | IL | Intersection of the `IN` lists / equalities on the same expression, repeated arguments of `COALESCE` removed (`batch_simplify_in_lists_and_coalesce`, `streaming_simplify_in_lists_and_coalesce`) | done (prototype, branch `proto/plan-reduction-contradictions`), see "IL" below |
 | EB | Batch executor: a hash join whose build side holds no key that can match does not execute its probe side, when the output can not depend on it and the probe side reads nothing from other tasks | done (unconditional, branch `proto/plan-reduction-contradictions`), see "EB" below |
+| BC | Batch: cross join, or join on the same constant on both sides, as a nested loop join that copies its left side to every task (broadcast exchange) instead of one task (`batch_broadcast_cross_join`) | done (prototype, branch `proto/plan-reduction-contradictions`), see "BC" below |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -2891,6 +2892,38 @@ discarded, and only in the shape where nothing waits for it.
 - Effect on the sample workload: none on the data test that motivated it. Its join with the empty
   side reads the large side through exchanges (and in the replayed plan the large side is the build
   side); NC removes the work there at planning time instead.
+
+### BC. Batch: cross joins copied to every task (added on 2026-11-28, done on the branch)
+
+Views that are also materialized write a cross join as `JOIN small ON big.one = small.one` with
+`1 AS one` on both sides, because a streaming job can not run a cross join. Upstream batch plans
+it as `HashJoin(1 = 1)` with both inputs `Exchange(HashShard(1))`: every row of both sides goes to
+the task of the hash of the constant. A real cross join is no better: `BatchNestedLoopJoin`
+requires both inputs `Single`. This is upstream behaviour (also in the plans of the sample
+workload without any fork variable); a performance defect, not a wrong result (note
+`docs/fork/evolutions/broadcast-cross-join.md`).
+
+**What BC does (variable `batch_broadcast_cross_join`, default false).**
+
+- `ConstantKeyJoinRule`, last logical stage of a batch query: an equality between the two sides
+  whose operands hold the same non-`NULL` constant in every row (column facts, simple types) is
+  `TRUE` for every pair and is removed, whatever the join type; an inner join without equality
+  between its sides gets its smaller side on the left when the cost-based estimates know both.
+- `BatchNestedLoopJoin::to_distributed`: for inner, right outer, right semi and right anti joins
+  whose right side is not `Single`, the left side (the one the executor buffers) is required
+  `Broadcast` and the join is `SomeShard`. Each task joins a copy of every left row with its share
+  of the right rows; these join types output nothing for a left row on its own, so the result is
+  the same.
+- `Distribution::to_prost`: `Broadcast` carries `BroadcastInfo { count }` (the number of consumer
+  tasks), as `HashShard` carries its output count. The batch broadcast output channel already
+  existed; batch plans never produced it.
+
+**Not done.** Left outer / semi / anti and full nested loop joins (each copy of a left row would be
+output or tested once per task); a broadcast hash join on a real key; streaming (no nested loop
+join; the join on a constant stays on one vnode). Local execution keeps both inputs `Single`.
+
+- Tests: planner test `batch_broadcast_cross_join.yaml`; differential test
+  `e2e_test/batch/broadcast_cross_join` (distributed mode).
 
 ## Not for now: sharing between materialized views
 

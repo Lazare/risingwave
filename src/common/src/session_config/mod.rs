@@ -798,6 +798,17 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_simplify_in_lists_and_coalesce: bool,
 
+    // Rule `ConstantKeyJoinRule` and `BatchNestedLoopJoin::to_distributed`
+    // (`batch_broadcast_cross_join`).
+    /// In a batch query, run a cross join (an inner join without equality between its sides, or
+    /// whose equalities compare the same constant on both sides, such as `a.one = b.one` with
+    /// `1 AS one` on both sides) as a nested loop join that copies its smaller side (by the
+    /// estimates, when there are some) to every task of the other side, instead of gathering both
+    /// sides into one task. Also for right outer, semi and anti nested loop joins. Defaults to
+    /// false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_broadcast_cross_join: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,

@@ -23,6 +23,7 @@ user application_name
 user auto_locality_backfill_min_size
 user backfill_rate_limit
 user background_ddl
+user batch_broadcast_cross_join
 user batch_cardinality_feedback
 user batch_cardinality_feedback_learning
 user batch_compact_shuffle_output
