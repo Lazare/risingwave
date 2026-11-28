@@ -200,7 +200,12 @@ impl Counter {
         under_limit: bool,
     ) -> (bool, bool) {
         let input_stage = input_stage(node, stage, path);
-        let input_under_limit = under_limit || node.node_type() == BatchPlanNodeType::BatchLimit;
+        // `BatchLimitDistinct` (`batch_limit_distinct`) also stops reading its input early.
+        let input_under_limit = under_limit
+            || matches!(
+                node.node_type(),
+                BatchPlanNodeType::BatchLimit | BatchPlanNodeType::BatchLimitDistinct
+            );
         let mut allowed = is_allowed(node);
         let mut costly = is_costly(node);
         for (i, input) in node.inputs().iter().enumerate() {
