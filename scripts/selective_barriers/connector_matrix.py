@@ -701,14 +701,19 @@ def after_version():
 def while_recovering(action, timeout=180):
     """Run `action`, again while the restarted cluster still refuses it because it recovers its
     streaming jobs: DML and webhook rows are refused until every table has its writer again, even
-    after `rw_recovery_status()` says RUNNING. Any other error is raised at once."""
+    after `rw_recovery_status()` says RUNNING. A DML can also reach the frontend before the
+    streaming vnode mapping of its table, and fail with "Streaming vnode mapping not found".
+    Any other error is raised at once."""
     deadline = time.time() + timeout
     while True:
         try:
             return action()
         except Exception as e:  # noqa: BLE001
-            transient = "not permitted during cluster recovery" in str(e) or (
-                isinstance(e, urllib.error.HTTPError) and e.code in (500, 503))
+            message = str(e)
+            transient = (
+                "not permitted during cluster recovery" in message
+                or "Streaming vnode mapping not found" in message
+                or (isinstance(e, urllib.error.HTTPError) and e.code in (500, 503)))
             if not transient or time.time() > deadline:
                 raise
             time.sleep(2)
