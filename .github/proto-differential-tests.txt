@@ -35,6 +35,7 @@ fncbatch batch/fold_null_contradictions 60
 fncstream streaming/fold_null_contradictions 60
 groupkeys streaming/reduce_group_keys 60
 groupkeysbatch batch/reduce_group_keys 60
+grouptopnmem batch/group_topn_memory 60
 ladder streaming/status_ladder_case 90
 lateral streaming/unnest_lateral_functions 60
 merge streaming/merge_repeated_lookups 90
