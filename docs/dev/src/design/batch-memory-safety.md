@@ -158,9 +158,20 @@ node sees it.
 **Over-count on the consumer side.** A local consumer of a hash shuffle receives the whole input
 chunk with a visibility that keeps about `1/Q` of its rows (`Q` outputs). An operator that kept it
 counted the full chunk (`estimated_heap_size` counts the shared columns), `Q` times over all the
-consumers, and kept the whole chunk alive. The hash join (build side) and the nested loop join
-(left side) now compact the chunks that they keep: one copy of their visible rows. The sort
-already did; the other operators keep rows, not chunks.
+consumers, and kept the whole chunk alive. The operators that keep chunks for a while (hash join
+build side, nested loop join left side, the outer batches of the lookup join) now compact a chunk
+when fewer than half of its rows are visible (`compact_if_sparse`): they copy the visible rows,
+count that copy in their own context, and drop their reference to the shared block. A chunk with
+at least half of its rows visible is kept as it is and counted in full by the operator: at most
+two consumers can keep such a slice of one block. The sort already compacted every chunk; the
+other operators keep rows, not chunks.
+
+**Lifetime of the count.** The block is counted once from the moment it enters the channels until
+its last slice leaves them (taken by a local consumer, or handed to gRPC). Afterwards, a consumer
+that streams the slice drops it right away, and a consumer that keeps it either compacts it or
+counts it itself. A small window remains uncounted: a slice being processed by a streaming
+operator, and the columns that an operator reuses in its output (a projection of input columns)
+while that output waits downstream.
 
 **Compact mode (`batch_compact_shuffle_output`, default false).** The hash shuffle appends the rows
 of each output to a chunk builder of its own and sends full chunks: no chunk is pinned by the
