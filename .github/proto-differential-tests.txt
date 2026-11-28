@@ -1,1 +1,2 @@
 batchlimit batch/push_down_limit 60
+batchlimitdistinct batch/limit_distinct 60

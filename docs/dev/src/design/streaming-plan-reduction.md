@@ -47,6 +47,7 @@ own rules.
 | BT | Batch: `row_number() <= n` per partition becomes a top-n per group, small `n` only (`batch_over_window_to_topn`) | done (prototype, branch `proto/plan-reduction-batch-pass2`, see "BP and BT" below) |
 | BU | Batch: `UNION ALL` run in parallel tasks instead of one (`batch_distributed_union`) | done (prototype, branch `proto/plan-reduction-batch-union-dist`, see "BU" below) |
 | BLM | Batch: a copy of a `LIMIT` / top-n pushed into the branches of a `UNION ALL` and into the preserved side of a left or right join (`batch_push_down_limit`) | done (prototype, branch `proto/plan-reduction-batch-limit`, see "BLM" below); full outer join rejected (wrong results) |
+| BLD | Batch: a distinct under a `LIMIT` (`SELECT DISTINCT`, `UNION`) read by a non-blocking operator that stops after `limit + offset` rows, also in each branch of the union (`batch_limit_distinct`) | done (prototype, branch `proto/plan-reduction-batch-limit`, see "BLD" below); ordered variant not done |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -1494,6 +1495,61 @@ distributed) where the plan sorted the union once; with a large `n + k` and bran
 than it, the gain is small. The copy on the preserved side of a join bounds the rows that the
 join reads from that side, whatever the operator chosen for the join (hash, lookup, nested loop);
 it does not help when the join is not where the time goes.
+
+### BLD. Batch: limit over a distinct (added on 2026-11-28)
+
+**Problem.** `SELECT DISTINCT a FROM t LIMIT 10` and `SELECT a FROM t1 UNION SELECT a FROM t2
+LIMIT 10` plan a hash aggregation without aggregate calls under the limit. The hash aggregation is
+blocking: it reads and deduplicates its whole input before the limit takes 10 rows, although the
+first 10 distinct values seen would do.
+
+**What BLD does (variable `batch_limit_distinct`, default false, rule `BatchLimitDistinctRule`,
+operator `BatchLimitDistinct`, proto `LimitDistinctNode`, executor `LimitDistinctExecutor`).**
+On the physical batch plan before its distribution, a `BatchLimit(n, k)` over a `BatchHashAgg`
+with a group key, no aggregate calls and no grouping sets (through projections) gets a
+`BatchLimitDistinct(n + k)` in place of the aggregation; the limit stays above and applies the
+offset. The executor keeps a hash set of the values emitted so far (counted in its memory context,
+`n + k` values at most), emits each value with the chunk where it first sees it (`NULL`s equal, as
+for `DISTINCT`), and stops reading its input once it has emitted `n + k` values: it drops its input
+stream, which ends the input as under a `BatchLimit` (an exchange ends its producers the same way).
+
+```sql
+create table t1 (a int, b int);
+create table t2 (a int, b int);
+select a from t1 union select a from t2 limit 10;
+-- before: Limit(10) <- HashAgg(a) <- Exchange(Hash a) <- Union <- [Exchange(Single) <- Scan(t1), ..]
+-- BLD:    Limit(10) <- LimitDistinct(a, 10) <- Union <- [Exchange(Single) <- LimitDistinct(a, 10, per task) <- Scan(t1), ..]
+```
+
+- `UNION` (an aggregation over a `UNION ALL`): each branch gets a per-task
+  `BatchLimitDistinct(n + k)` too. Correctness: if the union has at least `n + k` distinct values,
+  either one branch has `n + k` distinct values and emits `n + k` of them, or every branch emits
+  all its distinct values; in both cases what the branches emit holds `n + k` distinct values (or
+  every distinct value of the union), and the global operator above keeps `n + k` distinct values
+  of them. With fewer distinct values in the union, every branch emits all its values and the
+  global operator emits them all.
+- Distribution: a global operator over an input distributed in several tasks becomes a per-task
+  operator in each task (each stops after `n + k` values), a gather into one task, and the global
+  operator again: the same argument with the tasks in place of the branches. Over an input already
+  hashed on a part of the group key, or single, the operator runs once per task without gather
+  (the tasks hold disjoint values). A per-task copy only promises values distinct within its task.
+- Not rewritten: aggregations with calls (`GROUP BY` with `count`...), `DISTINCT ON` (an
+  aggregation with `first_value` calls, or a top-n per group), a sort aggregation (it already
+  streams its groups, so the limit stops it early), `OFFSET` without `LIMIT`, and an `ORDER BY`
+  over the distinct (a top-n, not a limit; `WITH TIES` included).
+- Not done: the ordered variant (`SELECT DISTINCT a .. ORDER BY a LIMIT n`): a top-n of distinct
+  rows per branch would need a heap that deduplicates its rows, which no operator has (the top-n
+  per group keeps rows per key, not distinct keys); a distinct then a top-n per branch still holds
+  every distinct value of the branch. Left as it is.
+- Tests: `batch_limit_distinct.yaml` (planner: distinct with a limit, with an offset, on two
+  columns, of an expression, on an input hashed by its key, `UNION` of two and three branches,
+  inside a count, distributed and local plans; kept: aggregation with calls, `DISTINCT ON`, top-n,
+  `WITH TIES`, offset only, off by default), the unit test of the executor (early end, `NULL`s,
+  a limit larger than the values), and the differential `e2e_test/batch/limit_distinct.gen.py`
+  (18 queries with a result that does not depend on which distinct rows the limit keeps: counts of
+  the rows of the limit, counts of values that appear twice in it, which must be 0, and limits
+  larger than the number of distinct rows; local and distributed query mode; NULLs, duplicates,
+  several chunks and tasks, updates and deletes, an empty branch, one distinct row).
 
 ## Not for now: sharing between materialized views
 

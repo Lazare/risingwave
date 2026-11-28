@@ -336,6 +336,7 @@ mod table_function_to_postgres_query_rule;
 mod top_n_to_vector_search_rule;
 mod values_extract_project_rule;
 pub use add_logstore_rule::*;
+pub use batch::batch_limit_distinct_rule::*;
 pub use batch::batch_push_limit_to_scan_rule::*;
 pub use correlated_topn_to_vector_search::*;
 pub use iceberg_count_star_rule::IcebergCountStarRule;
@@ -468,6 +469,7 @@ macro_rules! for_all_rules {
             , { UnifyFirstLastValueRule }
             , { ValuesExtractProjectRule }
             , { BatchPushLimitToScanRule }
+            , { BatchLimitDistinctRule }
             , { PullUpCorrelatedPredicateAggRule }
             , { SourceToKafkaScanRule }
             , { IcebergEngineStorageSelectionRule }

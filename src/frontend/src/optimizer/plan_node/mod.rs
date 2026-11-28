@@ -1026,6 +1026,7 @@ mod batch_hash_join;
 mod batch_hop_window;
 mod batch_insert;
 mod batch_limit;
+mod batch_limit_distinct;
 mod batch_log_seq_scan;
 mod batch_lookup_join;
 mod batch_max_one_row;
@@ -1162,6 +1163,7 @@ pub use batch_iceberg_scan::BatchIcebergScan;
 pub use batch_insert::BatchInsert;
 pub use batch_kafka_scan::BatchKafkaScan;
 pub use batch_limit::BatchLimit;
+pub use batch_limit_distinct::BatchLimitDistinct;
 pub use batch_log_seq_scan::BatchLogSeqScan;
 pub use batch_lookup_join::BatchLookupJoin;
 pub use batch_max_one_row::BatchMaxOneRow;
@@ -1361,6 +1363,7 @@ macro_rules! for_all_plan_nodes {
             , { Batch, Sort }
             , { Batch, Exchange }
             , { Batch, Limit }
+            , { Batch, LimitDistinct }
             , { Batch, TopN }
             , { Batch, HopWindow }
             , { Batch, TableFunction }

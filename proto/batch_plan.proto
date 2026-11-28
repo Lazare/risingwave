@@ -290,6 +290,14 @@ message LimitNode {
   uint64 offset = 2;
 }
 
+// The distinct values of the group key columns of the input, `limit` of them at most: each value
+// is emitted the first time it is seen, and the input is no longer read once `limit` values were
+// emitted (`batch_limit_distinct`).
+message LimitDistinctNode {
+  repeated uint32 group_key = 1;
+  uint64 limit = 2;
+}
+
 message NestedLoopJoinNode {
   plan_common.JoinType join_type = 1;
   expr.ExprNode join_cond = 2;
@@ -495,6 +503,7 @@ message PlanNode {
     VectorIndexNearestNode vector_index_nearest = 44;
     GetChannelDeltaStatsNode get_channel_delta_stats = 45;
     IcebergMetadataScanNode iceberg_metadata_scan = 46;
+    LimitDistinctNode limit_distinct = 48;
     // The following nodes are used for testing.
     bool block_executor = 100;
     bool busy_loop_executor = 101;

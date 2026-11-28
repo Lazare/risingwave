@@ -466,6 +466,19 @@ impl BatchOptimizedLogicalPlanRoot {
             ApplyOrder::BottomUp,
         ))?;
 
+        // Rule `BatchLimitDistinctRule` (`batch_limit_distinct`): a limit over a distinct reads the
+        // distinct values with an operator that stops after `limit + offset` values, also put into
+        // the branches of a `UNION ALL` below the distinct. On the physical plan before its
+        // distribution, which then splits the operator in two phases where its input is
+        // distributed.
+        if ctx.session_ctx().config().batch_limit_distinct() {
+            plan = plan.optimize_by_rules(&OptimizationStage::<Batch>::new(
+                "Limit Distinct",
+                vec![BatchLimitDistinctRule::create()],
+                ApplyOrder::TopDown,
+            ))?;
+        }
+
         // Inline session timezone
         plan = inline_session_timezone_in_exprs(ctx.clone(), plan)?;
 

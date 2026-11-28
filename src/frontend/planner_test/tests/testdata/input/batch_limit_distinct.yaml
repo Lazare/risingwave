@@ -1,0 +1,103 @@
+# Tests for `batch_limit_distinct` (batch only): `BatchLimitDistinctRule` replaces a distinct (a
+# hash aggregation with a group key and no aggregate calls) under a `LIMIT n OFFSET k` by a
+# `BatchLimitDistinct` that stops after `n + k` distinct rows; the branches of a `UNION` (an
+# aggregation over a `UNION ALL`) get a per-task copy. Over a distributed input, the operator runs
+# per task, then once more after the gather. Not for aggregations with calls, `DISTINCT ON`, an
+# `ORDER BY` (a top-n) or an offset without limit.
+- id: setup_off
+  sql: |
+    create table t1 (a int, b int, c varchar);
+  expected_outputs: []
+- id: setup
+  sql: |
+    set batch_limit_distinct = true;
+    create table t1 (a int, b int, c varchar);
+    create table t2 (a int, b int, c varchar);
+    create table t3 (a int, b int, c varchar);
+    create table l (id int primary key, k int, x int);
+  expected_outputs: []
+
+- name: off by default - distinct with a limit
+  before: [setup_off]
+  sql: |
+    select distinct a from t1 limit 5;
+  expected_outputs:
+  - batch_plan
+
+# Rewritten.
+- name: distinct with a limit
+  before: [setup]
+  sql: |
+    select distinct a from t1 limit 5;
+  expected_outputs:
+  - batch_plan
+  - batch_local_plan
+- name: distinct on two columns with a limit and an offset
+  before: [setup]
+  sql: |
+    select distinct a, b from t1 limit 5 offset 2;
+  expected_outputs:
+  - batch_plan
+- name: distinct of an expression
+  before: [setup]
+  sql: |
+    select distinct a + b as s from t1 limit 3;
+  expected_outputs:
+  - batch_plan
+- name: distinct on a column hashed like the input (primary key first)
+  before: [setup]
+  sql: |
+    select distinct id, k from l limit 3;
+  expected_outputs:
+  - batch_plan
+- name: union with a limit
+  before: [setup]
+  sql: |
+    select a, b from t1 union select a, b from t2 limit 10;
+  expected_outputs:
+  - batch_plan
+  - batch_local_plan
+- name: union of three branches with a limit and an offset
+  before: [setup]
+  sql: |
+    select a from t1 union select a from t2 union select a from t3 limit 4 offset 1;
+  expected_outputs:
+  - batch_plan
+- name: limited distinct inside a count
+  before: [setup]
+  sql: |
+    select count(*) from (select distinct a from t1 limit 4) s;
+  expected_outputs:
+  - batch_plan
+
+# Kept as they are.
+- name: kept - aggregation with calls
+  before: [setup]
+  sql: |
+    select a, count(*) from t1 group by a limit 5;
+  expected_outputs:
+  - batch_plan
+- name: kept - distinct on
+  before: [setup]
+  sql: |
+    select distinct on (a) a, b from t1 limit 5;
+  expected_outputs:
+  - batch_plan
+- name: kept - distinct with an order (top-n)
+  before: [setup]
+  sql: |
+    select distinct a from t1 order by a limit 5;
+  expected_outputs:
+  - batch_plan
+- name: kept - distinct with ties
+  before: [setup]
+  sql: |
+    select distinct a from t1 order by a fetch first 2 rows with ties;
+  expected_outputs:
+  - batch_plan
+- name: kept - offset without limit
+  before: [setup]
+  sql: |
+    select distinct a from t1 offset 3;
+  expected_outputs:
+  - batch_plan

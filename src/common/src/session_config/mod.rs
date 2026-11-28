@@ -513,6 +513,15 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_push_down_limit: bool,
 
+    // Rule `BatchLimitDistinctRule`, operator `BatchLimitDistinct`.
+    /// In a batch query, read the distinct rows under a `LIMIT` (`SELECT DISTINCT .. LIMIT n`,
+    /// `UNION .. LIMIT n`) with an operator that emits each distinct row the first time it sees it
+    /// and stops reading its input after `n + OFFSET` rows, instead of a hash aggregation that
+    /// reads its whole input first; the branches of a `UNION` get the same operator. Defaults to
+    /// false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_limit_distinct: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,
