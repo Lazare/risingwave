@@ -298,7 +298,8 @@ impl<'a, S: StateStore> OverPartition<'a, S> {
 
                 if let Some(old_row) = snapshot.get(key).cloned() {
                     // update
-                    if old_row != new_row {
+                    // Identical, not only equal: `1.0` and `1.00` (`numeric`) differ.
+                    if !risingwave_common::row::identical(&old_row, &new_row) {
                         part_changes.insert(
                             key.as_normal_expect().clone(),
                             Record::Update { old_row, new_row },

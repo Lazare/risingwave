@@ -16,10 +16,11 @@ use std::sync::LazyLock;
 
 use indexmap::IndexMap;
 use indexmap::map::Entry;
+use risingwave_common::array::stream_chunk::OpRowMutRef;
 use risingwave_common::array::stream_record::Record;
-use risingwave_common::array::{Op, StreamChunk, StreamChunkBuilder};
+use risingwave_common::array::{Op, RowRef, StreamChunk, StreamChunkBuilder};
 use risingwave_common::log::LogSuppressor;
-use risingwave_common::row::{Row, RowExt as _};
+use risingwave_common::row::{CompactedRow, OwnedRow, Row, RowExt as _};
 use risingwave_common::types::DataType;
 
 use crate::consistency::consistency_panic;
@@ -55,8 +56,40 @@ mod private {
     pub trait Key: Eq + std::hash::Hash {}
     impl<K> Key for K where K: Eq + std::hash::Hash {}
 
-    pub trait Row: Eq + Default {}
-    impl<R> Row for R where R: Eq + Default {}
+    pub trait Row: Eq + Default + super::Identical {}
+    impl<R> Row for R where R: Eq + Default + super::Identical {}
+}
+
+/// Whether two rows are identical, not only equal: an update between equal rows that differ in
+/// representation (`1.0` and `1.00` for `numeric`) is not a no-op. See
+/// [`risingwave_common::row::identical`].
+pub trait Identical {
+    fn identical(&self, other: &Self) -> bool;
+}
+
+impl Identical for OwnedRow {
+    fn identical(&self, other: &Self) -> bool {
+        risingwave_common::row::identical(self, other)
+    }
+}
+
+impl Identical for RowRef<'_> {
+    fn identical(&self, other: &Self) -> bool {
+        risingwave_common::row::identical(self, other)
+    }
+}
+
+impl Identical for OpRowMutRef<'_> {
+    fn identical(&self, other: &Self) -> bool {
+        risingwave_common::row::identical(self.row_ref(), other.row_ref())
+    }
+}
+
+impl Identical for CompactedRow {
+    /// The value encoding keeps the representation of the values.
+    fn identical(&self, other: &Self) -> bool {
+        self == other
+    }
 }
 
 /// A buffer that accumulates changes and produce compacted changes.
@@ -183,7 +216,7 @@ where
         self.buffer.into_values().filter(|record| match record {
             Record::Insert { .. } => true,
             Record::Delete { .. } => true,
-            Record::Update { old_row, new_row } => old_row != new_row,
+            Record::Update { old_row, new_row } => !old_row.identical(new_row),
         })
     }
 }

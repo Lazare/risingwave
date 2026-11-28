@@ -215,7 +215,7 @@ impl<S: StateStore> SimpleAggExecutor<S> {
             outputs_change.expect("`AlwaysOutput` strategy will output a change in any case");
         let chunk = if !this.must_output_per_barrier
             && let Record::Update { old_row, new_row } = &change
-            && old_row == new_row
+            && risingwave_common::row::identical(old_row, new_row)
         {
             // for cases without approx percentile, we don't need to output the change if it's noop
             None
