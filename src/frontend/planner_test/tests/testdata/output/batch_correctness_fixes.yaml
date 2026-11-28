@@ -558,19 +558,59 @@
   sql: |
     select k, count(*) from na group by k having k not in (select k from nb);
   batch_plan: |-
-    BatchNestedLoopJoin { type: Inner, predicate: true, output: [na.k, count] }
-    ├─BatchNestedLoopJoin { type: LeftAnti, predicate: IsNotNull(nb.k), output: all }
-    │ ├─BatchExchange { order: [], dist: Single }
-    │ │ └─BatchHashAgg { group_key: [na.k], aggs: [count] }
-    │ │   └─BatchExchange { order: [], dist: HashShard(na.k) }
-    │ │     └─BatchScan { table: na, columns: [na.k], distribution: SomeShard }
-    │ └─BatchExchange { order: [], dist: Single }
-    │   └─BatchScan { table: nb, columns: [nb.k], distribution: SomeShard }
-    └─BatchFilter { predicate: (Case(IsNull(Case((sum0(count) = 0:Int64), 0:Int32, (sum0(count filter(IsNull(nb.k))) > 0:Int64), 2:Int32, 1:Int32)), 1:Int32, 2:Int32) > Case((sum0(count) = 0:Int64), 0:Int32, (sum0(count filter(IsNull(nb.k))) > 0:Int64), 2:Int32, 1:Int32)) }
+    BatchNestedLoopJoin { type: Inner, predicate: ($expr1 > $expr2), output: [na.k, count] }
+    ├─BatchExchange { order: [], dist: Single }
+    │ └─BatchProject { exprs: [na.k, count, Case(IsNull(na.k), 1:Int32, 2:Int32) as $expr1] }
+    │   └─BatchHashJoin { type: LeftAnti, predicate: na.k = nb.k, output: all }
+    │     ├─BatchHashAgg { group_key: [na.k], aggs: [count] }
+    │     │ └─BatchExchange { order: [], dist: HashShard(na.k) }
+    │     │   └─BatchScan { table: na, columns: [na.k], distribution: SomeShard }
+    │     └─BatchExchange { order: [], dist: HashShard(nb.k) }
+    │       └─BatchScan { table: nb, columns: [nb.k], distribution: SomeShard }
+    └─BatchProject { exprs: [Case((sum0(count) = 0:Int64), 0:Int32, (sum0(count filter(IsNull(nb.k))) > 0:Int64), 2:Int32, 1:Int32) as $expr2] }
       └─BatchSimpleAgg { aggs: [sum0(count), sum0(count filter(IsNull(nb.k)))] }
         └─BatchExchange { order: [], dist: Single }
           └─BatchSimpleAgg { aggs: [count, count filter(IsNull(nb.k))] }
             └─BatchScan { table: nb, columns: [nb.k], distribution: SomeShard }
+- name: in - in having, the compared column refers to the group key
+  before:
+  - not_in_setup
+  sql: |
+    select k, count(*) from na group by k having k in (select k from nb);
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: LeftSemi, predicate: na.k = nb.k, output: all }
+      ├─BatchHashAgg { group_key: [na.k], aggs: [count] }
+      │ └─BatchExchange { order: [], dist: HashShard(na.k) }
+      │   └─BatchScan { table: na, columns: [na.k], distribution: SomeShard }
+      └─BatchExchange { order: [], dist: HashShard(nb.k) }
+        └─BatchScan { table: nb, columns: [nb.k], distribution: SomeShard }
+- name: not in - in having, compared with an aggregate
+  before:
+  - not_in_setup
+  sql: |
+    select k, count(*) from na group by k having count(*) not in (select y from nm);
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: LeftAnti, predicate: count = $expr1, output: all }
+      ├─BatchExchange { order: [], dist: HashShard(count) }
+      │ └─BatchHashAgg { group_key: [na.k], aggs: [count] }
+      │   └─BatchExchange { order: [], dist: HashShard(na.k) }
+      │     └─BatchScan { table: na, columns: [na.k], distribution: SomeShard }
+      └─BatchExchange { order: [], dist: HashShard($expr1) }
+        └─BatchProject { exprs: [nm.y::Int64 as $expr1] }
+          └─BatchScan { table: nm, columns: [nm.y], distribution: SomeShard }
+  stream_plan: |-
+    StreamMaterialize { columns: [k, count], stream_key: [k, count], pk_columns: [k, count], pk_conflict: NoCheck }
+    └─StreamExchange { dist: HashShard(na.k, count) }
+      └─StreamHashJoin { type: LeftAnti, predicate: count = $expr1, output: all }
+        ├─StreamExchange { dist: HashShard(count) }
+        │ └─StreamHashAgg { group_key: [na.k], aggs: [count] }
+        │   └─StreamExchange { dist: HashShard(na.k) }
+        │     └─StreamTableScan { table: na, columns: [na.k, na.id], stream_scan_type: SnapshotBackfill, stream_key: [na.id], pk: [id], dist: UpstreamHashShard(na.id) }
+        └─StreamExchange { dist: HashShard($expr1) }
+          └─StreamProject { exprs: [nm.y::Int64 as $expr1, nm.id] }
+            └─StreamTableScan { table: nm, columns: [nm.y, nm.id], stream_scan_type: SnapshotBackfill, stream_key: [nm.id], pk: [id], dist: UpstreamHashShard(nm.id) }
 - name: not in - delete
   before:
   - not_in_setup
