@@ -50,6 +50,7 @@
 
 use std::collections::BTreeSet;
 
+use risingwave_common::util::iter_util::ZipEqFast;
 use risingwave_expr::aggregate::{AggType, PbAggKind};
 
 use super::null_key_join_rule::always_null_columns;
@@ -168,7 +169,7 @@ impl Rule<Logical> for AggUnionNullBranchRule {
         let new_input: PlanRef = if agg.group_key().is_empty() {
             let mut kept: Vec<PlanRef> = branches
                 .iter()
-                .zip(&irrelevant)
+                .zip_eq_fast(&irrelevant)
                 .filter(|(_, irrelevant)| !**irrelevant)
                 .map(|(branch, _)| branch.clone())
                 .collect();
@@ -181,7 +182,7 @@ impl Rule<Logical> for AggUnionNullBranchRule {
             let mut changed = false;
             let new_branches: Vec<PlanRef> = branches
                 .iter()
-                .zip(&irrelevant)
+                .zip_eq_fast(&irrelevant)
                 .map(|(branch, &irrelevant)| {
                     if irrelevant && let Some(new_branch) = without_distinct(branch) {
                         changed = true;
