@@ -352,6 +352,9 @@ pub struct Query {
     /// The operators counted by the cardinality feedback (`batch_cardinality_feedback`), if any.
     pub cardinality_feedback:
         Option<std::sync::Arc<crate::scheduler::cardinality_feedback::QueryCardinalityFeedback>>,
+    /// `batch_spill_on_memory_wait`: on the compute nodes, an operator that cannot spill and
+    /// waits for memory asks the spillable operators of the query to spill.
+    pub spill_on_memory_wait: bool,
 }
 
 impl Query {
@@ -1144,6 +1147,7 @@ impl BatchPlanFragmenter {
             query_id: self.query_id,
             stage_graph: new_stage_graph,
             cardinality_feedback: None,
+            spill_on_memory_wait: false,
         })
     }
 

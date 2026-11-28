@@ -100,11 +100,15 @@ impl std::fmt::Debug for RwMemoryPool {
 
 impl MemoryPool for RwMemoryPool {
     fn grow(&self, reservation: &MemoryReservation, additional: usize) {
-        let success = match reservation.consumer().can_spill() {
-            true => self.spillable_ctx.add(additional as i64),
-            false => self.unspillable_ctx.add(additional as i64),
+        let ctx = match reservation.consumer().can_spill() {
+            true => &self.spillable_ctx,
+            false => &self.unspillable_ctx,
         };
+        let success = ctx.add(additional as i64);
         if !success {
+            // `grow` cannot fail: the reservation grows anyway, and `shrink` will subtract it.
+            // Count it beyond the limit, or the pool would end up counting less than it holds.
+            ctx.force_add(additional as i64);
             tracing::warn!(
                 error = %insufficient_capacity_err(
                     reservation,
@@ -209,6 +213,21 @@ mod tests {
 
     fn spillable_consumer(name: &str) -> MemoryConsumer {
         MemoryConsumer::new(name).with_can_spill(true)
+    }
+
+    #[test]
+    fn test_grow_beyond_the_limit_is_counted() {
+        let (pool, parent) = create_pool(1024);
+        let reservation = unspillable_consumer("test").register(&pool);
+        reservation.grow(1000);
+        // Beyond the limit: `grow` cannot refuse, the memory is counted anyway.
+        reservation.grow(500);
+        assert_eq!(pool.reserved(), 1500);
+        assert_eq!(parent.get_bytes_used(), 1500);
+        assert!(reservation.try_grow(1).is_err());
+        reservation.shrink(1500);
+        assert_eq!(pool.reserved(), 0);
+        assert_eq!(parent.get_bytes_used(), 0);
     }
 
     #[test]

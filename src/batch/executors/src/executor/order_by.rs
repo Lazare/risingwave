@@ -123,6 +123,9 @@ impl SortExecutor {
 
         let mut chunk_builder = DataChunkBuilder::new(self.schema.data_types(), self.chunk_size);
         let mut chunks = Vec::new_in(self.mem_context.global_allocator());
+        // What this sort counted in its context, given back once the rows are spilled or output:
+        // the sub-sorts of the spilled partitions share the context.
+        let mut counted = CountedMemory::new(self.mem_context.clone());
 
         let mut input_stream = self.child.execute();
         #[for_await]
@@ -130,7 +133,7 @@ impl SortExecutor {
             let chunk = chunk?.compact_vis();
             let chunk_estimated_heap_size = chunk.estimated_heap_size();
             chunks.push(chunk);
-            if !self.mem_context.add(chunk_estimated_heap_size as i64) && check_memory {
+            if !counted.add(chunk_estimated_heap_size as i64) && check_memory {
                 if self.spill_backend.is_some() {
                     need_to_spill = true;
                     break;
@@ -155,7 +158,7 @@ impl SortExecutor {
                     .enumerate()
                     .map(|(row_id, row)| (chunk.row_at_unchecked_vis(row_id), row)),
             );
-            if !self.mem_context.add(chunk_estimated_heap_size as i64) && check_memory {
+            if !counted.add(chunk_estimated_heap_size as i64) && check_memory {
                 if self.spill_backend.is_some() {
                     need_to_spill = true;
                     break;
@@ -190,6 +193,8 @@ impl SortExecutor {
             for chunk in chunks {
                 sort_spill_manager.write_input_chunk(chunk).await?;
             }
+            // The buffered rows are on disk: give their memory back, for the sub-sorts.
+            counted.release();
 
             // Spill input chunks.
             #[for_await]
@@ -253,6 +258,41 @@ impl SortExecutor {
                 yield spilled
             }
         }
+    }
+}
+
+/// Memory counted in a context by an operator, given back when it is dropped.
+struct CountedMemory {
+    mem_context: MemoryContext,
+    bytes: i64,
+}
+
+impl CountedMemory {
+    fn new(mem_context: MemoryContext) -> Self {
+        Self {
+            mem_context,
+            bytes: 0,
+        }
+    }
+
+    /// Counts `bytes` if the context grants them.
+    fn add(&mut self, bytes: i64) -> bool {
+        let granted = self.mem_context.add(bytes);
+        if granted {
+            self.bytes += bytes;
+        }
+        granted
+    }
+
+    fn release(&mut self) {
+        self.mem_context.add(-self.bytes);
+        self.bytes = 0;
+    }
+}
+
+impl Drop for CountedMemory {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -1047,5 +1087,60 @@ mod tests {
             assert_eq!(col0.as_float32().value_at(3), Some((-1.1).into()));
             assert_eq!(col0.as_float32().value_at(4), Some((-2.2).into()));
         }
+    }
+
+    /// A sort that spills gives back the memory of the rows that it moved to disk, instead of
+    /// keeping them counted while its partitions are sorted with the same context.
+    #[tokio::test]
+    async fn test_spill_gives_back_the_memory_of_the_spilled_rows() {
+        use risingwave_common::metrics::LabelGuardedIntGauge;
+
+        const ROWS: i64 = 1000;
+        let schema = Schema {
+            fields: vec![Field::unnamed(DataType::Int64)],
+        };
+        let mut mock_executor = MockExecutor::new(schema);
+        let mut chunk_size = 0;
+        for i in 0..3 {
+            let chunk = DataChunk::new(
+                vec![I64Array::from_iter((0..ROWS).map(|v| v * 3 + i)).into_ref()],
+                ROWS as usize,
+            );
+            chunk_size = chunk.estimated_heap_size();
+            mock_executor.add(chunk);
+        }
+        // Room for one chunk and a half: the sort counts the first chunk and spills at the second.
+        let root = MemoryContext::root(
+            LabelGuardedIntGauge::test_int_gauge::<4>(),
+            (chunk_size * 3 / 2) as u64,
+        );
+        let mem_context = MemoryContext::new(
+            Some(root.clone()),
+            LabelGuardedIntGauge::test_int_gauge::<4>(),
+        );
+        let order_by_executor = Box::new(SortExecutor::new(
+            Box::new(mock_executor),
+            Arc::new(vec![ColumnOrder {
+                column_index: 0,
+                order_type: OrderType::ascending(),
+            }]),
+            "SortExecutor3".to_owned(),
+            CHUNK_SIZE,
+            mem_context.clone(),
+            Some(SpillBackend::Memory),
+            BatchSpillMetrics::for_test(),
+        ));
+
+        let mut stream = order_by_executor.execute();
+        let mut values = vec![];
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.unwrap();
+            values.extend(chunk.column_at(0).as_int64().iter().map(|v| v.unwrap()));
+        }
+        drop(stream);
+        assert_eq!(values, (0..ROWS * 3).collect::<Vec<_>>());
+        // Nothing is left counted once the sort is over, although the context lives on.
+        assert_eq!(mem_context.get_bytes_used(), 0);
+        assert_eq!(root.get_bytes_used(), 0);
     }
 }

@@ -39,6 +39,16 @@ pub struct MergeSortExecutor {
     current_chunks: Vec<Option<DataChunk>, MonitoredGlobalAlloc>,
 }
 
+impl Drop for MergeSortExecutor {
+    fn drop(&mut self) {
+        // The chunks still held when the sort is dropped before its end, e.g. when the query is
+        // cancelled: each was counted once when it was taken from its input.
+        for chunk in self.current_chunks.iter().flatten() {
+            self.mem_context.add(-(chunk.estimated_heap_size() as i64));
+        }
+    }
+}
+
 impl Executor for MergeSortExecutor {
     fn schema(&self) -> &Schema {
         &self.schema
@@ -66,6 +76,10 @@ impl MergeSortExecutor {
             match input_stream.next().await {
                 Some(chunk) => {
                     let chunk = chunk?;
+                    // Counted like the next chunks of the input: `get_input_chunk` subtracts it
+                    // when it is replaced.
+                    self.mem_context
+                        .force_add(chunk.estimated_heap_size() as i64);
                     self.current_chunks.push(Some(chunk));
                     if let Some(chunk) = &self.current_chunks[input_idx] {
                         // We assume that we would always get a non-empty chunk from the upstream of
@@ -144,7 +158,8 @@ impl MergeSortExecutor {
                 assert_ne!(chunk.cardinality(), 0);
                 let new_chunk_size = chunk.estimated_heap_size() as i64;
                 let old = self.current_chunks[input_idx].replace(chunk);
-                self.mem_context.add(new_chunk_size);
+                // The chunk is held whatever the limit: count it, as its release is counted.
+                self.mem_context.force_add(new_chunk_size);
                 old
             }
             None => std::mem::take(&mut self.current_chunks[input_idx]),
@@ -190,6 +205,64 @@ impl MergeSortExecutor {
             min_heap: MemMonitoredHeap::with_capacity(inputs_num, mem_context.clone()),
             current_chunks: Vec::with_capacity_in(inputs_num, mem_context.global_allocator()),
             mem_context,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use risingwave_common::catalog::Field;
+    use risingwave_common::metrics::LabelGuardedIntGauge;
+    use risingwave_common::test_prelude::DataChunkTestExt;
+    use risingwave_common::types::DataType;
+    use risingwave_common::util::sort_util::OrderType;
+
+    use super::*;
+    use crate::executor::test_utils::MockExecutor;
+
+    fn sorted_input(first: &str, second: &str) -> BoxedExecutor {
+        let mut input = MockExecutor::new(Schema {
+            fields: vec![Field::unnamed(DataType::Int64)],
+        });
+        input.add(DataChunk::from_pretty(first));
+        input.add(DataChunk::from_pretty(second));
+        Box::new(input)
+    }
+
+    /// Each chunk taken from an input is counted once and released once, when the sort ends
+    /// and when it is dropped before its end.
+    #[tokio::test]
+    async fn test_merge_sort_releases_its_chunks() {
+        for read_all in [true, false] {
+            let mem_context =
+                MemoryContext::root(LabelGuardedIntGauge::test_int_gauge::<4>(), u64::MAX);
+            let merge_sort = Box::new(MergeSortExecutor::new(
+                vec![
+                    sorted_input("I\n 1\n 3", "I\n 5\n 7"),
+                    sorted_input("I\n 2\n 4", "I\n 6\n 8"),
+                ],
+                Arc::new(vec![ColumnOrder::new(0, OrderType::ascending())]),
+                Schema {
+                    fields: vec![Field::unnamed(DataType::Int64)],
+                },
+                "MergeSortExecutor".to_owned(),
+                1,
+                mem_context.clone(),
+            ));
+            let mut stream = merge_sort.execute();
+            let first = stream.next().await.unwrap().unwrap();
+            assert_eq!(first, DataChunk::from_pretty("I\n 1"));
+            // The first chunk of each input is held.
+            assert!(mem_context.get_bytes_used() > 0);
+            if read_all {
+                let mut rows = 1;
+                while let Some(chunk) = stream.next().await {
+                    rows += chunk.unwrap().cardinality();
+                }
+                assert_eq!(rows, 8);
+            }
+            drop(stream);
+            assert_eq!(mem_context.get_bytes_used(), 0, "read_all: {read_all}");
         }
     }
 }

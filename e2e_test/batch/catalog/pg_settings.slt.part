@@ -43,6 +43,7 @@ user batch_simplify_column_facts
 user batch_simplify_null_join_keys
 user batch_simplify_on_unique_key
 user batch_simplify_subquery_unnesting
+user batch_spill_on_memory_wait
 user batch_status_ladder_case
 user batch_unnest_lateral_functions
 user bypass_cluster_limits

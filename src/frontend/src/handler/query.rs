@@ -539,6 +539,7 @@ pub async fn create_stream(
 
     let mut query = plan_fragmenter.generate_complete_query().await?;
     query.cardinality_feedback = cardinality_feedback;
+    query.spill_on_memory_wait = session.config().batch_spill_on_memory_wait();
     tracing::trace!("Generated query after plan fragmenter: {:?}", &query);
 
     let pg_descs = schema

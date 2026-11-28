@@ -49,6 +49,9 @@ message CreateTaskRequest {
   // Number of instances of spillable operators (hash agg, hash join, sort) in the whole query,
   // over all stages and tasks. Used to split the memory of the query among them. 0 if unknown.
   uint32 spillable_operator_instances = 6;
+  // `batch_spill_on_memory_wait`: an operator that cannot spill and waits for memory asks the
+  // spillable operators of the query to spill.
+  bool spill_on_memory_wait = 7;
 }
 
 message GetBatchLimitsRequest {}
@@ -75,6 +78,8 @@ message AdmitQueryRequest {
   // Number of spillable operators (hash agg, hash join, sort) that the query runs, summed over
   // all its stages and tasks.
   uint32 spillable_operator_instances = 2;
+  // See `CreateTaskRequest.spill_on_memory_wait`.
+  bool spill_on_memory_wait = 3;
 }
 
 // Sent once, when the query is admitted. The stream then stays open, and the node keeps the

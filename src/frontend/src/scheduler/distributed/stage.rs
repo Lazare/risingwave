@@ -975,6 +975,7 @@ impl StageRunner {
                 plan_fragment,
                 expr_context,
                 self.query.spillable_operator_instances(),
+                self.query.spill_on_memory_wait,
             )
             .await
             .inspect_err(|_| self.mask_failed_serving_worker(&worker))

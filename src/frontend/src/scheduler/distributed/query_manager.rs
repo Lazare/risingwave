@@ -293,7 +293,11 @@ impl QueryManager {
             for worker in &workers {
                 let client = self.compute_client_pool.get(worker).await?;
                 let mut stream = match client
-                    .admit_query(query.query_id.id.clone(), spillable_operator_instances)
+                    .admit_query(
+                        query.query_id.id.clone(),
+                        spillable_operator_instances,
+                        query.spill_on_memory_wait,
+                    )
                     .await
                 {
                     Ok(stream) => stream,

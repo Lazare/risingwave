@@ -146,6 +146,19 @@ impl TopNHeap {
         }
     }
 
+    /// A heap that allocates nothing until its first row, then grows with its rows, never beyond
+    /// `limit + offset` rows without ties: for the many small heaps of a top-n per group, most of
+    /// whose groups may hold fewer rows than the limit.
+    pub fn new_lazy(limit: usize, offset: usize, with_ties: bool, mem_ctx: MemoryContext) -> Self {
+        assert!(limit > 0);
+        Self {
+            heap: MemMonitoredHeap::new_with(mem_ctx),
+            limit,
+            offset,
+            with_ties,
+        }
+    }
+
     // Only used for swapping out the heap in hashmap, due to a bug in hashmap which forbids us from
     // using `into_iter`. We should remove this after Hashmap upgraded and fixed the bug.
     pub fn empty() -> Self {
@@ -158,7 +171,14 @@ impl TopNHeap {
     }
 
     pub fn push(&mut self, elem: HeapElem) {
-        if self.heap.len() < self.limit + self.offset {
+        let full_len = self.limit + self.offset;
+        if self.heap.len() < full_len {
+            let len = self.heap.len();
+            if len == self.heap.capacity() {
+                // Double the room, as a vector would, but never beyond the rows that it keeps.
+                let target = (len * 2).max(1).min(full_len);
+                self.heap.reserve_exact(target - len);
+            }
             self.heap.push(elem);
         } else {
             // heap is full
