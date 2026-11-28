@@ -25,7 +25,7 @@ use risingwave_common::hash::VnodeCount;
 use risingwave_common::id::FragmentId;
 use risingwave_common::types::DataType;
 use risingwave_common::util::column_index_mapping::ColIndexMapping;
-use risingwave_common::util::iter_util::ZipEqFast;
+use risingwave_common::util::iter_util::{ZipEqDebug, ZipEqFast};
 use risingwave_common::util::sort_util::{ColumnOrder, OrderType};
 use risingwave_pb::catalog::PbWebhookSourceInfo;
 use risingwave_pb::stream_plan::stream_node::PbNodeBody;
@@ -276,7 +276,7 @@ impl StreamMaterialize {
             .map(|name| {
                 user_cols
                     .ones()
-                    .zip_eq_fast(out_names)
+                    .zip_eq_debug(out_names)
                     .find(|(_, out_name)| *out_name == name)
                     .map(|(column, _)| column)
             })
