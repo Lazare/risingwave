@@ -88,7 +88,7 @@ impl ColumnFacts {
     }
 
     /// Adds the facts of another set about the same columns.
-    fn merge(&mut self, other: ColumnFacts) {
+    pub(super) fn merge(&mut self, other: ColumnFacts) {
         for (index, literal) in other.constants {
             self.constants.entry(index).or_insert(literal);
         }
@@ -99,7 +99,7 @@ impl ColumnFacts {
     }
 
     /// The same facts, with every column index moved by `offset`.
-    fn shift(self, offset: usize) -> Self {
+    pub(super) fn shift(self, offset: usize) -> Self {
         Self {
             constants: self
                 .constants
@@ -160,7 +160,9 @@ impl ColumnFacts {
 /// - a boolean column `#i` alone, or `NOT #i`: the column is `TRUE`, or `FALSE`;
 /// - a conjunct that rejects `NULL` for `#i` (see [`null_rejected_columns`]): the column is not
 ///   `NULL`.
-fn predicate_facts<'a>(conjuncts: impl IntoIterator<Item = &'a ExprImpl>) -> ColumnFacts {
+pub(super) fn predicate_facts<'a>(
+    conjuncts: impl IntoIterator<Item = &'a ExprImpl>,
+) -> ColumnFacts {
     let mut facts = ColumnFacts::default();
     for expr in conjuncts {
         facts.non_null.extend(null_rejected_columns(expr));
@@ -198,7 +200,7 @@ fn predicate_facts<'a>(conjuncts: impl IntoIterator<Item = &'a ExprImpl>) -> Col
 /// An expression is only reported as never `NULL` when it can not fail either, because a failed
 /// expression evaluates to `NULL` in a streaming job: a column, a constant, an `IS ...` test, or
 /// a `COALESCE` with such an argument.
-fn expr_facts(expr: &ExprImpl, input: &ColumnFacts) -> (Option<Literal>, bool) {
+pub(super) fn expr_facts(expr: &ExprImpl, input: &ColumnFacts) -> (Option<Literal>, bool) {
     if let Some(input_ref) = expr.as_input_ref() {
         let index = input_ref.index();
         return (input.constant(index).cloned(), input.is_non_null(index));
@@ -279,7 +281,7 @@ fn is_not_null_column(column: &ColumnDesc) -> bool {
 
 /// The facts about the columns of a scanned table that come from its constraints, indexed by the
 /// columns of the table.
-fn table_constraint_facts(scan: &LogicalScan) -> ColumnFacts {
+pub(super) fn table_constraint_facts(scan: &LogicalScan) -> ColumnFacts {
     let mut facts = ColumnFacts::default();
     let table = scan.table();
     if table.is_user_table() && !table.has_generated_column() {

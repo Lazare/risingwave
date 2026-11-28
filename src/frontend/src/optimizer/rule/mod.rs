@@ -219,6 +219,9 @@ mod common_join_over_union_rule;
 pub use common_join_over_union_rule::*;
 mod apply_one_row_join_split_rule;
 pub use apply_one_row_join_split_rule::*;
+// Rule `NullSafeEqToEqRule` (`batch_null_safe_eq_to_eq`, `streaming_null_safe_eq_to_eq`).
+mod null_safe_eq_to_eq_rule;
+pub use null_safe_eq_to_eq_rule::*;
 // Rule `NullKeyJoinRule` (`batch_simplify_null_join_keys`, `streaming_simplify_null_join_keys`).
 mod null_key_join_rule;
 pub use null_key_join_rule::*;
@@ -411,6 +414,7 @@ macro_rules! for_all_rules {
             , { UnusedJoinUnderDedupRule }
             , { CommonJoinOverUnionRule }
             , { ApplyOneRowJoinSplitRule }
+            , { NullSafeEqToEqRule }
             , { NullKeyJoinRule }
             , { NarrowValueAggRule }
             , { NarrowValuePushRule }

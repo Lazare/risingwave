@@ -249,6 +249,17 @@ static STREAM_SIMPLE_UNNESTING_AGG: LazyLock<OptimizationStage> = LazyLock::new(
     )
 });
 
+// Rule `NullSafeEqToEqRule` (`streaming_null_safe_eq_to_eq`, `batch_null_safe_eq_to_eq`):
+// `a IS NOT DISTINCT FROM b` becomes `a = b` in a predicate when `a` or `b` is never `NULL`.
+// Bottom-up: a join condition rewritten below tells the join above that its keys are not `NULL`.
+static NULL_SAFE_EQ_TO_EQ: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Null-Safe Equality To Equality",
+        vec![NullSafeEqToEqRule::create()],
+        ApplyOrder::BottomUp,
+    )
+});
+
 // Batch counterparts of `STREAM_PRUNE_EMPTY_RELATION`, `STREAM_SIMPLIFY_ON_UNIQUE_KEY` and
 // `STREAM_MERGE_REPEATED_LOOKUPS`, with the same rules (`batch_simplify_column_facts`,
 // `batch_simplify_on_unique_key`, `batch_merge_repeated_lookups`), see `reduce_batch_on_keys`.
@@ -1184,6 +1195,18 @@ impl LogicalOptimizer {
         // Predicate Push-down
         plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
 
+        // Rule `NullSafeEqToEqRule` (`streaming_null_safe_eq_to_eq`): after the predicate pushdown,
+        // which puts the filters that prove a column not `NULL` next to the scans, and before join
+        // ordering, which then sees plain equi-joins. On demand only: the plan of a streaming job
+        // is frozen when the job is created.
+        if ctx.session_ctx().config().streaming_null_safe_eq_to_eq()
+            && !ctx.is_stream_prune_baseline()
+        {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&NULL_SAFE_EQ_TO_EQ)?;
+            ctx.add_stream_prune_rule_applied(ctx.total_rule_applied() - applied_before);
+        }
+
         if plan.ctx().session_ctx().config().enable_join_ordering() {
             // Merge inner joins and intermediate filters into multijoin
             // This rule assumes that filters have already been pushed down near to
@@ -1660,6 +1683,13 @@ impl LogicalOptimizer {
         // Predicate Push-down
         let mut last_total_rule_applied_before_predicate_pushdown = ctx.total_rule_applied();
         plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+
+        // Rule `NullSafeEqToEqRule` (`batch_null_safe_eq_to_eq`): after the predicate pushdown,
+        // which puts the filters that prove a column not `NULL` next to the scans, and before the
+        // reductions on keys and join ordering, which then see plain equi-joins.
+        if ctx.session_ctx().config().batch_null_safe_eq_to_eq() {
+            plan = plan.optimize_by_rules(&NULL_SAFE_EQ_TO_EQ)?;
+        }
 
         // Simplifications with column facts and unique keys, and merge of repeated lookups, on
         // demand (`batch_simplify_column_facts`, `batch_simplify_on_unique_key`,

@@ -36,6 +36,7 @@ user batch_hnsw_ef_search
 user batch_merge_repeated_lookups
 user batch_merge_union_scans
 user batch_narrow_value_aggregates
+user batch_null_safe_eq_to_eq
 user batch_over_window_to_topn
 user batch_parallelism
 user batch_reduce_keys_after_conversions
@@ -105,6 +106,7 @@ user streaming_merge_repeated_lookups
 user streaming_merge_stacked_aggregations
 user streaming_merge_union_scans
 user streaming_narrow_value_aggregates
+user streaming_null_safe_eq_to_eq
 user streaming_over_window_cache_policy
 user streaming_parallelism
 user streaming_parallelism_for_backfill

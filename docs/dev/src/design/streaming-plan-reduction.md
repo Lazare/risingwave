@@ -46,6 +46,7 @@ own rules.
 | BP | Batch: second pass of the reductions on keys after the stages that create aggregations (`batch_reduce_keys_after_conversions`) | done (prototype, branch `proto/plan-reduction-batch-pass2`, see "BP and BT" below) |
 | BT | Batch: `row_number() <= n` per partition becomes a top-n per group, small `n` only (`batch_over_window_to_topn`) | done (prototype, branch `proto/plan-reduction-batch-pass2`, see "BP and BT" below) |
 | BU | Batch: `UNION ALL` run in parallel tasks instead of one (`batch_distributed_union`) | done (prototype, branch `proto/plan-reduction-batch-union-dist`, see "BU" below) |
+| NE | `a IS NOT DISTINCT FROM b` becomes `a = b` when an operand is never `NULL` (`batch_null_safe_eq_to_eq`, `streaming_null_safe_eq_to_eq`) | done (prototype, branch `proto/plan-reduction-null-rules`, see "NE" below) |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -753,6 +754,45 @@ Agg(count)                                   Agg(count)
   `e2e_test/streaming/narrow_value_aggregates` (NULL values and order keys, missing fields,
   fields a cast cannot read in older rows, ties, unions, joins, a `CASE` over a lower
   `first_value`, updates and deletes of the last rows, emptied tables).
+
+### NE. Null-safe equality on a non-null operand (added on 2026-11-28, done on the branch)
+
+Variables `batch_null_safe_eq_to_eq` and `streaming_null_safe_eq_to_eq`, rule
+`NullSafeEqToEqRule`. Subquery decorrelation joins the outer side with the subquery, and with the
+domain, on `IS NOT DISTINCT FROM` the correlated columns. Several rules refuse or penalize such a
+key (`RepeatedLookupMergeRule`, `NullKeyJoinRule`, the column facts protect it), and a hash join
+on a null-safe key keeps the rows whose key is `NULL`, which can match. When one operand is never
+`NULL`, the condition is a plain equality:
+
+```text
+SELECT * FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.k = t.id LIMIT 1)   -- t.id: primary key
+
+Join(LeftSemi, t.id IS NOT DISTINCT FROM u.k)       Join(LeftSemi, t.id = u.k)
+├─Scan(t)                                     =>    ├─Scan(t)
+└─GroupTopN(u.k, limit 1)                           └─GroupTopN(u.k, limit 1)
+```
+
+- Where: the top-level conjuncts of a join condition (any join type but as-of), of a filter and
+  of a scan predicate. Never an operand of `NOT`, `OR`, `CASE`, nor a projected expression.
+- Never `NULL`: what the column facts of the input say (E: `NOT NULL` columns, constants, a filter
+  below that rejects `NULL`, keys of aggregations, counts), a non-null literal, and the facts of
+  the other conjuncts of the same predicate (`a.y = b.id AND a.y IS NOT DISTINCT FROM b.k`). For a
+  join condition, the facts of each side, whatever the type of the join: the condition is
+  evaluated on rows of the inputs, before padding.
+- Valid: both forms are the same comparison when both operands are not `NULL`; with exactly one
+  `NULL`, `IS NOT DISTINCT FROM` is `FALSE` and `=` is `NULL`, and a top-level conjunct of a
+  predicate evaluated with filter semantics rejects the row (or the pair) in both cases; both
+  `NULL` can not happen. The facts hold for every row ever produced, under retractions, so the
+  rewrite is valid for a frozen streaming plan. Duplicates are not involved.
+- Not rewritten: a conjunct with `now()`, a comparison that would need an implicit cast, an
+  operand that is an expression that may fail or be `NULL` (a cast to a wider type is not proven
+  non-null), both operands nullable.
+- Stages: `NULL_SAFE_EQ_TO_EQ` (bottom-up) right after the first predicate pushdown, before join
+  ordering, in both pipelines.
+- Tests: planner tests `batch_null_safe_eq_to_eq.yaml`, `stream_null_safe_eq_to_eq.yaml`;
+  differential tests `e2e_test/batch/null_safe_eq_to_eq` and `e2e_test/streaming/null_safe_eq_to_eq`
+  (NULLs on both sides, duplicates, outer and full joins, `EXISTS` / `NOT EXISTS` / scalar
+  subqueries through the domain, updates to and from `NULL`, emptied tables).
 
 ### 5. Aggregation pushed below a join onto the unique side
 
