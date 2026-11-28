@@ -213,6 +213,9 @@ pub fn move_stateful_operators_out_of_root_stage(plan: PlanRef) -> PlanRef {
             BatchExchange => return true,
             BatchHashJoin | BatchHashAgg | BatchSort | BatchNestedLoopJoin | BatchTopN
             | BatchGroupTopN => *stateful = true,
+            // Batch spool (`batch_share_identical_subplans`): the producer keeps the rows of its
+            // sub-plan, a reader has no input.
+            BatchSpool => *stateful = true,
             BatchSimpleAgg | BatchSortAgg | BatchProject | BatchFilter | BatchLimit
             | BatchUnion | BatchHopWindow | BatchExpand | BatchProjectSet | BatchOverWindow
             | BatchMaxOneRow | BatchValues => {}
@@ -864,12 +867,14 @@ impl StageGraph {
     /// of the query.
     pub fn spillable_operator_instances(&self) -> u32 {
         fn count(node: &ExecutionPlanNode) -> u32 {
-            let own = matches!(
+            let own = (matches!(
                 node.plan_node_type,
                 BatchPlanNodeType::BatchHashAgg
                     | BatchPlanNodeType::BatchHashJoin
                     | BatchPlanNodeType::BatchSort
-            ) as u32;
+            ) || (node.plan_node_type == BatchPlanNodeType::BatchSpool
+                // Batch spool (`batch_share_identical_subplans`): the producer spills.
+                && !node.children.is_empty())) as u32;
             own + node.children.iter().map(count).sum::<u32>()
         }
         let default_parallelism = self.batch_parallelism.max(1) as u32;

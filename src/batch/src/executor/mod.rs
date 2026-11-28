@@ -15,6 +15,8 @@
 mod cardinality;
 mod fast_insert;
 mod managed;
+// Batch spool (`batch_share_identical_subplans`).
+mod spool_registry;
 pub mod test_utils;
 
 use std::future::Future;
@@ -31,6 +33,7 @@ use risingwave_common::array::DataChunk;
 use risingwave_common::catalog::Schema;
 use risingwave_pb::batch_plan::PlanNode;
 use risingwave_pb::batch_plan::plan_node::NodeBodyDiscriminants;
+pub use spool_registry::*;
 use thiserror_ext::AsReport;
 
 use crate::error::Result;
@@ -80,6 +83,8 @@ pub struct ExecutorBuilder<'a> {
     pub task_id: &'a TaskId,
     context: Arc<dyn BatchTaskContext>,
     shutdown_rx: ShutdownToken,
+    /// The spools of the plan fragment, shared by the builders of all its nodes.
+    spools: Arc<SpoolRegistry>,
 }
 
 impl<'a> ExecutorBuilder<'a> {
@@ -94,17 +99,19 @@ impl<'a> ExecutorBuilder<'a> {
             task_id,
             context,
             shutdown_rx,
+            spools: Arc::new(SpoolRegistry::default()),
         }
     }
 
     #[must_use]
     pub fn clone_for_plan(&self, plan_node: &'a PlanNode) -> Self {
-        ExecutorBuilder::new(
+        ExecutorBuilder {
             plan_node,
-            self.task_id,
-            self.context.clone(),
-            self.shutdown_rx.clone(),
-        )
+            task_id: self.task_id,
+            context: self.context.clone(),
+            shutdown_rx: self.shutdown_rx.clone(),
+            spools: self.spools.clone(),
+        }
     }
 
     pub fn plan_node(&self) -> &PlanNode {
@@ -117,6 +124,11 @@ impl<'a> ExecutorBuilder<'a> {
 
     pub fn shutdown_rx(&self) -> &ShutdownToken {
         &self.shutdown_rx
+    }
+
+    /// The spools of the plan fragment that this node belongs to.
+    pub fn spools(&self) -> &SpoolRegistry {
+        &self.spools
     }
 }
 

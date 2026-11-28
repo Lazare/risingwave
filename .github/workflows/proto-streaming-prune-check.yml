@@ -138,6 +138,13 @@ jobs:
           cargo nextest run --locked --no-fail-fast --lib -p risingwave_frontend \
             --features risingwave_frontend/datafusion -E 'test(/datafusion::execute::memory_ctx/)'
 
+      # Batch spool (`batch_share_identical_subplans`): the executor lives in the executors crate.
+      - name: Batch spool unit tests
+        if: ${{ !cancelled() && steps.planner.outcome != 'skipped' }}
+        run: |
+          cargo nextest run --locked --no-fail-fast --lib \
+            -p risingwave_batch_executors -E 'test(spool)'
+
   clippy:
     name: Clippy on the frontend
     runs-on: ubuntu-24.04

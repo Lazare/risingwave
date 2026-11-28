@@ -25,6 +25,8 @@ pub use plan_node::{Explain, LogicalPlanRef, PlanRef};
 
 pub mod property;
 
+// Batch spool (`batch_share_identical_subplans`).
+mod batch_share_subplans;
 mod delta_join_solver;
 mod heuristic_optimizer;
 mod plan_rewriter;
@@ -588,6 +590,19 @@ impl BatchPlanRoot {
             ApplyOrder::BottomUp,
         ))?;
 
+        // Batch spool (`batch_share_identical_subplans`): compute once per task the identical
+        // sub-plans of a stage. Last, on the final distribution of the plan.
+        let plan = if plan
+            .ctx()
+            .session_ctx()
+            .config()
+            .batch_share_identical_subplans()
+        {
+            batch_share_subplans::share_identical_batch_subplans(plan)
+        } else {
+            plan
+        };
+
         Ok(plan)
     }
 
@@ -627,6 +642,19 @@ impl BatchPlanRoot {
             vec![BatchPushLimitToScanRule::create()],
             ApplyOrder::BottomUp,
         ))?;
+
+        // Batch spool (`batch_share_identical_subplans`): compute once per task the identical
+        // sub-plans of a stage. Last, on the final distribution of the plan.
+        let plan = if plan
+            .ctx()
+            .session_ctx()
+            .config()
+            .batch_share_identical_subplans()
+        {
+            batch_share_subplans::share_identical_batch_subplans(plan)
+        } else {
+            plan
+        };
 
         Ok(plan)
     }
