@@ -97,6 +97,11 @@ impl Rule<Logical> for PullUpHopRule {
                 && join_type != JoinType::LeftSemi
                 && join_type != JoinType::LeftOuter
                 && join_type != JoinType::FullOuter
+                // The output indices of a right semi or anti join index its right side alone,
+                // while the mapping of the output columns above reads them after the left
+                // columns: keep the hop window below such a join.
+                && join_type != JoinType::RightSemi
+                && join_type != JoinType::RightAnti
             {
                 let (input, time_col, window_slide, window_size, window_offset, _) =
                     hop.clone().into_parts();

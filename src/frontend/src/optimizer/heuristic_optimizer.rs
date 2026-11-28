@@ -23,6 +23,7 @@ use super::ApplyResult;
 use crate::Explain;
 use crate::error::Result;
 use crate::optimizer::plan_node::ConventionMarker;
+use crate::optimizer::plan_node::generic::GenericPlanRef;
 use crate::optimizer::rule::BoxedRule;
 use crate::optimizer::{PlanRef, PlanTreeNode};
 
@@ -56,6 +57,18 @@ impl<'a, C: ConventionMarker> HeuristicOptimizer<'a, C> {
                 ApplyResult::Ok(applied) => {
                     #[cfg(debug_assertions)]
                     Self::check_equivalent_plan(rule.description(), &plan, &applied);
+                    // Release builds too (a comparison of the output types, cheap; debug builds
+                    // panicked above): a rewrite that changes the output types of a node is
+                    // wrong, and the plan would read its columns with the wrong types. Fail the
+                    // query instead.
+                    if !plan.schema().type_eq(applied.schema()) {
+                        risingwave_common::bail!(
+                            "rule {} changed the output types of a plan node from {:?} to {:?}",
+                            rule.description(),
+                            plan.schema().data_types(),
+                            applied.schema().data_types()
+                        );
+                    }
 
                     plan = applied;
                     self.stats.count_rule(rule);
@@ -105,7 +118,6 @@ impl<'a, C: ConventionMarker> HeuristicOptimizer<'a, C> {
         input_plan: &PlanRef<C>,
         output_plan: &PlanRef<C>,
     ) {
-        use crate::optimizer::plan_node::generic::GenericPlanRef;
         if !input_plan.schema().type_eq(output_plan.schema()) {
             panic!(
                 "{} fails to generate equivalent plan.\nInput schema: {:?}\nInput plan: \n{}\nOutput schema: {:?}\nOutput plan: \n{}\nSQL: {}",
