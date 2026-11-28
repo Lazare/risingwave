@@ -595,6 +595,47 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_reduce_outer_joins: bool,
 
+    // Rule `ValuesJoinInlineRule`.
+    /// In the plan of a new streaming job, replace a join with a small relation of constant rows
+    /// (`VALUES` of at most 64 rows) with a filter (`IN` list) and a projection (`CASE`) of the
+    /// other side: semi and anti joins always; inner and outer joins when a key of the constant
+    /// rows, compared with `=`, holds distinct literals (each row matches at most one constant
+    /// row). No join state and no fragment for the constant rows. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    streaming_inline_values_join: bool,
+
+    /// The same as `streaming_inline_values_join`, for batch queries. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_inline_values_join: bool,
+
+    // Rule `OrRestrictionDeriveRule`.
+    /// In the plan of a new streaming job, derive from a condition `(a.x = 1 AND b.y = 2) OR
+    /// (a.x = 3 AND b.y = 4)` of a join a restriction of each side (`a.x = 1 OR a.x = 3`,
+    /// `b.y = 2 OR b.y = 4`), pushed into that side, the original condition being kept: fewer
+    /// rows in the join states. Only from parts that are deterministic and can not fail. Defaults
+    /// to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    streaming_derive_or_restrictions: bool,
+
+    /// The same as `streaming_derive_or_restrictions`, for batch queries. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_derive_or_restrictions: bool,
+
+    // Rule `OrJoinToUnionRule`.
+    /// In the plan of a new streaming job, split a join whose condition has no equality between
+    /// its sides, but an `OR` of 2 to 4 disjuncts that each have one (`a.id = b.id1 OR a.id =
+    /// b.id2`), into equi-joins on the disjuncts combined with `UNION ALL` (inner and left outer
+    /// joins) or chained (semi and anti joins), each pair of rows matched once. Such a join can
+    /// not be planned in streaming otherwise (nested-loop join). Each equi-join keeps its own
+    /// state. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    streaming_or_join_to_union: bool,
+
+    /// The same as `streaming_or_join_to_union`, for batch queries: hash joins instead of a
+    /// nested-loop join. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_or_join_to_union: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,

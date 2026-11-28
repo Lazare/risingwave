@@ -1,0 +1,117 @@
+# Tests for `batch_or_join_to_union` (`OrJoinToUnionRule`): a join without equality whose condition is an `OR`
+# of equi-conditions becomes equi-joins on the disjuncts.
+- id: setup_off
+  sql: |
+    create table a (id int primary key, k int, x int);
+    create table b (id int primary key, id1 int, id2 int, y int);
+  expected_outputs: []
+- id: setup
+  sql: |
+    set batch_or_join_to_union = true;
+    create table a (id int primary key, k int, x int);
+    create table b (id int primary key, id1 int, id2 int, y int);
+  expected_outputs: []
+
+# The variable is off by default: a nested-loop join.
+- name: off by default - or of equalities
+  before: [setup_off]
+  sql: |
+    select a.id, b.y from a join b on a.id = b.id1 or a.id = b.id2;
+  expected_outputs:
+  - batch_plan
+
+# Rewritten.
+
+- name: inner join - two equalities
+  before: [setup]
+  sql: |
+    select a.id, b.y from a join b on a.id = b.id1 or a.id = b.id2;
+  expected_outputs:
+  - batch_plan
+- name: inner join - another conjunct of both sides
+  before: [setup]
+  sql: |
+    select a.id, b.y from a join b on (a.id = b.id1 or a.id = b.id2) and a.x > b.y;
+  expected_outputs:
+  - batch_plan
+- name: inner join - disjuncts of several conjuncts
+  before: [setup]
+  sql: |
+    select a.id, b.y from a join b on (a.id = b.id1 and a.x = b.y) or (a.k = b.id2 and a.x > 0);
+  expected_outputs:
+  - batch_plan
+- name: inner join - three disjuncts
+  before: [setup]
+  sql: |
+    select a.id, b.y from a join b on a.id = b.id1 or a.id = b.id2 or a.k = b.y;
+  expected_outputs:
+  - batch_plan
+- name: inner join - conditions in the where clause
+  before: [setup]
+  sql: |
+    select a.id, b.y from a, b where a.id = b.id1 or a.k = b.id2;
+  expected_outputs:
+  - batch_plan
+- name: inner join - aggregation above
+  before: [setup]
+  sql: |
+    select count(*) as n, sum(b.y) as s from a join b on a.id = b.id1 or a.id = b.id2;
+  expected_outputs:
+  - batch_plan
+- name: left join - inner branches and the rows without match padded
+  before: [setup]
+  sql: |
+    select a.id, a.x, b.y from a left join b on a.id = b.id1 or a.id = b.id2;
+  expected_outputs:
+  - batch_plan
+- name: semi join - exists with an or
+  before: [setup]
+  sql: |
+    select a.id from a where exists (select 1 from b where a.id = b.id1 or a.id = b.id2);
+  expected_outputs:
+  - batch_plan
+- name: semi join - three disjuncts
+  before: [setup]
+  sql: |
+    select a.id from a where exists (select 1 from b where a.id = b.id1 or a.id = b.id2 or a.k = b.y);
+  expected_outputs:
+  - batch_plan
+- name: anti join - not exists with an or
+  before: [setup]
+  sql: |
+    select a.id from a where not exists (select 1 from b where a.id = b.id1 or a.id = b.id2);
+  expected_outputs:
+  - batch_plan
+
+# Left as they are.
+
+- name: kept - a disjunct without equality
+  before: [setup]
+  sql: |
+    select a.id, b.y from a join b on a.id = b.id1 or a.x < b.y;
+  expected_outputs:
+  - batch_plan
+- name: kept - five disjuncts
+  before: [setup]
+  sql: |
+    select a.id, b.y from a join b on a.id = b.id1 or a.id = b.id2 or a.k = b.y or a.x = b.id1 or a.x = b.id2;
+  expected_outputs:
+  - batch_plan
+- name: kept - full join
+  before: [setup]
+  sql: |
+    select a.id, b.y from a full join b on a.id = b.id1 or a.id = b.id2;
+  expected_outputs:
+  - batch_plan
+- name: kept - an equality outside the or makes it a hash join already
+  before: [setup]
+  sql: |
+    select a.id, b.y from a join b on a.k = b.y and (a.id = b.id1 or a.id = b.id2);
+  expected_outputs:
+  - batch_plan
+- name: kept - a side with a volatile filter is not read twice without a share
+  before: [setup]
+  sql: |
+    select a.id, b.y from a join b on (a.id = b.id1 or a.id = b.id2) and random() < 0.5;
+  expected_outputs:
+  - batch_plan

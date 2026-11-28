@@ -27,6 +27,7 @@ user batch_cardinality_feedback
 user batch_cardinality_feedback_learning
 user batch_compact_shuffle_output
 user batch_cost_based_join_ordering
+user batch_derive_or_restrictions
 user batch_distributed_union
 user batch_enable_distributed_dml
 user batch_enable_lookup_join
@@ -35,11 +36,13 @@ user batch_exchange_buffer_max_mb
 user batch_expr_strict_mode
 user batch_factor_union_join
 user batch_hnsw_ef_search
+user batch_inline_values_join
 user batch_limit_distinct
 user batch_merge_repeated_lookups
 user batch_merge_union_scans
 user batch_narrow_value_aggregates
 user batch_null_safe_eq_to_eq
+user batch_or_join_to_union
 user batch_over_window_to_topn
 user batch_parallelism
 user batch_push_down_limit
@@ -101,12 +104,14 @@ user statement_timeout
 user streaming_allow_jsonb_in_stream_key
 user streaming_asof_join_use_cache
 user streaming_cache_refill_policy
+user streaming_derive_or_restrictions
 user streaming_enable_bushy_join
 user streaming_enable_delta_join
 user streaming_enable_unaligned_join
 user streaming_exact_not_in_without_equality
 user streaming_factor_union_join
 user streaming_force_filter_inside_join
+user streaming_inline_values_join
 user streaming_join_encoding
 user streaming_max_parallelism
 user streaming_merge_lookups_under_dedup
@@ -115,6 +120,7 @@ user streaming_merge_stacked_aggregations
 user streaming_merge_union_scans
 user streaming_narrow_value_aggregates
 user streaming_null_safe_eq_to_eq
+user streaming_or_join_to_union
 user streaming_over_window_cache_policy
 user streaming_parallelism
 user streaming_parallelism_for_backfill

@@ -52,6 +52,9 @@ own rules.
 | NE | `a IS NOT DISTINCT FROM b` becomes `a = b` when an operand is never `NULL` (`batch_null_safe_eq_to_eq`, `streaming_null_safe_eq_to_eq`) | done (prototype, branch `proto/plan-reduction-null-rules`, see "NE" below) |
 | SE | Simplification of the subquery of a correlated `EXISTS` / `IN`: no limit, `DISTINCT` or `GROUP BY` without aggregates (`batch_simplify_exists_subquery`, `streaming_simplify_exists_subquery`) | done (prototype, branch `proto/plan-reduction-null-rules`, see "SE" below) |
 | RO | Outer join reduction with a null-rejection test, and `LEFT JOIN ... WHERE r.c IS NULL` as an anti join (`batch_reduce_outer_joins`, `streaming_reduce_outer_joins`) | done (prototype, branch `proto/plan-reduction-null-rules`, see "RO" below) |
+| IV | Join with a small constant `VALUES` becomes a filter (`IN` list) and a `CASE` (`batch_inline_values_join`, `streaming_inline_values_join`; survey rule 8) | done (prototype, branch `proto/plan-reduction-or-values`), see "IV" below |
+| OR | Restrictions of each side derived from an `OR` of a join condition (`batch_derive_or_restrictions`, `streaming_derive_or_restrictions`; survey rule 6) | done (prototype, branch `proto/plan-reduction-or-values`), see "OR" below |
+| OU | Join on an `OR` of equi-conditions as equi-joins combined with `UNION ALL` or anti joins (`batch_or_join_to_union`, `streaming_or_join_to_union`; survey rule 7) | done (prototype, branch `proto/plan-reduction-or-values`), see "OU" below |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -1794,6 +1797,184 @@ select a from t1 union select a from t2 limit 10;
   the limit, counts of values that appear twice in it, which must be 0, and limits larger than the
   number of distinct rows; local and distributed query mode; NULLs, duplicates, several chunks and
   tasks, updates and deletes, an empty branch, one distinct row).
+
+### IV. Join with a small constant `VALUES` (added on 2026-11-28, survey rule 8)
+
+Source: PostgreSQL 18 `convert_VALUES_to_ANY` (`x IN (VALUES (1), (2))` becomes `x = ANY(...)`).
+The prototype's `ConstantRowJoinRule` (G) only handled an inner join with *one* constant row; a
+join with several rows stayed a hash join, which in streaming keeps the whole other input in its
+state, plus a fragment for the constant rows.
+
+```sql
+create table t (k int primary key, code varchar, x int);
+with m(code, label) as (values ('a', 'Alpha'), ('b', 'Beta'))
+select t.k, m.label from t left join m on t.code = m.code;
+-- IV: Project(t.k, CASE WHEN t.code = 'a' THEN 'Alpha' WHEN t.code = 'b' THEN 'Beta' END) <- Scan(t)
+select * from t where t.code in (select c from (values ('a'), ('b')) v(c));
+-- IV: Filter(t.code IN ('a', 'b')) <- Scan(t)
+```
+
+**Rule** (`ValuesJoinInlineRule`, variables `batch_inline_values_join` and
+`streaming_inline_values_join`, default false). One side of the join is a `LogicalValues` of 1 to
+64 rows of constants of the declared types, read directly, through a share (a CTE read twice) or
+through projections (the column a subquery selects, computed on each row); it must be the side
+whose rows are neither preserved nor output on their own: either side of an inner join, the right
+side of a left outer, left semi or left anti join, the left side of their right counterparts. Let
+`cond_i` be the conjuncts of the condition that refer to the constant side, with the values of row
+`i` in place of its columns, and `kept` the conjuncts on the other side only. Every conjunct must
+be pure, since `cond_i` is evaluated once per row.
+
+- Semi join: `Filter(kept AND (cond_1 OR ... OR cond_n))`; anti join:
+  `Filter((kept AND (cond_1 OR ... OR cond_n)) IS NOT TRUE)`. A row of the kept side is output by
+  the semi join iff some constant row satisfies the condition, i.e. iff some `kept AND cond_i` is
+  true; the anti join keeps it iff none is (`IS NOT TRUE`: a condition that is `NULL` does not
+  match, as in the join). Duplicate constant rows do not change either. Any condition qualifies,
+  ranges included.
+- Inner join: a row of the kept side must match at most one constant row. The rule requires a
+  conjunct `k = v.c` (the key), `k` a column of the kept side and `c` one of the constant side of
+  the same type, a type whose equal values are identical (integers, `varchar`, `boolean`, dates
+  and times, see `is_simple_type`), with distinct literal values. The join becomes
+  `Project(Filter(kept AND matched))` where each column `j` of the constant side is
+  `CASE WHEN cond_1 THEN r_1[j] ... WHEN cond_n THEN r_n[j] END`: exactly one `cond_i` is true on a
+  row that passes the filter, the one of the row it joined. The key column is `k` itself (equal,
+  hence identical), a column with the same value in every row is that value.
+- Left join (constant side on the right, or a right join with it on the left): no filter, and the
+  guards of the `CASE` are `kept AND cond_i`, the whole `ON` condition for row `i`. A row without
+  a match gets `NULL` (no `ELSE`), which is the padding of the join.
+- Rows whose key, or any column of the constant side compared with `=`, is a `NULL` literal never
+  match and are dropped first (if none is left the rule does nothing: the rules on empty relations
+  take over). When the only conjunct with the constant side is `k = v.c`, `matched` is the list
+  `k IN (c_1, ..., c_n)` without duplicates (`k = c_1` for one value), which becomes scan ranges on
+  a key in batch; otherwise it is the `OR` of the `cond_i`.
+- `NOT IN` is planned as an anti join on `x = c`; the rule keeps exactly the semantics of that
+  join (`(x IN (...)) IS NOT TRUE`), whatever they are: it only replaces the join, not the planning
+  of `NOT IN`.
+
+**Placement.** Batch and streaming: after the first predicate pushdown (subqueries are unnested and
+`ON` conditions are in place), before join ordering, which would take the constant rows as an
+input; the new filter is pushed down right after. The result has no join state, no exchange and
+no fragment for the constant rows; the constant side has no watermark, the kept side keeps its own.
+
+- Not done: inner and outer joins without a key of distinct literals (a range join, or duplicate
+  keys, would multiply rows: the join is kept); a constant side under a filter;
+  `decimal`, floats, intervals as keys of inner and outer joins (equal values may print
+  differently, so the key column could not be replaced by `k`); full joins and the preserved side
+  of an outer join (every constant row must be output).
+- Tests: `stream_inline_values_join.yaml`, `batch_inline_values_join.yaml` (semi joins with
+  duplicates and `NULL`s, a single value left, anti joins from `NOT EXISTS` and `NOT IN`, range
+  conditions, inner joins with the constant side on either side, a constant column, an extra
+  condition, left and right joins, a guard of the preserved side, a `NULL` key, a CTE read twice,
+  a side with a watermark, 64 rows; kept: duplicate keys, a `decimal` key, the preserved side, full
+  join, only `NULL` keys, 65 rows, no equality, a volatile condition; off by default), and the
+  differentials `e2e_test/batch/inline_values_join.gen.py` and
+  `e2e_test/streaming/inline_values_join.gen.py` (29 and 28 queries, results with the variable off
+  and on, and the batch query, compared as multisets over `NULL` codes, duplicate rows, upserts,
+  updates of the key and of the flag, deletes, no match at all and empty tables; the range
+  queries, which streaming can only plan with the rule, are compared with batch only).
+
+### OR. Restrictions derived from an `OR` (added on 2026-11-28, survey rule 6)
+
+Sources: PostgreSQL `extract_restriction_or_clauses` (`orclauses.c`), Calcite
+`ExpandDisjunctionForJoinInputsRule`. `Condition` only factors out the conjuncts common to every
+disjunct of an `OR`; an `OR` whose disjuncts each restrict both sides stayed in the join, and each
+side kept all its rows in the join (and its state, in streaming).
+
+```sql
+create table a (id int primary key, k int, x int);
+create table b (id int primary key, k int, y int);
+select a.id, b.y from a join b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 3 and b.y = 4);
+-- OR: Scan(a) gets (a.x = 1 OR a.x = 3), Scan(b) gets (b.y = 2 OR b.y = 4); the join keeps the OR
+```
+
+**Rule** (`OrRestrictionDeriveRule`, variables `batch_derive_or_restrictions` and
+`streaming_derive_or_restrictions`, default false). For each conjunct `d_1 OR ... OR d_n`
+(2 to 16 disjuncts) of the condition of a join that refers to both sides, and for each side `X`
+into which predicate pushdown moves an `ON` conjunct (`can_push_left_from_on`,
+`can_push_right_from_on`: both sides of an inner join, the optional side of an outer join, the
+outer side of a left semi join), let `p_i` be the conjunction of the conjuncts of `d_i` that only
+refer to `X`. When every `p_i` is non-empty, `p_1 OR ... OR p_n` is added to the condition, which
+keeps the `OR`; predicate pushdown then moves it into `X` (and, through the equalities of the join,
+into the other side when it may).
+
+- Exactness: a pair of rows that satisfies the `OR` satisfies some `d_i`, hence each of its
+  conjuncts, hence `p_i`, hence the derived `OR`: adding an implied conjunct changes no result, for
+  any join type. A disjunct without a part on `X` implies nothing on `X` (no derivation). Only
+  where pushdown moves the conjunct into `X` (on the preserved side of an outer join, a conjunct of
+  the `ON` condition does not remove rows, it would stay in the join for nothing).
+- Safety: the parts are made only of column references, literals, comparisons, `IS [NOT] NULL`,
+  `IS [NOT] TRUE/FALSE`, `IS [NOT] DISTINCT FROM`, `IN`, `NOT`, `AND` and `OR`: deterministic and
+  unable to fail, since they are now evaluated on rows that the join would not have compared
+  (`10 / b.z`, `lower(a.s)`, `random()`, `now()` are never derived). Temporal and as-of joins are
+  left untouched.
+- Placement: batch and streaming, after the first predicate pushdown (the `WHERE` conjuncts of
+  inner joins are in the join conditions), before join ordering; predicate pushdown right after.
+  The rule adds a conjunct only if the condition changes (a join reached again through a shared
+  sub-plan is not extended twice).
+- Not done: a `WHERE` filter above an outer join (its preserved side could be restricted too);
+  derivation inside a single scan for index ranges (Calcite `ExpandDisjunctionForTableRule`); an
+  `OR` of equalities is not turned into an `IN` list (scan ranges already merge the arms of an
+  `OR`).
+- Tests: `stream_derive_or_restrictions.yaml`, `batch_derive_or_restrictions.yaml` (inner joins with
+  one or several parts per side, `IS NULL`, `IN`, a disjunct with one side only, no equality, left,
+  right and semi joins, three tables, scan ranges on a primary key; kept: an `OR` on one side, the
+  preserved side of a left join, anti and full joins, parts that may fail, volatile parts, `now()`;
+  off by default), and the differentials `e2e_test/batch/derive_or_restrictions.gen.py` and
+  `e2e_test/streaming/derive_or_restrictions.gen.py` (17 and 16 queries compared with the variable
+  off and on, and with batch, over `NULL` keys and compared columns, duplicates, upserts, updates of
+  the compared columns and of the keys, deletes and empty sides).
+
+### OU. Join on an `OR` of equi-conditions (added on 2026-11-28, survey rule 7)
+
+Source: Calcite `JoinExpandOrToUnionRule`. A join whose condition has no equality between its
+sides, such as `a.id = b.id1 OR a.id = b.id2`, can only be a nested-loop join: batch compares every
+pair of rows, streaming refuses the query ("streaming nested-loop join").
+
+```sql
+create table a (id int primary key, k int, x int);
+create table b (id int primary key, id1 int, id2 int, y int);
+select a.id, b.y from a join b on a.id = b.id1 or a.id = b.id2;
+-- OU: Join(a.id = b.id1) UNION ALL Join(a.id = b.id2 AND (a.id = b.id1) IS NOT TRUE)
+```
+
+**Rule** (`OrJoinToUnionRule`, variables `batch_or_join_to_union` and `streaming_or_join_to_union`,
+default false). The condition has no equality between the sides (`=` or `IS NOT DISTINCT FROM`
+between a column of each), but a conjunct `d_1 OR ... OR d_n`, 2 to 4 disjuncts, each with such an
+equality; every conjunct is pure (evaluated in several joins). Let `r` be the other conjuncts and
+`c_i = d_i AND r`, so that the condition is `c_1 OR ... OR c_n`.
+
+- Inner join: `UNION ALL` over `i` of `A JOIN B ON c_i AND d_1 IS NOT TRUE AND ... AND
+  d_{i-1} IS NOT TRUE`. A pair satisfies the condition iff some `c_i` is true; it is output by the
+  branch of the first such `i` and by no other (in branch `i`, `r` is true, so excluding `c_j` is
+  excluding `d_j`). `IS NOT TRUE` lets through a pair for which `d_j` is `NULL` (it does not satisfy
+  `d_j` either), where `NOT d_j` would lose it: each pair is output exactly once.
+- Left semi join: `UNION ALL` over `i` of `R_{i-1} SEMI JOIN B ON c_i`, with `R_0 = A` and
+  `R_i = R_{i-1} ANTI JOIN B ON c_i` (the rows of `A` with no match on `c_1`, ..., `c_i`). A row of
+  `A` is in the result iff it matches some `c_i`; it is output by the branch of the first such `i`
+  only, whatever the duplicates of `A` or `B`.
+- Left anti join: `R_n`: a row has no match on `c_1 OR ... OR c_n` iff it has none on any `c_i`.
+- Left outer join: the inner join above `UNION ALL` the rows of `R_n` padded with `NULL`s, which is
+  the definition of the outer join (matched pairs, plus the unmatched rows padded).
+- In streaming, the sides and the `R_i` read twice are shared (`LogicalShare`, when the plan may
+  share sub-plans): each is computed once, each equi-join keeps its own state (the price, hence the
+  cap of 4 disjuncts). In batch the sides are read once per join, so the rule requires that two
+  reads give the same rows: no volatile expression (a `random()` filter pushed into a side would
+  otherwise be drawn again in each branch) and no source. Right outer, right semi and right
+  anti joins, full joins and temporal joins are left untouched.
+- Placement: batch and streaming, after the first predicate pushdown and after rule OR (whose
+  restrictions are then below the shared sides), before join ordering, which then orders the
+  joins of each branch; predicate pushdown right after.
+- Not done: right joins (rare: written as left joins), full joins (`FULL JOIN` would need the
+  unmatched rows of both sides), disjuncts without an equality, more than 4 disjuncts. Rows that
+  match through `IS NOT DISTINCT FROM` work like any other equality.
+- Tests: `stream_or_join_to_union.yaml`, `batch_or_join_to_union.yaml` (inner joins with 2 or 3
+  disjuncts, an extra conjunct, disjuncts of several conjuncts, the `OR` in a `WHERE` clause, an
+  aggregation above, left, semi and anti joins; kept: a disjunct without equality, five disjuncts,
+  full join, an equality outside the `OR`, a volatile condition; off by default), and the
+  differentials `e2e_test/batch/or_join_to_union.gen.py` (19 queries, nested loop against the
+  rewrite) and `e2e_test/streaming/or_join_to_union.gen.py` (the same 19 queries materialized with
+  the variable and compared with batch; the query refused without the variable is checked to fail),
+  over pairs matched by one disjunct, by both (`id1 = id2`), by none, `NULL` keys, duplicate rows on
+  the left, upserts, keys moved between the disjuncts, deletes and empty sides.
 
 ## Not for now: sharing between materialized views
 

@@ -1,0 +1,186 @@
+# Tests for `streaming_inline_values_join` (`ValuesJoinInlineRule`): a join with a small relation
+# of constant rows becomes a filter (`IN` list) and a projection (`CASE`) of the other side.
+- id: setup_off
+  sql: |
+    create table t (k int primary key, code varchar, x int);
+  expected_outputs: []
+- id: setup
+  sql: |
+    set streaming_inline_values_join = true;
+    create table t (k int primary key, code varchar, x int);
+    create table w (ts timestamp, code varchar, watermark for ts as ts - interval '1 minute') append only;
+    create table td (k int primary key, d decimal);
+  expected_outputs: []
+
+# The variable is off by default: the constant rows stay a join input.
+- name: off by default - semi join with constant rows is kept
+  before: [setup_off]
+  sql: |
+    select * from t where t.code in (select c from (values ('a'), ('b')) v(c));
+  expected_outputs:
+  - stream_plan
+
+# Rewritten.
+
+- name: semi join - in list
+  before: [setup]
+  sql: |
+    select * from t where t.code in (select c from (values ('a'), ('b')) v(c));
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: semi join - duplicates and nulls in the constant rows
+  before: [setup]
+  sql: |
+    select * from t where t.code in (select c from (values ('a'), ('a'), (null), ('b')) v(c));
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: semi join - a single value left after the nulls are dropped
+  before: [setup]
+  sql: |
+    select * from t where t.code in (select c from (values ('a'), (null)) v(c));
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: anti join - not exists over constant rows
+  before: [setup]
+  sql: |
+    select * from t where not exists (select 1 from (values (1), (2)) v(c) where v.c = t.x);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: anti join - not in over constant rows, planned as an anti join on equality
+  before: [setup]
+  sql: |
+    select * from t where t.x not in (select c from (values (1), (2)) v(c));
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: semi join - range condition, no key, one disjunct per row
+  before: [setup]
+  sql: |
+    select * from t where exists (select 1 from (values (1, 10), (20, 30)) v(lo, hi) where t.x between v.lo and v.hi);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: inner join - key with distinct values, labels as case
+  before: [setup]
+  sql: |
+    with m(code, label) as (values ('a', 'Alpha'), ('b', 'Beta'))
+    select t.k, m.code, m.label from t join m on t.code = m.code;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: inner join - constant rows on the left
+  before: [setup]
+  sql: |
+    with m(code, label) as (values ('a', 'Alpha'), ('b', 'Beta'))
+    select m.label, t.k from m join t on t.code = m.code;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: inner join - a column with the same value in every row is a constant
+  before: [setup]
+  sql: |
+    with m(code, grp, label) as (values ('a', 1, 'Alpha'), ('b', 1, 'Beta'))
+    select t.k, m.grp, m.label from t join m on t.code = m.code;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: inner join - another condition on the constant rows
+  before: [setup]
+  sql: |
+    with m(code, lo, label) as (values ('a', 0, 'Alpha'), ('b', 5, 'Beta'))
+    select t.k, m.label from t join m on t.code = m.code and t.x > m.lo;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: left join - case without else gives null for the rows without match
+  before: [setup]
+  sql: |
+    with m(code, label) as (values ('a', 'Alpha'), ('b', 'Beta'))
+    select t.k, m.code, m.label from t left join m on t.code = m.code;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: left join - a condition on the preserved side guards the case
+  before: [setup]
+  sql: |
+    with m(code, label) as (values ('a', 'Alpha'), ('b', 'Beta'))
+    select t.k, m.label from t left join m on t.code = m.code and t.x > 0;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: right join - constant rows on the left
+  before: [setup]
+  sql: |
+    with m(code, label) as (values ('a', 'Alpha'), ('b', 'Beta'))
+    select m.label, t.k from m right join t on t.code = m.code;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: left join - a null key never matches and is dropped
+  before: [setup]
+  sql: |
+    with m(code, label) as (values ('a', 'Alpha'), (null, 'None'), ('b', 'Beta'))
+    select t.k, m.label from t left join m on t.code = m.code;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: common table expression read twice through a share
+  before: [setup]
+  sql: |
+    with m(code, n) as (values ('a', 1), ('b', 2))
+    select t.k, m.n from t join m on t.code = m.code where t.x in (select n from m);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: append-only side with a watermark keeps it
+  before: [setup]
+  sql: |
+    select w.ts, m.label from w join (values ('a', 'Alpha'), ('b', 'Beta')) m(code, label) on w.code = m.code;
+  expected_outputs:
+  - stream_plan
+
+- name: semi join - in over the column selected from the constant rows, through a projection
+  before: [setup]
+  sql: |
+    select * from t where t.x in (select c + 1 from (values (1), (2)) v(c));
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+
+# Left as they are.
+
+- name: kept - inner join with a duplicate key would multiply rows
+  before: [setup]
+  sql: |
+    with m(code, label) as (values ('a', 'Alpha'), ('a', 'Again'))
+    select t.k, m.label from t join m on t.code = m.code;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - left join with a duplicate key would multiply rows
+  before: [setup]
+  sql: |
+    with m(code, label) as (values ('a', 'Alpha'), ('a', 'Again'))
+    select t.k, m.label from t left join m on t.code = m.code;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - inner join on a decimal key (equal values may differ)
+  before: [setup]
+  sql: |
+    with m(d, label) as (values (1.5::decimal, 'a'), (2.5::decimal, 'b'))
+    select td.k, m.d, m.label from td join m on td.d = m.d;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - constant rows on the preserved side of a left join
+  before: [setup]
+  sql: |
+    with m(code, label) as (values ('a', 'Alpha'), ('b', 'Beta'))
+    select m.label, t.k from m left join t on t.code = m.code;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - full join
+  before: [setup]
+  sql: |
+    with m(code, label) as (values ('a', 'Alpha'), ('b', 'Beta'))
+    select m.label, t.k from t full join m on t.code = m.code;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - only null keys, left to the rules on empty relations
+  before: [setup]
+  sql: |
+    select * from t where t.code in (select c from (values (null::varchar), (null::varchar)) v(c));
+  expected_outputs:
+  - optimized_logical_plan_for_stream
