@@ -1,0 +1,178 @@
+# Tests for `batch_push_join_below_group_ops` (`JoinBelowGroupOpRule`): an inner or semi join on
+# the group columns of a top-n per group, a deduplication, a window or an aggregation goes below the
+# operator, through filters, projections and the branches of a `UNION ALL`, into the operators below
+# on the same columns. The planner tests have no table statistics: the rule decides without
+# estimates (the other side is filtered and the join compares all the group columns).
+- id: tables
+  sql: |
+    create table ea (id int primary key, k int, ts bigint, doc jsonb, g int);
+    create table eb (id int primary key, k int, ts bigint, doc jsonb, g int);
+    create table d (u int primary key, state varchar, w int);
+    create table dn (u int, state varchar, w int);
+    create table att (aid int primary key, tid int, x int);
+    create table tk (tid int primary key, kind varchar);
+    create table en (id int primary key, k numeric, ts bigint, doc jsonb);
+    create table dnum (u numeric primary key, state varchar);
+    create view va as select k, last_value(doc order by ts) as doc, max(ts) as ts from ea group by k;
+    create view vb as select k, last_value(doc order by ts) as doc, max(ts) as ts from eb group by k;
+    create view vu as select distinct on (k) * from (select * from va union all select * from vb) s
+      order by k, ts desc;
+    create view vt as select distinct on (k) k, ts, doc from ea order by k, ts desc;
+    create view vd as select distinct on (k) k, ts, doc from ea;
+    create view vg as select k, g, last_value(doc order by ts) as doc from ea group by k, g;
+    create view sel as select att.aid, att.x from att join tk on att.tid = tk.tid where tk.kind = 'a';
+    create view vn as select k, last_value(doc order by ts) as doc from en group by k;
+  expected_outputs: []
+- id: setup
+  sql: |
+    set batch_push_join_below_group_ops = true;
+  expected_outputs: []
+
+# The variable is off by default: nothing changes.
+- name: off by default
+  before: [tables]
+  sql: |
+    select d.u, vu.doc->'a'->>'b' as x from vu join d on vu.k = d.u where d.state = 'open';
+  expected_outputs:
+  - batch_plan
+
+# Rewritten.
+- name: top-n per group over a union of aggregations, joined with a filtered unique table
+  before: [tables, setup]
+  sql: |
+    select d.u, d.w, vu.doc->'a'->>'b' as x, vu.ts from vu join d on vu.k = d.u where d.state = 'open';
+  expected_outputs:
+  - batch_plan
+- name: semi join, the other side is not unique
+  before: [tables, setup]
+  sql: |
+    select vu.k, vu.doc->'a'->>'b' as x from vu where vu.k in (select u from dn where state = 'open');
+  expected_outputs:
+  - batch_plan
+- name: the per-group operator on the right side of the join
+  before: [tables, setup]
+  sql: |
+    select d.w, vt.ts from d join vt on vt.k = d.u where d.state = 'open';
+  expected_outputs:
+  - batch_plan
+- name: the other side is a join, unique on the key of its first table
+  before: [tables, setup]
+  sql: |
+    select sel.x, vu.doc->>'c' as c from vu join sel on vu.k = sel.aid;
+  expected_outputs:
+  - batch_plan
+- name: window partitioned by the key, filtered on its row number
+  before: [tables, setup]
+  sql: |
+    select d.u, s.doc->>'c' as c from (
+      select k, doc, row_number() over (partition by k order by ts desc) as rn from ea
+    ) s join d on s.k = d.u where d.state = 'open' and s.rn = 1;
+  expected_outputs:
+  - batch_plan
+- name: deduplication (distinct on without order by)
+  before: [tables, setup]
+  sql: |
+    select d.w, vd.k from vd join d on vd.k = d.u where d.state = 'open';
+  expected_outputs:
+  - batch_plan
+- name: aggregation, a column of the other side read above becomes a group key
+  before: [tables, setup]
+  sql: |
+    select va.k, d.w, va.doc->>'c' as c from va join d on va.k = d.u where d.state = 'open';
+  expected_outputs:
+  - batch_plan
+- name: condition with a constant comparison of the other side and a group column
+  before: [tables, setup]
+  sql: |
+    select vu.k, vu.ts from vu join d on vu.k = d.u and d.w > vu.k where d.state = 'open';
+  expected_outputs:
+  - batch_plan
+- name: with statistics, a small selection of a large input
+  before: [tables, setup]
+  sql: |
+    select d.u, vu.doc->'a'->>'b' as x from vu join d on vu.k = d.u where d.state = 'open';
+  table_row_counts:
+    ea: 1000000
+    eb: 1000000
+    d: 1000
+  expected_outputs:
+  - batch_plan
+- name: with statistics, the join compares part of the group key only
+  before: [tables, setup]
+  sql: |
+    select d.u, vg.g from vg join d on vg.k = d.u where d.state = 'open';
+  table_row_counts:
+    ea: 1000000
+    d: 1000
+  expected_outputs:
+  - batch_plan
+
+# Left as they are.
+- name: kept - left outer join
+  before: [tables, setup]
+  sql: |
+    select d.u, vu.ts from d left join vu on vu.k = d.u where d.state = 'open';
+  expected_outputs:
+  - batch_plan
+- name: kept - inner join with a side that is not unique
+  before: [tables, setup]
+  sql: |
+    select dn.u, vu.ts from vu join dn on vu.k = dn.u where dn.state = 'open';
+  expected_outputs:
+  - batch_plan
+- name: kept - the join also compares a column that is not a group column
+  before: [tables, setup]
+  sql: |
+    select d.u, vu.ts from vu join d on vu.k = d.u and vu.ts = d.w where d.state = 'open';
+  expected_outputs:
+  - batch_plan
+- name: kept - the join compares only a column that is not a group column
+  before: [tables, setup]
+  sql: |
+    select d.u, va.ts from va join d on va.ts = d.w where d.state = 'open';
+  expected_outputs:
+  - batch_plan
+- name: kept - the other side is not filtered (no estimates)
+  before: [tables, setup]
+  sql: |
+    select d.u, vu.ts from vu join d on vu.k = d.u;
+  expected_outputs:
+  - batch_plan
+- name: kept - the join compares part of the group key only (no estimates)
+  before: [tables, setup]
+  sql: |
+    select d.u, vg.g from vg join d on vg.k = d.u where d.state = 'open';
+  expected_outputs:
+  - batch_plan
+- name: with statistics, a filtered other side larger than the input of the operator
+  before: [tables, setup]
+  sql: |
+    select d.u, vu.doc->'a'->>'b' as x from vu join d on vu.k = d.u where d.state = 'open';
+  table_row_counts:
+    ea: 100
+    eb: 100
+    d: 1000000
+  expected_outputs:
+  - batch_plan
+- name: a volatile condition stays above the operator, as a filter
+  before: [tables, setup]
+  sql: |
+    select d.u, vu.ts from vu join d on vu.k = d.u and random() < 0.5 where d.state = 'open';
+  expected_outputs:
+  - batch_plan
+- name: kept - with statistics, a join that keeps every row
+  before: [tables, setup]
+  sql: |
+    select d.u, vu.ts from vu join d on vu.k = d.u;
+  table_row_counts:
+    ea: 1000000
+    eb: 1000000
+    d: 1000000
+  expected_outputs:
+  - batch_plan
+- name: kept - group column of a type whose equal values may differ (numeric)
+  before: [tables, setup]
+  sql: |
+    select dnum.u, vn.doc->>'c' as c from vn join dnum on vn.k = dnum.u where dnum.state = 'open';
+  expected_outputs:
+  - batch_plan

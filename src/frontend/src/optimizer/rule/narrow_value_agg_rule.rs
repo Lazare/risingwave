@@ -23,7 +23,9 @@
 //! aggregation only keeps what is read. [`NarrowValuePushRule`] then moves those functions further
 //! down, into the branches of a `UNION ALL` and into the side of a join that the value comes
 //! from, so that a lower aggregation of the value is narrowed in turn and the join and the union
-//! carry the narrow value.
+//! carry the narrow value. It also moves them below the operators that pass the rows of their
+//! input through without reading the value: a top-n (per group or not, `DISTINCT ON`), a
+//! deduplication, a window (the columns of its input), and a filter right above one of them.
 //!
 //! Why the result is the same:
 //! - The row that the aggregate picks depends on the order key (and, on ties, on the order of the
@@ -41,9 +43,14 @@
 //! - `DISTINCT` aggregates are not rewritten (the distinct values of `f(x)` are not those of `x`).
 //! - A value read in any other way (output as it is, compared in a join, a grouping key...) is
 //!   not narrowed: the whole value is needed anyway.
+//! - A top-n, a deduplication, a window or a filter that does not read the value (in its keys,
+//!   order, partition, window function arguments or predicate) picks the same rows whatever the
+//!   value, and passes the columns of each picked row through: `f` of the value of a picked row is
+//!   the same computed before or after the operator. No `NULL` is added by them.
 
 use std::collections::{HashMap, HashSet};
 
+use fixedbitset::FixedBitSet;
 use itertools::Itertools;
 use risingwave_common::types::{DataType, ScalarImpl, StructType};
 use risingwave_common::util::iter_util::ZipEqFast;
@@ -686,14 +693,22 @@ fn is_value_call(call: &PlanAggCall) -> bool {
 }
 
 /// Whether column `col` of `plan` is the result of a value aggregate below, passed through
-/// filters, limits, projections (as it is or through narrowing functions), unions (from one of the
-/// branches) and joins.
+/// filters, limits, top-n, deduplications, windows, projections (as it is or through narrowing
+/// functions), unions (from one of the branches) and joins.
 fn from_value_agg(plan: &PlanRef, col: usize) -> bool {
     if let Some(agg) = plan.as_logical_agg() {
         let group_len = agg.group_key().len();
         col >= group_len && is_value_call(&agg.agg_calls()[col - group_len])
-    } else if plan.as_logical_filter().is_some() || plan.as_logical_limit().is_some() {
+    } else if plan.as_logical_filter().is_some()
+        || plan.as_logical_limit().is_some()
+        || plan.as_logical_top_n().is_some()
+        || plan.as_logical_dedup().is_some()
+    {
         from_value_agg(&plan.inputs()[0], col)
+    } else if let Some(over_window) = plan.as_logical_over_window() {
+        // The columns of the input come first.
+        let input = over_window.input();
+        col < input.schema().len() && from_value_agg(&input, col)
     } else if let Some(project) = plan.as_logical_project() {
         // A column passed through, or narrowing functions of one column (a `CASE` over the value,
         // for example): what they read is still narrowed by the functions above.
@@ -739,8 +754,88 @@ impl NarrowValuePushRule {
         } else if let Some(join) = input.as_logical_join() {
             Self::push_into_join(project, join, eligible)
         } else {
-            None
+            Self::push_below_row_operator(project, eligible)
+                .or_else(|| Self::push_through_selection(project))
         }
+    }
+
+    /// The same as [`Self::push_below_row_operator`] through projections that only select columns
+    /// of the operator (the column pruning of a top-n leaves one above it when the order key is
+    /// not read above): the projections are merged.
+    fn push_through_selection(project: &LogicalProject) -> Option<PlanRef> {
+        let mut exprs = project.exprs().clone();
+        let mut node = project.input();
+        let mut merged_any = false;
+        while let Some(inner) = node.as_logical_project()
+            && inner.is_all_inputref()
+        {
+            exprs = ProjectMergeRule::merge_project_exprs(&exprs, inner.exprs(), false)?;
+            node = inner.input();
+            merged_any = true;
+        }
+        if !merged_any {
+            return None;
+        }
+        row_operator_reads(&node)?;
+        let merged = LogicalProject::new(node.clone(), exprs);
+        Self::push_below_row_operator(&merged, &|col| from_value_agg(&node, col))
+    }
+
+    /// Moves the narrowing functions below a top-n, a deduplication, a window, or a filter right
+    /// above one of them, that does not read the column: the operator picks the same rows, and the
+    /// projection reads the narrowed columns that it passes through.
+    fn push_below_row_operator(
+        project: &LogicalProject,
+        eligible: &dyn Fn(usize) -> bool,
+    ) -> Option<PlanRef> {
+        let op = project.input();
+        let (input_len, read) = row_operator_reads(&op)?;
+        let below = op.inputs()[0].clone();
+        let types = op.schema().data_types();
+        let col_num = types.len();
+        let mut units = vec![];
+        for (col, data_type) in types.iter().enumerate().take(input_len) {
+            if !is_wide(data_type) || read.contains(col) || !eligible(col) {
+                continue;
+            }
+            let narrowing = Narrowing {
+                col,
+                col_num,
+                null_on_null: false,
+            };
+            if let Some(col_units) = narrowing.units(project.exprs()) {
+                units.extend(col_units);
+            }
+        }
+        if units.is_empty() {
+            return None;
+        }
+        // The units only read columns of the input, at the same index below the operator. The
+        // operator reads the columns of its input at the same index too; a window puts its
+        // functions after the new columns.
+        let extra = units.len();
+        let new_op = op.clone_root_with_inputs(&[project_with(below, units.clone())]);
+        let replacements = units
+            .iter()
+            .enumerate()
+            .map(|(k, unit)| {
+                (
+                    unit.clone(),
+                    InputRef::new(input_len + k, unit.return_type()).into(),
+                )
+            })
+            .collect();
+        let mut rewriter = ReplaceUnits(replacements);
+        let exprs = project
+            .exprs()
+            .iter()
+            .map(|e| {
+                let shifted =
+                    Renumber(|i| if i < input_len { i } else { i + extra }).rewrite_expr(e.clone());
+                rewriter.rewrite_expr(shifted)
+            })
+            .collect();
+        Some(LogicalProject::create(new_op, exprs))
     }
 
     fn push_into_union(
@@ -946,6 +1041,45 @@ fn scan_may_be_looked_up(scan: &LogicalScan, join: &LogicalJoin) -> bool {
             .get(&0)
             .is_none_or(|c| right_eq_cols.contains(c))
     })
+}
+
+/// For a top-n, a deduplication, a window, or a filter right above one of them: the number of
+/// columns of its input, which it outputs first at the same index, and the columns of its input
+/// that it reads.
+fn row_operator_reads(plan: &PlanRef) -> Option<(usize, FixedBitSet)> {
+    let input = plan.inputs().into_iter().next()?;
+    let input_len = input.schema().len();
+    let mut read = FixedBitSet::with_capacity(input_len);
+    if let Some(top_n) = plan.as_logical_top_n() {
+        read.extend(top_n.group_key().iter().copied());
+        read.extend(
+            top_n
+                .topn_order()
+                .column_orders
+                .iter()
+                .map(|o| o.column_index),
+        );
+    } else if let Some(dedup) = plan.as_logical_dedup() {
+        read.extend(dedup.dedup_cols().iter().copied());
+    } else if let Some(over_window) = plan.as_logical_over_window() {
+        for function in over_window.window_functions() {
+            read.extend(function.args.iter().map(|i| i.index()));
+            read.extend(function.partition_by.iter().map(|i| i.index()));
+            read.extend(function.order_by.iter().map(|o| o.column_index));
+        }
+    } else {
+        let filter = plan.as_logical_filter()?;
+        // Only right above one of the operators above: a filter above an aggregation is crossed
+        // by `NarrowValueAggRule`.
+        if input.as_logical_top_n().is_none()
+            && input.as_logical_dedup().is_none()
+            && input.as_logical_over_window().is_none()
+        {
+            return None;
+        }
+        read = filter.predicate().collect_input_refs(input_len);
+    }
+    Some((input_len, read))
 }
 
 /// Whether `JoinProjectTransposeRule` must keep `project`, an input of a join, below the join:

@@ -77,6 +77,8 @@ default.
 | EB | Batch executor: a hash join whose build side holds no key that can match does not execute its probe side, when the output can not depend on it and the probe side reads nothing from other tasks | done (unconditional, branch `proto/plan-reduction-contradictions`), see "EB" below |
 | BC | Batch: cross join, or join on the same constant on both sides, as a nested loop join that copies its left side to every task (broadcast exchange) instead of one task (`batch_broadcast_cross_join`) | done (prototype, branch `proto/plan-reduction-contradictions`), see "BC" below |
 | RK | Unique key of the partition columns of a `row_number() = n` filter over a window (the empty key without `PARTITION BY`), for the rules of 1 and 2 (`streaming_simplify_on_unique_key`, `batch_simplify_on_unique_key`) | done (prototype, branch `proto/plan-reduction-fix-cast-rownum`, see "RK" below) |
+| GO | Batch: inner or semi join on the group columns of a top-n per group, a deduplication, a window or an aggregation computed below the operator, through `UNION ALL` into the operators below (`batch_push_join_below_group_ops`) | done for batch (prototype, branch `proto/plan-reduction-group-pushdown`, see "GO" below); streaming not done (no general reduction of the state) |
+| NV2 | Narrow values through a top-n (per group or not), a deduplication, a window and a filter right above one of them (`batch_narrow_value_aggregates`, `streaming_narrow_value_aggregates`, a generalisation of NV) | done (prototype, branch `proto/plan-reduction-group-pushdown`, see "GO" below) |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -3157,6 +3159,110 @@ a window without partition, off by default), the differential
 variable, the streaming ones also compared with the batch query,
 after rounds that insert a new first row, move a row to another partition, change, delete and set
 to `NULL` the first rows, empty and refill the tables).
+### GO. Join below a per-group operator; narrow values through it (added on 2026-11-28)
+
+A frequent shape: a "latest row per key" view built as a top-n per group over a `UNION ALL` of
+aggregations on the same key, each keeping a wide value, read through a selective join and a small
+expression of the value:
+
+```sql
+create view va as select k, last_value(doc order by ts) as doc, max(ts) as ts from ea group by k;
+create view vb as select k, last_value(doc order by ts) as doc, max(ts) as ts from eb group by k;
+create view vu as select distinct on (k) * from (select * from va union all select * from vb) s
+  order by k, ts desc;
+select d.u, vu.doc->'a'->>'b' from vu join d on vu.k = d.u where d.state = 'open';
+-- before: Project <- Join(k = u) <- [GroupTopN(k) <- Union <- [Agg(k) <- ea, Agg(k) <- eb], Filter <- d]
+```
+
+The aggregations and the top-n process every key of `ea` and `eb`, with the whole value, and the
+join keeps a small fraction of the keys afterwards; the expression is applied above everything.
+
+**GO (variable `batch_push_join_below_group_ops`, rule `JoinBelowGroupOpRule`).** An inner or left
+semi join (either side for an inner join) whose condition reads, on the side of a per-group
+operator, only its group columns goes below the operator, through the filters and projections
+between them, and through the branches of a `UNION ALL` into the per-group operators below:
+
+```text
+-- after:  Project <- GroupTopN(k) <- Union <- [Project <- Agg(k) <- Join(k = u) <- [ea, Filter <- d], ...]
+```
+
+- Operators: a top-n with a group key (`DISTINCT ON ... ORDER BY`, `row_number() <= n` once
+  converted), a deduplication (`DISTINCT ON` without `ORDER BY`), a window whose every function is
+  partitioned by the compared columns (the filter `rn = 1` above it commutes with the join), an
+  aggregation without grouping sets.
+- Exactness. Let `G` be the group (partition, deduplication) columns and every column of the
+  operator read by the condition be in `G`, of a type whose equal values are identical
+  (`is_simple_type`: not `numeric`, floats or intervals). The rows of a group agree on those
+  columns, so for a row `r` of the other side `T` the condition is true for all of them or none.
+  Inner join: `T` is unique on the columns that the equalities compare (the unique keys of
+  `unique_key_simplify_rule.rs`, which include a join with a lookup on the key of its second table,
+  `att ⋈ tk on att.tid = tk.tid` being unique on the key of `att`), so a group meets at most one
+  `r`: below the operator the join keeps the whole group with the same `r` appended to each row, or
+  drops it. Semi join: whole groups are kept or dropped whatever the duplicates of `T`. The
+  operator sees the same rows, in the same order, in each kept group: a top-n and a deduplication
+  pick the same rows, a window computes the same values, an aggregation the same aggregates.
+  Filters and projections commute with an inner or semi join; a `UNION ALL` distributes over it.
+  An aggregation outputs only its group columns and aggregates: each column of `T` is carried by
+  an `internal_last_seen_value` (all the rows of a kept group hold the same `r`; the calls that
+  nothing reads are pruned), except those the condition equates with a group column, copied from
+  it. Not with an
+  impure condition (evaluated on every row of the groups instead of once per group), nor without
+  an equality between `G` and `T`.
+- When. The rewrite trades the operator's input for a join of every input row: worth it when the
+  join keeps few rows. With estimates (statistics of the tables and, with
+  `batch_cardinality_feedback_learning`, the learned ratios, through the estimator of BJ), the join
+  goes below an operator when its estimated output (an inner join of the same sides for a semi
+  join) is at most a quarter of the operator's input. Without estimates, only when `T` is
+  restricted (a filter, a scan predicate, a semi or anti join or a limit inside it, through
+  projections and inner joins) and the condition equates every column of `G` with a column of `T`.
+  An aggregation is never pushed below an inner join with a whole table, where the opposite rule 5
+  (`batch_push_agg_below_join`) applies: the two rules never undo each other.
+- Placement: after the first predicate pushdown and the stages before join ordering (the filters of
+  `T` are in it), before join ordering, which then orders the joins below the operators; a
+  predicate pushdown follows a rewrite.
+- Streaming: not done. The plan is frozen and the rewrite is exact, but the join below the operator
+  keeps in its state every input row of the operator (all the rows of `ea`), where the operator
+  kept one row or one aggregated value per group: the state is not reduced in general, only when
+  the operator itself keeps all its rows (a `last_value` over a retractable input), and then the
+  join state replaces it rather than shrinking it. A filtered small `T` does not change that: the
+  state of the large side is the cost.
+- Not done: an outer join (the padded groups would differ), a join that also compares a column
+  that is not a group column (it would drop rows inside a group), a join that is not on a unique
+  side (inner), a join with `T` reached only through another join of the tree (the multi-join is
+  not split for it).
+
+**NV2 (variables `batch_narrow_value_aggregates`, `streaming_narrow_value_aggregates`, rule
+`NarrowValuePushRule`).** A generalisation of NV: the narrowing functions of a projection over a
+top-n (with or without group key), a deduplication, a window, or a filter right above one of them,
+go below that operator when it does not read the value (not a group, partition, order or
+deduplication column, not an argument of a window function, not read by the filter), so that the
+next round moves them into the union and the aggregations below. The operator picks the same rows
+whatever the value and passes the columns of a picked row through, so `f` of its value is the same
+before and after; the functions are those of NV (deterministic, pure, infallible: evaluated on
+every row instead of the picked one) and no `NULL` is added. `from_value_agg` now also follows
+these operators, so the existing pushes into unions and join sides see a value aggregated below
+them. A filter is crossed only above one of these operators: above an aggregation,
+`NarrowValueAggRule` already crosses it, and the plans of NV do not change. In the example above
+(streaming, or batch after GO), `last_value(doc)` becomes `last_value(doc->'a'->>'b')` in both
+aggregations, and the union, the top-n state and the join carry the text only.
+
+- Tests: planner tests `batch_push_join_below_group_ops.yaml` (top-n over a union of aggregations,
+  semi join on a side that is not unique, the operator on the right side, a join unique on the key
+  of its first table, a window filtered on its row number, a deduplication, an aggregation with a
+  column of `T` read above, a condition comparing a group column with `T`; with statistics: a small
+  selection of a large input, a filtered `T` larger than the input, part of the group key; a
+  volatile filter left above the operator; kept: left join, `T` not unique, a column that is not
+  a group column, `T` not filtered without estimates, part of the group key without estimates, a
+  join that keeps every row with statistics, a `numeric` group column),
+  `batch_narrow_value_group_ops.yaml` and `stream_narrow_value_group_ops.yaml` (through a join and
+  a top-n per group into a union of aggregations, several fields with a fallible cast left above,
+  a top-n ordered by a field of the value, a top-n without group, a deduplication, windows; kept:
+  the value output as it is, a window function reading the value, a deduplication on the value;
+  batch with both variables); differential tests `e2e_test/batch/push_join_below_group_ops`
+  (21 queries run without the variables, with each and with both, compared after inserts, updates
+  of the selective side, deletes of last rows and emptied tables) and
+  `e2e_test/streaming/narrow_value_group_ops` (8 queries materialized with and without the
+  variable, compared with each other and with the batch query after the backfill and each round).
 
 ## Not for now: sharing between materialized views
 

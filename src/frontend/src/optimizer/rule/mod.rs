@@ -326,6 +326,9 @@ pub use in_list_coalesce_simplify_rule::*;
 // Rule `ConstantKeyJoinRule` (`batch_broadcast_cross_join`).
 mod constant_key_join_rule;
 pub use constant_key_join_rule::*;
+// Rule `JoinBelowGroupOpRule` (`batch_push_join_below_group_ops`).
+mod join_below_group_op_rule;
+pub use join_below_group_op_rule::*;
 mod join_project_transpose_rule;
 pub use join_project_transpose_rule::*;
 mod limit_push_down_rule;
@@ -567,6 +570,7 @@ macro_rules! for_all_rules {
             , { NullContradictionRule }
             , { InListCoalesceSimplifyRule }
             , { ConstantKeyJoinRule }
+            , { JoinBelowGroupOpRule }
         }
     };
 }
