@@ -1662,7 +1662,13 @@ impl LogicalOptimizer {
         {
             for _ in 0..3 {
                 let applied_before = ctx.total_rule_applied();
-                plan = plan.optimize_by_rules(&STREAM_SIMPLIFY_ON_UNIQUE_KEY)?;
+                // `streaming_preserve_mv_key`: the operator that gives the job its key is kept
+                // when removing it would change the key (see `optimize_below_key_operator`).
+                plan = if ctx.session_ctx().config().streaming_preserve_mv_key() {
+                    optimize_below_key_operator(plan, &STREAM_SIMPLIFY_ON_UNIQUE_KEY)?
+                } else {
+                    plan.optimize_by_rules(&STREAM_SIMPLIFY_ON_UNIQUE_KEY)?
+                };
                 let applied = ctx.total_rule_applied() - applied_before;
                 if applied == 0 {
                     break;

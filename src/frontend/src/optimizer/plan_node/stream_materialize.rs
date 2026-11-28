@@ -25,7 +25,7 @@ use risingwave_common::hash::VnodeCount;
 use risingwave_common::id::FragmentId;
 use risingwave_common::types::DataType;
 use risingwave_common::util::column_index_mapping::ColIndexMapping;
-use risingwave_common::util::iter_util::ZipEqFast;
+use risingwave_common::util::iter_util::{ZipEqDebug, ZipEqFast};
 use risingwave_common::util::sort_util::{ColumnOrder, OrderType};
 use risingwave_pb::catalog::PbWebhookSourceInfo;
 use risingwave_pb::stream_plan::stream_node::PbNodeBody;
@@ -127,7 +127,11 @@ impl StreamMaterialize {
         cardinality: Cardinality,
         retention_seconds: Option<NonZeroU32>,
     ) -> Result<Self> {
-        let input = Self::rewrite_input(input, user_distributed_by.clone(), table_type)?;
+        let input =
+            match Self::preferred_mv_distribution(&input, table_type, &user_cols, &out_names) {
+                Some(required) => required.streaming_enforce_if_not_satisfies(input)?,
+                None => Self::rewrite_input(input, user_distributed_by.clone(), table_type)?,
+            };
         // the hidden column name might refer some expr id
         let input = reorganize_elements_id(input);
         let columns = derive_columns(input.schema(), out_names, &user_cols)?;
@@ -244,6 +248,44 @@ impl StreamMaterialize {
         );
 
         Self::new_with_staging_and_progress(input, table, staging_table, refresh_progress_table)
+    }
+
+    /// `streaming_preserve_mv_key`: the distribution of a materialized view by the columns that
+    /// the view would be distributed by without the plan reductions (see
+    /// `OptimizerContext::preferred_mv_distribution`), if they are visible columns, still part of
+    /// the stream key. A batch lookup join by those columns (the shortest prefix of the primary key
+    /// that holds the distribution key) or a streaming join on them then reads the view as before.
+    fn preferred_mv_distribution(
+        input: &PlanRef,
+        table_type: TableType,
+        user_cols: &FixedBitSet,
+        out_names: &[String],
+    ) -> Option<RequiredDist> {
+        if table_type != TableType::MaterializedView
+            || matches!(input.distribution(), Distribution::Single)
+        {
+            return None;
+        }
+        let names = input.ctx().preferred_mv_distribution()?;
+        if names.is_empty() {
+            return None;
+        }
+        // The visible columns are those of `user_cols`, named by `out_names` in this order.
+        let columns: Vec<usize> = names
+            .iter()
+            .map(|name| {
+                user_cols
+                    .ones()
+                    .zip_eq_debug(out_names)
+                    .find(|(_, out_name)| *out_name == name)
+                    .map(|(column, _)| column)
+            })
+            .collect::<Option<_>>()?;
+        let stream_key = input.stream_key()?;
+        columns
+            .iter()
+            .all(|column| stream_key.contains(column))
+            .then(|| RequiredDist::shard_by_exact_key(input.schema().len(), &columns))
     }
 
     /// Rewrite the input to satisfy the required distribution if necessary, according to the type.

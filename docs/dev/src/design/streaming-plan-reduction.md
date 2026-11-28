@@ -71,6 +71,7 @@ default.
 | SJ14 | Batch: semi and anti joins pushed into an input of the inner joins or merged as an inner join on a unique side, by the costs of BJ (`batch_semi_join_ordering`) | first version (prototype, branch `proto/plan-reduction-batch-joins`, see "SJ" below); semi joins reading several inputs not done |
 | SJ16 | Batch: outer-join reordering with the identities of PostgreSQL | design only (see "SJ" below): too large and risky for this round |
 | SU | Streaming: inputs of a `UNION ALL` shuffled directly by the key the operator above needs, when that key is part of the stream key of the union (`streaming_distributed_union`) | done (prototype, branch `proto/plan-reduction-stream-union-dist`, see "SU" below); key outside the stream key not done (see "SU") |
+| MK | Streaming: the plan reductions keep the key of a materialized view (its primary key and distribution key) when the key without them is still valid (`streaming_preserve_mv_key`) | done (prototype, branch `proto/plan-reduction-mv-key-regime`), see "MK" below |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -2760,6 +2761,75 @@ frequent case (the other branches fill the slot with `null`). It would cover the
 key, whose two copies are the same column of each branch, but the union's distribution key would
 then be outside its stream key by position (equal by value), which the same assertion compares;
 not done.
+
+### MK. Streaming: the reductions keep the key of a materialized view (added on 2026-11-28)
+
+Variable `streaming_preserve_mv_key`. The replay of a workload compares plans with the reductions
+on; it used to create every materialized view with the variables off and only plan the queries
+with them on. Creating the views with the variables on, as a deployment does, gave worse plans to
+the consumers of the views, with the same rules: batch lookup joins by the key of a view became a
+scan, a shuffle and a hash join, and streaming joins on the view needed a shuffle. The reductions
+had changed the key of the views they read:
+
+- **The operator that gives the view its key is removed.** A top-1 per key, a `DISTINCT ON`, a
+  dedup or an aggregation grouped by a key, at the top of the view, over a join whose other side
+  has at most one row per row (a left join on the primary key of the other side). The input is
+  unique on the group key, so `AggOnKeyEliminateRule` (`streaming_simplify_on_unique_key`, idea 2)
+  removes the operator. The key of the view then becomes the stream key of the join, which holds
+  the stream keys of both sides (or the join key, for the side whose key is compared), so the
+  primary key is wider, and the distribution key, a subset of it, may be a column the
+  consumers do not join on:
+
+  ```text
+  SELECT DISTINCT ON (e.id) e.id, d.v FROM e LEFT JOIN d ON e.ref_id = d.id
+
+  without the reductions: pk [id], distribution [id]
+  with them:              pk [id, e.ref_id], distribution [e.ref_id]
+  ```
+
+  A lookup join by `id` needs the shortest prefix of the primary key that holds the
+  distribution key, here the whole key. Downstream, a scan of the view is no longer known to be
+  unique on `id`, so the rules that rely on that key (1, 2, 3) no longer apply to the consumers.
+  The wider key can not be narrowed again without a stateful operator: the rows of one `id` can
+  come from two actors (a row whose `ref_id` changes is deleted by the actor of the old value and
+  inserted by the actor of the new one), and a narrower key would let the insert overtake the
+  delete. The removed operator was what tolerated this.
+- **The distribution comes from another operator.** A join removed by the reductions (a table
+  joined with itself on its key, idea 3), or a projection moved below the top join (so that the
+  top operator becomes the join, for which `StreamMaterialize` shuffles by the whole stream key),
+  changes the distribution of the input of the materialize; the primary key may stay the same.
+
+The fix, behind the variable:
+
+- **The operator that gives the job its key is kept** (`optimize_below_key_operator`, used by the
+  stage of idea 2): below the projections and filters at the top of the plan, the first
+  aggregation with a group key, top-n that keeps one row per group or dedup is not removed if the
+  stream key of its input is not within its group key. The stage is applied to its input: the
+  other operators are still removed. Operators whose removal does not change the key (input key
+  within the group key, a top-n of several rows per group) and operators deeper in the plan are
+  removed as before.
+- **The distribution key of the view is kept** (`StreamMaterialize::preferred_mv_distribution`):
+  `gen_create_mv_plan_bound` plans the view once more without the reductions (the baseline plan
+  of H) and records its distribution key, by the names of the visible columns. The materialize
+  of the plan with the reductions shuffles by those columns if they are still part of its stream
+  key (one exchange in the job of the view when the input is distributed otherwise). A
+  distribution by hidden columns is not kept: they may differ between the two plans.
+- Valid: keeping an operator of the original plan, and shuffling the input of the materialize by
+  columns of its stream key (the rows of a key stay on one actor, in order), are always correct.
+- Cost: the kept operator keeps its state (a top-1 per key keeps the rows of the view once more);
+  the view is planned twice when it is created.
+- Measure (replay of a sample workload, the views created with the variables of the
+  reductions on, compared with the same queries planned over views created without them): the
+  regression was +5 joins, +47 scans and +49 exchanges in 34 batch queries, +4 joins in the
+  streaming jobs. Recreating with the original key the five views whose top operator was removed
+  recovers all but +6 scans and +6 exchanges; recreating also the four views whose distribution
+  had changed recovers everything (0 joins, scans and exchanges of difference).
+- Not done: the order of the primary key (a consumer may need a prefix that the reductions moved
+  after another column), and the views planned with an `ORDER BY`.
+- Tests: planner tests `stream_preserve_mv_key.yaml` (the keys with and without the variable,
+  the operators still removed, batch lookup joins and streaming joins on the views); differential
+  test `e2e_test/streaming/preserve_mv_key` (views with and without the variable, views joined on
+  their key, join keys moved between actors, deletes, emptied tables).
 
 ## Not for now: sharing between materialized views
 

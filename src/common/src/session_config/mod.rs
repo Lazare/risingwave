@@ -773,6 +773,18 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     streaming_distributed_union: bool,
 
+    // `optimize_below_key_operator` and `StreamMaterialize` (`streaming_preserve_mv_key`).
+    /// In the plan of a new streaming job, keep the key that the job would have without the plan
+    /// reductions of the other `streaming_*` variables, when it is still a valid key: the
+    /// aggregation, top-1 per group or dedup at the top of the plan is not removed by
+    /// `streaming_simplify_on_unique_key` if the key of its input is not within its group key, and
+    /// a materialized view keeps the distribution key it would have without the reductions if those
+    /// columns are still part of its key. Consumers of the view (batch lookup joins, streaming
+    /// joins, the rules that rely on the key of a scanned table) then see the same key. Defaults to
+    /// false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    streaming_preserve_mv_key: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,
