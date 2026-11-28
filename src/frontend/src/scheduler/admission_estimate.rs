@@ -220,11 +220,11 @@ mod tests {
 
     #[test]
     fn test_small_query_reserves_nothing() {
-        // Two integer columns: 3 stages x 4 tasks x 65 x 1024 x 15 bytes = 11.4 MB of buffers,
+        // Two integer columns: 3 stages x 4 tasks x 65 x 1024 x 14 bytes = 10.7 MB of buffers,
         // and two scans of 32 MB.
         let graph = join_query(vec![field(DataType::Int32), field(DataType::Int64)]);
         let estimate = estimate_bytes(&graph, settings());
-        assert_eq!(estimate, 3 * 4 * 65 * 1024 * 15 + 2 * SCAN_BYTES);
+        assert_eq!(estimate, 3 * 4 * 65 * 1024 * 14 + 2 * SCAN_BYTES);
         assert!(estimate < MIN_RESERVED_BYTES);
         assert_eq!(extra_reservation_bytes(&graph, settings()), 0);
     }
