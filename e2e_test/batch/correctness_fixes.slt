@@ -470,3 +470,25 @@ drop table cf_ga;
 
 statement ok
 drop table cf_gb;
+
+# An update or an upsert to an equal value with a different text changes the table.
+statement ok
+create table cf_n (id int primary key, k numeric, f float8);
+
+statement ok
+insert into cf_n values (1, 1.00, 0), (2, 2.5, 1);
+
+statement ok
+update cf_n set k = 1.0, f = '-0'::float8 where id = 1;
+
+statement ok
+insert into cf_n values (2, 2.50, 1);
+
+query ITT rowsort
+select id, k::varchar, f::varchar from cf_n;
+----
+1 1.0 -0
+2 2.50 1
+
+statement ok
+drop table cf_n;
