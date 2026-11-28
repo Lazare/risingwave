@@ -847,6 +847,16 @@ static LIMIT_PUSH_DOWN: LazyLock<OptimizationStage> = LazyLock::new(|| {
     )
 });
 
+// `batch_push_down_limit`: rule `LimitUnionJoinPushDownRule`. Top-down: the copy of a limit put
+// into a branch is pushed further into the unions and outer joins below it.
+static BATCH_PUSH_DOWN_LIMIT: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Push Down Limit Into Unions And Outer Joins For Batch",
+        vec![LimitUnionJoinPushDownRule::create()],
+        ApplyOrder::TopDown,
+    )
+});
+
 static PULL_UP_HOP: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Pull Up Hop",
@@ -1872,6 +1882,17 @@ impl LogicalOptimizer {
         plan = plan.optimize_by_rules(&ICEBERG_COUNT_STAR)?;
 
         plan = plan.optimize_by_rules(&PULL_UP_HOP)?;
+
+        // Rule `LimitUnionJoinPushDownRule` (`batch_push_down_limit`): a copy of a limit or top-n
+        // goes into each branch of a `UNION ALL` and into the preserved side of an outer join
+        // below it. After the last predicate pushdown, which has moved into the branches the
+        // filters that the limit could not cross, and after the column pruning (only projections,
+        // which the rule sees through, are left between them). Before `TOP_N_AGG_ON_INDEX`, so
+        // that a top-n put on a scan can read an index ordered by its key, and before
+        // `LIMIT_PUSH_DOWN` and the batch rule that puts a limit into a scan.
+        if ctx.session_ctx().config().batch_push_down_limit() {
+            plan = plan.optimize_by_rules(&BATCH_PUSH_DOWN_LIMIT)?;
+        }
 
         plan = plan.optimize_by_rules(&TOP_N_AGG_ON_INDEX)?;
 

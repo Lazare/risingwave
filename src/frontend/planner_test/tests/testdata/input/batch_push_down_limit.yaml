@@ -1,0 +1,238 @@
+# Tests for `batch_push_down_limit` (batch only): `LimitUnionJoinPushDownRule` puts a copy of a
+# limit (or of a top-n) with `limit + offset` rows into each branch of a `UNION ALL` below it, and
+# into the side of a left or right join that keeps all its rows (a top-n only when it is ordered by
+# columns of that side). The limit itself stays above. Not through `UNION` (a distinct), inner,
+# semi, anti or full joins, a filter, nor into a branch that already returns few enough rows.
+- id: setup_off
+  sql: |
+    create table t1 (a int, b int, c varchar);
+    create table t2 (a int, b int, c varchar);
+  expected_outputs: []
+- id: setup
+  sql: |
+    set batch_push_down_limit = true;
+    create table t1 (a int, b int, c varchar);
+    create table t2 (a int, b int, c varchar);
+    create table t3 (a int, b int, c varchar);
+    create table l (id int primary key, k int, x int);
+    create table r (k int primary key, v varchar);
+    create table rd (k int, v varchar);
+  expected_outputs: []
+
+- name: off by default - limit over union all
+  before: [setup_off]
+  sql: |
+    select a, b from t1 union all select a, b from t2 limit 10;
+  expected_outputs:
+  - batch_plan
+
+# Rewritten.
+- name: limit over union all
+  before: [setup]
+  sql: |
+    select a, b from t1 union all select a, b from t2 limit 10;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+- name: limit with offset over union all
+  before: [setup]
+  sql: |
+    select a, b from t1 union all select a, b from t2 limit 10 offset 5;
+  expected_outputs:
+  - batch_plan
+- name: top-n with offset over union all
+  before: [setup]
+  sql: |
+    select a, b from t1 union all select a, b from t2 order by a, b desc limit 10 offset 5;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+- name: top-n with ties over union all
+  before: [setup]
+  sql: |
+    select a, b from t1 union all select a, b from t2 order by a fetch first 3 rows with ties;
+  expected_outputs:
+  - batch_plan
+- name: filter above the union, pushed into the branches first
+  before: [setup]
+  sql: |
+    select * from (select a, b from t1 union all select a, b from t2) u where b > 3 limit 10;
+  expected_outputs:
+  - batch_plan
+- name: top-n over a union of expressions, ordered by a plain column
+  before: [setup]
+  sql: |
+    select a, b + 1 as b1 from t1 union all select a, b * 2 from t2 order by a limit 4;
+  expected_outputs:
+  - batch_plan
+- name: nested unions, one under a projection with an expression
+  before: [setup]
+  sql: |
+    select a from t1
+    union all
+    select x from (select a + 1 as x from t2 union all select a from t3) s
+    limit 5;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+- name: a branch limited to more rows gets one limit with the smaller count
+  before: [setup]
+  sql: |
+    select a from t1 union all (select a from t2 limit 100 offset 3) limit 5;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+- name: a left join in a branch of the union
+  before: [setup]
+  sql: |
+    select l.x from l left join r on l.k = r.k
+    union all
+    select a from t1
+    limit 5;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+- name: limit inside a count
+  before: [setup]
+  sql: |
+    select count(*) from (select a from t1 union all select a from t2 limit 7) s;
+  expected_outputs:
+  - batch_plan
+- name: limit over left join on a unique key
+  before: [setup]
+  sql: |
+    select l.id, l.x, r.v from l left join r on l.k = r.k limit 10;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+- name: limit with offset over left join, right side without a key
+  before: [setup]
+  sql: |
+    select l.id, rd.v from l left join rd on l.k = rd.k limit 10 offset 4;
+  expected_outputs:
+  - batch_plan
+- name: limit over left join with a condition that is not an equality
+  before: [setup]
+  sql: |
+    select l.id, rd.v from l left join rd on l.k < rd.k limit 3;
+  expected_outputs:
+  - batch_plan
+- name: limit over right join
+  before: [setup]
+  sql: |
+    select l.id, r.k, r.v from l right join r on l.k = r.k limit 10;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+- name: top-n over left join, ordered by left columns
+  before: [setup]
+  sql: |
+    select l.id, l.x, r.v from l left join r on l.k = r.k order by l.x desc, l.id limit 10 offset 2;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+- name: top-n over left join, expressions in the select list
+  before: [setup]
+  sql: |
+    select l.x + 1 as x1, r.v from l left join r on l.k = r.k order by l.id limit 3;
+  expected_outputs:
+  - batch_plan
+- name: top-n over right join, ordered by right columns
+  before: [setup]
+  sql: |
+    select l.id, r.v from l right join r on l.k = r.k order by r.k limit 6;
+  expected_outputs:
+  - batch_plan
+- name: top-n with ties over left join, ordered by a left column
+  before: [setup]
+  sql: |
+    select l.k, rd.v from l left join rd on l.k = rd.k order by l.k fetch first 2 rows with ties;
+  expected_outputs:
+  - batch_plan
+
+# Kept as they are.
+- name: kept - top-n over left join ordered by a column of the right side
+  before: [setup]
+  sql: |
+    select l.id, r.v from l left join r on l.k = r.k order by r.v, l.id limit 5;
+  expected_outputs:
+  - batch_plan
+- name: kept - full outer join
+  before: [setup]
+  sql: |
+    select l.id, r.v from l full join r on l.k = r.k limit 5;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+- name: kept - top-n over full outer join
+  before: [setup]
+  sql: |
+    select l.id, r.v from l full join r on l.k = r.k order by l.id limit 5;
+  expected_outputs:
+  - batch_plan
+- name: kept - inner join
+  before: [setup]
+  sql: |
+    select l.id, r.v from l join r on l.k = r.k limit 5;
+  expected_outputs:
+  - batch_plan
+- name: kept - semi join
+  before: [setup]
+  sql: |
+    select l.id from l where exists (select 1 from rd where rd.k = l.k) limit 5;
+  expected_outputs:
+  - batch_plan
+- name: kept - anti join
+  before: [setup]
+  sql: |
+    select l.id from l where not exists (select 1 from rd where rd.k = l.k) limit 5;
+  expected_outputs:
+  - batch_plan
+- name: kept - left join turned into an inner join by a filter on the right side
+  before: [setup]
+  sql: |
+    select l.id, r.v from l left join r on l.k = r.k where r.v = 'a' limit 5;
+  expected_outputs:
+  - batch_plan
+- name: kept - filter above the left join that cannot be pushed down
+  before: [setup]
+  sql: |
+    select l.id, r.v from l left join r on l.k = r.k where coalesce(r.v, 'none') = 'none' limit 5;
+  expected_outputs:
+  - batch_plan
+- name: kept - union without all
+  before: [setup]
+  sql: |
+    select a, b from t1 union select a, b from t2 limit 10;
+  expected_outputs:
+  - batch_plan
+- name: kept - top-n ordered by an expression over the union
+  before: [setup]
+  sql: |
+    select * from (select a, b from t1 union all select a, b from t2) u order by a + b limit 10;
+  expected_outputs:
+  - batch_plan
+- name: kept - every branch already limited to fewer rows
+  before: [setup]
+  sql: |
+    (select a from t1 limit 2) union all (select a from t2 order by a limit 3) union all select 1 limit 10;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+- name: partly kept - one branch already limited to fewer rows
+  before: [setup]
+  sql: |
+    select a from t1 union all (select a from t2 limit 3) limit 10;
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+- name: kept - offset without limit
+  before: [setup]
+  sql: |
+    select a from t1 union all select a from t2 offset 5;
+  expected_outputs:
+  - batch_plan
+- name: kept - top-n per group (row_number) over a union
+  before: [setup]
+  sql: |
+    select a, b from (select a, b, row_number() over (partition by a order by b) as rn
+      from (select a, b from t1 union all select a, b from t2) u) x where rn <= 2;
+  expected_outputs:
+  - batch_plan

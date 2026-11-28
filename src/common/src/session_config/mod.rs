@@ -504,6 +504,15 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_spill_on_memory_wait: bool,
 
+    // Rule `LimitUnionJoinPushDownRule`.
+    /// In a batch query, put a copy of a `LIMIT` (or of an `ORDER BY .. LIMIT`) into each branch of
+    /// a `UNION ALL` below it, and into the side of a left or right join that keeps all its rows
+    /// (a top-n only when it is ordered by columns of that side), with `LIMIT n + OFFSET` rows;
+    /// the limit itself stays above. Not through `UNION`, inner, semi, anti or full joins, nor
+    /// through a filter. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_push_down_limit: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,

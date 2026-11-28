@@ -264,6 +264,9 @@ mod join_project_transpose_rule;
 pub use join_project_transpose_rule::*;
 mod limit_push_down_rule;
 pub use limit_push_down_rule::*;
+// Rule `LimitUnionJoinPushDownRule` (`batch_push_down_limit`).
+mod limit_union_join_push_down_rule;
+pub use limit_union_join_push_down_rule::*;
 mod pull_up_hop_rule;
 pub use pull_up_hop_rule::*;
 mod apply_offset_rewriter;
@@ -434,6 +437,7 @@ macro_rules! for_all_rules {
             , { LogicalFilterExpressionSimplifyRule }
             , { JoinProjectTransposeRule }
             , { LimitPushDownRule }
+            , { LimitUnionJoinPushDownRule }
             , { PullUpHopRule }
             , { IntersectToSemiJoinRule }
             , { ExceptToAntiJoinRule }
