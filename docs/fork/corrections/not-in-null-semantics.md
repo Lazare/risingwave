@@ -76,8 +76,13 @@ Commits on branch `proto/plan-reduction-fix-correctness`:
 
 - `178f11ecc9` fix(planner): plan NOT IN over a subquery with its NULL semantics (applies to
   upstream code alone; adds the session variable);
+- `04005a5d08` compilation fix of `178f11ecc9` (a missing import), to squash into it;
 - `77fd6f8b48` feat(planner): keep the plain anti join of NOT IN when both sides are never NULL
-  (needs the column facts of the plan reduction prototype).
+  (needs the column facts of the plan reduction prototype);
+- tests: `65d11b899c` (end-to-end), `a04212c589` (planner outputs).
+
+In `HAVING`, `NOT IN` also needed the correction of
+[in-subquery-in-having.md](in-subquery-in-having.md).
 
 Not changed: `x NOT IN` in a select list or a `CASE`, or under `OR`, is still rejected ("not yet
 implemented"); `(a, b) NOT IN (SELECT c, d ...)` is still rejected by the binder ("Subquery must
