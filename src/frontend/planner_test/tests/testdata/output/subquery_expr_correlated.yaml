@@ -612,9 +612,18 @@
   optimized_logical_plan_for_batch: |-
     LogicalJoin { type: LeftAnti, on: IsNotDistinctFrom(t1.x, t2.x), output: all }
     ├─LogicalScan { table: t1, columns: [t1.x, t1.y] }
-    └─LogicalJoin { type: LeftAnti, on: (t2.y = t3.y) AND IsNotDistinctFrom(t2.x, t3.x), output: [t2.x] }
-      ├─LogicalScan { table: t2, columns: [t2.x, t2.y], predicate: IsNotNull(t2.x) }
-      └─LogicalScan { table: t3, columns: [t3.x, t3.y], predicate: IsNotNull(t3.x) }
+    └─LogicalJoin { type: Inner, on: ($expr1 > $expr2) AND IsNotDistinctFrom(t2.x, t1.x), output: [t2.x] }
+      ├─LogicalProject { exprs: [t2.x, Case(IsNull(t2.y), 1:Int32, 2:Int32) as $expr1] }
+      │ └─LogicalJoin { type: LeftAnti, on: (t2.y = t3.y) AND IsNotDistinctFrom(t2.x, t3.x), output: all }
+      │   ├─LogicalScan { table: t2, columns: [t2.x, t2.y], predicate: IsNotNull(t2.x) }
+      │   └─LogicalScan { table: t3, columns: [t3.x, t3.y], predicate: IsNotNull(t3.x) }
+      └─LogicalProject { exprs: [t1.x, Case((count(1:Int32) = 0:Int64), 0:Int32, (count(1:Int32) filter(IsNull(t3.y)) > 0:Int64), 2:Int32, 1:Int32) as $expr2] }
+        └─LogicalAgg { group_key: [t1.x], aggs: [count(1:Int32), count(1:Int32) filter(IsNull(t3.y))] }
+          └─LogicalJoin { type: LeftOuter, on: IsNotDistinctFrom(t1.x, t3.x), output: [t1.x, t3.y, 1:Int32] }
+            ├─LogicalAgg { group_key: [t1.x], aggs: [] }
+            │ └─LogicalScan { table: t1, columns: [t1.x] }
+            └─LogicalProject { exprs: [t3.x, t3.y, 1:Int32] }
+              └─LogicalScan { table: t3, columns: [t3.x, t3.y], predicate: IsNotNull(t3.x) }
 - sql: |
     create table t1(x int, y int);
     create table t2(x int, y int);
@@ -2554,3 +2563,95 @@
         └─BatchProject { exprs: [users.id] }
           └─BatchFilter { predicate: (users.is_active = false:Boolean) }
             └─BatchScan { table: users, columns: [users.id, users.is_active], distribution: SomeShard }
+- name: exists over correlated scalar agg keeps the empty-group row
+  sql: |
+    create table a(x int);
+    create table b(x int, y int);
+    select * from a where exists (select max(y) from b where b.x = a.x);
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: LeftSemi, predicate: a.x IS NOT DISTINCT FROM a.x, output: all }
+      ├─BatchExchange { order: [], dist: HashShard(a.x) }
+      │ └─BatchScan { table: a, columns: [a.x], distribution: SomeShard }
+      └─BatchHashAgg { group_key: [a.x], aggs: [] }
+        └─BatchHashJoin { type: LeftOuter, predicate: a.x IS NOT DISTINCT FROM b.x, output: [a.x] }
+          ├─BatchHashAgg { group_key: [a.x], aggs: [] }
+          │ └─BatchExchange { order: [], dist: HashShard(a.x) }
+          │   └─BatchScan { table: a, columns: [a.x], distribution: SomeShard }
+          └─BatchExchange { order: [], dist: HashShard(b.x) }
+            └─BatchFilter { predicate: IsNotNull(b.x) }
+              └─BatchScan { table: b, columns: [b.x], distribution: SomeShard }
+  stream_plan: |-
+    StreamMaterialize { columns: [x, a._row_id(hidden)], stream_key: [a._row_id, x], pk_columns: [a._row_id, x], pk_conflict: NoCheck }
+    └─StreamExchange { dist: HashShard(a.x, a._row_id) }
+      └─StreamHashJoin { type: LeftSemi, predicate: a.x IS NOT DISTINCT FROM a.x, output: all }
+        ├─StreamExchange { dist: HashShard(a.x) }
+        │ └─StreamTableScan { table: a, columns: [a.x, a._row_id], stream_scan_type: SnapshotBackfill, stream_key: [a._row_id], pk: [_row_id], dist: UpstreamHashShard(a._row_id) }
+        └─StreamProject { exprs: [a.x], noop_update_hint: true }
+          └─StreamHashAgg { group_key: [a.x], aggs: [count] }
+            └─StreamHashJoin { type: LeftOuter, predicate: a.x IS NOT DISTINCT FROM b.x, output: [a.x, b._row_id] }
+              ├─StreamProject { exprs: [a.x], noop_update_hint: true }
+              │ └─StreamHashAgg { group_key: [a.x], aggs: [count] }
+              │   └─StreamExchange { dist: HashShard(a.x) }
+              │     └─StreamTableScan { table: a, columns: [a.x, a._row_id], stream_scan_type: SnapshotBackfill, stream_key: [a._row_id], pk: [_row_id], dist: UpstreamHashShard(a._row_id) }
+              └─StreamExchange { dist: HashShard(b.x) }
+                └─StreamFilter { predicate: IsNotNull(b.x) }
+                  └─StreamTableScan { table: b, columns: [b.x, b._row_id], stream_scan_type: SnapshotBackfill, stream_key: [b._row_id], pk: [_row_id], dist: UpstreamHashShard(b._row_id) }
+- name: not exists over correlated scalar agg keeps the empty-group row
+  sql: |
+    create table a(x int);
+    create table b(x int, y int);
+    select * from a where not exists (select sum(y) + 1 from b where b.x = a.x);
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: LeftAnti, predicate: a.x IS NOT DISTINCT FROM a.x, output: all }
+      ├─BatchExchange { order: [], dist: HashShard(a.x) }
+      │ └─BatchScan { table: a, columns: [a.x], distribution: SomeShard }
+      └─BatchHashAgg { group_key: [a.x], aggs: [] }
+        └─BatchHashJoin { type: LeftOuter, predicate: a.x IS NOT DISTINCT FROM b.x, output: [a.x] }
+          ├─BatchHashAgg { group_key: [a.x], aggs: [] }
+          │ └─BatchExchange { order: [], dist: HashShard(a.x) }
+          │   └─BatchScan { table: a, columns: [a.x], distribution: SomeShard }
+          └─BatchExchange { order: [], dist: HashShard(b.x) }
+            └─BatchFilter { predicate: IsNotNull(b.x) }
+              └─BatchScan { table: b, columns: [b.x], distribution: SomeShard }
+  stream_plan: |-
+    StreamMaterialize { columns: [x, a._row_id(hidden)], stream_key: [a._row_id, x], pk_columns: [a._row_id, x], pk_conflict: NoCheck }
+    └─StreamExchange { dist: HashShard(a.x, a._row_id) }
+      └─StreamHashJoin { type: LeftAnti, predicate: a.x IS NOT DISTINCT FROM a.x, output: all }
+        ├─StreamExchange { dist: HashShard(a.x) }
+        │ └─StreamTableScan { table: a, columns: [a.x, a._row_id], stream_scan_type: SnapshotBackfill, stream_key: [a._row_id], pk: [_row_id], dist: UpstreamHashShard(a._row_id) }
+        └─StreamProject { exprs: [a.x], noop_update_hint: true }
+          └─StreamHashAgg { group_key: [a.x], aggs: [count] }
+            └─StreamHashJoin { type: LeftOuter, predicate: a.x IS NOT DISTINCT FROM b.x, output: [a.x, b._row_id] }
+              ├─StreamProject { exprs: [a.x], noop_update_hint: true }
+              │ └─StreamHashAgg { group_key: [a.x], aggs: [count] }
+              │   └─StreamExchange { dist: HashShard(a.x) }
+              │     └─StreamTableScan { table: a, columns: [a.x, a._row_id], stream_scan_type: SnapshotBackfill, stream_key: [a._row_id], pk: [_row_id], dist: UpstreamHashShard(a._row_id) }
+              └─StreamExchange { dist: HashShard(b.x) }
+                └─StreamFilter { predicate: IsNotNull(b.x) }
+                  └─StreamTableScan { table: b, columns: [b.x, b._row_id], stream_scan_type: SnapshotBackfill, stream_key: [b._row_id], pk: [_row_id], dist: UpstreamHashShard(b._row_id) }
+- name: in over correlated scalar agg still decorrelates to group by
+  sql: |
+    create table a(x int);
+    create table b(x int, y int);
+    select * from a where x in (select max(y) from b where b.x = a.x);
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: LeftSemi, predicate: a.x = max(b.y) AND a.x = b.x, output: all }
+      ├─BatchExchange { order: [], dist: HashShard(a.x) }
+      │ └─BatchScan { table: a, columns: [a.x], distribution: SomeShard }
+      └─BatchProject { exprs: [max(b.y), b.x] }
+        └─BatchHashAgg { group_key: [b.x], aggs: [max(b.y)] }
+          └─BatchExchange { order: [], dist: HashShard(b.x) }
+            └─BatchScan { table: b, columns: [b.x, b.y], distribution: SomeShard }
+  stream_plan: |-
+    StreamMaterialize { columns: [x, a._row_id(hidden)], stream_key: [a._row_id, x], pk_columns: [a._row_id, x], pk_conflict: NoCheck }
+    └─StreamExchange { dist: HashShard(a.x, a._row_id) }
+      └─StreamHashJoin { type: LeftSemi, predicate: a.x = max(b.y) AND a.x = b.x, output: all }
+        ├─StreamExchange { dist: HashShard(a.x) }
+        │ └─StreamTableScan { table: a, columns: [a.x, a._row_id], stream_scan_type: SnapshotBackfill, stream_key: [a._row_id], pk: [_row_id], dist: UpstreamHashShard(a._row_id) }
+        └─StreamProject { exprs: [max(b.y), b.x] }
+          └─StreamHashAgg { group_key: [b.x], aggs: [max(b.y), count] }
+            └─StreamExchange { dist: HashShard(b.x) }
+              └─StreamTableScan { table: b, columns: [b.x, b.y, b._row_id], stream_scan_type: SnapshotBackfill, stream_key: [b._row_id], pk: [_row_id], dist: UpstreamHashShard(b._row_id) }
