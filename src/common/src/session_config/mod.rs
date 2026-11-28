@@ -773,6 +773,17 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     streaming_distributed_union: bool,
 
+    // Rule `JoinBelowGroupOpRule` (`batch_push_join_below_group_ops`).
+    /// In a batch query, compute an inner or semi join on the group columns of a top-n per group
+    /// (`DISTINCT ON`), a deduplication, a window partitioned by them or an aggregation below that
+    /// operator, when the other side is unique on the compared columns (not needed for a semi
+    /// join): the operator then only sees the groups that the join keeps. Through filters, projections
+    /// and the branches of a `UNION ALL`, into the operators below on the same columns. When the
+    /// estimates say that the join keeps at most a quarter of the rows, or without estimates when
+    /// the other side is filtered and the join compares all the group columns. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_push_join_below_group_ops: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,

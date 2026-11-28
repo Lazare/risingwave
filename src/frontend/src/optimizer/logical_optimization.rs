@@ -2229,6 +2229,24 @@ impl LogicalOptimizer {
             }
         }
 
+        // Rule `JoinBelowGroupOpRule` (`batch_push_join_below_group_ops`): an inner or semi join
+        // on the group columns of a top-n per group, a deduplication, a window or an aggregation,
+        // with a side unique on the compared columns, goes below the operator (and through the
+        // branches of a `UNION ALL` into the operators below), when it is selective. After the
+        // predicate pushdown, which puts the filters of the other side into it, and before join
+        // ordering, which then orders the joins below the operators.
+        if ctx.session_ctx().config().batch_push_join_below_group_ops() {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&OptimizationStage::new(
+                "Push Join Below Group Operators For Batch",
+                vec![JoinBelowGroupOpRule::create()],
+                ApplyOrder::TopDown,
+            ))?;
+            if ctx.total_rule_applied() != applied_before {
+                plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+            }
+        }
+
         if plan.ctx().session_ctx().config().enable_join_ordering() {
             // Merge inner joins and intermediate filters into multijoin
             // This rule assumes that filters have already been pushed down near to

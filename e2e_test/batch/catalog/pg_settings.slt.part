@@ -54,6 +54,7 @@ user batch_partial_agg_into_union
 user batch_prune_null_union_branches
 user batch_push_agg_below_join
 user batch_push_down_limit
+user batch_push_join_below_group_ops
 user batch_reduce_group_keys
 user batch_reduce_keys_after_conversions
 user batch_reduce_outer_joins

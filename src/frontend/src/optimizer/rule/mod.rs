@@ -314,6 +314,9 @@ pub use agg_group_key_reduce_rule::*;
 // Rule `AggUnionNullBranchRule` (`*_prune_null_union_branches`).
 mod agg_union_null_branch_rule;
 pub use agg_union_null_branch_rule::*;
+// Rule `JoinBelowGroupOpRule` (`batch_push_join_below_group_ops`).
+mod join_below_group_op_rule;
+pub use join_below_group_op_rule::*;
 mod join_project_transpose_rule;
 pub use join_project_transpose_rule::*;
 mod limit_push_down_rule;
@@ -552,6 +555,7 @@ macro_rules! for_all_rules {
             , { SetOperationFilterMergeRule }
             , { AggGroupKeyReduceRule }
             , { AggUnionNullBranchRule }
+            , { JoinBelowGroupOpRule }
         }
     };
 }
