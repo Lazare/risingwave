@@ -30,6 +30,7 @@ use crate::expr::{
     CorrelatedId, Expr, ExprImpl, ExprRewriter, ExprType, FunctionCall, InputRef, Subquery,
     SubqueryKind,
 };
+use crate::optimizer::is_never_null;
 pub use crate::optimizer::plan_node::LogicalFilter;
 use crate::optimizer::plan_node::generic::{Agg, GenericPlanRef, Project, ProjectBuilder};
 use crate::optimizer::plan_node::{
@@ -265,16 +266,20 @@ impl Planner {
                 .next_tuple()
                 .unwrap();
 
+        // The plan before the subqueries, whose columns the semi and anti joins below keep: what
+        // is known about the nullability of its columns holds on them.
+        let outer = input.clone();
+
         // EXISTS and IN in WHERE.
         for expr in subquery_conjunctions {
-            self.handle_exists_and_in(expr, false, &mut input)?;
+            self.handle_exists_and_in(expr, false, &mut input, &outer)?;
         }
 
         // NOT EXISTS and NOT IN in WHERE.
         for expr in not_subquery_conjunctions {
             let not = expr.into_function_call().unwrap();
             let (_, expr) = not.decompose_as_unary();
-            self.handle_exists_and_in(expr, true, &mut input)?;
+            self.handle_exists_and_in(expr, true, &mut input, &outer)?;
         }
 
         if others.always_true() {
@@ -295,12 +300,15 @@ impl Planner {
     ///
     /// We will use a = b to replace a in (select b from ....) for (NOT) IN thus avoiding adding a
     /// `LogicalFilter` on `LogicalApply`. The anti join on `a = b` of `NOT IN` ignores the `NULL`
-    /// values: see [`Self::plan_not_in_nulls`] for the rest of `NOT IN`.
+    /// values: see [`Self::plan_not_in_nulls`] for the rest of `NOT IN`, unless `a` and `b` are
+    /// never `NULL`. `outer` is the plan before the subqueries of the condition, whose columns
+    /// `input` keeps.
     fn handle_exists_and_in(
         &mut self,
         expr: ExprImpl,
         negated: bool,
         input: &mut PlanRef,
+        outer: &PlanRef,
     ) -> Result<()> {
         let join_type = if negated {
             JoinType::LeftAnti
@@ -327,6 +335,11 @@ impl Planner {
         correlated_indices.dedup();
         let output_column_type = subquery.query.data_types()[0].clone();
         let right_plan = self.plan_query(subquery.query)?.into_unordered_subplan();
+        // `x NOT IN (SELECT y ...)` is the anti join on `x = y` when `x` and `y` are never `NULL`.
+        let not_in = not_in.filter(|(left_expr, _)| {
+            let right_expr: ExprImpl = InputRef::new(0, output_column_type.clone()).into();
+            !(is_never_null(outer, left_expr) && is_never_null(&right_plan, &right_expr))
+        });
         let on = match subquery.kind {
             SubqueryKind::Existential => ExprImpl::literal_bool(true),
             SubqueryKind::In(left_expr) => {
