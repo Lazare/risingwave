@@ -22,6 +22,7 @@ use risingwave_common::types::{DataType, Date, ScalarImpl, Timestamp, Timestampt
 
 use super::prelude::{PlanRef, *};
 use crate::expr::{Expr, ExprImpl, ExprType, FunctionCall, Literal};
+use crate::optimizer::plan_node::generic::GenericPlanRef;
 use crate::optimizer::plan_node::{LogicalFilter, PlanTreeNodeUnary};
 use crate::utils::Condition;
 
@@ -30,12 +31,15 @@ use crate::utils::Condition;
 /// into comparisons of `x` itself (`x >= lo`, `x < hi`):
 ///
 /// - `date_trunc(unit, x)` for a `timestamp` `x`, or a `timestamptz` `x` truncated in the `UTC`
-///   time zone (the session time zone that the binder adds as a third argument), for the units
-///   `second`, `minute`, `hour`, `day`, `week`, `month`, `quarter` and `year`;
-/// - `x::date` for a `timestamp` `x` (a `timestamptz` is first converted with `AT TIME ZONE`,
-///   handled when the zone is `UTC`, see below);
+///   time zone, for the units `second`, `minute`, `hour`, `day`, `week`, `month`, `quarter` and
+///   `year`;
+/// - `x::date` for a `timestamp` `x`, or a `timestamptz` `x` in the `UTC` time zone;
 /// - `extract(year from x)` and `date_part('year', x)` for a `date` or `timestamp` `x`, or a
 ///   `timestamptz` `x` in the `UTC` time zone.
+///
+/// A function of a `timestamptz` uses the session time zone, which is only written into the
+/// expression (as a third argument, or `AT TIME ZONE`) after the logical optimization: both forms
+/// are handled, the first one when the session time zone is `UTC`.
 ///
 /// ```text
 /// date_trunc('month', ts) = '2024-05-01'   =>  ts >= '2024-05-01' AND ts < '2024-06-01'
@@ -56,9 +60,10 @@ use crate::utils::Condition;
 /// before Christ agree that they are smaller). If `x` is `NULL`, both forms are `NULL`.
 ///
 /// The bounds then go through the conversions of `x` that are increasing (`d::timestamp` of a date
-/// `d`: `d::timestamp >= v` is `d >= ` the first day at or after `v`; `AT TIME ZONE 'UTC'`, which
-/// keeps the value), so that `date_trunc('month', d)` of a date column, bound as
-/// `date_trunc('month', d::timestamp AT TIME ZONE 'UTC', 'UTC')`, becomes a range of `d`.
+/// `d`: `d::timestamp >= v` is `d >= ` the first day at or after `v`; `AT TIME ZONE 'UTC'` and the
+/// casts between `timestamp`, `timestamptz` and `date` in a `UTC` session, which keep the value),
+/// so that `date_trunc('month', d)` of a date column, bound as `date_trunc('month',
+/// d::timestamptz)`, becomes a range of `d`.
 ///
 /// Not rewritten: other time zones than `UTC` (a day or an hour may then be shorter or longer and
 /// the truncation of a local time that does not exist or exists twice depends on the zone), other
@@ -68,12 +73,15 @@ pub struct DateRangePredicateRule;
 
 impl Rule<Logical> for DateRangePredicateRule {
     fn apply(&self, plan: PlanRef) -> Option<PlanRef> {
+        // The session time zone is inlined into the expressions only after the logical
+        // optimization: a `timestamptz` function without zone argument uses it.
+        let utc_session = is_utc_name(&plan.ctx().get_session_timezone());
         if let Some(filter) = plan.as_logical_filter() {
-            let predicate = rewrite_condition(filter.predicate())?;
+            let predicate = rewrite_condition(filter.predicate(), utc_session)?;
             return Some(LogicalFilter::create(filter.input(), predicate));
         }
         let scan = plan.as_logical_scan()?;
-        let predicate = rewrite_condition(scan.predicate())?;
+        let predicate = rewrite_condition(scan.predicate(), utc_session)?;
         Some(scan.clone_with_predicate(predicate).into())
     }
 }
@@ -84,11 +92,11 @@ impl DateRangePredicateRule {
     }
 }
 
-fn rewrite_condition(condition: &Condition) -> Option<Condition> {
+fn rewrite_condition(condition: &Condition, utc_session: bool) -> Option<Condition> {
     let mut changed = false;
     let mut conjunctions = vec![];
     for expr in &condition.conjunctions {
-        match range_form(expr) {
+        match range_form(expr, utc_session) {
             Some(range) => {
                 conjunctions.extend(range);
                 changed = true;
@@ -281,13 +289,17 @@ fn floor_ceil(value: &ScalarImpl) -> Option<(i64, i64)> {
     (floor.abs() <= 1_000_000_000 && ceil.abs() <= 1_000_000_000).then_some((floor, ceil))
 }
 
+/// Whether the time zone is `UTC`.
+fn is_utc_name(zone: &str) -> bool {
+    zone.eq_ignore_ascii_case("UTC") || zone.eq_ignore_ascii_case("Etc/UTC")
+}
+
 /// Whether the expression is the literal name of the `UTC` time zone.
 fn is_utc(expr: &ExprImpl) -> bool {
     if let ExprImpl::Literal(literal) = expr
         && let Some(ScalarImpl::Utf8(zone)) = literal.get_data()
     {
-        let zone: &str = zone;
-        zone.eq_ignore_ascii_case("UTC") || zone.eq_ignore_ascii_case("Etc/UTC")
+        is_utc_name(zone)
     } else {
         false
     }
@@ -323,7 +335,9 @@ fn as_timestamp(value: &ScalarImpl) -> Option<Timestamp> {
 }
 
 /// The conjuncts equivalent to a comparison of one of the handled functions with a constant.
-fn range_form(expr: &ExprImpl) -> Option<Vec<ExprImpl>> {
+/// `utc_session`: the session time zone, used by the `timestamptz` functions without zone
+/// argument, is `UTC`.
+fn range_form(expr: &ExprImpl, utc_session: bool) -> Option<Vec<ExprImpl>> {
     let call = expr.as_function_call()?;
     let cmp = Cmp::of(call.func_type())?;
     let [a, b] = call.inputs() else {
@@ -343,6 +357,14 @@ fn range_form(expr: &ExprImpl) -> Option<Vec<ExprImpl>> {
             let unit = Unit::of(literal_text(unit)?)?;
             (x, truncation_bounds(unit, cmp, as_timestamp(&value)?)?)
         }
+        (ExprType::DateTrunc, [unit, x])
+            if utc_session
+                && x.return_type() == DataType::Timestamptz
+                && matches!(value, ScalarImpl::Timestamptz(_)) =>
+        {
+            let unit = Unit::of(literal_text(unit)?)?;
+            (x, truncation_bounds(unit, cmp, as_timestamp(&value)?)?)
+        }
         (ExprType::DateTrunc, [unit, x, zone])
             if x.return_type() == DataType::Timestamptz
                 && is_utc(zone)
@@ -353,13 +375,15 @@ fn range_form(expr: &ExprImpl) -> Option<Vec<ExprImpl>> {
         }
         (ExprType::Cast, [x])
             if operand.return_type() == DataType::Date
-                && x.return_type() == DataType::Timestamp
+                && (x.return_type() == DataType::Timestamp
+                    || (utc_session && x.return_type() == DataType::Timestamptz))
                 && matches!(value, ScalarImpl::Date(_)) =>
         {
             (x, truncation_bounds(Unit::Day, cmp, as_timestamp(&value)?)?)
         }
         (ExprType::Extract | ExprType::DatePart, [field, x])
-            if matches!(x.return_type(), DataType::Date | DataType::Timestamp) =>
+            if matches!(x.return_type(), DataType::Date | DataType::Timestamp)
+                || (utc_session && x.return_type() == DataType::Timestamptz) =>
         {
             if !literal_text(field)?.eq_ignore_ascii_case("year") {
                 return None;
@@ -384,10 +408,10 @@ fn range_form(expr: &ExprImpl) -> Option<Vec<ExprImpl>> {
     }
     let mut conjunctions = vec![];
     if let Some(lower) = lower {
-        conjunctions.push(bound(x, true, lower)?);
+        conjunctions.push(bound(x, true, lower, utc_session)?);
     }
     if let Some(upper) = upper {
-        conjunctions.push(bound(x, false, upper)?);
+        conjunctions.push(bound(x, false, upper, utc_session)?);
     }
     Some(conjunctions)
 }
@@ -395,9 +419,9 @@ fn range_form(expr: &ExprImpl) -> Option<Vec<ExprImpl>> {
 /// `x >= value` (`lower`) or `x < value`, for a `date`, `timestamp` or `timestamptz` `x` whose
 /// value is given as a `timestamp` (in `UTC` for a `timestamptz`), compared with `x` itself or
 /// with the operand of an increasing conversion of `x` (see [`peel`]).
-fn bound(x: &ExprImpl, lower: bool, value: Timestamp) -> Option<ExprImpl> {
+fn bound(x: &ExprImpl, lower: bool, value: Timestamp, utc_session: bool) -> Option<ExprImpl> {
     let (mut x, mut value) = (x.clone(), value);
-    while let Some((inner, inner_value)) = peel(&x, value) {
+    while let Some((inner, inner_value)) = peel(&x, value, utc_session) {
         x = inner;
         value = inner_value;
     }
@@ -427,11 +451,23 @@ fn bound(x: &ExprImpl, lower: bool, value: Timestamp) -> Option<ExprImpl> {
 /// `g(v) >= value`.
 ///
 /// - `y AT TIME ZONE 'UTC'`, from `timestamp` to `timestamptz` or back: the same value, since a
-///   `timestamptz` value is given as a `timestamp` in `UTC`;
-/// - `y::timestamp` of a `date` `y`: the first day at or after `value`.
-fn peel(x: &ExprImpl, value: Timestamp) -> Option<(ExprImpl, Timestamp)> {
+///   `timestamptz` value is given as a `timestamp` in `UTC`; so is a cast between `timestamp`
+///   and `timestamptz` when the session time zone is `UTC`;
+/// - `y::timestamp` of a `date` `y`, or `y::timestamptz` in a `UTC` session: the first day at or
+///   after `value`.
+fn peel(x: &ExprImpl, value: Timestamp, utc_session: bool) -> Option<(ExprImpl, Timestamp)> {
     let call = x.as_function_call()?;
     match (call.func_type(), call.inputs()) {
+        (ExprType::Cast, [y])
+            if utc_session
+                && matches!(
+                    (y.return_type(), call.return_type()),
+                    (DataType::Timestamp, DataType::Timestamptz)
+                        | (DataType::Timestamptz, DataType::Timestamp)
+                ) =>
+        {
+            Some((y.clone(), value))
+        }
         (ExprType::AtTimeZone, [y, zone])
             if is_utc(zone)
                 && matches!(
@@ -443,7 +479,9 @@ fn peel(x: &ExprImpl, value: Timestamp) -> Option<(ExprImpl, Timestamp)> {
             Some((y.clone(), value))
         }
         (ExprType::Cast, [y])
-            if y.return_type() == DataType::Date && call.return_type() == DataType::Timestamp =>
+            if y.return_type() == DataType::Date
+                && (call.return_type() == DataType::Timestamp
+                    || (utc_session && call.return_type() == DataType::Timestamptz)) =>
         {
             let day = value.truncate_day();
             let first_day = if day == value {
