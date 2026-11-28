@@ -949,6 +949,42 @@ static CORRELATED_TOP_N_TO_VECTOR_SEARCH_FOR_STREAM: LazyLock<OptimizationStage>
         )
     });
 
+// Aggregation pushed below a join (`streaming_push_agg_below_join`, `batch_push_agg_below_join`,
+// `batch_partial_agg_below_join`) and into the branches of a `UNION ALL`
+// (`batch_partial_agg_into_union`). Top-down: an aggregation pushed below a join is pushed again
+// below the join under it.
+static STREAM_PUSH_AGG_BELOW_JOIN: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Push Aggregation Below Join For Stream",
+        vec![AggJoinTransposeRule::create_for_stream()],
+        ApplyOrder::TopDown,
+    )
+});
+
+static BATCH_PUSH_AGG_BELOW_JOIN: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Push Aggregation Below Join For Batch",
+        vec![AggJoinTransposeRule::create_for_batch()],
+        ApplyOrder::TopDown,
+    )
+});
+
+static BATCH_PARTIAL_AGG_BELOW_JOIN: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Partial Aggregation Below Join For Batch",
+        vec![AggJoinTransposeRule::create_partial_for_batch()],
+        ApplyOrder::TopDown,
+    )
+});
+
+static BATCH_PARTIAL_AGG_INTO_UNION: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Partial Aggregation Into Union For Batch",
+        vec![AggUnionTransposeRule::create()],
+        ApplyOrder::TopDown,
+    )
+});
+
 static BATCH_MV_SELECTION: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Batch Mv Selection",
@@ -1447,6 +1483,23 @@ impl LogicalOptimizer {
                 plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
             }
         }
+        // Rule `AggJoinTransposeRule` (`streaming_push_agg_below_join`): an aggregation over a join
+        // whose other side is unique on the join columns is computed before the join, on the
+        // aggregated side: the join keeps one row per group instead of one per row. After the
+        // simplifications above, which may remove joins, and before the merge of stacked
+        // aggregations below, which may merge the moved aggregation with one under it.
+        if ctx.session_ctx().config().streaming_push_agg_below_join()
+            && !ctx.is_stream_prune_baseline()
+        {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&STREAM_PUSH_AGG_BELOW_JOIN)?;
+            let applied = ctx.total_rule_applied() - applied_before;
+            if applied > 0 {
+                ctx.add_stream_prune_rule_applied(applied);
+                plan = Self::column_pruning(plan, explain_trace, &ctx);
+                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
+            }
+        }
         // Merge an aggregation over another one into a single aggregation of the input of the inner
         // one (`StackedAggMergeRule`), then share the stateful sub-plans that the simplifications
         // above made identical (`share_identical_subplans`): the common sub-plan sharing at the
@@ -1742,6 +1795,34 @@ impl LogicalOptimizer {
         if last_total_rule_applied_before_predicate_pushdown != ctx.total_rule_applied() {
             last_total_rule_applied_before_predicate_pushdown = ctx.total_rule_applied();
             plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+        }
+
+        // Aggregations pushed below joins and into the branches of a `UNION ALL`, each behind its
+        // own variable: after join ordering, which then orders the joins as written, and before
+        // the conversion of distinct aggregates and the column pruning, which apply to the moved
+        // aggregations too.
+        // - `batch_push_agg_below_join`: exact form of `AggJoinTransposeRule` (the other side is
+        //   unique on the join columns; an inner join only when it reads a whole table);
+        // - `batch_partial_agg_below_join`: partial form, when the learned group ratio of the
+        //   partial aggregation is small (`batch_cardinality_feedback_learning`);
+        // - `batch_partial_agg_into_union`: `AggUnionTransposeRule`.
+        for (enabled, stage) in [
+            (
+                ctx.session_ctx().config().batch_push_agg_below_join(),
+                &BATCH_PUSH_AGG_BELOW_JOIN,
+            ),
+            (
+                ctx.session_ctx().config().batch_partial_agg_below_join(),
+                &BATCH_PARTIAL_AGG_BELOW_JOIN,
+            ),
+            (
+                ctx.session_ctx().config().batch_partial_agg_into_union(),
+                &BATCH_PARTIAL_AGG_INTO_UNION,
+            ),
+        ] {
+            if enabled {
+                plan = plan.optimize_by_rules(stage)?;
+            }
         }
 
         // Push down the calculation of inputs of join's condition.

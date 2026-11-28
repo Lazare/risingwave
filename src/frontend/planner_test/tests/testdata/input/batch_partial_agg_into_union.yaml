@@ -1,0 +1,144 @@
+# Tests for `batch_partial_agg_into_union` (`AggUnionTransposeRule`): an aggregation over a
+# `UNION ALL` aggregates each branch partially, always without group key, otherwise for the
+# branches whose grouping the cardinality feedback learning (`batch_cardinality_feedback_learning`)
+# has seen reduce the rows (`cardinality_observations` records a query as if it had run, see
+# `batch_cardinality_feedback_learning.yaml`).
+- id: setup_off
+  sql: |
+    create table a (id int primary key, k int, x int, r real);
+    create table b (k int, x int, r real);
+  expected_outputs: []
+- id: setup
+  sql: |
+    set batch_partial_agg_into_union = true;
+    set batch_cardinality_feedback_learning = true;
+    create table a (id int primary key, k int, x int, r real);
+    create table b (k int, x int, r real);
+    create table c (k int primary key, x int);
+  expected_outputs: []
+
+# The variable is off by default: nothing changes.
+- name: off by default - count over a union
+  before: [setup_off]
+  sql: |
+    select count(*) as n, sum(x) as s from (select k, x from a union all select k, x from b) u;
+  expected_outputs:
+  - batch_plan
+
+# Rewritten.
+
+- name: no group key - every branch is aggregated
+  before: [setup]
+  sql: |
+    select count(*) as n, sum(x) as s, min(x) as mn, count(x) filter (where x > 2) as p
+    from (select k, x from a union all select k, x from b) u;
+  cardinality_observations: []
+  expected_outputs:
+  - optimized_logical_plan_for_batch
+  - batch_plan
+- name: grouped - both branches observed with 100 rows per group
+  before: [setup]
+  sql: |
+    select k, count(*) as n, sum(x) as s, max(x) as mx from (select k, x from a union all select k, x from b) u group by k;
+  cardinality_observations:
+  - sql: select k, count(*) from a group by k
+    rows:
+      seq_scan: [100000]
+      hash_agg: [1000]
+  - sql: select k, count(*) from b group by k
+    rows:
+      seq_scan: [100000]
+      hash_agg: [1000]
+  expected_outputs:
+  - batch_plan
+- name: grouped - only one branch observed with few groups, the other gives its rows as partial results
+  before: [setup]
+  sql: |
+    select k, count(*) as n, sum(x) as s, count(x) as cx, bool_or(x > 3) as o
+    from (select k, x from a union all select k, x from b) u group by k;
+  cardinality_observations:
+  - sql: select k, count(*) from a group by k
+    rows:
+      seq_scan: [100000]
+      hash_agg: [1000]
+  expected_outputs:
+  - batch_plan
+- name: grouped through a projection above the union
+  before: [setup]
+  sql: |
+    select k, sum(x2) as s from (select k, x * 2 as x2 from (select k, x from a union all select k, x from b) u0) u group by k;
+  cardinality_observations:
+  - sql: select k, count(*) from a group by k
+    rows:
+      seq_scan: [100000]
+      hash_agg: [1000]
+  - sql: select k, count(*) from b group by k
+    rows:
+      seq_scan: [100000]
+      hash_agg: [1000]
+  expected_outputs:
+  - batch_plan
+
+# Left as they are.
+
+- name: grouped - nothing learned
+  before: [setup]
+  sql: |
+    select k, count(*) as n from (select k, x from a union all select k, x from b) u group by k;
+  cardinality_observations: []
+  expected_outputs:
+  - batch_plan
+- name: grouped - observed with nearly one group per row
+  before: [setup]
+  sql: |
+    select k, count(*) as n from (select k, x from a union all select k, x from b) u group by k;
+  cardinality_observations:
+  - sql: select k, count(*) from a group by k
+    rows:
+      seq_scan: [100000]
+      hash_agg: [90000]
+  - sql: select k, count(*) from b group by k
+    rows:
+      seq_scan: [100000]
+      hash_agg: [90000]
+  expected_outputs:
+  - batch_plan
+- name: grouped - a branch unique on the group key
+  before: [setup]
+  sql: |
+    select k, count(*) as n from (select k, x from c union all select k, x from b) u group by k;
+  cardinality_observations:
+  - sql: select k, count(*) from b group by k
+    rows:
+      seq_scan: [100000]
+      hash_agg: [90000]
+  expected_outputs:
+  - batch_plan
+- name: distinct count
+  before: [setup]
+  sql: |
+    select count(distinct x) as n from (select k, x from a union all select k, x from b) u;
+  cardinality_observations: []
+  expected_outputs:
+  - batch_plan
+- name: sum of a float
+  before: [setup]
+  sql: |
+    select sum(r) as s from (select k, r from a union all select k, r from b) u;
+  cardinality_observations: []
+  expected_outputs:
+  - batch_plan
+- name: ordered aggregate
+  before: [setup]
+  sql: |
+    select string_agg(x::varchar, ',' order by x) as l from (select k, x from a union all select k, x from b) u;
+  cardinality_observations: []
+  expected_outputs:
+  - batch_plan
+- name: union without all
+  before: [setup]
+  sql: |
+    select count(*) as n from (select k, x from a union select k, x from b) u;
+  cardinality_observations: []
+  expected_outputs:
+  - batch_plan
