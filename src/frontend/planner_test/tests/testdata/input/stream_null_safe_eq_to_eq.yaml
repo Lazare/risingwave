@@ -82,6 +82,12 @@
     select a.id, (select max(b.y) from b where b.k = a.x) as m from a;
   expected_outputs:
   - stream_plan
+- name: operands of different integer types, compared without a cast
+  before: [setup]
+  sql: |
+    select a.id, b.y from a join b on a.x is not distinct from b.kb;
+  expected_outputs:
+  - stream_plan
 
 # Kept.
 - name: join on a primary key column, which RisingWave does not declare not null
@@ -126,10 +132,10 @@
     select a.id from a join b on a.id = b.id where case when a.x is not distinct from b.k then b.y > 0 else false end;
   expected_outputs:
   - stream_plan
-- name: a cast is not proven non-null
+- name: an arithmetic expression is not proven non-null
   before: [setup]
   sql: |
-    select a.id, b.y from a join b on a.x is not distinct from b.kb;
+    select a.id, b.y from a join b on a.x + 1 is not distinct from b.k;
   expected_outputs:
   - stream_plan
 - name: filter above a left join, both operands may be null
