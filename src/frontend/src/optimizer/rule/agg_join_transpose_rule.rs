@@ -22,6 +22,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::ops::Range;
 
 use risingwave_common::types::DataType;
+use risingwave_common::util::iter_util::ZipEqFast;
 use risingwave_expr::aggregate::{AggType, PbAggKind};
 use risingwave_pb::plan_common::JoinType;
 
@@ -245,9 +246,9 @@ impl Pushdown<'_> {
         let left_len = left.schema().len();
         let internal_len = self.internal_types.len();
         let (side_a, side_b) = if self.agg_left {
-            (left.clone(), right.clone())
+            (left, right)
         } else {
-            (right.clone(), left.clone())
+            (right, left)
         };
         let a_range: Range<usize> = if self.agg_left {
             0..left_len
@@ -405,7 +406,7 @@ impl Pushdown<'_> {
         // projection.
         let mut pa_of_agg_input: HashMap<usize, usize> = HashMap::new();
         let mut pa_of_internal: HashMap<usize, usize> = HashMap::new();
-        for (&index, side) in group_indices.iter().zip(&group_sides) {
+        for (&index, side) in group_indices.iter().zip_eq_fast(&group_sides) {
             if *side != Side::Agg {
                 continue;
             }
@@ -417,26 +418,24 @@ impl Pushdown<'_> {
             }
         }
         for &column in &join_columns {
-            if !pa_of_internal.contains_key(&column) {
+            pa_of_internal.entry(column).or_insert_with(|| {
                 let expr = InputRef::new(column - a_offset, self.internal_types[column].clone());
-                let position = push(&mut pa_exprs, expr.into());
-                pa_of_internal.insert(column, position);
-            }
+                push(&mut pa_exprs, expr.into())
+            });
         }
         let new_group_len = pa_exprs.len();
         if new_group_len == 0 {
             return None;
         }
-        for (call, side) in self.agg.agg_calls().iter().zip(&call_sides) {
+        for (call, side) in self.agg.agg_calls().iter().zip_eq_fast(&call_sides) {
             if *side != Side::Agg {
                 continue;
             }
             for column in call_columns(call, agg_input_len) {
-                if !pa_of_agg_input.contains_key(&column) {
+                pa_of_agg_input.entry(column).or_insert_with(|| {
                     let expr = to_a_columns.rewrite_expr(self.to_internal[column].clone());
-                    let position = push(&mut pa_exprs, expr);
-                    pa_of_agg_input.insert(column, position);
-                }
+                    push(&mut pa_exprs, expr)
+                });
             }
         }
 
@@ -457,7 +456,7 @@ impl Pushdown<'_> {
             .agg
             .agg_calls()
             .iter()
-            .zip(&call_sides)
+            .zip_eq_fast(&call_sides)
             .filter(|(_, side)| **side == Side::Agg)
             .map(|(call, _)| remap_call(call, &pa_of_agg_input))
             .collect();
@@ -479,11 +478,8 @@ impl Pushdown<'_> {
             } else {
                 PARTIAL_AGG_MAX_GROUP_RATIO
             };
-            let learned = learned_ratio(
-                &**CARDINALITY_LEARNING_STORE,
-                RatioKind::GroupRatio,
-                &new_agg,
-            )?;
+            let learned =
+                learned_ratio(&CARDINALITY_LEARNING_STORE, RatioKind::GroupRatio, &new_agg)?;
             if learned.max > largest {
                 return None;
             }
@@ -522,7 +518,7 @@ impl Pushdown<'_> {
         // The group keys, then the aggregates (or what the final aggregation reads), over the new
         // join.
         let mut exprs: Vec<ExprImpl> = vec![];
-        for (&index, side) in group_indices.iter().zip(&group_sides) {
+        for (&index, side) in group_indices.iter().zip_eq_fast(&group_sides) {
             exprs.push(match side {
                 Side::Agg => InputRef::new(
                     a_new_offset + pa_of_agg_input[&index],
@@ -533,7 +529,7 @@ impl Pushdown<'_> {
             });
         }
         let mut pushed_position = 0;
-        for (call, side) in self.agg.agg_calls().iter().zip(&call_sides) {
+        for (call, side) in self.agg.agg_calls().iter().zip_eq_fast(&call_sides) {
             exprs.push(match side {
                 Side::Agg => {
                     let position = a_new_offset + new_group_len + pushed_position;
@@ -562,8 +558,8 @@ impl Pushdown<'_> {
             .agg
             .agg_calls()
             .iter()
-            .zip(&call_sides)
-            .zip(totals)
+            .zip_eq_fast(&call_sides)
+            .zip_eq_fast(totals)
             .enumerate()
             .map(|(position, ((call, side), total))| {
                 let column = group_len + position;

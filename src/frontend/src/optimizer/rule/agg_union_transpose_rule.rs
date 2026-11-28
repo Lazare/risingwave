@@ -18,6 +18,8 @@
 
 use std::collections::BTreeSet;
 
+use risingwave_common::util::iter_util::ZipEqFast;
+
 use super::agg_join_transpose_rule::{
     PARTIAL_AGG_MAX_GROUP_RATIO, through_projects, total_call, total_of_partial,
 };
@@ -151,7 +153,7 @@ impl Rule<Logical> for AggUnionTransposeRule {
         let final_calls = agg
             .agg_calls()
             .iter()
-            .zip(totals)
+            .zip_eq_fast(totals)
             .enumerate()
             .map(|(position, (call, total))| total_call(call, total, group_len + position))
             .collect();
