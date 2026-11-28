@@ -518,7 +518,7 @@ mod tests {
         // already done.
         let mut stop = stages_to_stop(&graph, parents, 1.into(), &set(&[4]));
         stop.sort();
-        assert_eq!(stop, vec![2.into(), 3.into()]);
+        assert_eq!(stop, vec![StageId::from(2), StageId::from(3)]);
         // A leaf that finishes stops nothing.
         assert!(stages_to_stop(&graph, parents, 3.into(), &set(&[])).is_empty());
     }

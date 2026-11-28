@@ -915,12 +915,9 @@ impl StageGraph {
         for (id, root, children) in stages {
             let id: StageId = id.into();
             for child in children {
-                graph.child_edges.get_mut(&id).unwrap().insert(child.into());
-                graph
-                    .parent_edges
-                    .get_mut(&child.into())
-                    .unwrap()
-                    .insert(id);
+                let child: StageId = child.into();
+                graph.child_edges.get_mut(&id).unwrap().insert(child);
+                graph.parent_edges.get_mut(&child).unwrap().insert(id);
             }
             graph.stages.insert(
                 id,
