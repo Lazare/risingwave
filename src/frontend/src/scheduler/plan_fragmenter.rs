@@ -874,7 +874,10 @@ impl StageGraph {
                     | BatchPlanNodeType::BatchSort
             ) || (node.plan_node_type == BatchPlanNodeType::BatchSpool
                 // Batch spool (`batch_share_identical_subplans`): the producer spills.
-                && !node.children.is_empty())) as u32;
+                && !node.children.is_empty())
+                // `batch_spill_group_topn`: a top-n per group that spills.
+                || matches!(&node.node, NodeBody::GroupTopN(top_n) if top_n.spill))
+                as u32;
             own + node.children.iter().map(count).sum::<u32>()
         }
         let default_parallelism = self.batch_parallelism.max(1) as u32;

@@ -299,7 +299,21 @@ impl PredicatePushdown for LogicalTopN {
 impl ToBatch for LogicalTopN {
     fn to_batch(&self) -> Result<crate::optimizer::plan_node::BatchPlanRef> {
         let new_input = self.input().to_batch()?;
-        let core = self.core.clone_with_input(new_input);
+        let mut core = self.core.clone_with_input(new_input);
+        // `batch_streaming_unordered_group_topn`: the columns of the group key are equal within a
+        // group, ordering a group by them changes nothing. Without them, a group top-n may be left
+        // unordered, which its executor runs without keeping rows.
+        if !core.group_key.is_empty()
+            && self
+                .ctx()
+                .session_ctx()
+                .config()
+                .batch_streaming_unordered_group_topn()
+        {
+            core.order
+                .column_orders
+                .retain(|order| !core.group_key.contains(&order.column_index));
+        }
         if self.group_key().is_empty() {
             Ok(BatchTopN::new(core).into())
         } else {

@@ -66,8 +66,10 @@ user batch_simplify_exists_subquery
 user batch_simplify_null_join_keys
 user batch_simplify_on_unique_key
 user batch_simplify_subquery_unnesting
+user batch_spill_group_topn
 user batch_spill_on_memory_wait
 user batch_status_ladder_case
+user batch_streaming_unordered_group_topn
 user batch_transitive_predicates
 user batch_unnest_lateral_functions
 user bypass_cluster_limits

@@ -773,6 +773,24 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     streaming_distributed_union: bool,
 
+    // Batch top-n per group (`group_top_n.rs`, `LogicalTopN::to_batch`).
+    /// In a batch query, drop from the order of a top-n per group (`DISTINCT ON`, `row_number() <=
+    /// n` per partition) the columns of its group key, which are equal within a group. A top-n per
+    /// group left without order, `WITH TIES` and offset emits the first rows of each group as they
+    /// arrive and keeps only the group keys in memory, instead of keeping rows until its input
+    /// ends. Which row of a group is returned may then change among rows that are equal in the
+    /// order. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_streaming_unordered_group_topn: bool,
+
+    /// In a batch query, a top-n per group that has an order spills to disk when the memory of its
+    /// query is short: the rows that it keeps and the rest of its input are written to partitions
+    /// by a hash of the group key, then the partitions are processed one by one. It is then counted
+    /// as a spillable operator of its query (`batch_spill_on_memory_wait` can ask it to spill).
+    /// Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_spill_group_topn: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,

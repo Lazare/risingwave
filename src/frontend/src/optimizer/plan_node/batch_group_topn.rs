@@ -12,12 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use pretty_xmlish::{Pretty, XmlNode};
 use risingwave_pb::batch_plan::GroupTopNNode;
 use risingwave_pb::batch_plan::plan_node::NodeBody;
 
 use super::batch::prelude::*;
 use super::batch_union::input_to_distributed_with_required;
-use super::utils::impl_distill_by_unit;
+use super::utils::{Distill, childless_record};
 use super::{
     BatchPlanRef as PlanRef, ExprRewritable, PlanBase, PlanTreeNodeUnary, ToBatchPb,
     ToDistributedBatch, generic,
@@ -45,9 +46,37 @@ impl BatchGroupTopN {
     fn group_key(&self) -> &[usize] {
         &self.core.group_key
     }
+
+    /// Without order, `WITH TIES` and offset, any `limit` rows of a group are a valid result: the
+    /// executor emits the first rows of each group as they arrive and only keeps the group keys.
+    pub fn is_unordered(&self) -> bool {
+        self.core.order.column_orders.is_empty()
+            && !self.core.limit_attr.with_ties()
+            && self.core.offset == 0
+    }
+
+    /// `batch_spill_group_topn`: the executor spills its rows to disk when the memory of its query
+    /// is short. Not when it is unordered: it then keeps no rows.
+    pub fn spills(&self) -> bool {
+        !self.is_unordered()
+            && self
+                .base
+                .ctx()
+                .session_ctx()
+                .config()
+                .batch_spill_group_topn()
+    }
 }
 
-impl_distill_by_unit!(BatchGroupTopN, core, "BatchGroupTopN");
+impl Distill for BatchGroupTopN {
+    fn distill<'a>(&self) -> XmlNode<'a> {
+        let mut fields = self.core.fields_pretty();
+        if self.spills() {
+            fields.push(("spill", Pretty::debug(&true)));
+        }
+        childless_record("BatchGroupTopN", fields)
+    }
+}
 
 impl PlanTreeNodeUnary<Batch> for BatchGroupTopN {
     fn input(&self) -> PlanRef {
@@ -82,6 +111,7 @@ impl ToBatchPb for BatchGroupTopN {
             column_orders,
             group_key: self.group_key().iter().map(|c| *c as u32).collect(),
             with_ties: self.core.limit_attr.with_ties(),
+            spill: self.spills(),
         })
     }
 }

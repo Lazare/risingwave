@@ -159,7 +159,14 @@ impl<PlanRef: GenericPlanRef> TopN<PlanRef> {
 
 impl<PlanRef: GenericPlanRef> DistillUnit for TopN<PlanRef> {
     fn distill_with_name<'a>(&self, name: impl Into<Str<'a>>) -> XmlNode<'a> {
-        let mut vec = Vec::with_capacity(5);
+        childless_record(name, self.fields_pretty())
+    }
+}
+
+impl<PlanRef: GenericPlanRef> TopN<PlanRef> {
+    /// The fields of the explain output.
+    pub fn fields_pretty<'a>(&self) -> Vec<(&'a str, Pretty<'a>)> {
+        let mut vec = Vec::with_capacity(6);
         let input_schema = self.input.schema();
         let order_d = OrderDisplay {
             order: &self.order,
@@ -178,7 +185,7 @@ impl<PlanRef: GenericPlanRef> DistillUnit for TopN<PlanRef> {
                 Pretty::Array(self.group_key.iter().copied().map(f).collect()),
             ));
         }
-        childless_record(name, vec)
+        vec
     }
 }
 
