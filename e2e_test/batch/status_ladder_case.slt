@@ -106,6 +106,86 @@ create table slb_r_kept_tables_off (c1 int, c2 varchar);
 statement ok
 create table slb_r_kept_tables_on (c1 int, c2 varchar);
 
+# two GROUP BY branches over the same table, and a default branch over another table
+
+statement ok
+create table slb_r_agg_dedup_off (c1 int, c2 varchar);
+
+statement ok
+create table slb_r_agg_dedup_on (c1 int, c2 varchar);
+
+# every branch is a GROUP BY of the same table by the key: the top-1 is removed
+
+statement ok
+create table slb_r_agg_only_off (c1 int, c2 varchar);
+
+statement ok
+create table slb_r_agg_only_on (c1 int, c2 varchar);
+
+# GROUP BY branches with conditions on their aggregates
+
+statement ok
+create table slb_r_agg_having_off (c1 int, c2 varchar);
+
+statement ok
+create table slb_r_agg_having_on (c1 int, c2 varchar);
+
+# SELECT DISTINCT branches over the same table
+
+statement ok
+create table slb_r_agg_distinct_off (c1 int, c2 varchar);
+
+statement ok
+create table slb_r_agg_distinct_on (c1 int, c2 varchar);
+
+# GROUP BY branches by the same expression
+
+statement ok
+create table slb_r_agg_expr_key_off (c1 int, c2 varchar);
+
+statement ok
+create table slb_r_agg_expr_key_on (c1 int, c2 varchar);
+
+# GROUP BY branches over the same shared join
+
+statement ok
+create table slb_r_agg_shared_join_off (c1 int, c2 varchar);
+
+statement ok
+create table slb_r_agg_shared_join_on (c1 int, c2 varchar);
+
+# GROUP BY branches over copies of the same join with filters on either side
+
+statement ok
+create table slb_r_agg_joins_off (c1 int, c2 varchar);
+
+statement ok
+create table slb_r_agg_joins_on (c1 int, c2 varchar);
+
+# branches that join the same tables, with filters on either side
+
+statement ok
+create table slb_r_joins_off (c1 int, c2 varchar);
+
+statement ok
+create table slb_r_joins_on (c1 int, c2 varchar);
+
+# kept: GROUP BY branches with different group keys
+
+statement ok
+create table slb_r_kept_agg_keys_off (c1 int, c2 varchar);
+
+statement ok
+create table slb_r_kept_agg_keys_on (c1 int, c2 varchar);
+
+# kept: a GROUP BY branch with a distinct aggregate
+
+statement ok
+create table slb_r_kept_agg_distinct_call_off (c1 int, c2 varchar);
+
+statement ok
+create table slb_r_kept_agg_distinct_call_on (c1 int, c2 varchar);
+
 statement ok
 insert into slb_e values (1, 1, 0, 'closed'), (2, 0, 5, null), (3, null, null, 'open'), (4, 7, 1, 'x'), (5, -1, -1, 'closed'), (6, null, 2, null);
 
@@ -433,6 +513,296 @@ select
   (select count(*) from (select c1, c2, count(*) as n from slb_r_kept_tables_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_kept_tables_off group by c1, c2) x),
   (select count(*) from (select c1, c2, count(*) as n from slb_r_kept_tables_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_kept_tables_on group by c1, c2) y),
   (select count(*) from slb_r_kept_tables_on) - (select count(*) from slb_r_kept_tables_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_dedup_off;
+
+statement ok
+delete from slb_r_agg_dedup_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_dedup_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select id as k, 'new' as st, 1 as p from slb_e union all select k, 'active', 2 from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' group by k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_dedup_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select id as k, 'new' as st, 1 as p from slb_e union all select k, 'active', 2 from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' group by k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_dedup_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_dedup_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_dedup_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_dedup_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_dedup_on) - (select count(*) from slb_r_agg_dedup_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_only_off;
+
+statement ok
+delete from slb_r_agg_only_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_only_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'seen' as st, 1 as p from slb_f group by k union all select k, 'active', 2 from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' and amt is not null group by k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_only_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'seen' as st, 1 as p from slb_f group by k union all select k, 'active', 2 from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' and amt is not null group by k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_only_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_only_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_only_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_only_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_only_on) - (select count(*) from slb_r_agg_only_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_having_off;
+
+statement ok
+delete from slb_r_agg_having_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_having_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'neg' as st, 1 as p from slb_f where amt < 0 group by k having count(*) >= 1 union all select k, 'some', 2 from slb_f where st = 'back' group by k having max(amt) > 0 union all select k, 'big', 3 from slb_f group by k having coalesce(sum(amt), 0) > 10) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_having_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'neg' as st, 1 as p from slb_f where amt < 0 group by k having count(*) >= 1 union all select k, 'some', 2 from slb_f where st = 'back' group by k having max(amt) > 0 union all select k, 'big', 3 from slb_f group by k having coalesce(sum(amt), 0) > 10) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_having_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_having_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_having_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_having_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_having_on) - (select count(*) from slb_r_agg_having_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_distinct_off;
+
+statement ok
+delete from slb_r_agg_distinct_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_distinct_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select distinct k, 'active' as st, 2 as p from slb_f where amt > 0 union all select distinct k, 'closed', 3 from slb_f where st = 'back' union all select k, 'held', 4 from slb_g) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_distinct_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select distinct k, 'active' as st, 2 as p from slb_f where amt > 0 union all select distinct k, 'closed', 3 from slb_f where st = 'back' union all select k, 'held', 4 from slb_g) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_distinct_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_distinct_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_distinct_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_distinct_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_distinct_on) - (select count(*) from slb_r_agg_distinct_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_expr_key_off;
+
+statement ok
+delete from slb_r_agg_expr_key_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_expr_key_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k % 3 as k, 'odd' as st, 1 as p from slb_f where amt % 2 = 1 group by k % 3 union all select k % 3, 'back', 2 from slb_f where st = 'back' group by k % 3) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_expr_key_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k % 3 as k, 'odd' as st, 1 as p from slb_f where amt % 2 = 1 group by k % 3 union all select k % 3, 'back', 2 from slb_f where st = 'back' group by k % 3) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_expr_key_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_expr_key_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_expr_key_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_expr_key_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_expr_key_on) - (select count(*) from slb_r_agg_expr_key_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_shared_join_off;
+
+statement ok
+delete from slb_r_agg_shared_join_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_shared_join_off select * from (with c as (select slb_f.k, slb_f.amt, slb_f.st from slb_f join slb_g on slb_f.k = slb_g.k) select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'open' as st, 1 as p from c where amt > 0 group by k union all select k, 'back', 2 from c where st = 'back' group by k union all select id, 'new', 0 from slb_e) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_shared_join_on select * from (with c as (select slb_f.k, slb_f.amt, slb_f.st from slb_f join slb_g on slb_f.k = slb_g.k) select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'open' as st, 1 as p from c where amt > 0 group by k union all select k, 'back', 2 from c where st = 'back' group by k union all select id, 'new', 0 from slb_e) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_shared_join_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_shared_join_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_shared_join_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_shared_join_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_shared_join_on) - (select count(*) from slb_r_agg_shared_join_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_joins_off;
+
+statement ok
+delete from slb_r_agg_joins_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_joins_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select slb_f.k, 'matched' as st, 1 as p from slb_f join slb_g on slb_f.k = slb_g.k where slb_g.r > 2 group by slb_f.k union all select slb_f.k, 'paid', 2 from slb_f join slb_g on slb_f.k = slb_g.k where slb_f.amt > 0 group by slb_f.k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_joins_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select slb_f.k, 'matched' as st, 1 as p from slb_f join slb_g on slb_f.k = slb_g.k where slb_g.r > 2 group by slb_f.k union all select slb_f.k, 'paid', 2 from slb_f join slb_g on slb_f.k = slb_g.k where slb_f.amt > 0 group by slb_f.k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_joins_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_joins_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_joins_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_joins_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_joins_on) - (select count(*) from slb_r_agg_joins_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_joins_off;
+
+statement ok
+delete from slb_r_joins_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_joins_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select slb_f.k, 'matched' as st, 1 as p from slb_f join slb_g on slb_f.k = slb_g.k where slb_g.r > 2 union all select slb_f.k, 'paid', 2 from slb_f join slb_g on slb_f.k = slb_g.k where slb_f.amt > 0 union all select id, 'new', 0 from slb_e) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_joins_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select slb_f.k, 'matched' as st, 1 as p from slb_f join slb_g on slb_f.k = slb_g.k where slb_g.r > 2 union all select slb_f.k, 'paid', 2 from slb_f join slb_g on slb_f.k = slb_g.k where slb_f.amt > 0 union all select id, 'new', 0 from slb_e) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_joins_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_joins_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_joins_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_joins_on group by c1, c2) y),
+  (select count(*) from slb_r_joins_on) - (select count(*) from slb_r_joins_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_kept_agg_keys_off;
+
+statement ok
+delete from slb_r_kept_agg_keys_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_kept_agg_keys_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'active' as st, 2 as p from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' group by k, st) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_kept_agg_keys_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'active' as st, 2 as p from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' group by k, st) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_kept_agg_keys_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_kept_agg_keys_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_kept_agg_keys_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_kept_agg_keys_on group by c1, c2) y),
+  (select count(*) from slb_r_kept_agg_keys_on) - (select count(*) from slb_r_kept_agg_keys_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_kept_agg_distinct_call_off;
+
+statement ok
+delete from slb_r_kept_agg_distinct_call_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_kept_agg_distinct_call_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'active' as st, 2 as p from slb_f where amt > 0 group by k union all select k, 'many', 3 from slb_f group by k having count(distinct amt) > 1) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_kept_agg_distinct_call_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'active' as st, 2 as p from slb_f where amt > 0 group by k union all select k, 'many', 3 from slb_f group by k having count(distinct amt) > 1) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_kept_agg_distinct_call_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_kept_agg_distinct_call_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_kept_agg_distinct_call_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_kept_agg_distinct_call_on group by c1, c2) y),
+  (select count(*) from slb_r_kept_agg_distinct_call_on) - (select count(*) from slb_r_kept_agg_distinct_call_off);
 ----
 0 0 0
 
@@ -798,6 +1168,296 @@ select
 ----
 0 0 0
 
+statement ok
+delete from slb_r_agg_dedup_off;
+
+statement ok
+delete from slb_r_agg_dedup_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_dedup_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select id as k, 'new' as st, 1 as p from slb_e union all select k, 'active', 2 from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' group by k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_dedup_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select id as k, 'new' as st, 1 as p from slb_e union all select k, 'active', 2 from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' group by k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_dedup_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_dedup_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_dedup_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_dedup_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_dedup_on) - (select count(*) from slb_r_agg_dedup_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_only_off;
+
+statement ok
+delete from slb_r_agg_only_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_only_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'seen' as st, 1 as p from slb_f group by k union all select k, 'active', 2 from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' and amt is not null group by k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_only_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'seen' as st, 1 as p from slb_f group by k union all select k, 'active', 2 from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' and amt is not null group by k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_only_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_only_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_only_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_only_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_only_on) - (select count(*) from slb_r_agg_only_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_having_off;
+
+statement ok
+delete from slb_r_agg_having_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_having_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'neg' as st, 1 as p from slb_f where amt < 0 group by k having count(*) >= 1 union all select k, 'some', 2 from slb_f where st = 'back' group by k having max(amt) > 0 union all select k, 'big', 3 from slb_f group by k having coalesce(sum(amt), 0) > 10) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_having_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'neg' as st, 1 as p from slb_f where amt < 0 group by k having count(*) >= 1 union all select k, 'some', 2 from slb_f where st = 'back' group by k having max(amt) > 0 union all select k, 'big', 3 from slb_f group by k having coalesce(sum(amt), 0) > 10) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_having_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_having_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_having_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_having_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_having_on) - (select count(*) from slb_r_agg_having_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_distinct_off;
+
+statement ok
+delete from slb_r_agg_distinct_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_distinct_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select distinct k, 'active' as st, 2 as p from slb_f where amt > 0 union all select distinct k, 'closed', 3 from slb_f where st = 'back' union all select k, 'held', 4 from slb_g) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_distinct_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select distinct k, 'active' as st, 2 as p from slb_f where amt > 0 union all select distinct k, 'closed', 3 from slb_f where st = 'back' union all select k, 'held', 4 from slb_g) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_distinct_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_distinct_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_distinct_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_distinct_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_distinct_on) - (select count(*) from slb_r_agg_distinct_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_expr_key_off;
+
+statement ok
+delete from slb_r_agg_expr_key_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_expr_key_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k % 3 as k, 'odd' as st, 1 as p from slb_f where amt % 2 = 1 group by k % 3 union all select k % 3, 'back', 2 from slb_f where st = 'back' group by k % 3) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_expr_key_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k % 3 as k, 'odd' as st, 1 as p from slb_f where amt % 2 = 1 group by k % 3 union all select k % 3, 'back', 2 from slb_f where st = 'back' group by k % 3) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_expr_key_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_expr_key_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_expr_key_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_expr_key_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_expr_key_on) - (select count(*) from slb_r_agg_expr_key_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_shared_join_off;
+
+statement ok
+delete from slb_r_agg_shared_join_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_shared_join_off select * from (with c as (select slb_f.k, slb_f.amt, slb_f.st from slb_f join slb_g on slb_f.k = slb_g.k) select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'open' as st, 1 as p from c where amt > 0 group by k union all select k, 'back', 2 from c where st = 'back' group by k union all select id, 'new', 0 from slb_e) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_shared_join_on select * from (with c as (select slb_f.k, slb_f.amt, slb_f.st from slb_f join slb_g on slb_f.k = slb_g.k) select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'open' as st, 1 as p from c where amt > 0 group by k union all select k, 'back', 2 from c where st = 'back' group by k union all select id, 'new', 0 from slb_e) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_shared_join_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_shared_join_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_shared_join_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_shared_join_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_shared_join_on) - (select count(*) from slb_r_agg_shared_join_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_joins_off;
+
+statement ok
+delete from slb_r_agg_joins_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_joins_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select slb_f.k, 'matched' as st, 1 as p from slb_f join slb_g on slb_f.k = slb_g.k where slb_g.r > 2 group by slb_f.k union all select slb_f.k, 'paid', 2 from slb_f join slb_g on slb_f.k = slb_g.k where slb_f.amt > 0 group by slb_f.k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_joins_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select slb_f.k, 'matched' as st, 1 as p from slb_f join slb_g on slb_f.k = slb_g.k where slb_g.r > 2 group by slb_f.k union all select slb_f.k, 'paid', 2 from slb_f join slb_g on slb_f.k = slb_g.k where slb_f.amt > 0 group by slb_f.k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_joins_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_joins_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_joins_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_joins_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_joins_on) - (select count(*) from slb_r_agg_joins_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_joins_off;
+
+statement ok
+delete from slb_r_joins_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_joins_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select slb_f.k, 'matched' as st, 1 as p from slb_f join slb_g on slb_f.k = slb_g.k where slb_g.r > 2 union all select slb_f.k, 'paid', 2 from slb_f join slb_g on slb_f.k = slb_g.k where slb_f.amt > 0 union all select id, 'new', 0 from slb_e) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_joins_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select slb_f.k, 'matched' as st, 1 as p from slb_f join slb_g on slb_f.k = slb_g.k where slb_g.r > 2 union all select slb_f.k, 'paid', 2 from slb_f join slb_g on slb_f.k = slb_g.k where slb_f.amt > 0 union all select id, 'new', 0 from slb_e) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_joins_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_joins_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_joins_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_joins_on group by c1, c2) y),
+  (select count(*) from slb_r_joins_on) - (select count(*) from slb_r_joins_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_kept_agg_keys_off;
+
+statement ok
+delete from slb_r_kept_agg_keys_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_kept_agg_keys_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'active' as st, 2 as p from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' group by k, st) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_kept_agg_keys_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'active' as st, 2 as p from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' group by k, st) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_kept_agg_keys_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_kept_agg_keys_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_kept_agg_keys_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_kept_agg_keys_on group by c1, c2) y),
+  (select count(*) from slb_r_kept_agg_keys_on) - (select count(*) from slb_r_kept_agg_keys_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_kept_agg_distinct_call_off;
+
+statement ok
+delete from slb_r_kept_agg_distinct_call_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_kept_agg_distinct_call_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'active' as st, 2 as p from slb_f where amt > 0 group by k union all select k, 'many', 3 from slb_f group by k having count(distinct amt) > 1) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_kept_agg_distinct_call_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'active' as st, 2 as p from slb_f where amt > 0 group by k union all select k, 'many', 3 from slb_f group by k having count(distinct amt) > 1) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_kept_agg_distinct_call_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_kept_agg_distinct_call_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_kept_agg_distinct_call_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_kept_agg_distinct_call_on group by c1, c2) y),
+  (select count(*) from slb_r_kept_agg_distinct_call_on) - (select count(*) from slb_r_kept_agg_distinct_call_off);
+----
+0 0 0
+
 # Changes: rows that move from one filter to another, and to NULL.
 
 statement ok
@@ -1160,6 +1820,296 @@ select
 ----
 0 0 0
 
+statement ok
+delete from slb_r_agg_dedup_off;
+
+statement ok
+delete from slb_r_agg_dedup_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_dedup_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select id as k, 'new' as st, 1 as p from slb_e union all select k, 'active', 2 from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' group by k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_dedup_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select id as k, 'new' as st, 1 as p from slb_e union all select k, 'active', 2 from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' group by k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_dedup_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_dedup_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_dedup_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_dedup_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_dedup_on) - (select count(*) from slb_r_agg_dedup_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_only_off;
+
+statement ok
+delete from slb_r_agg_only_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_only_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'seen' as st, 1 as p from slb_f group by k union all select k, 'active', 2 from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' and amt is not null group by k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_only_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'seen' as st, 1 as p from slb_f group by k union all select k, 'active', 2 from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' and amt is not null group by k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_only_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_only_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_only_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_only_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_only_on) - (select count(*) from slb_r_agg_only_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_having_off;
+
+statement ok
+delete from slb_r_agg_having_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_having_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'neg' as st, 1 as p from slb_f where amt < 0 group by k having count(*) >= 1 union all select k, 'some', 2 from slb_f where st = 'back' group by k having max(amt) > 0 union all select k, 'big', 3 from slb_f group by k having coalesce(sum(amt), 0) > 10) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_having_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'neg' as st, 1 as p from slb_f where amt < 0 group by k having count(*) >= 1 union all select k, 'some', 2 from slb_f where st = 'back' group by k having max(amt) > 0 union all select k, 'big', 3 from slb_f group by k having coalesce(sum(amt), 0) > 10) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_having_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_having_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_having_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_having_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_having_on) - (select count(*) from slb_r_agg_having_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_distinct_off;
+
+statement ok
+delete from slb_r_agg_distinct_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_distinct_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select distinct k, 'active' as st, 2 as p from slb_f where amt > 0 union all select distinct k, 'closed', 3 from slb_f where st = 'back' union all select k, 'held', 4 from slb_g) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_distinct_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select distinct k, 'active' as st, 2 as p from slb_f where amt > 0 union all select distinct k, 'closed', 3 from slb_f where st = 'back' union all select k, 'held', 4 from slb_g) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_distinct_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_distinct_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_distinct_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_distinct_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_distinct_on) - (select count(*) from slb_r_agg_distinct_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_expr_key_off;
+
+statement ok
+delete from slb_r_agg_expr_key_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_expr_key_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k % 3 as k, 'odd' as st, 1 as p from slb_f where amt % 2 = 1 group by k % 3 union all select k % 3, 'back', 2 from slb_f where st = 'back' group by k % 3) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_expr_key_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k % 3 as k, 'odd' as st, 1 as p from slb_f where amt % 2 = 1 group by k % 3 union all select k % 3, 'back', 2 from slb_f where st = 'back' group by k % 3) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_expr_key_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_expr_key_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_expr_key_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_expr_key_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_expr_key_on) - (select count(*) from slb_r_agg_expr_key_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_shared_join_off;
+
+statement ok
+delete from slb_r_agg_shared_join_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_shared_join_off select * from (with c as (select slb_f.k, slb_f.amt, slb_f.st from slb_f join slb_g on slb_f.k = slb_g.k) select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'open' as st, 1 as p from c where amt > 0 group by k union all select k, 'back', 2 from c where st = 'back' group by k union all select id, 'new', 0 from slb_e) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_shared_join_on select * from (with c as (select slb_f.k, slb_f.amt, slb_f.st from slb_f join slb_g on slb_f.k = slb_g.k) select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'open' as st, 1 as p from c where amt > 0 group by k union all select k, 'back', 2 from c where st = 'back' group by k union all select id, 'new', 0 from slb_e) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_shared_join_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_shared_join_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_shared_join_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_shared_join_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_shared_join_on) - (select count(*) from slb_r_agg_shared_join_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_joins_off;
+
+statement ok
+delete from slb_r_agg_joins_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_joins_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select slb_f.k, 'matched' as st, 1 as p from slb_f join slb_g on slb_f.k = slb_g.k where slb_g.r > 2 group by slb_f.k union all select slb_f.k, 'paid', 2 from slb_f join slb_g on slb_f.k = slb_g.k where slb_f.amt > 0 group by slb_f.k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_joins_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select slb_f.k, 'matched' as st, 1 as p from slb_f join slb_g on slb_f.k = slb_g.k where slb_g.r > 2 group by slb_f.k union all select slb_f.k, 'paid', 2 from slb_f join slb_g on slb_f.k = slb_g.k where slb_f.amt > 0 group by slb_f.k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_joins_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_joins_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_joins_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_joins_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_joins_on) - (select count(*) from slb_r_agg_joins_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_joins_off;
+
+statement ok
+delete from slb_r_joins_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_joins_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select slb_f.k, 'matched' as st, 1 as p from slb_f join slb_g on slb_f.k = slb_g.k where slb_g.r > 2 union all select slb_f.k, 'paid', 2 from slb_f join slb_g on slb_f.k = slb_g.k where slb_f.amt > 0 union all select id, 'new', 0 from slb_e) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_joins_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select slb_f.k, 'matched' as st, 1 as p from slb_f join slb_g on slb_f.k = slb_g.k where slb_g.r > 2 union all select slb_f.k, 'paid', 2 from slb_f join slb_g on slb_f.k = slb_g.k where slb_f.amt > 0 union all select id, 'new', 0 from slb_e) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_joins_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_joins_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_joins_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_joins_on group by c1, c2) y),
+  (select count(*) from slb_r_joins_on) - (select count(*) from slb_r_joins_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_kept_agg_keys_off;
+
+statement ok
+delete from slb_r_kept_agg_keys_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_kept_agg_keys_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'active' as st, 2 as p from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' group by k, st) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_kept_agg_keys_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'active' as st, 2 as p from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' group by k, st) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_kept_agg_keys_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_kept_agg_keys_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_kept_agg_keys_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_kept_agg_keys_on group by c1, c2) y),
+  (select count(*) from slb_r_kept_agg_keys_on) - (select count(*) from slb_r_kept_agg_keys_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_kept_agg_distinct_call_off;
+
+statement ok
+delete from slb_r_kept_agg_distinct_call_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_kept_agg_distinct_call_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'active' as st, 2 as p from slb_f where amt > 0 group by k union all select k, 'many', 3 from slb_f group by k having count(distinct amt) > 1) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_kept_agg_distinct_call_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'active' as st, 2 as p from slb_f where amt > 0 group by k union all select k, 'many', 3 from slb_f group by k having count(distinct amt) > 1) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_kept_agg_distinct_call_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_kept_agg_distinct_call_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_kept_agg_distinct_call_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_kept_agg_distinct_call_on group by c1, c2) y),
+  (select count(*) from slb_r_kept_agg_distinct_call_on) - (select count(*) from slb_r_kept_agg_distinct_call_off);
+----
+0 0 0
+
 # Changes: deletes.
 
 statement ok
@@ -1495,6 +2445,296 @@ select
 ----
 0 0 0
 
+statement ok
+delete from slb_r_agg_dedup_off;
+
+statement ok
+delete from slb_r_agg_dedup_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_dedup_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select id as k, 'new' as st, 1 as p from slb_e union all select k, 'active', 2 from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' group by k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_dedup_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select id as k, 'new' as st, 1 as p from slb_e union all select k, 'active', 2 from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' group by k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_dedup_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_dedup_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_dedup_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_dedup_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_dedup_on) - (select count(*) from slb_r_agg_dedup_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_only_off;
+
+statement ok
+delete from slb_r_agg_only_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_only_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'seen' as st, 1 as p from slb_f group by k union all select k, 'active', 2 from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' and amt is not null group by k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_only_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'seen' as st, 1 as p from slb_f group by k union all select k, 'active', 2 from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' and amt is not null group by k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_only_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_only_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_only_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_only_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_only_on) - (select count(*) from slb_r_agg_only_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_having_off;
+
+statement ok
+delete from slb_r_agg_having_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_having_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'neg' as st, 1 as p from slb_f where amt < 0 group by k having count(*) >= 1 union all select k, 'some', 2 from slb_f where st = 'back' group by k having max(amt) > 0 union all select k, 'big', 3 from slb_f group by k having coalesce(sum(amt), 0) > 10) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_having_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'neg' as st, 1 as p from slb_f where amt < 0 group by k having count(*) >= 1 union all select k, 'some', 2 from slb_f where st = 'back' group by k having max(amt) > 0 union all select k, 'big', 3 from slb_f group by k having coalesce(sum(amt), 0) > 10) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_having_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_having_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_having_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_having_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_having_on) - (select count(*) from slb_r_agg_having_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_distinct_off;
+
+statement ok
+delete from slb_r_agg_distinct_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_distinct_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select distinct k, 'active' as st, 2 as p from slb_f where amt > 0 union all select distinct k, 'closed', 3 from slb_f where st = 'back' union all select k, 'held', 4 from slb_g) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_distinct_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select distinct k, 'active' as st, 2 as p from slb_f where amt > 0 union all select distinct k, 'closed', 3 from slb_f where st = 'back' union all select k, 'held', 4 from slb_g) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_distinct_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_distinct_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_distinct_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_distinct_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_distinct_on) - (select count(*) from slb_r_agg_distinct_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_expr_key_off;
+
+statement ok
+delete from slb_r_agg_expr_key_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_expr_key_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k % 3 as k, 'odd' as st, 1 as p from slb_f where amt % 2 = 1 group by k % 3 union all select k % 3, 'back', 2 from slb_f where st = 'back' group by k % 3) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_expr_key_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k % 3 as k, 'odd' as st, 1 as p from slb_f where amt % 2 = 1 group by k % 3 union all select k % 3, 'back', 2 from slb_f where st = 'back' group by k % 3) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_expr_key_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_expr_key_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_expr_key_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_expr_key_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_expr_key_on) - (select count(*) from slb_r_agg_expr_key_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_shared_join_off;
+
+statement ok
+delete from slb_r_agg_shared_join_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_shared_join_off select * from (with c as (select slb_f.k, slb_f.amt, slb_f.st from slb_f join slb_g on slb_f.k = slb_g.k) select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'open' as st, 1 as p from c where amt > 0 group by k union all select k, 'back', 2 from c where st = 'back' group by k union all select id, 'new', 0 from slb_e) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_shared_join_on select * from (with c as (select slb_f.k, slb_f.amt, slb_f.st from slb_f join slb_g on slb_f.k = slb_g.k) select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'open' as st, 1 as p from c where amt > 0 group by k union all select k, 'back', 2 from c where st = 'back' group by k union all select id, 'new', 0 from slb_e) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_shared_join_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_shared_join_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_shared_join_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_shared_join_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_shared_join_on) - (select count(*) from slb_r_agg_shared_join_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_joins_off;
+
+statement ok
+delete from slb_r_agg_joins_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_joins_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select slb_f.k, 'matched' as st, 1 as p from slb_f join slb_g on slb_f.k = slb_g.k where slb_g.r > 2 group by slb_f.k union all select slb_f.k, 'paid', 2 from slb_f join slb_g on slb_f.k = slb_g.k where slb_f.amt > 0 group by slb_f.k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_joins_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select slb_f.k, 'matched' as st, 1 as p from slb_f join slb_g on slb_f.k = slb_g.k where slb_g.r > 2 group by slb_f.k union all select slb_f.k, 'paid', 2 from slb_f join slb_g on slb_f.k = slb_g.k where slb_f.amt > 0 group by slb_f.k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_joins_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_joins_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_joins_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_joins_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_joins_on) - (select count(*) from slb_r_agg_joins_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_joins_off;
+
+statement ok
+delete from slb_r_joins_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_joins_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select slb_f.k, 'matched' as st, 1 as p from slb_f join slb_g on slb_f.k = slb_g.k where slb_g.r > 2 union all select slb_f.k, 'paid', 2 from slb_f join slb_g on slb_f.k = slb_g.k where slb_f.amt > 0 union all select id, 'new', 0 from slb_e) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_joins_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select slb_f.k, 'matched' as st, 1 as p from slb_f join slb_g on slb_f.k = slb_g.k where slb_g.r > 2 union all select slb_f.k, 'paid', 2 from slb_f join slb_g on slb_f.k = slb_g.k where slb_f.amt > 0 union all select id, 'new', 0 from slb_e) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_joins_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_joins_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_joins_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_joins_on group by c1, c2) y),
+  (select count(*) from slb_r_joins_on) - (select count(*) from slb_r_joins_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_kept_agg_keys_off;
+
+statement ok
+delete from slb_r_kept_agg_keys_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_kept_agg_keys_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'active' as st, 2 as p from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' group by k, st) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_kept_agg_keys_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'active' as st, 2 as p from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' group by k, st) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_kept_agg_keys_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_kept_agg_keys_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_kept_agg_keys_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_kept_agg_keys_on group by c1, c2) y),
+  (select count(*) from slb_r_kept_agg_keys_on) - (select count(*) from slb_r_kept_agg_keys_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_kept_agg_distinct_call_off;
+
+statement ok
+delete from slb_r_kept_agg_distinct_call_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_kept_agg_distinct_call_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'active' as st, 2 as p from slb_f where amt > 0 group by k union all select k, 'many', 3 from slb_f group by k having count(distinct amt) > 1) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_kept_agg_distinct_call_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'active' as st, 2 as p from slb_f where amt > 0 group by k union all select k, 'many', 3 from slb_f group by k having count(distinct amt) > 1) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_kept_agg_distinct_call_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_kept_agg_distinct_call_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_kept_agg_distinct_call_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_kept_agg_distinct_call_on group by c1, c2) y),
+  (select count(*) from slb_r_kept_agg_distinct_call_on) - (select count(*) from slb_r_kept_agg_distinct_call_off);
+----
+0 0 0
+
 # Changes: the tables are emptied.
 
 statement ok
@@ -1824,6 +3064,296 @@ select
   (select count(*) from (select c1, c2, count(*) as n from slb_r_kept_tables_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_kept_tables_off group by c1, c2) x),
   (select count(*) from (select c1, c2, count(*) as n from slb_r_kept_tables_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_kept_tables_on group by c1, c2) y),
   (select count(*) from slb_r_kept_tables_on) - (select count(*) from slb_r_kept_tables_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_dedup_off;
+
+statement ok
+delete from slb_r_agg_dedup_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_dedup_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select id as k, 'new' as st, 1 as p from slb_e union all select k, 'active', 2 from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' group by k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_dedup_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select id as k, 'new' as st, 1 as p from slb_e union all select k, 'active', 2 from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' group by k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_dedup_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_dedup_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_dedup_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_dedup_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_dedup_on) - (select count(*) from slb_r_agg_dedup_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_only_off;
+
+statement ok
+delete from slb_r_agg_only_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_only_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'seen' as st, 1 as p from slb_f group by k union all select k, 'active', 2 from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' and amt is not null group by k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_only_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'seen' as st, 1 as p from slb_f group by k union all select k, 'active', 2 from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' and amt is not null group by k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_only_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_only_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_only_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_only_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_only_on) - (select count(*) from slb_r_agg_only_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_having_off;
+
+statement ok
+delete from slb_r_agg_having_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_having_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'neg' as st, 1 as p from slb_f where amt < 0 group by k having count(*) >= 1 union all select k, 'some', 2 from slb_f where st = 'back' group by k having max(amt) > 0 union all select k, 'big', 3 from slb_f group by k having coalesce(sum(amt), 0) > 10) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_having_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'neg' as st, 1 as p from slb_f where amt < 0 group by k having count(*) >= 1 union all select k, 'some', 2 from slb_f where st = 'back' group by k having max(amt) > 0 union all select k, 'big', 3 from slb_f group by k having coalesce(sum(amt), 0) > 10) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_having_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_having_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_having_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_having_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_having_on) - (select count(*) from slb_r_agg_having_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_distinct_off;
+
+statement ok
+delete from slb_r_agg_distinct_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_distinct_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select distinct k, 'active' as st, 2 as p from slb_f where amt > 0 union all select distinct k, 'closed', 3 from slb_f where st = 'back' union all select k, 'held', 4 from slb_g) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_distinct_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select distinct k, 'active' as st, 2 as p from slb_f where amt > 0 union all select distinct k, 'closed', 3 from slb_f where st = 'back' union all select k, 'held', 4 from slb_g) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_distinct_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_distinct_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_distinct_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_distinct_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_distinct_on) - (select count(*) from slb_r_agg_distinct_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_expr_key_off;
+
+statement ok
+delete from slb_r_agg_expr_key_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_expr_key_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k % 3 as k, 'odd' as st, 1 as p from slb_f where amt % 2 = 1 group by k % 3 union all select k % 3, 'back', 2 from slb_f where st = 'back' group by k % 3) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_expr_key_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k % 3 as k, 'odd' as st, 1 as p from slb_f where amt % 2 = 1 group by k % 3 union all select k % 3, 'back', 2 from slb_f where st = 'back' group by k % 3) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_expr_key_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_expr_key_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_expr_key_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_expr_key_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_expr_key_on) - (select count(*) from slb_r_agg_expr_key_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_shared_join_off;
+
+statement ok
+delete from slb_r_agg_shared_join_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_shared_join_off select * from (with c as (select slb_f.k, slb_f.amt, slb_f.st from slb_f join slb_g on slb_f.k = slb_g.k) select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'open' as st, 1 as p from c where amt > 0 group by k union all select k, 'back', 2 from c where st = 'back' group by k union all select id, 'new', 0 from slb_e) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_shared_join_on select * from (with c as (select slb_f.k, slb_f.amt, slb_f.st from slb_f join slb_g on slb_f.k = slb_g.k) select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'open' as st, 1 as p from c where amt > 0 group by k union all select k, 'back', 2 from c where st = 'back' group by k union all select id, 'new', 0 from slb_e) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_shared_join_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_shared_join_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_shared_join_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_shared_join_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_shared_join_on) - (select count(*) from slb_r_agg_shared_join_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_joins_off;
+
+statement ok
+delete from slb_r_agg_joins_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_joins_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select slb_f.k, 'matched' as st, 1 as p from slb_f join slb_g on slb_f.k = slb_g.k where slb_g.r > 2 group by slb_f.k union all select slb_f.k, 'paid', 2 from slb_f join slb_g on slb_f.k = slb_g.k where slb_f.amt > 0 group by slb_f.k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_joins_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select slb_f.k, 'matched' as st, 1 as p from slb_f join slb_g on slb_f.k = slb_g.k where slb_g.r > 2 group by slb_f.k union all select slb_f.k, 'paid', 2 from slb_f join slb_g on slb_f.k = slb_g.k where slb_f.amt > 0 group by slb_f.k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_joins_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_joins_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_joins_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_joins_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_joins_on) - (select count(*) from slb_r_agg_joins_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_joins_off;
+
+statement ok
+delete from slb_r_joins_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_joins_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select slb_f.k, 'matched' as st, 1 as p from slb_f join slb_g on slb_f.k = slb_g.k where slb_g.r > 2 union all select slb_f.k, 'paid', 2 from slb_f join slb_g on slb_f.k = slb_g.k where slb_f.amt > 0 union all select id, 'new', 0 from slb_e) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_joins_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select slb_f.k, 'matched' as st, 1 as p from slb_f join slb_g on slb_f.k = slb_g.k where slb_g.r > 2 union all select slb_f.k, 'paid', 2 from slb_f join slb_g on slb_f.k = slb_g.k where slb_f.amt > 0 union all select id, 'new', 0 from slb_e) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_joins_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_joins_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_joins_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_joins_on group by c1, c2) y),
+  (select count(*) from slb_r_joins_on) - (select count(*) from slb_r_joins_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_kept_agg_keys_off;
+
+statement ok
+delete from slb_r_kept_agg_keys_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_kept_agg_keys_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'active' as st, 2 as p from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' group by k, st) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_kept_agg_keys_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'active' as st, 2 as p from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' group by k, st) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_kept_agg_keys_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_kept_agg_keys_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_kept_agg_keys_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_kept_agg_keys_on group by c1, c2) y),
+  (select count(*) from slb_r_kept_agg_keys_on) - (select count(*) from slb_r_kept_agg_keys_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_kept_agg_distinct_call_off;
+
+statement ok
+delete from slb_r_kept_agg_distinct_call_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_kept_agg_distinct_call_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'active' as st, 2 as p from slb_f where amt > 0 group by k union all select k, 'many', 3 from slb_f group by k having count(distinct amt) > 1) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_kept_agg_distinct_call_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'active' as st, 2 as p from slb_f where amt > 0 group by k union all select k, 'many', 3 from slb_f group by k having count(distinct amt) > 1) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_kept_agg_distinct_call_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_kept_agg_distinct_call_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_kept_agg_distinct_call_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_kept_agg_distinct_call_on group by c1, c2) y),
+  (select count(*) from slb_r_kept_agg_distinct_call_on) - (select count(*) from slb_r_kept_agg_distinct_call_off);
 ----
 0 0 0
 
@@ -2159,7 +3689,357 @@ select
 ----
 0 0 0
 
+statement ok
+delete from slb_r_agg_dedup_off;
+
+statement ok
+delete from slb_r_agg_dedup_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_dedup_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select id as k, 'new' as st, 1 as p from slb_e union all select k, 'active', 2 from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' group by k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_dedup_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select id as k, 'new' as st, 1 as p from slb_e union all select k, 'active', 2 from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' group by k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_dedup_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_dedup_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_dedup_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_dedup_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_dedup_on) - (select count(*) from slb_r_agg_dedup_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_only_off;
+
+statement ok
+delete from slb_r_agg_only_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_only_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'seen' as st, 1 as p from slb_f group by k union all select k, 'active', 2 from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' and amt is not null group by k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_only_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'seen' as st, 1 as p from slb_f group by k union all select k, 'active', 2 from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' and amt is not null group by k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_only_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_only_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_only_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_only_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_only_on) - (select count(*) from slb_r_agg_only_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_having_off;
+
+statement ok
+delete from slb_r_agg_having_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_having_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'neg' as st, 1 as p from slb_f where amt < 0 group by k having count(*) >= 1 union all select k, 'some', 2 from slb_f where st = 'back' group by k having max(amt) > 0 union all select k, 'big', 3 from slb_f group by k having coalesce(sum(amt), 0) > 10) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_having_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'neg' as st, 1 as p from slb_f where amt < 0 group by k having count(*) >= 1 union all select k, 'some', 2 from slb_f where st = 'back' group by k having max(amt) > 0 union all select k, 'big', 3 from slb_f group by k having coalesce(sum(amt), 0) > 10) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_having_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_having_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_having_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_having_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_having_on) - (select count(*) from slb_r_agg_having_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_distinct_off;
+
+statement ok
+delete from slb_r_agg_distinct_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_distinct_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select distinct k, 'active' as st, 2 as p from slb_f where amt > 0 union all select distinct k, 'closed', 3 from slb_f where st = 'back' union all select k, 'held', 4 from slb_g) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_distinct_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select distinct k, 'active' as st, 2 as p from slb_f where amt > 0 union all select distinct k, 'closed', 3 from slb_f where st = 'back' union all select k, 'held', 4 from slb_g) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_distinct_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_distinct_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_distinct_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_distinct_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_distinct_on) - (select count(*) from slb_r_agg_distinct_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_expr_key_off;
+
+statement ok
+delete from slb_r_agg_expr_key_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_expr_key_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k % 3 as k, 'odd' as st, 1 as p from slb_f where amt % 2 = 1 group by k % 3 union all select k % 3, 'back', 2 from slb_f where st = 'back' group by k % 3) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_expr_key_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k % 3 as k, 'odd' as st, 1 as p from slb_f where amt % 2 = 1 group by k % 3 union all select k % 3, 'back', 2 from slb_f where st = 'back' group by k % 3) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_expr_key_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_expr_key_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_expr_key_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_expr_key_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_expr_key_on) - (select count(*) from slb_r_agg_expr_key_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_shared_join_off;
+
+statement ok
+delete from slb_r_agg_shared_join_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_shared_join_off select * from (with c as (select slb_f.k, slb_f.amt, slb_f.st from slb_f join slb_g on slb_f.k = slb_g.k) select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'open' as st, 1 as p from c where amt > 0 group by k union all select k, 'back', 2 from c where st = 'back' group by k union all select id, 'new', 0 from slb_e) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_shared_join_on select * from (with c as (select slb_f.k, slb_f.amt, slb_f.st from slb_f join slb_g on slb_f.k = slb_g.k) select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'open' as st, 1 as p from c where amt > 0 group by k union all select k, 'back', 2 from c where st = 'back' group by k union all select id, 'new', 0 from slb_e) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_shared_join_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_shared_join_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_shared_join_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_shared_join_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_shared_join_on) - (select count(*) from slb_r_agg_shared_join_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_agg_joins_off;
+
+statement ok
+delete from slb_r_agg_joins_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_agg_joins_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select slb_f.k, 'matched' as st, 1 as p from slb_f join slb_g on slb_f.k = slb_g.k where slb_g.r > 2 group by slb_f.k union all select slb_f.k, 'paid', 2 from slb_f join slb_g on slb_f.k = slb_g.k where slb_f.amt > 0 group by slb_f.k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_agg_joins_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select slb_f.k, 'matched' as st, 1 as p from slb_f join slb_g on slb_f.k = slb_g.k where slb_g.r > 2 group by slb_f.k union all select slb_f.k, 'paid', 2 from slb_f join slb_g on slb_f.k = slb_g.k where slb_f.amt > 0 group by slb_f.k) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_joins_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_joins_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_agg_joins_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_agg_joins_on group by c1, c2) y),
+  (select count(*) from slb_r_agg_joins_on) - (select count(*) from slb_r_agg_joins_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_joins_off;
+
+statement ok
+delete from slb_r_joins_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_joins_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select slb_f.k, 'matched' as st, 1 as p from slb_f join slb_g on slb_f.k = slb_g.k where slb_g.r > 2 union all select slb_f.k, 'paid', 2 from slb_f join slb_g on slb_f.k = slb_g.k where slb_f.amt > 0 union all select id, 'new', 0 from slb_e) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_joins_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select slb_f.k, 'matched' as st, 1 as p from slb_f join slb_g on slb_f.k = slb_g.k where slb_g.r > 2 union all select slb_f.k, 'paid', 2 from slb_f join slb_g on slb_f.k = slb_g.k where slb_f.amt > 0 union all select id, 'new', 0 from slb_e) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_joins_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_joins_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_joins_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_joins_on group by c1, c2) y),
+  (select count(*) from slb_r_joins_on) - (select count(*) from slb_r_joins_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_kept_agg_keys_off;
+
+statement ok
+delete from slb_r_kept_agg_keys_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_kept_agg_keys_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'active' as st, 2 as p from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' group by k, st) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_kept_agg_keys_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'active' as st, 2 as p from slb_f where amt > 0 group by k union all select k, 'closed', 3 from slb_f where st = 'back' group by k, st) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_kept_agg_keys_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_kept_agg_keys_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_kept_agg_keys_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_kept_agg_keys_on group by c1, c2) y),
+  (select count(*) from slb_r_kept_agg_keys_on) - (select count(*) from slb_r_kept_agg_keys_off);
+----
+0 0 0
+
+statement ok
+delete from slb_r_kept_agg_distinct_call_off;
+
+statement ok
+delete from slb_r_kept_agg_distinct_call_on;
+
+statement ok
+set batch_status_ladder_case = false;
+
+statement ok
+insert into slb_r_kept_agg_distinct_call_off select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'active' as st, 2 as p from slb_f where amt > 0 group by k union all select k, 'many', 3 from slb_f group by k having count(distinct amt) > 1) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = true;
+
+statement ok
+insert into slb_r_kept_agg_distinct_call_on select * from (select k as c1, st as c2 from (select k, st, row_number() over (partition by k order by p desc) as rn from (select k, 'active' as st, 2 as p from slb_f where amt > 0 group by k union all select k, 'many', 3 from slb_f group by k having count(distinct amt) > 1) u) x where rn = 1) q;
+
+statement ok
+set batch_status_ladder_case = false;
+
+query III
+select
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_kept_agg_distinct_call_on group by c1, c2 except select c1, c2, count(*) as n from slb_r_kept_agg_distinct_call_off group by c1, c2) x),
+  (select count(*) from (select c1, c2, count(*) as n from slb_r_kept_agg_distinct_call_off group by c1, c2 except select c1, c2, count(*) as n from slb_r_kept_agg_distinct_call_on group by c1, c2) y),
+  (select count(*) from slb_r_kept_agg_distinct_call_on) - (select count(*) from slb_r_kept_agg_distinct_call_off);
+----
+0 0 0
+
 # Cleanup.
+
+statement ok
+drop table slb_r_kept_agg_distinct_call_on;
+
+statement ok
+drop table slb_r_kept_agg_distinct_call_off;
+
+statement ok
+drop table slb_r_kept_agg_keys_on;
+
+statement ok
+drop table slb_r_kept_agg_keys_off;
+
+statement ok
+drop table slb_r_joins_on;
+
+statement ok
+drop table slb_r_joins_off;
+
+statement ok
+drop table slb_r_agg_joins_on;
+
+statement ok
+drop table slb_r_agg_joins_off;
+
+statement ok
+drop table slb_r_agg_shared_join_on;
+
+statement ok
+drop table slb_r_agg_shared_join_off;
+
+statement ok
+drop table slb_r_agg_expr_key_on;
+
+statement ok
+drop table slb_r_agg_expr_key_off;
+
+statement ok
+drop table slb_r_agg_distinct_on;
+
+statement ok
+drop table slb_r_agg_distinct_off;
+
+statement ok
+drop table slb_r_agg_having_on;
+
+statement ok
+drop table slb_r_agg_having_off;
+
+statement ok
+drop table slb_r_agg_only_on;
+
+statement ok
+drop table slb_r_agg_only_off;
+
+statement ok
+drop table slb_r_agg_dedup_on;
+
+statement ok
+drop table slb_r_agg_dedup_off;
 
 statement ok
 drop table slb_r_kept_tables_on;

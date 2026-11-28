@@ -14,6 +14,17 @@
     create table f (r int primary key, k int, st varchar, amt int, ts timestamptz);
     create table g (r int primary key, k int);
   expected_outputs: []
+- id: setup_share
+  sql: |
+    set streaming_status_ladder_case = true;
+    set streaming_share_identical_subplans = true;
+    set streaming_factor_union_join = true;
+    set batch_status_ladder_case = true;
+    set batch_factor_union_join = true;
+    create table e (id int primary key, a int, b int, s varchar, ts timestamptz);
+    create table f (r int primary key, k int, st varchar, amt int, ts timestamptz);
+    create table g (r int primary key, k int);
+  expected_outputs: []
 - id: setup_both
   sql: |
     set streaming_status_ladder_case = true;
@@ -200,6 +211,169 @@
       select k, st, amt, row_number() over (partition by k order by p desc) as rn from (
         select k, 'open' as st, amt, 1 as p from f
         union all select k, 'paid', amt, 2 from f where amt > 0
+      ) u
+    ) x where rn = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+
+# Branches over aggregations of the same relation with the same group key.
+- name: off by default - one aggregation per GROUP BY branch
+  before: [setup_off]
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select id as k, 'new' as st, 1 as p from e
+        union all select k, 'active', 2 from f where amt > 0 group by k
+        union all select k, 'closed', 3 from f where st = 'back' group by k
+      ) u
+    ) x where rn = 1;
+  expected_outputs:
+  - stream_plan
+- name: GROUP BY branches over the same table become one aggregation and one CASE
+  before: [setup]
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select id as k, 'new' as st, 1 as p from e
+        union all select k, 'active', 2 from f where amt > 0 group by k
+        union all select k, 'closed', 3 from f where st = 'back' group by k
+      ) u
+    ) x where rn = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+  - batch_plan
+- name: every branch is a GROUP BY of the same table by the key - the top-n is removed
+  before: [setup]
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select k, 'seen' as st, 1 as p from f group by k
+        union all select k, 'active', 2 from f where amt > 0 group by k
+        union all select k, 'closed', 3 from f where st = 'back' and amt is not null group by k
+      ) u
+    ) x where rn = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+  - batch_plan
+- name: GROUP BY branches with conditions on their aggregates
+  before: [setup]
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select k, 'neg' as st, 1 as p from f where amt < 0 group by k having count(*) >= 1
+        union all select k, 'some', 2 from f where st = 'back' group by k having max(amt) > 0
+        union all select k, 'big', 3 from f group by k having sum(amt) > 10
+      ) u
+    ) x where rn = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - batch_plan
+- name: SELECT DISTINCT branches over the same table
+  before: [setup]
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select distinct k, 'active' as st, 2 as p from f where amt > 0
+        union all select distinct k, 'closed', 3 from f where st = 'back'
+        union all select k, 'held', 4 from g
+      ) u
+    ) x where rn = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: GROUP BY branches by the same expression
+  before: [setup]
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select k % 3 as k, 'odd' as st, 1 as p from f where amt % 2 = 1 group by k % 3
+        union all select k % 3, 'back', 2 from f where st = 'back' group by k % 3
+      ) u
+    ) x where rn = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - batch_plan
+- name: GROUP BY branches over the same shared join
+  before: [setup]
+  sql: |
+    with c as (select f.k, f.amt, f.st from f join g on f.k = g.k)
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select k, 'open' as st, 1 as p from c where amt > 0 group by k
+        union all select k, 'back', 2 from c where st = 'back' group by k
+        union all select id, 'new', 0 from e
+      ) u
+    ) x where rn = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - batch_plan
+- name: GROUP BY branches over copies of the same join - merged after the sharing of widened copies
+  before: [setup_share]
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select f.k, 'matched' as st, 1 as p from f join g on f.k = g.k where g.r > 2 group by f.k
+        union all select f.k, 'paid', 2 from f join g on f.k = g.k where f.amt > 0 group by f.k
+      ) u
+    ) x where rn = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: branches that join the same tables - one join after the factoring of the joins
+  before: [setup_share]
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select f.k, 'matched' as st, 1 as p from f join g on f.k = g.k where g.r > 2
+        union all select f.k, 'paid', 2 from f join g on f.k = g.k where f.amt > 0
+        union all select id, 'new', 0 from e
+      ) u
+    ) x where rn = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+  - batch_plan
+- name: kept - GROUP BY branches with different group keys
+  before: [setup]
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select k, 'active' as st, 2 as p from f where amt > 0 group by k
+        union all select k, 'closed', 3 from f where st = 'back' group by k, st
+      ) u
+    ) x where rn = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - a GROUP BY branch with a distinct aggregate
+  before: [setup]
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select k, 'active' as st, 2 as p from f where amt > 0 group by k
+        union all select k, 'many', 3 from f group by k having count(distinct amt) > 1
+      ) u
+    ) x where rn = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - GROUP BY branches over different tables
+  before: [setup]
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select k, 'active' as st, 2 as p from f where amt > 0 group by k
+        union all select k, 'held', 3 from g where r > 1 group by k
+      ) u
+    ) x where rn = 1;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - a GROUP BY branch with now() in streaming
+  before: [setup]
+  sql: |
+    select k, st from (
+      select k, st, row_number() over (partition by k order by p desc) as rn from (
+        select k, 'active' as st, 2 as p from f where amt > 0 group by k
+        union all select k, 'late', 3 from f where ts < now() group by k
       ) u
     ) x where rn = 1;
   expected_outputs:
