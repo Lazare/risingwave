@@ -355,6 +355,11 @@ pub struct Query {
     /// `batch_spill_on_memory_wait`: on the compute nodes, an operator that cannot spill and
     /// waits for memory asks the spillable operators of the query to spill.
     pub spill_on_memory_wait: bool,
+    /// `batch_compact_shuffle_output`: hash exchanges send each consumer chunks of its own rows.
+    pub compact_shuffle_output: bool,
+    /// `batch_exchange_buffer_max_mb`, in bytes: what the output channels of a task may hold at
+    /// most, 0 for no bound beyond their number of chunks.
+    pub exchange_buffer_max_bytes: u64,
 }
 
 impl Query {
@@ -1148,6 +1153,8 @@ impl BatchPlanFragmenter {
             stage_graph: new_stage_graph,
             cardinality_feedback: None,
             spill_on_memory_wait: false,
+            compact_shuffle_output: false,
+            exchange_buffer_max_bytes: 0,
         })
     }
 

@@ -97,7 +97,8 @@ impl NestedLoopJoinExecutor {
             let mut ret = Vec::with_capacity(1024);
             #[for_await]
             for chunk in self.left_child.execute() {
-                let c = chunk?;
+                // Kept until the end of the join: only its visible rows (see the hash join).
+                let c = chunk?.compact_vis();
                 trace!("Estimated chunk size is {:?}", c.estimated_heap_size());
                 if !self.mem_context.add(c.estimated_heap_size() as i64) {
                     Err(BatchError::OutOfMemory(self.mem_context.mem_limit()))?;

@@ -25,6 +25,7 @@ mod data_chunk_in_channel;
 mod env;
 mod fifo_channel;
 mod hash_shuffle_channel;
+pub mod output_buffer;
 pub mod query_memory;
 pub use query_memory::ExecutorMemory;
 mod task_execution;

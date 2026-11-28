@@ -40,8 +40,8 @@ use crate::error::BatchError;
 use crate::executor::{CardinalityCounters, FastInsertExecutor, inject_optional_row_id_column};
 use crate::rpc::service::exchange::GrpcExchangeWriter;
 use crate::task::{
-    BatchEnvironment, BatchManager, BatchTaskExecution, ComputeNodeContext, StateReporter,
-    TASK_STATUS_BUFFER_SIZE,
+    BatchEnvironment, BatchManager, BatchTaskExecution, ComputeNodeContext, ExchangeSettings,
+    StateReporter, TASK_STATUS_BUFFER_SIZE,
 };
 
 #[derive(Clone)]
@@ -81,6 +81,8 @@ impl TaskService for BatchServiceImpl {
             expr_context,
             spillable_operator_instances,
             spill_on_memory_wait,
+            compact_shuffle_output,
+            exchange_buffer_max_bytes,
         } = request.into_inner();
         let task_id = task_id.expect("no task id found");
 
@@ -99,6 +101,10 @@ impl TaskService for BatchServiceImpl {
                     spillable_operator_instances,
                     spill_on_memory_wait,
                     cardinality_counters,
+                    ExchangeSettings {
+                        compact_shuffle: compact_shuffle_output,
+                        buffer_limit_bytes: exchange_buffer_max_bytes,
+                    },
                 ),
                 state_reporter,
                 TracingContext::from_protobuf(&tracing_context),
@@ -314,6 +320,7 @@ impl BatchServiceImpl {
             0,
             false,
             cardinality_counters.clone(),
+            ExchangeSettings::default(),
         );
         trace!(
             "local execute request: plan:{:?} with task id:{:?}",

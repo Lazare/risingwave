@@ -976,6 +976,8 @@ impl StageRunner {
                 expr_context,
                 self.query.spillable_operator_instances(),
                 self.query.spill_on_memory_wait,
+                self.query.compact_shuffle_output,
+                self.query.exchange_buffer_max_bytes,
             )
             .await
             .inspect_err(|_| self.mask_failed_serving_worker(&worker))

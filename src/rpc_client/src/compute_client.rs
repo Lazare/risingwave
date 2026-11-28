@@ -165,6 +165,7 @@ impl ComputeClient {
         Ok((response_stream, permits_tx))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_task(
         &self,
         task_id: TaskId,
@@ -172,6 +173,8 @@ impl ComputeClient {
         expr_context: ExprContext,
         spillable_operator_instances: u32,
         spill_on_memory_wait: bool,
+        compact_shuffle_output: bool,
+        exchange_buffer_max_bytes: u64,
     ) -> Result<Streaming<TaskInfoResponse>> {
         Ok(self
             .task_client
@@ -183,6 +186,8 @@ impl ComputeClient {
                 expr_context: Some(expr_context),
                 spillable_operator_instances,
                 spill_on_memory_wait,
+                compact_shuffle_output,
+                exchange_buffer_max_bytes,
             })
             .await
             .map_err(RpcError::from_compute_status)?

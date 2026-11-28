@@ -96,6 +96,22 @@ pub trait BatchTaskContext: Send + Sync + 'static {
     fn cardinality_counters(&self) -> Option<Arc<CardinalityCounters>> {
         None
     }
+
+    /// How the task sends its output to its consumers.
+    fn exchange_settings(&self) -> ExchangeSettings {
+        ExchangeSettings::default()
+    }
+}
+
+/// How a task sends its output, from the session variables of its query.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ExchangeSettings {
+    /// `batch_compact_shuffle_output`: a hash shuffle copies the rows of each output into chunks
+    /// of their own instead of sending each output the whole chunk with a visibility.
+    pub compact_shuffle: bool,
+    /// `batch_exchange_buffer_max_mb`, in bytes: the bytes that the output channels of the task
+    /// may hold at most, 0 for no bound beyond their number of chunks.
+    pub buffer_limit_bytes: u64,
 }
 
 /// Batch task context on compute node.
@@ -111,6 +127,8 @@ pub struct ComputeNodeContext {
     query_memory: Option<Arc<QueryMemory>>,
 
     cardinality_counters: Option<Arc<CardinalityCounters>>,
+
+    exchange_settings: ExchangeSettings,
 }
 
 impl BatchTaskContext for ComputeNodeContext {
@@ -195,6 +213,10 @@ impl BatchTaskContext for ComputeNodeContext {
     fn cardinality_counters(&self) -> Option<Arc<CardinalityCounters>> {
         self.cardinality_counters.clone()
     }
+
+    fn exchange_settings(&self) -> ExchangeSettings {
+        self.exchange_settings
+    }
 }
 
 impl ComputeNodeContext {
@@ -205,6 +227,7 @@ impl ComputeNodeContext {
             mem_context: MemoryContext::none(),
             query_memory: None,
             cardinality_counters: None,
+            exchange_settings: ExchangeSettings::default(),
         })
     }
 
@@ -219,6 +242,7 @@ impl ComputeNodeContext {
         spillable_operator_instances: u32,
         spill_on_memory_wait: bool,
         cardinality_counters: Option<Arc<CardinalityCounters>>,
+        exchange_settings: ExchangeSettings,
     ) -> Arc<dyn BatchTaskContext> {
         let query_memory = env.task_manager().query_memory(
             query_id,
@@ -237,6 +261,7 @@ impl ComputeNodeContext {
             mem_context,
             query_memory: Some(query_memory),
             cardinality_counters,
+            exchange_settings,
         })
     }
 }

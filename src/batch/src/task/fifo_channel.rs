@@ -23,9 +23,11 @@ use crate::error::BatchError::{Internal, SenderError};
 use crate::error::{BatchError, Result as BatchResult, SharedResult};
 use crate::task::channel::{ChanReceiver, ChanReceiverImpl, ChanSender, ChanSenderImpl};
 use crate::task::data_chunk_in_channel::DataChunkInChannel;
+use crate::task::output_buffer::OutputBuffer;
 #[derive(Clone)]
 pub struct FifoSender {
     sender: mpsc::Sender<SharedResult<Option<DataChunkInChannel>>>,
+    buffer: OutputBuffer,
 }
 
 impl Debug for FifoSender {
@@ -40,7 +42,8 @@ pub struct FifoReceiver {
 
 impl ChanSender for FifoSender {
     async fn send(&mut self, chunk: DataChunk) -> BatchResult<()> {
-        let data = DataChunkInChannel::new(chunk);
+        let held = self.buffer.hold(&chunk).await;
+        let data = DataChunkInChannel::new(chunk, held);
         self.sender
             .send(Ok(Some(data)))
             .await
@@ -63,10 +66,13 @@ impl ChanReceiver for FifoReceiver {
     }
 }
 
-pub fn new_fifo_channel(output_channel_size: usize) -> (ChanSenderImpl, Vec<ChanReceiverImpl>) {
+pub fn new_fifo_channel(
+    output_channel_size: usize,
+    buffer: OutputBuffer,
+) -> (ChanSenderImpl, Vec<ChanReceiverImpl>) {
     let (s, r) = mpsc::channel(output_channel_size);
     (
-        ChanSenderImpl::Fifo(FifoSender { sender: s }),
+        ChanSenderImpl::Fifo(FifoSender { sender: s, buffer }),
         vec![ChanReceiverImpl::Fifo(FifoReceiver { receiver: r })],
     )
 }
@@ -76,7 +82,8 @@ mod tests {
     async fn test_recv_not_fail_on_closed_channel() {
         use crate::task::fifo_channel::new_fifo_channel;
 
-        let (sender, mut receivers) = new_fifo_channel(64);
+        let (sender, mut receivers) =
+            new_fifo_channel(64, crate::task::output_buffer::OutputBuffer::unbounded());
         assert_eq!(receivers.len(), 1);
         drop(sender);
 

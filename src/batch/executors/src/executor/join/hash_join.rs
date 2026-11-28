@@ -621,7 +621,10 @@ impl<K: HashKey> HashJoinExecutor<K> {
         let mut build_side_stream = self.build_side_source.execute();
         #[for_await]
         for build_chunk in &mut build_side_stream {
-            let build_chunk = build_chunk?;
+            // Kept until the end of the join: only its visible rows. A chunk of a hash shuffle
+            // shares the columns of a chunk with all the other outputs, and would keep all of
+            // it alive, and counted here in full.
+            let build_chunk = build_chunk?.compact_vis();
             if build_chunk.cardinality() > 0 {
                 build_row_count += build_chunk.cardinality();
                 let chunk_estimated_heap_size = build_chunk.estimated_heap_size();
