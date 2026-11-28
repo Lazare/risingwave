@@ -61,6 +61,11 @@ own rules.
 | S13 | `UNION` / `INTERSECT` / `EXCEPT` of filters over the same input become one filter (`streaming_merge_set_operation_filters`, `batch_merge_set_operation_filters`) | done (prototype, branch `proto/plan-reduction-setop-keys`), see "S13" below |
 | S9 | Group key columns that the other ones determine removed, `min` / `max` / `first_value` / `last_value` of a value of the group replaced (`streaming_reduce_group_keys`, `batch_reduce_group_keys`) | done for aggregations (prototype, branch `proto/plan-reduction-setop-keys`), see "S9" below; partition and order keys of windows and top-n not done |
 | S10 | Branches of a `UNION ALL` that only feed `NULL` to the aggregation above removed (`streaming_prune_null_union_branches`, `batch_prune_null_union_branches`) | done (prototype, branch `proto/plan-reduction-setop-keys`), see "S10" below |
+| SJ17 | Batch: inner join to semi join on a unique side that is not read; `DISTINCT` removed under a semi or anti join by estimates (`batch_inner_join_to_semi_join`) | done (prototype, branch `proto/plan-reduction-batch-joins`, see "SJ" below) |
+| SJ18 | Batch: `IS NOT NULL` on equi-join keys, on the sides whose unmatched rows are not output (`batch_join_keys_not_null`) | done (prototype, branch `proto/plan-reduction-batch-joins`, see "SJ" below) |
+| SJ15 | Batch: range form of `date_trunc`, `::date`, `extract(year ...)` compared with constants (`batch_date_range_predicates`) | done for `date`, `timestamp` and `timestamptz` in `UTC` (prototype, branch `proto/plan-reduction-batch-joins`, see "SJ" below); other time zones not done |
+| SJ14 | Batch: semi and anti joins pushed into an input of the inner joins or merged as an inner join on a unique side, by the costs of BJ (`batch_semi_join_ordering`) | first version (prototype, branch `proto/plan-reduction-batch-joins`, see "SJ" below); semi joins reading several inputs not done |
+| SJ16 | Batch: outer-join reordering with the identities of PostgreSQL | design only (see "SJ" below): too large and risky for this round |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -2336,6 +2341,224 @@ SELECT k, sum(m) FROM (... UNION ALL SELECT k, NULL FROM b GROUP BY k) v GROUP B
   its filter, a `GROUP BY` and a `DISTINCT` removed, kept cases with `count(*)`, `array_agg`, a
   call per branch). Streaming sums are wrapped in `coalesce(.., 0)` (see the known quirk of a
   streaming `sum` whose values were all retracted).
+
+### SJ. Batch join rules of the survey of Calcite and PostgreSQL rules (added on 2026-11-28)
+
+Rules 14 to 18 of the survey of the rewrite rules of Calcite and PostgreSQL missing from the fork,
+for batch queries only, each behind its own variable (default false). Branch
+`proto/plan-reduction-batch-joins`.
+
+**17. Inner join to semi join (`batch_inner_join_to_semi_join`, Calcite `SemiJoinRule`).**
+
+```sql
+select t.* from t join (select distinct k from u) x on t.k = x.k;
+-- before: HashJoin(Inner, t.k = u.k) <- Scan(t), HashAgg(group u.k) <- Scan(u)
+-- after:  HashJoin(LeftSemi, t.k = u.k) <- Scan(t), HashAgg(group u.k) <- Scan(u)
+--         and, when the estimates say the aggregation keeps at least half of its rows:
+--         HashJoin(LeftSemi, t.k = u.k) <- Scan(t), Scan(u)
+```
+
+- `InnerJoinToSemiJoinRule`: an inner join with an equality between its sides, no column of one
+  side in its output, and that side unique on the columns its condition binds
+  (`is_unique_on_compared_columns`: equalities between the sides or with constants, on types whose
+  equal values are identical) becomes a left (or right) semi join with the same condition. A row
+  of the kept side matches at most one row, so the inner join outputs it once or not at all: the
+  semi join's output. The other conjuncts only remove matches. `IS NOT DISTINCT FROM` keys are
+  fine (the unique key treats `NULL` as a value). The unique side is a `DISTINCT` subquery, a
+  `GROUP BY` whose aggregates are not read (the column pruning drops them), or a table joined on
+  its key (`count(*)` over a join to a dimension, a join used as a filter).
+- `SemiJoinDistinctRemoveRule`: a semi or anti join whose tested side is an aggregation without
+  aggregate calls and with a group key (an empty group key returns a row over an empty input) gets
+  the input of the aggregation, projected on the group key, instead. Exact: a semi join keeps a
+  row when some row matches, an anti join when none does, neither depends on how many. Not always
+  cheaper: the batch hash join holds every row of its build side, duplicates included, where the
+  aggregation held each group once (the hash table of the aggregation plus the build side of the
+  distinct rows, against the build side of all the rows). Removed only when the estimates of BJ
+  (learned with `batch_cardinality_feedback_learning`) say the aggregation keeps at least half of
+  its input rows: grouped by a key of its input, or a learned group ratio of 0.5 or more. Without
+  an estimate, or with the fixed guess of 10 % of groups, it stays. This also applies to
+  `IN (SELECT DISTINCT ...)` as written.
+- Stage `BATCH_INNER_JOIN_TO_SEMI_JOIN`, after the join ordering (the inner join was ordered as
+  such) and the first column pruning (the output of a join holds only the columns read above it),
+  just before `JOIN_COMMUTE` (a right semi join becomes a left one) and before
+  `CostBasedOuterJoinSidesRule` (the sides of the semi join can still be swapped by cost).
+- Not done: an inner join whose other side is read only through columns equal to columns of the
+  kept side (they could be replaced); a semi join on a side that is not unique and that a
+  `DISTINCT` could make unique (PostgreSQL's unique-ification, a cost decision).
+- Tests: planner tests `batch_inner_join_to_semi_join.yaml` (distinct side on either side, table
+  joined on its key, `count(*)`, null-safe key, extra conjunct; kept: a column read, not unique on
+  the compared columns, no equality, outer join; removal of the aggregation with statistics on a
+  key, with nothing learned, with a learned ratio high and low, under an anti join, empty group
+  key kept; off by default); differential test `e2e_test/batch/inner_join_to_semi_join.gen.py`
+  (19 queries with the variable off and on, compared as multisets, on empty tables, duplicates and
+  `NULL` keys, a distinct side with few and with many groups, updates, deletes, each side emptied,
+  with a pause after each change so that the storage statistics reach the frontend).
+
+**18. `IS NOT NULL` on equi-join keys (`batch_join_keys_not_null`, Calcite
+`JoinDeriveIsNotNullFilterRule`).** `JoinKeyNotNullRule` adds, below a join, a filter
+`c IS NOT NULL` on each column of an input that a top-level conjunct `l = r` of the condition
+compares with a column of the other input, on the sides whose rows without a match are not
+output: both sides of an inner or semi join, the right side of a left outer or left anti join,
+the left side of a right outer or right anti join. `NULL = x` is `NULL` for every `x`, so such a
+row matches nothing, whatever the other conjuncts. The predicate pushdown that follows moves the
+filters into the scans: the rows with a `NULL` key are no longer shuffled by the exchanges of the
+hash join.
+
+- Not for a column already known to be never `NULL` (column facts: `NOT NULL` constraint, a
+  null-rejecting filter or join condition below, which also covers the keys of the inner joins
+  below), so the rule adds a filter once and never twice; not for `IS NOT DISTINCT FROM`, full
+  outer or as-of joins; not for the right side of a possible lookup join (a table read by key or
+  with an index: it is not scanned, and a lookup with a `NULL` key finds nothing).
+- Stage `BATCH_JOIN_KEYS_NOT_NULL` after the join ordering (the cost-based ordering would count
+  the new conjuncts in its estimates, as the survey warns) and after `PUSH_CALC_OF_JOIN` (a key
+  computed by an expression is a column of a projection below the join; the filter is pushed
+  through it as `expr IS NOT NULL`), then a predicate pushdown. The fingerprints of the learned
+  ratios of BF step 2 include the filters of a scan: a scan with the new filter is a new relation
+  for the learning.
+- Streaming: rejected by the design note (no state gain: a `NULL` key already costs no join state).
+- Tests: planner tests `batch_join_keys_not_null.yaml` (inner, `NOT NULL` column, key filtered
+  below, left, right, full, semi, anti, null-safe, lookup, expression key, three-way join; off by
+  default); differential test `e2e_test/batch/join_keys_not_null.gen.py` (16 queries, `NULL` keys
+  on both sides, duplicates, keys set to `NULL` and back, a side with only `NULL` keys, deletes).
+
+**15. Range form of date predicates (`batch_date_range_predicates`, Calcite `DateRangeRules`).**
+
+```sql
+date_trunc('month', ts) = '2024-05-01'   =>  ts >= '2024-05-01 00:00:00' AND ts < '2024-06-01 00:00:00'
+ts::date <= '2024-05-01'                 =>  ts < '2024-05-02 00:00:00'
+extract(year from d) between 2020 and 2022  =>  d >= '2020-01-01' AND d < '2023-01-01'
+date_trunc('month', d) = '2024-05-01'    =>  d >= '2024-05-01' AND d < '2024-06-01'   -- d a date
+```
+
+`DateRangePredicateRule` rewrites, in the predicate of a filter or of a scan (after the first
+predicate pushdown, in place), each top-level conjunct comparing (`=`, `<`, `<=`, `>`, `>=`, the
+constant on either side) with a constant: `date_trunc(unit, x)` for units `second` to `year` (not
+`decade` and larger: their conventions for the years before Christ differ), `x::date`,
+`extract(year from x)` and `date_part('year', x)`. The scan then turns the bounds into key ranges
+when `x` leads the key of the table.
+
+- Exactness: a truncation `f` is non-decreasing, idempotent and below its argument, so for an
+  aligned value `a` (`f(a) = a`), `f(x) < a` exactly when `x < a`. With `up(c)` the smallest
+  aligned value at or above `c` and `after(c)` the smallest above `c`: `f(x) < c` is
+  `x < up(c)`, `>=` is `x >= up(c)`, `<=` is `x < after(c)`, `>` is `x >= after(c)`, `=` is
+  `c <= x < after(c)` when `c` is aligned (never true otherwise: left as it is). The truncation
+  is the one of `date_trunc` itself (`Timestamp::truncate_*`); the next aligned value adds one
+  unit and is checked to be aligned and larger. A cast to `date` is the truncation to the day;
+  the year of `extract` is an integer, `y(x) < n` exactly when `x` is before January 1 of `n`, for
+  bounds from year 1 to 9999 (both conventions for the years before Christ make them smaller).
+  `NULL` gives `NULL` in both forms. `x` must be deterministic (written twice for `=`).
+- Time zones: a function of a `timestamptz` uses the session time zone, which RisingWave writes
+  into the expression (`date_trunc(u, tz, zone)`, `extract(year from tz, zone)`,
+  `(tz AT TIME ZONE zone)::date`, a `date` given to `date_trunc` as
+  `d::timestamp AT TIME ZONE zone`) only after the logical optimization; during it the call has no
+  zone argument (`date_trunc(u, tz)`, `tz::date`, `date_trunc(u, d::timestamptz)`). Both forms are
+  handled, the first with an explicit `UTC` zone, the second when the session time zone (read
+  from the optimizer context) is `UTC`; so is a text without offset compared with a
+  `timestamptz` (`date_trunc('month', d) = '2024-05-01'`), a cast that cannot be folded before
+  the zone is inlined and is read as in a `UTC` session. A `timestamptz` is handled only in `UTC`
+  (or `Etc/UTC`): there a `timestamptz` behaves as a `timestamp`. In other zones a day or an hour
+  may be shorter or longer, and the truncation of a local time that does not exist
+  or exists twice depends on the zone: left as it is. The bounds then go through the increasing
+  conversions of `x` (`AT TIME ZONE 'UTC'` and the casts between `timestamp` and `timestamptz` in
+  a `UTC` session keep the value; `d::timestamp >= v` is `d >=` the first day at or after `v`), so
+  that the bounds apply to the column itself.
+- Not done: other time zones (a proof per zone, or bounds computed and checked in the zone);
+  `date_trunc` compared with another expression than a constant; `extract` of other fields
+  (`month` alone is not a range); conjuncts inside `OR`; join conditions.
+- Tests: planner tests `batch_date_range_predicates.yaml` (each function and comparison, aligned
+  and unaligned constants, constant on the left, week, quarter, hour, a `date` truncated, `between`,
+  `date_part` with fractions, `timestamptz` in `UTC` and kept in another zone, a column that is not
+  a key, kept cases: `decade`, `month` field, fraction with `=`, year bound 0, `OR`; off by
+  default); differential test `e2e_test/batch/date_range_predicates.gen.py` (26 queries on values
+  on, one microsecond before and after each boundary, in `UTC` and in `Europe/Paris`, after
+  updates to `NULL`, deletes and inserts).
+
+**14. Semi and anti joins in the cost-based ordering (`batch_semi_join_ordering`, Calcite
+`SemiJoinJoinTransposeRule`, PostgreSQL `reduce_unique_semijoins`).** With
+`batch_cost_based_join_ordering`, BJ orders the inner joins and leaves every semi or anti join
+where the binder put it, above all the inner joins of the `FROM` clause. `SemiJoinPlacementRule`,
+in its own bottom-up stage just before the stages of BJ, looks at a left semi or anti join whose
+left side is the multi-join of those inner joins (or a two-way inner join), and compares the
+estimated cost of three placements:
+
+```sql
+select f.* from f join d1 on f.d1_id = d1.id join d2 on f.d2_id = d2.id
+where exists (select 1 from h where h.x = f.v);
+-- kept:   LeftSemi(f.v = h.x) <- [Join(f, d1, d2)], h
+-- pushed: Join(LeftSemi(f.v = h.x) <- f, h ; d1 ; d2), ordered by BJ
+select ... where f.w in (select g.id from g where g.x = 1);
+-- merged: Join(f, d1, d2, g) on ... AND f.w = g.id, ordered by BJ (g unique on id)
+```
+
+- Pushed into the input of the multi-join that holds all the left columns its condition reads
+  (exact for semi and anti joins: they keep a row according to those columns only, so filtering
+  that input first keeps the same rows of the join, with their multiplicities). The condition is
+  remapped to the input, the multi-join keeps its condition and output.
+- Merged as one more input of the multi-join (semi joins only): when its right side is unique on
+  the columns its condition binds and the condition has an equality between the sides, the semi
+  join is an inner join whose right columns are not output; its condition joins the condition of
+  the multi-join, and BJ may then join the right side anywhere (a small filtered table early, a
+  lookup).
+- Costs: those of BJ (rows from the storage statistics, learned ratios with
+  `batch_cardinality_feedback_learning`, widths, probe 1, build 3, output 1 per byte; the rows
+  kept by a semi or anti join are half of its left side). Kept: the best join tree of the
+  multi-join plus the reading of the right side and the hash semi join above it. Pushed: the best
+  tree with the pushed input (which BJ counts as an input reading half of its rows), corrected to
+  count the reading of the original input and of the right side and the hash semi join over them.
+  Merged: the best tree of the multi-join with the right side. A placement replaces the kept one
+  only when cheaper by a factor 1.25; without an estimate for every input nothing moves. Bottom-up,
+  so that a semi join stacked over another sees the multi-join the lower one went into.
+- Behaviour with the variable off: the stage does not run, BJ is unchanged. The rule never runs
+  without BJ (it is inside its block) or without estimates.
+- Not done: a semi join whose condition reads several inputs of the multi-join (it could go into
+  the smallest sub-join holding them: an extension of the enumeration, below); semi joins on a
+  non-unique side turned into inner joins over a `DISTINCT` of that side (PostgreSQL's
+  unique-ification, which BJ could cost); lookup semi joins are costed as hash joins; right semi
+  and anti joins (none exist at this point of the pipeline).
+- Tests: planner tests `batch_semi_join_ordering.yaml` (semi join pushed below a multi-join, anti
+  join below a two-way join, semi join on a unique side merged, semi join on a dimension, two
+  stacked semi joins; kept: condition reading two inputs, no statistics, no cost-based ordering;
+  off by default); differential test `e2e_test/batch/semi_join_ordering.gen.py` (12 queries with
+  `batch_cost_based_join_ordering` on in both runs, a large fact table and small dimensions,
+  duplicates and `NULL`s in the tested side, stacked semi and anti joins, `NOT IN`, aggregation
+  above, after updates, deletes and with a side emptied; a pause after each change for the
+  statistics).
+
+**16. Outer-join reordering: design only, not implemented.** After study, this one is too large
+and too risky for this round: it needs a new enumeration, and a wrong reordering of an outer join
+gives wrong results silently. What it would take:
+
+- The identities, from PostgreSQL's `optimizer/README` and `make_outerjoininfo`
+  (`initsplan.c`), with `Pab` a condition reading only `A` and `B`:
+  1. `(A ⟕ B on Pab) ⋈ C on Pac = (A ⋈ C on Pac) ⟕ B on Pab`: an inner join commutes with a left
+     join when its condition does not read the nullable side `B`;
+  2. `(A ⟕ B on Pab) ⟕ C on Pac = (A ⟕ C on Pac) ⟕ B on Pab`: two left joins from the same
+     preserved side commute;
+  3. `(A ⟕ B on Pab) ⟕ C on Pbc = A ⟕ (B ⟕ C on Pbc) on Pab` only if `Pbc` is strict in `B` (it is
+     not true when the columns of `B` are `NULL`, `Strong` of `plan_expr_visitor/strong.rs`); not
+     in the other direction without that proof;
+  4. semi and anti joins follow 1 and 2 with their left side as the preserved side; full joins
+     only commute with themselves (`A ⟗ B = B ⟗ A`) and associate only under strictness of both
+     conditions; never across an as-of join.
+  An inner join above a left join whose condition reads the nullable side is first reduced (the
+  outer join becomes inner when the condition is strict: the reduction of rule 3 of the survey,
+  owned by another branch), which is what makes identity 1 cover most real plans.
+- The enumeration: PostgreSQL keeps one `SpecialJoinInfo` per outer join, with its minimal left
+  and right sets (`min_lefthand`, `min_righthand`) widened by the conflicts the identities do not
+  allow, and `join_is_legal` accepts a pair of sets only when every special join is either fully
+  inside one of them or exactly matched by the pair. The fork's DP (`JoinGraph::dp`) would need:
+  the multi-join builder to absorb left joins as such special edges (today it stops at any
+  non-inner join), the legality test in `linked`, the right estimate for a left join (at least
+  the rows of the preserved side), and `JoinTree::build` to emit the right join type and
+  condition at the node that matches the special edge. Calcite's `DphypJoinReorderRule` uses
+  hyper-edges for the same purpose.
+- Gain: a large preserved side joined to dimensions by left joins and to a selective inner join
+  (identity 1 lets the inner join filter first); chains of left joins to dimensions reordered so
+  that a lookup or a small build side comes first. Batch only (streaming plans are frozen and
+  have no statistics).
+- Tests it would need: the differential test of every identity with `NULL`s on each side, rows
+  without match, duplicates, and conditions that are strict and not strict in the nullable side,
+  before any use on real queries.
 
 ## Not for now: sharing between materialized views
 

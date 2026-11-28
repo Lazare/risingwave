@@ -729,6 +729,37 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_prune_null_union_branches: bool,
 
+    // Batch join rules of the survey of Calcite and PostgreSQL rules.
+    /// In a batch query, turn an inner join into a semi join when no column of one side is read
+    /// above it and that side is unique on the compared columns (a `DISTINCT` subquery, a table
+    /// joined on its key), and drop the `DISTINCT` of the side that a semi or anti join only
+    /// tests when the estimates say it removes few rows. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_inner_join_to_semi_join: bool,
+
+    /// In a batch query, filter out below a join the rows whose column compared with `=` to the
+    /// other side is `NULL` (`c IS NOT NULL`, pushed into the scans), on the sides whose rows
+    /// without a match are not output: such rows are then neither read nor shuffled further.
+    /// Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_join_keys_not_null: bool,
+
+    /// In a batch query, turn a comparison of `date_trunc(unit, x)`, `x::date`,
+    /// `extract(year from x)` or `date_part('year', x)` with a constant into a range of `x`
+    /// (`x >= lo AND x < hi`), which a scan reads as a key range when `x` leads the key of the
+    /// table. For `date` and `timestamp` values, and `timestamptz` values in the `UTC` time zone.
+    /// Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_date_range_predicates: bool,
+
+    /// In a batch query whose inner joins are ordered by cost (`batch_cost_based_join_ordering`),
+    /// also place the semi and anti joins above them: push one into the input of the inner joins
+    /// whose columns it tests, or join a semi join whose other side is unique on the compared
+    /// columns as one more inner join, when the estimates say that it costs less. Defaults to
+    /// false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_semi_join_ordering: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,

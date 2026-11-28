@@ -1,0 +1,194 @@
+# Range form of the comparisons of `date_trunc`, `extract(year ...)`, `date_part('year', ...)` and
+# casts to `date` with a constant (`batch_date_range_predicates`, rule `DateRangePredicateRule`).
+- id: tables
+  sql: |
+    create table drp_ts (ts timestamp primary key, v int);
+    create table drp_d (d date primary key, v int);
+    create table drp_tz (tz timestamptz primary key, v int);
+    create table drp_x (id int primary key, ts timestamp, d date, tz timestamptz);
+  expected_outputs: []
+- name: variable off by default
+  before:
+  - tables
+  sql: |
+    select * from drp_ts where date_trunc('month', ts) = '2024-05-01 00:00:00';
+  expected_outputs:
+  - batch_plan
+- name: date_trunc of a timestamp equal to an aligned constant (key range)
+  before:
+  - tables
+  sql: |
+    set batch_date_range_predicates = true;
+    select * from drp_ts where date_trunc('month', ts) = '2024-05-01 00:00:00';
+  expected_outputs:
+  - batch_plan
+- name: date_trunc equal to a constant that is not aligned (kept, never true)
+  before:
+  - tables
+  sql: |
+    set batch_date_range_predicates = true;
+    select * from drp_ts where date_trunc('month', ts) = '2024-05-02 00:00:00';
+  expected_outputs:
+  - batch_plan
+- name: date_trunc compared with constants that are not aligned
+  before:
+  - tables
+  sql: |
+    set batch_date_range_predicates = true;
+    select * from drp_ts where date_trunc('day', ts) > '2024-05-01 10:00:00' and date_trunc('day', ts) <= '2024-05-03 10:00:00';
+  expected_outputs:
+  - batch_plan
+- name: date_trunc compared with aligned constants, constant on the left
+  before:
+  - tables
+  sql: |
+    set batch_date_range_predicates = true;
+    select * from drp_ts where '2024-01-01 00:00:00' <= date_trunc('quarter', ts) and date_trunc('quarter', ts) < '2024-07-01 00:00:00';
+  expected_outputs:
+  - batch_plan
+- name: date_trunc by week and hour
+  before:
+  - tables
+  sql: |
+    set batch_date_range_predicates = true;
+    select * from drp_ts where date_trunc('week', ts) = '2024-05-06 00:00:00' and date_trunc('hour', ts) >= '2024-05-07 10:30:00';
+  expected_outputs:
+  - batch_plan
+- name: kept, unit decade
+  before:
+  - tables
+  sql: |
+    set batch_date_range_predicates = true;
+    select * from drp_ts where date_trunc('decade', ts) = '2020-01-01 00:00:00';
+  expected_outputs:
+  - batch_plan
+- name: cast of a timestamp to date
+  before:
+  - tables
+  sql: |
+    set batch_date_range_predicates = true;
+    select * from drp_ts where ts::date = '2024-05-01';
+  expected_outputs:
+  - batch_plan
+- name: cast of a timestamp to date, bounds
+  before:
+  - tables
+  sql: |
+    set batch_date_range_predicates = true;
+    select * from drp_ts where ts::date > '2024-05-01' and ts::date <= '2024-05-10';
+  expected_outputs:
+  - batch_plan
+- name: date_trunc of a date (bound as a timestamptz in UTC, range of the date)
+  before:
+  - tables
+  sql: |
+    set batch_date_range_predicates = true;
+    select * from drp_d where date_trunc('month', d) = '2024-05-01';
+  expected_outputs:
+  - batch_plan
+- name: extract year of a date
+  before:
+  - tables
+  sql: |
+    set batch_date_range_predicates = true;
+    select * from drp_d where extract(year from d) = 2024;
+  expected_outputs:
+  - batch_plan
+- name: extract year of a date, between
+  before:
+  - tables
+  sql: |
+    set batch_date_range_predicates = true;
+    select * from drp_d where extract(year from d) between 2020 and 2022;
+  expected_outputs:
+  - batch_plan
+- name: date_part year of a date, non-integer bounds
+  before:
+  - tables
+  sql: |
+    set batch_date_range_predicates = true;
+    select * from drp_d where date_part('year', d) > 2020.5 and date_part('year', d) < 2023.5;
+  expected_outputs:
+  - batch_plan
+- name: kept, extract year equal to a non-integer
+  before:
+  - tables
+  sql: |
+    set batch_date_range_predicates = true;
+    select * from drp_d where extract(year from d) = 2024.5;
+  expected_outputs:
+  - batch_plan
+- name: kept, extract month
+  before:
+  - tables
+  sql: |
+    set batch_date_range_predicates = true;
+    select * from drp_d where extract(month from d) = 5;
+  expected_outputs:
+  - batch_plan
+- name: kept, year bound out of range
+  before:
+  - tables
+  sql: |
+    set batch_date_range_predicates = true;
+    select * from drp_d where extract(year from d) < 0;
+  expected_outputs:
+  - batch_plan
+- name: timestamptz in UTC (the default session time zone)
+  before:
+  - tables
+  sql: |
+    set batch_date_range_predicates = true;
+    select * from drp_tz where date_trunc('day', tz) = '2024-05-01 00:00:00+00:00' and extract(year from tz) = 2024;
+  expected_outputs:
+  - batch_plan
+- name: timestamptz cast to date in UTC
+  before:
+  - tables
+  sql: |
+    set batch_date_range_predicates = true;
+    select * from drp_tz where tz::date = '2024-05-01';
+  expected_outputs:
+  - batch_plan
+- name: timestamptz compared with texts without offset in UTC (read in UTC)
+  before:
+  - tables
+  sql: |
+    set batch_date_range_predicates = true;
+    select * from drp_tz where date_trunc('day', tz) >= '2024-05-01' and date_trunc('day', tz) < '2024-05-02 12:00:00';
+  expected_outputs:
+  - batch_plan
+- name: kept, date_trunc of a date in another time zone
+  before:
+  - tables
+  sql: |
+    set batch_date_range_predicates = true;
+    set timezone = 'Europe/Paris';
+    select * from drp_d where date_trunc('month', d) = '2024-05-01';
+  expected_outputs:
+  - batch_plan
+- name: kept, timestamptz in another time zone
+  before:
+  - tables
+  sql: |
+    set batch_date_range_predicates = true;
+    set timezone = 'Europe/Paris';
+    select * from drp_tz where date_trunc('day', tz) = '2024-05-01 00:00:00+02:00' and tz::date = '2024-05-01';
+  expected_outputs:
+  - batch_plan
+- name: column that is not a key (a filter of the column, no range)
+  before:
+  - tables
+  sql: |
+    set batch_date_range_predicates = true;
+    select * from drp_x where date_trunc('year', ts) = '2024-01-01 00:00:00' and extract(year from d) >= 2024;
+  expected_outputs:
+  - batch_plan
+- name: condition inside an OR (kept)
+  before:
+  - tables
+  sql: |
+    set batch_date_range_predicates = true;
+    select * from drp_ts where date_trunc('month', ts) = '2024-05-01 00:00:00' or v = 1;
+  expected_outputs:
+  - batch_plan

@@ -410,6 +410,49 @@ static BATCH_MERGE_UNION_SCANS: LazyLock<OptimizationStage> = LazyLock::new(|| {
     )
 });
 
+// Batch join rules of the survey of Calcite and PostgreSQL rules, each behind its own variable.
+// Rules `InnerJoinToSemiJoinRule` and `SemiJoinDistinctRemoveRule`
+// (`batch_inner_join_to_semi_join`): the second one applies to the semi join that the first one
+// makes, in the same pass.
+static BATCH_INNER_JOIN_TO_SEMI_JOIN: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Inner Join To Semi Join For Batch",
+        vec![
+            InnerJoinToSemiJoinRule::create(),
+            SemiJoinDistinctRemoveRule::create(),
+        ],
+        ApplyOrder::TopDown,
+    )
+});
+
+// Rule `JoinKeyNotNullRule` (`batch_join_keys_not_null`).
+static BATCH_JOIN_KEYS_NOT_NULL: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Join Keys Not Null For Batch",
+        vec![JoinKeyNotNullRule::create()],
+        ApplyOrder::TopDown,
+    )
+});
+
+// Rule `DateRangePredicateRule` (`batch_date_range_predicates`).
+static BATCH_DATE_RANGE_PREDICATES: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Date Range Predicates For Batch",
+        vec![DateRangePredicateRule::create()],
+        ApplyOrder::TopDown,
+    )
+});
+
+// Rule `SemiJoinPlacementRule` (`batch_semi_join_ordering`): bottom-up, so that a semi join
+// stacked over another one sees the inner joins that the lower one was pushed into.
+static BATCH_SEMI_JOIN_PLACEMENT: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Semi Join Placement For Batch",
+        vec![SemiJoinPlacementRule::create()],
+        ApplyOrder::BottomUp,
+    )
+});
+
 // Rule `UnionScanMergeRule` (`streaming_merge_union_scans`).
 static STREAM_MERGE_UNION_SCANS: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
@@ -2064,6 +2107,14 @@ impl LogicalOptimizer {
             plan = plan.optimize_by_rules(&NULL_SAFE_EQ_TO_EQ)?;
         }
 
+        // Range form of the comparisons of `date_trunc`, `extract(year ...)` and casts to `date`
+        // with a constant (`batch_date_range_predicates`): after the predicate pushdown, which
+        // puts the conjuncts into the scans, where they become key ranges. The conjuncts are
+        // rewritten in place: nothing needs to be pushed again.
+        if ctx.session_ctx().config().batch_date_range_predicates() {
+            plan = plan.optimize_by_rules(&BATCH_DATE_RANGE_PREDICATES)?;
+        }
+
         // Simplifications with column facts and unique keys, and merge of repeated lookups, on
         // demand (`batch_simplify_column_facts`, `batch_simplify_on_unique_key`,
         // `batch_merge_repeated_lookups`): before join ordering.
@@ -2179,6 +2230,12 @@ impl LogicalOptimizer {
                 .config()
                 .batch_cost_based_join_ordering()
             {
+                // Semi and anti joins placed by the cost-based ordering
+                // (`batch_semi_join_ordering`): pushed into an input of the inner joins below
+                // them, or merged as one more inner join, before the inner joins are ordered.
+                if plan.ctx().session_ctx().config().batch_semi_join_ordering() {
+                    plan = plan.optimize_by_rules(&BATCH_SEMI_JOIN_PLACEMENT)?;
+                }
                 // The columns that the plan reads, for the widths of the inputs of the joins:
                 // the scans still read all the columns of their tables at this point.
                 let required = Arc::new(required_output_columns(&plan));
@@ -2237,6 +2294,18 @@ impl LogicalOptimizer {
         // Push down the calculation of inputs of join's condition.
         plan = plan.optimize_by_rules(&PUSH_CALC_OF_JOIN)?;
 
+        // `IS NOT NULL` filters on the columns that a join compares with `=`
+        // (`batch_join_keys_not_null`): after the join ordering, which would count them in its
+        // estimates, and after the calculation of the keys is pushed below the joins, so that
+        // the keys are columns. The filters are pushed into the scans.
+        if ctx.session_ctx().config().batch_join_keys_not_null() {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&BATCH_JOIN_KEYS_NOT_NULL)?;
+            if ctx.total_rule_applied() != applied_before {
+                plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+            }
+        }
+
         // Duplicates found with `lag` over a window ordered by the column
         // (`batch_rewrite_lag_duplicates`): after predicate pushdown, which puts the filter
         // `x = lag(x)` right above the window, and before the window functions are split
@@ -2289,6 +2358,15 @@ impl LogicalOptimizer {
             plan = Self::narrow_value_aggregates(plan, explain_trace, &ctx)?.0;
         }
         plan = plan.optimize_by_rules(&SIMPLIFY_AGG)?;
+
+        // Inner join to semi join on a unique side that is not read, and `DISTINCT` removed
+        // under a semi or anti join (`batch_inner_join_to_semi_join`): after the join ordering
+        // (the inner join was ordered as such) and the column pruning (the output of a join only
+        // holds the columns read above it), before `JOIN_COMMUTE` turns a right semi join into
+        // a left one and the sides of the semi joins are chosen by cost.
+        if ctx.session_ctx().config().batch_inner_join_to_semi_join() {
+            plan = plan.optimize_by_rules(&BATCH_INNER_JOIN_TO_SEMI_JOIN)?;
+        }
 
         plan = plan.optimize_by_rules(&JOIN_COMMUTE)?;
 

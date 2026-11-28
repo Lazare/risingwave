@@ -1650,3 +1650,104 @@ impl JoinGraph {
         selectivity
     }
 }
+
+// Estimates and costs shared with the batch join rules of the survey of Calcite and PostgreSQL
+// rules.
+
+/// Runs `f` with the estimator of the cost-based ordering, which uses the learned ratios when
+/// `batch_cardinality_feedback_learning` is on (and the fixed guesses where nothing is learned).
+fn with_estimator<T>(
+    ctx: &crate::optimizer::optimizer_context::OptimizerContextRef,
+    f: impl FnOnce(&Estimator<'_>) -> T,
+) -> T {
+    let lookup_join_enabled = ctx.session_ctx().config().batch_enable_lookup_join();
+    let learning = ctx
+        .session_ctx()
+        .config()
+        .batch_cardinality_feedback_learning();
+    let catalog_reader = ctx.session_ctx().env().catalog_reader().read_guard();
+    let estimator = Estimator {
+        stats: catalog_reader.table_stats(),
+        lookup_join_enabled,
+        learned: learning.then_some(&**CARDINALITY_LEARNING_STORE),
+    };
+    f(&estimator)
+}
+
+/// The estimated rows of a relation, estimated as an input of a join of the cost-based ordering,
+/// or `None` without an estimate.
+pub(crate) fn estimated_rows(plan: &PlanRef) -> Option<f64> {
+    with_estimator(&plan.ctx(), |estimator| {
+        estimator.input_estimate(plan).map(|estimate| estimate.rows)
+    })
+}
+
+/// Whether the planner may read `plan`, the right side of a join, by key with the given columns
+/// (a lookup join): it is a table scan whose key prefix the columns give, or a table with an index.
+pub(super) fn may_be_lookup_join_side(plan: &PlanRef, columns: &BTreeSet<usize>) -> bool {
+    if !plan.ctx().session_ctx().config().batch_enable_lookup_join() {
+        return false;
+    }
+    let Some(scan) = plan.as_logical_scan() else {
+        return false;
+    };
+    scan_lookup_columns(scan).is_some_and(|key| key.is_subset(columns))
+        || !scan.table_indexes().is_empty()
+}
+
+/// What the cost-based ordering estimates of a relation, for `SemiJoinPlacementRule`.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct RelationCost {
+    /// Estimated rows.
+    pub(super) rows: f64,
+    /// Pessimistic rows, for the memory of a build side.
+    pub(super) rows_hi: f64,
+    /// Bytes of a row.
+    pub(super) width: f64,
+    /// Cost of producing the relation: the bytes its inputs read, and the cost of its joins.
+    pub(super) cost: f64,
+}
+
+/// The estimate of a relation as an input of a join (all its columns), or `None` without an
+/// estimate.
+pub(super) fn relation_cost(plan: &PlanRef) -> Option<RelationCost> {
+    with_estimator(&plan.ctx(), |estimator| {
+        let estimate = estimator.input_estimate(plan)?;
+        let width = estimator.row_width(plan, None);
+        Some(RelationCost {
+            rows: estimate.rows,
+            rows_hi: estimate.hi,
+            width,
+            cost: estimate.read * width,
+        })
+    })
+}
+
+/// The estimate of the join tree that the cost-based ordering would choose for a multi-join (its
+/// cost includes the reading of its inputs), or `None` without estimates for all its inputs.
+pub(super) fn multi_join_cost(join: &LogicalMultiJoin) -> Option<RelationCost> {
+    let heuristic = join.heuristic_ordering().ok()?;
+    with_estimator(&join.base.ctx(), |estimator| {
+        let graph = estimator.graph(join, None)?;
+        let tree = graph.best_tree(&heuristic)?;
+        let planned = graph.planned(&tree);
+        Some(RelationCost {
+            rows: planned.rows,
+            rows_hi: planned.rows_hi,
+            width: graph.width(planned.inputs),
+            cost: planned.cost,
+        })
+    })
+}
+
+/// The cost of a hash join that probes with `probe` and builds `build`, as in the join tree costs.
+pub(super) fn hash_join_cost(
+    probe: &RelationCost,
+    build: &RelationCost,
+    output_rows: f64,
+    output_width: f64,
+) -> f64 {
+    probe.rows * probe.width * PROBE_COST
+        + build.rows_hi * build.width * BUILD_COST
+        + output_rows * output_width * OUTPUT_COST
+}

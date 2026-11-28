@@ -27,6 +27,7 @@ user batch_cardinality_feedback
 user batch_cardinality_feedback_learning
 user batch_compact_shuffle_output
 user batch_cost_based_join_ordering
+user batch_date_range_predicates
 user batch_derive_or_restrictions
 user batch_distributed_union
 user batch_enable_distributed_dml
@@ -37,6 +38,8 @@ user batch_expr_strict_mode
 user batch_factor_union_join
 user batch_hnsw_ef_search
 user batch_inline_values_join
+user batch_inner_join_to_semi_join
+user batch_join_keys_not_null
 user batch_limit_distinct
 user batch_merge_repeated_lookups
 user batch_merge_set_operation_filters
@@ -55,6 +58,7 @@ user batch_reduce_group_keys
 user batch_reduce_keys_after_conversions
 user batch_reduce_outer_joins
 user batch_rewrite_lag_duplicates
+user batch_semi_join_ordering
 user batch_set_operation_to_count
 user batch_share_identical_subplans
 user batch_simplify_column_facts
