@@ -1,7 +1,8 @@
-# Tests for `streaming_narrow_value_aggregates` (`NarrowValueAggRule`, `NarrowValuePushRule`) through the operators that
-# pass the rows of their input through: the functions that read the result of a `last_value` are
-# moved below a top-n (per group or not), a deduplication, a window and a filter right above one of
-# them, when the operator does not read the value, down to the aggregation.
+# Tests for `streaming_narrow_value_aggregates` (`NarrowValueAggRule`, `NarrowValuePushRule`)
+# through the operators that pass the rows of their input through: the functions that read the
+# result of a `last_value` are moved below a top-n (per group or not), a deduplication, a window and
+# a filter right above one of them, when the operator does not read the value, down to the
+# aggregation.
 - id: tables
   sql: |
     create table ea (id int primary key, k int, ts bigint, doc jsonb);
@@ -85,6 +86,7 @@
 - name: kept - deduplicated on the value
   before: [tables, setup]
   sql: |
+    set rw_streaming_allow_jsonb_in_stream_key to true;
     select distinct on (doc) k, doc->>'c' as c from vab;
   expected_outputs:
   - stream_plan
