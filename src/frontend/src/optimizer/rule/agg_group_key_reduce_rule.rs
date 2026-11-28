@@ -50,6 +50,7 @@ use std::collections::{HashMap, HashSet};
 use fixedbitset::FixedBitSet;
 use risingwave_expr::aggregate::{AggType, PbAggKind};
 
+use super::column_facts_simplify_rule::column_facts;
 use super::prelude::{PlanRef, *};
 use crate::expr::{ExprImpl, InputRef};
 use crate::optimizer::plan_node::generic::{Agg, GenericPlanRef, PlanAggCall};
@@ -112,8 +113,15 @@ impl Rule<Logical> for AggGroupKeyReduceRule {
         let width = input.schema().len();
         let group_key: Vec<usize> = agg.group_key().indices().collect();
 
-        // The functional dependencies of the input, with the literals of a projection below.
+        // The functional dependencies of the input, with its constant columns (`c = literal`
+        // conjuncts of the filters and scans below, see `column_facts`) and the literals of a
+        // projection right below.
         let mut fd = input.functional_dependency().clone();
+        let constants: Vec<usize> = column_facts(&input)
+            .constant_columns()
+            .into_iter()
+            .collect();
+        fd.add_constant_columns(&constants);
         if let Some(project) = input.as_logical_project() {
             for (index, expr) in project.exprs().iter().enumerate() {
                 if matches!(expr, ExprImpl::Literal(_)) {
