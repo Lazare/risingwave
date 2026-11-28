@@ -36,3 +36,4 @@ without conflicts. Each file gives:
 | [now-during-snapshot-backfill.md](now-during-snapshot-backfill.md) | `now()` near 2021 during the snapshot of a snapshot backfill | upstream |
 | [hash-agg-spill-ordered-aggregates.md](hash-agg-spill-ordered-aggregates.md) | spill of a batch hash aggregation: error with ordered aggregates, groups emitted twice | upstream |
 | [hash-agg-spill-reload-memory.md](hash-agg-spill-reload-memory.md) | spilled aggregation states reloaded beyond the memory limit | upstream |
+| [mv-selection-hidden-columns.md](mv-selection-hidden-columns.md) | materialized view selection read a hidden column (panic in debug builds) | upstream |
