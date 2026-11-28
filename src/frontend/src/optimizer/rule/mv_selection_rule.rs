@@ -61,9 +61,26 @@ impl MvSelectionRule {
         candidate: &MaterializedViewCandidate,
         ctx: crate::optimizer::optimizer_context::OptimizerContextRef,
     ) -> Option<LogicalScan> {
-        let output_len = candidate.plan.schema().len();
-        debug_assert!(output_len <= candidate.table.columns().len());
-        let output_col_idx = (0..output_len).collect();
+        // The outputs of the plan of the materialized view are its visible columns, in order. The
+        // table of the view may also have hidden columns (the stream key: the row id of a table,
+        // the group key of an aggregation...) anywhere among them, before an over window column for
+        // example: the scan reads the visible columns only. No rewrite unless they match one to one.
+        let fields = candidate.plan.schema().fields();
+        let output_col_idx: Vec<usize> = candidate
+            .table
+            .columns()
+            .iter()
+            .enumerate()
+            .filter(|(_, column)| !column.is_hidden())
+            .map(|(index, _)| index)
+            .collect();
+        if output_col_idx.len() != fields.len()
+            || output_col_idx.iter().zip(fields).any(|(&index, field)| {
+                candidate.table.columns()[index].data_type() != &field.data_type
+            })
+        {
+            return None;
+        }
         Some(
             LogicalScan::create(candidate.table.clone(), ctx, None)
                 .clone_with_output_indices(output_col_idx),
