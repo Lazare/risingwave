@@ -253,9 +253,19 @@ static STREAM_SIMPLE_UNNESTING_AGG: LazyLock<OptimizationStage> = LazyLock::new(
 // outer join whose padded rows a filter or a join above rejects becomes an inner join, and one
 // filtered on `r.c IS NULL` for a column never `NULL` in a matched row becomes an anti join.
 // Top-down: a join reduced above lets the conditions it pushes down reach the joins below.
+// Before join ordering, an outer join whose padded side is an inner join is not made inner: it is
+// reduced by `REDUCE_OUTER_JOINS_AFTER_JOIN_ORDERING`, which keeps the join order.
 static REDUCE_OUTER_JOINS: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Reduce Outer Joins",
+        vec![OuterJoinReduceRule::create_before_join_ordering()],
+        ApplyOrder::TopDown,
+    )
+});
+
+static REDUCE_OUTER_JOINS_AFTER_JOIN_ORDERING: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Reduce Outer Joins After Join Ordering",
         vec![OuterJoinReduceRule::create()],
         ApplyOrder::TopDown,
     )
@@ -1568,6 +1578,24 @@ impl LogicalOptimizer {
             }
         }
 
+        // Rule `OuterJoinReduceRule` (`streaming_reduce_outer_joins`), second pass: the outer joins
+        // whose padded side is an inner join, left by the pass before join ordering so that they
+        // keep their order. Each round pushes down the conjuncts that a reduced join lets through.
+        if ctx.session_ctx().config().streaming_reduce_outer_joins()
+            && !ctx.is_stream_prune_baseline()
+        {
+            for _ in 0..3 {
+                let applied_before = ctx.total_rule_applied();
+                plan = plan.optimize_by_rules(&REDUCE_OUTER_JOINS_AFTER_JOIN_ORDERING)?;
+                let applied = ctx.total_rule_applied() - applied_before;
+                if applied == 0 {
+                    break;
+                }
+                ctx.add_stream_prune_rule_applied(applied);
+                plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+            }
+        }
+
         // Predicate Push-down: apply filter pushdown rules again since we pullup all join
         // conditions into a filter above the multijoin.
         plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
@@ -2278,6 +2306,19 @@ impl LogicalOptimizer {
 
             // Reorder multijoin into left-deep join tree.
             plan = plan.optimize_by_rules(&LEFT_DEEP_JOIN_ORDERING)?;
+        }
+
+        // Rule `OuterJoinReduceRule` (`batch_reduce_outer_joins`), second pass: the outer joins
+        // whose padded side is an inner join, which keep their order (see streaming).
+        if ctx.session_ctx().config().batch_reduce_outer_joins() {
+            for _ in 0..3 {
+                let applied_before = ctx.total_rule_applied();
+                plan = plan.optimize_by_rules(&REDUCE_OUTER_JOINS_AFTER_JOIN_ORDERING)?;
+                if ctx.total_rule_applied() == applied_before {
+                    break;
+                }
+                plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+            }
         }
 
         // Predicate Push-down: apply filter pushdown rules again since we pullup all join

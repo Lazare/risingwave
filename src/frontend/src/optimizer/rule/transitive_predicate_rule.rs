@@ -142,6 +142,19 @@ impl Rule<Logical> for TransitivePredicateRule {
                 LogicalFilter::create(input, Condition { conjunctions })
             }
         };
+        // A copied equality of two columns that would add a second key on a column that the inner
+        // join below already uses as a key is not copied (see `adds_second_join_key`).
+        let drop_second_keys = |side: &PlanRef, predicates: Vec<ExprImpl>| -> Vec<ExprImpl> {
+            predicates
+                .into_iter()
+                .filter(|predicate| {
+                    !column_equality(predicate)
+                        .is_some_and(|(x, y)| adds_second_join_key(side, x.index(), y.index()))
+                })
+                .collect()
+        };
+        let new_left = drop_second_keys(&left, new_left);
+        let new_right = drop_second_keys(&right, new_right);
         let (new_left, new_right) = if self.for_stream {
             let keep = |side: &PlanRef, predicates: Vec<ExprImpl>| -> Vec<ExprImpl> {
                 predicates
@@ -174,6 +187,56 @@ impl TransitivePredicateRule {
     pub fn create_for_batch() -> BoxedRule {
         Box::new(TransitivePredicateRule { for_stream: false })
     }
+}
+
+/// Whether `x = y`, pushed into `plan`, would become one more equi-join key of the inner join at the
+/// top of `plan` (below projections and filters) on a column that already is one of its keys:
+/// `x` and `y` come from different inputs of the join, and one of them is already compared with
+/// `=` to the other input. The join would then be keyed on `(x, x) = (z, y)`: its distribution
+/// changes, which costs an exchange, for a filter that only removes the rows of one input where
+/// `z <> y`.
+fn adds_second_join_key(plan: &PlanRef, x: usize, y: usize) -> bool {
+    let mut plan = plan.clone();
+    let (mut x, mut y) = (x, y);
+    loop {
+        if let Some(filter) = plan.as_logical_filter() {
+            plan = filter.input();
+            continue;
+        }
+        if let Some(project) = plan.as_logical_project() {
+            let column = |index: usize| {
+                project.exprs()[index]
+                    .as_input_ref()
+                    .map(|input_ref| input_ref.index())
+            };
+            let (Some(new_x), Some(new_y)) = (column(x), column(y)) else {
+                return false;
+            };
+            (x, y) = (new_x, new_y);
+            plan = project.input();
+            continue;
+        }
+        break;
+    }
+    let Some(join) = plan.as_logical_join() else {
+        return false;
+    };
+    if join.join_type() != JoinType::Inner {
+        return false;
+    }
+    let (Some(&x), Some(&y)) = (join.output_indices().get(x), join.output_indices().get(y)) else {
+        return false;
+    };
+    let left_len = join.left().schema().len();
+    if (x < left_len) == (y < left_len) {
+        return false;
+    }
+    let keys: HashSet<usize> = join
+        .eq_indexes()
+        .into_iter()
+        .flat_map(|(l, r)| [l, r + left_len])
+        .collect();
+    keys.contains(&x) || keys.contains(&y)
 }
 
 /// The column of a predicate on one column that may select several ranges of values of a key:
@@ -311,6 +374,17 @@ fn copy_through_keys(
         }
     }
     derived
+}
+
+/// The two columns of `a = b` (input references of the same type).
+fn column_equality(expr: &ExprImpl) -> Option<(&InputRef, &InputRef)> {
+    let call = expr.as_function_call()?;
+    if call.func_type() != ExprType::Equal || call.inputs().len() != 2 {
+        return None;
+    }
+    let a = call.inputs()[0].as_input_ref()?;
+    let b = call.inputs()[1].as_input_ref()?;
+    (a.return_type() == b.return_type()).then_some((&**a, &**b))
 }
 
 /// `c IS NOT NULL` on a column: implied by the `=` of the keys, never worth a filter.

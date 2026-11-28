@@ -44,6 +44,9 @@ CASES = [
      f"select t.id, s.v from {T} t left join {R} r on t.k = r.id join {S} s on s.k = r.c"),
     ('semi_above', 'id',
      f"select t.id from {T} t left join {R} r on t.k = r.id where exists (select 1 from {S} s where s.k = r.c)"),
+    # Padded side that is an inner join: reduced after join ordering.
+    ('padded_inner_join', 'id, v',
+     f"select t.id, s.v from {T} t left join ({R} r join {S} s on s.k = r.c) on t.k = r.id where s.v + 1 > 0"),
     # Rewritten by the rule: outer join to anti join.
     ('anti_key', 'id',
      f"select t.id from {T} t left join {R} r on t.k = r.k where r.k is null"),

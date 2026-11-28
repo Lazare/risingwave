@@ -83,25 +83,67 @@ use crate::utils::{Condition, Substitute};
 /// column that a matched row may hold `NULL` in; a filter or a join that is not directly above
 /// the outer join.
 ///
+/// # Join order
+///
+/// Before join ordering, the rule is created with [`OuterJoinReduceRule::create_before_join_ordering`]:
+/// an outer join that would become an inner join while its padded side is itself an inner join
+/// (below projections and filters) is left for the pass after join ordering
+/// ([`OuterJoinReduceRule::create`]). Otherwise the join ordering would merge the inner join of
+/// the padded side with the joins above and order them again, losing the order (and the
+/// distribution on the keys of that inner join, often the keys of the outer join too, as after
+/// the unnesting of a correlated subquery) that the plan was built with: one more exchange for no
+/// fewer rows. After join ordering the reduced join keeps its place and only drops the padding
+/// (and, in a streaming job, the degrees of the outer join).
+///
 /// Used on demand, behind `streaming_reduce_outer_joins` and `batch_reduce_outer_joins`.
-pub struct OuterJoinReduceRule {}
+pub struct OuterJoinReduceRule {
+    keep_padded_inner_joins: bool,
+}
 
 impl Rule<Logical> for OuterJoinReduceRule {
     fn apply(&self, plan: PlanRef) -> Option<PlanRef> {
+        let keep = self.keep_padded_inner_joins;
         if let Some(filter) = plan.as_logical_filter() {
             let input = filter.input();
             let join = input.as_logical_join()?;
-            return reduce_below_filter(filter.predicate(), join)
+            return reduce_below_filter(filter.predicate(), join, keep)
                 .or_else(|| anti_join_below_filter(filter.predicate(), join));
         }
-        reduce_inputs_of_join(plan.as_logical_join()?)
+        reduce_inputs_of_join(plan.as_logical_join()?, keep)
     }
 }
 
 impl OuterJoinReduceRule {
+    /// Every reduction (after join ordering).
     pub fn create() -> BoxedRule {
-        Box::new(OuterJoinReduceRule {})
+        Box::new(OuterJoinReduceRule {
+            keep_padded_inner_joins: false,
+        })
     }
+
+    /// Before join ordering: not the reductions to an inner join of an outer join whose padded side
+    /// is an inner join (see the documentation of the type).
+    pub fn create_before_join_ordering() -> BoxedRule {
+        Box::new(OuterJoinReduceRule {
+            keep_padded_inner_joins: true,
+        })
+    }
+}
+
+/// Whether a plan is an inner join below projections and filters, that the join ordering would
+/// merge with an inner join above it.
+fn is_inner_join_below_projections(plan: &PlanRef) -> bool {
+    if let Some(join) = plan.as_logical_join() {
+        return join.join_type() == JoinType::Inner;
+    }
+    if let Some(filter) = plan.as_logical_filter() {
+        return is_inner_join_below_projections(&filter.input());
+    }
+    if let Some(project) = plan.as_logical_project() {
+        return project.try_as_projection().is_some()
+            && is_inner_join_below_projections(&project.input());
+    }
+    false
 }
 
 /// The sides that an outer join pads with `NULL`s, left and right.
@@ -155,6 +197,7 @@ fn reduce_with_conjuncts(
     conjuncts: &[ExprImpl],
     offset: usize,
     len: usize,
+    keep_padded_inner_joins: bool,
 ) -> Option<LogicalJoin> {
     let (mut padded_left, mut padded_right) = padded_sides(join.join_type())?;
     let rejects = |left: bool| {
@@ -169,6 +212,16 @@ fn reduce_with_conjuncts(
     if join_type == join.join_type() {
         return None;
     }
+    // Before join ordering: an inner join of a padded side keeps its order (see the documentation
+    // of `OuterJoinReduceRule`); reduced after join ordering.
+    if keep_padded_inner_joins && join_type == JoinType::Inner {
+        let (left_padded, right_padded) = padded_sides(join.join_type())?;
+        if (left_padded && is_inner_join_below_projections(&join.left()))
+            || (right_padded && is_inner_join_below_projections(&join.right()))
+        {
+            return None;
+        }
+    }
     let (left, right, on, _, output_indices) = join.clone().decompose();
     Some(LogicalJoin::with_output_indices(
         left,
@@ -180,16 +233,26 @@ fn reduce_with_conjuncts(
 }
 
 /// 1, for a filter right above an outer join.
-fn reduce_below_filter(predicate: &Condition, join: &LogicalJoin) -> Option<PlanRef> {
+fn reduce_below_filter(
+    predicate: &Condition,
+    join: &LogicalJoin,
+    keep_padded_inner_joins: bool,
+) -> Option<PlanRef> {
     let len = join.output_indices().len();
-    let reduced = reduce_with_conjuncts(join, &predicate.conjunctions, 0, len)?;
+    let reduced = reduce_with_conjuncts(
+        join,
+        &predicate.conjunctions,
+        0,
+        len,
+        keep_padded_inner_joins,
+    )?;
     Some(LogicalFilter::create(reduced.into(), predicate.clone()))
 }
 
 /// 1, for the inputs of a join that are outer joins whose rows that match nothing the join does
 /// not keep. The condition of the join refers to the columns of its left input, then of its right
 /// input.
-fn reduce_inputs_of_join(join: &LogicalJoin) -> Option<PlanRef> {
+fn reduce_inputs_of_join(join: &LogicalJoin, keep_padded_inner_joins: bool) -> Option<PlanRef> {
     let join_type = join.join_type();
     if matches!(join_type, JoinType::AsofInner | JoinType::AsofLeftOuter) {
         return None;
@@ -203,7 +266,10 @@ fn reduce_inputs_of_join(join: &LogicalJoin) -> Option<PlanRef> {
             return None;
         }
         let input_join = input.as_logical_join()?;
-        Some(reduce_with_conjuncts(input_join, conjuncts, offset, len)?.into())
+        Some(
+            reduce_with_conjuncts(input_join, conjuncts, offset, len, keep_padded_inner_joins)?
+                .into(),
+        )
     };
     let new_left = reduce(&left, true, 0);
     let new_right = reduce(&right, false, left_len);
