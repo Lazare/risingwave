@@ -520,7 +520,7 @@ mod tests {
             let slice = wide.with_visibility(visibilities[0].clone());
             let start = Instant::now();
             for _ in 0..ROUNDS {
-                std::hint::black_box(slice.clone().compact_vis());
+                let _ = std::hint::black_box(slice.clone().compact_vis());
             }
             let compact_one = start.elapsed() / ROUNDS as u32;
 
