@@ -1,0 +1,100 @@
+# Tests for `batch_narrow_value_aggregates` (`NarrowValueAggRule`, `NarrowValuePushRule`) through the operators that
+# pass the rows of their input through: the functions that read the result of a `last_value` are
+# moved below a top-n (per group or not), a deduplication, a window and a filter right above one of
+# them, when the operator does not read the value, down to the aggregation.
+- id: tables
+  sql: |
+    create table ea (id int primary key, k int, ts bigint, doc jsonb);
+    create table eb (id int primary key, k int, ts bigint, doc jsonb);
+    create table d (u int primary key, state varchar, w int);
+    create view va as select k, last_value(doc order by ts) as doc, max(ts) as ts from ea group by k;
+    create view vb as select k, last_value(doc order by ts) as doc, max(ts) as ts from eb group by k;
+    create view vab as select * from va union all select * from vb;
+    create view vu as select distinct on (k) * from vab order by k, ts desc;
+  expected_outputs: []
+- id: setup
+  sql: |
+    set batch_narrow_value_aggregates = true;
+  expected_outputs: []
+
+# The variable is off by default: nothing changes.
+- name: off by default
+  before: [tables]
+  sql: |
+    select d.u, vu.doc->'a'->>'b' as x from vu join d on vu.k = d.u where d.state = 'open';
+  expected_outputs:
+  - batch_plan
+
+# Rewritten.
+- name: top-n per group over a union of aggregations, below a join
+  before: [tables, setup]
+  sql: |
+    select d.u, vu.doc->'a'->>'b' as x from vu join d on vu.k = d.u where d.state = 'open';
+  expected_outputs:
+  - batch_plan
+- name: top-n per group over a union of aggregations, several fields
+  before: [tables, setup]
+  sql: |
+    select k, doc->>'c' as c, doc->'a'->>'b' as b, (doc->>'n')::int as n from vu;
+  expected_outputs:
+  - batch_plan
+- name: top-n per group ordered by a field of the value
+  before: [tables, setup]
+  sql: |
+    select distinct on (k) k, doc->>'c' as c from vab order by k, doc->>'o';
+  expected_outputs:
+  - batch_plan
+- name: top-n without group
+  before: [tables, setup]
+  sql: |
+    select k, doc->>'c' as c from vab order by ts desc limit 3;
+  expected_outputs:
+  - batch_plan
+- name: deduplication (distinct on without order by)
+  before: [tables, setup]
+  sql: |
+    select distinct on (k) k, doc->>'c' as c from vab;
+  expected_outputs:
+  - batch_plan
+- name: window partitioned by the key, filtered on its row number
+  before: [tables, setup]
+  sql: |
+    select k, c from (select k, doc->>'c' as c, row_number() over (partition by k order by ts desc) as rn from vab) s where rn = 1;
+  expected_outputs:
+  - batch_plan
+- name: window that is not a top-n
+  before: [tables, setup]
+  sql: |
+    select k, doc->>'c' as c, count(*) over (partition by k) as n from vab;
+  expected_outputs:
+  - batch_plan
+
+# Left as they are.
+- name: kept - the value is output as it is
+  before: [tables, setup]
+  sql: |
+    select k, doc from vu;
+  expected_outputs:
+  - batch_plan
+- name: kept - a window function reads the value
+  before: [tables, setup]
+  sql: |
+    select k, doc->>'c' as c, first_value(doc) over (partition by k order by ts) ->> 'c' as f from vab;
+  expected_outputs:
+  - batch_plan
+- name: kept - deduplicated on the value
+  before: [tables, setup]
+  sql: |
+    select distinct on (doc) k, doc->>'c' as c from vab;
+  expected_outputs:
+  - batch_plan
+
+# With `batch_push_join_below_group_ops`: the join goes below the top-n and into the aggregations,
+# then the narrowing functions reach the aggregations too.
+- name: with the join pushed below the group operators
+  before: [tables, setup]
+  sql: |
+    set batch_push_join_below_group_ops = true;
+    select d.u, vu.doc->'a'->>'b' as x from vu join d on vu.k = d.u where d.state = 'open';
+  expected_outputs:
+  - batch_plan
