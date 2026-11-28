@@ -436,3 +436,132 @@
           └─BatchExchange { order: [], dist: HashShard($expr1) }
             └─BatchProject { exprs: [s.k, Coalesce(s.k, 0:Int32) as $expr1] }
               └─BatchScan { table: s, columns: [s.k], distribution: SomeShard }
+- name: padded side is an inner join - reduced after join ordering
+  before:
+  - setup
+  sql: |
+    select t.id, s.v from t left join (r join s on s.k = r.c) on t.k = r.id where s.v + 1 > 0;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: Inner, predicate: t.k = r.id, output: [t.id, s.v] }
+      ├─BatchExchange { order: [], dist: HashShard(t.k) }
+      │ └─BatchScan { table: t, columns: [t.id, t.k], distribution: UpstreamHashShard(t.id) }
+      └─BatchExchange { order: [], dist: HashShard(r.id) }
+        └─BatchHashJoin { type: Inner, predicate: r.c = s.k, output: [r.id, s.v] }
+          ├─BatchExchange { order: [], dist: HashShard(r.c) }
+          │ └─BatchScan { table: r, columns: [r.id, r.c], distribution: UpstreamHashShard(r.id) }
+          └─BatchExchange { order: [], dist: HashShard(s.k) }
+            └─BatchFilter { predicate: ((s.v + 1:Int32) > 0:Int32) }
+              └─BatchScan { table: s, columns: [s.k, s.v], distribution: SomeShard }
+- id: setup_correlated
+  sql: |
+    set batch_reduce_outer_joins = true;
+    create table t1(a int, b int);
+    create table t2(c int primary key, d int);
+    create table t3(e int, f int);
+    create table t4(g int, h int);
+    create table t5(i int, j int);
+    create table t6(k int, l int);
+- name: correlated scalar subqueries - the reduced left join keeps the order of the unnesting
+  before:
+  - setup_correlated
+  sql: |
+    select coalesce((select sum(d) from t2 left join t3 on e = a and f = c left join t4 on g = a and h = c left join t5 on i = a and j = c where t1.a = t2.c and j in (select k from t6 where b = l)), 0) as col1, coalesce((select sum(d) from t2 left join t3 on e = a and f = c left join t4 on g = a and h = c left join t5 on i = a and j = c where t1.a = t2.c and j in (select k from t6 where b = l)), 0) as col2 from t1;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchProject { exprs: [Coalesce(sum(t2.d), 0:Int64) as $expr1, Coalesce(sum(t2.d), 0:Int64) as $expr2] }
+      └─BatchHashJoin { type: LeftOuter, predicate: t1.a IS NOT DISTINCT FROM t1.a AND t1.b IS NOT DISTINCT FROM t1.b, output: [sum(t2.d), sum(t2.d)] }
+        ├─BatchExchange { order: [], dist: HashShard(t1.a, t1.b) }
+        │ └─BatchScan { table: t1, columns: [t1.a, t1.b], distribution: SomeShard }
+        └─BatchExchange { order: [], dist: HashShard(t1.a, t1.b) }
+          └─BatchHashJoin { type: FullOuter, predicate: t1.a IS NOT DISTINCT FROM t1.a AND t1.b IS NOT DISTINCT FROM t1.b, output: [t1.a, t1.b, sum(t2.d), sum(t2.d)] }
+            ├─BatchHashAgg { group_key: [t1.a, t1.b], aggs: [sum(t2.d)] }
+            │ └─BatchHashJoin { type: LeftOuter, predicate: t1.a IS NOT DISTINCT FROM t1.a AND t1.b IS NOT DISTINCT FROM t1.b, output: [t1.a, t1.b, t2.d] }
+            │   ├─BatchExchange { order: [], dist: HashShard(t1.b) }
+            │   │ └─BatchHashAgg { group_key: [t1.a, t1.b], aggs: [] }
+            │   │   └─BatchExchange { order: [], dist: HashShard(t1.a, t1.b) }
+            │   │     └─BatchScan { table: t1, columns: [t1.a, t1.b], distribution: SomeShard }
+            │   └─BatchHashJoin { type: LeftSemi, predicate: t5.j = t6.k AND t1.a IS NOT DISTINCT FROM t1.a AND t1.b IS NOT DISTINCT FROM t1.b, output: [t1.a, t1.b, t2.d] }
+            │     ├─BatchExchange { order: [], dist: HashShard(t1.b) }
+            │     │ └─BatchHashJoin { type: Inner, predicate: t2.c = t5.j AND t1.a IS NOT DISTINCT FROM t1.a AND t1.b IS NOT DISTINCT FROM t1.b, output: [t1.a, t1.b, t2.d, t5.j] }
+            │     │   ├─BatchHashJoin { type: LeftOuter, predicate: t2.c = t4.h AND t1.a IS NOT DISTINCT FROM t1.a AND t1.b IS NOT DISTINCT FROM t1.b, output: [t1.a, t1.b, t2.c, t2.d] }
+            │     │   │ ├─BatchHashJoin { type: LeftOuter, predicate: t2.c = t3.f AND t1.a IS NOT DISTINCT FROM t1.a AND t1.b IS NOT DISTINCT FROM t1.b, output: [t1.a, t1.b, t2.c, t2.d] }
+            │     │   │ │ ├─BatchExchange { order: [], dist: HashShard(t1.a, t1.a) }
+            │     │   │ │ │ └─BatchLookupJoin { type: Inner, predicate: t1.a = t2.c, output: all, lookup table: t2 }
+            │     │   │ │ │   └─BatchExchange { order: [], dist: UpstreamHashShard(t1.a) }
+            │     │   │ │ │     └─BatchHashAgg { group_key: [t1.a, t1.b], aggs: [] }
+            │     │   │ │ │       └─BatchExchange { order: [], dist: HashShard(t1.a, t1.b) }
+            │     │   │ │ │         └─BatchScan { table: t1, columns: [t1.a, t1.b], distribution: SomeShard }
+            │     │   │ │ └─BatchHashJoin { type: Inner, predicate: t1.a = t3.e AND t1.a = t3.f, output: [t1.a, t1.b, t3.f] }
+            │     │   │ │   ├─BatchExchange { order: [], dist: HashShard(t1.a, t1.a) }
+            │     │   │ │   │ └─BatchHashAgg { group_key: [t1.a, t1.b], aggs: [] }
+            │     │   │ │   │   └─BatchExchange { order: [], dist: HashShard(t1.a, t1.b) }
+            │     │   │ │   │     └─BatchScan { table: t1, columns: [t1.a, t1.b], distribution: SomeShard }
+            │     │   │ │   └─BatchExchange { order: [], dist: HashShard(t3.e, t3.f) }
+            │     │   │ │     └─BatchScan { table: t3, columns: [t3.e, t3.f], distribution: SomeShard }
+            │     │   │ └─BatchHashJoin { type: Inner, predicate: t1.a = t4.g AND t1.a = t4.h, output: [t1.a, t1.b, t4.h] }
+            │     │   │   ├─BatchExchange { order: [], dist: HashShard(t1.a, t1.a) }
+            │     │   │   │ └─BatchHashAgg { group_key: [t1.a, t1.b], aggs: [] }
+            │     │   │   │   └─BatchExchange { order: [], dist: HashShard(t1.a, t1.b) }
+            │     │   │   │     └─BatchScan { table: t1, columns: [t1.a, t1.b], distribution: SomeShard }
+            │     │   │   └─BatchExchange { order: [], dist: HashShard(t4.g, t4.h) }
+            │     │   │     └─BatchScan { table: t4, columns: [t4.g, t4.h], distribution: SomeShard }
+            │     │   └─BatchHashJoin { type: Inner, predicate: t1.a = t5.i AND t1.a = t5.j, output: [t1.a, t1.b, t5.j] }
+            │     │     ├─BatchExchange { order: [], dist: HashShard(t1.a, t1.a) }
+            │     │     │ └─BatchHashAgg { group_key: [t1.a, t1.b], aggs: [] }
+            │     │     │   └─BatchExchange { order: [], dist: HashShard(t1.a, t1.b) }
+            │     │     │     └─BatchScan { table: t1, columns: [t1.a, t1.b], distribution: SomeShard }
+            │     │     └─BatchExchange { order: [], dist: HashShard(t5.i, t5.j) }
+            │     │       └─BatchScan { table: t5, columns: [t5.i, t5.j], distribution: SomeShard }
+            │     └─BatchHashJoin { type: Inner, predicate: t1.b = t6.l, output: [t1.a, t1.b, t6.k] }
+            │       ├─BatchExchange { order: [], dist: HashShard(t1.b) }
+            │       │ └─BatchHashAgg { group_key: [t1.a, t1.b], aggs: [] }
+            │       │   └─BatchExchange { order: [], dist: HashShard(t1.a, t1.b) }
+            │       │     └─BatchScan { table: t1, columns: [t1.a, t1.b], distribution: SomeShard }
+            │       └─BatchExchange { order: [], dist: HashShard(t6.l) }
+            │         └─BatchScan { table: t6, columns: [t6.k, t6.l], distribution: SomeShard }
+            └─BatchHashAgg { group_key: [t1.a, t1.b], aggs: [sum(t2.d)] }
+              └─BatchHashJoin { type: LeftOuter, predicate: t1.a IS NOT DISTINCT FROM t1.a AND t1.b IS NOT DISTINCT FROM t1.b, output: [t1.a, t1.b, t2.d] }
+                ├─BatchExchange { order: [], dist: HashShard(t1.b) }
+                │ └─BatchHashAgg { group_key: [t1.a, t1.b], aggs: [] }
+                │   └─BatchExchange { order: [], dist: HashShard(t1.a, t1.b) }
+                │     └─BatchScan { table: t1, columns: [t1.a, t1.b], distribution: SomeShard }
+                └─BatchHashJoin { type: LeftSemi, predicate: t5.j = t6.k AND t1.a IS NOT DISTINCT FROM t1.a AND t1.b IS NOT DISTINCT FROM t1.b, output: [t1.a, t1.b, t2.d] }
+                  ├─BatchExchange { order: [], dist: HashShard(t1.b) }
+                  │ └─BatchHashJoin { type: Inner, predicate: t2.c = t5.j AND t1.a IS NOT DISTINCT FROM t1.a AND t1.b IS NOT DISTINCT FROM t1.b, output: [t1.a, t1.b, t2.d, t5.j] }
+                  │   ├─BatchHashJoin { type: LeftOuter, predicate: t2.c = t4.h AND t1.a IS NOT DISTINCT FROM t1.a AND t1.b IS NOT DISTINCT FROM t1.b, output: [t1.a, t1.b, t2.c, t2.d] }
+                  │   │ ├─BatchHashJoin { type: LeftOuter, predicate: t2.c = t3.f AND t1.a IS NOT DISTINCT FROM t1.a AND t1.b IS NOT DISTINCT FROM t1.b, output: [t1.a, t1.b, t2.c, t2.d] }
+                  │   │ │ ├─BatchExchange { order: [], dist: HashShard(t1.a, t1.a) }
+                  │   │ │ │ └─BatchLookupJoin { type: Inner, predicate: t1.a = t2.c, output: all, lookup table: t2 }
+                  │   │ │ │   └─BatchExchange { order: [], dist: UpstreamHashShard(t1.a) }
+                  │   │ │ │     └─BatchHashAgg { group_key: [t1.a, t1.b], aggs: [] }
+                  │   │ │ │       └─BatchExchange { order: [], dist: HashShard(t1.a, t1.b) }
+                  │   │ │ │         └─BatchScan { table: t1, columns: [t1.a, t1.b], distribution: SomeShard }
+                  │   │ │ └─BatchHashJoin { type: Inner, predicate: t1.a = t3.e AND t1.a = t3.f, output: [t1.a, t1.b, t3.f] }
+                  │   │ │   ├─BatchExchange { order: [], dist: HashShard(t1.a, t1.a) }
+                  │   │ │   │ └─BatchHashAgg { group_key: [t1.a, t1.b], aggs: [] }
+                  │   │ │   │   └─BatchExchange { order: [], dist: HashShard(t1.a, t1.b) }
+                  │   │ │   │     └─BatchScan { table: t1, columns: [t1.a, t1.b], distribution: SomeShard }
+                  │   │ │   └─BatchExchange { order: [], dist: HashShard(t3.e, t3.f) }
+                  │   │ │     └─BatchScan { table: t3, columns: [t3.e, t3.f], distribution: SomeShard }
+                  │   │ └─BatchHashJoin { type: Inner, predicate: t1.a = t4.g AND t1.a = t4.h, output: [t1.a, t1.b, t4.h] }
+                  │   │   ├─BatchExchange { order: [], dist: HashShard(t1.a, t1.a) }
+                  │   │   │ └─BatchHashAgg { group_key: [t1.a, t1.b], aggs: [] }
+                  │   │   │   └─BatchExchange { order: [], dist: HashShard(t1.a, t1.b) }
+                  │   │   │     └─BatchScan { table: t1, columns: [t1.a, t1.b], distribution: SomeShard }
+                  │   │   └─BatchExchange { order: [], dist: HashShard(t4.g, t4.h) }
+                  │   │     └─BatchScan { table: t4, columns: [t4.g, t4.h], distribution: SomeShard }
+                  │   └─BatchHashJoin { type: Inner, predicate: t1.a = t5.i AND t1.a = t5.j, output: [t1.a, t1.b, t5.j] }
+                  │     ├─BatchExchange { order: [], dist: HashShard(t1.a, t1.a) }
+                  │     │ └─BatchHashAgg { group_key: [t1.a, t1.b], aggs: [] }
+                  │     │   └─BatchExchange { order: [], dist: HashShard(t1.a, t1.b) }
+                  │     │     └─BatchScan { table: t1, columns: [t1.a, t1.b], distribution: SomeShard }
+                  │     └─BatchExchange { order: [], dist: HashShard(t5.i, t5.j) }
+                  │       └─BatchScan { table: t5, columns: [t5.i, t5.j], distribution: SomeShard }
+                  └─BatchHashJoin { type: Inner, predicate: t1.b = t6.l, output: [t1.a, t1.b, t6.k] }
+                    ├─BatchExchange { order: [], dist: HashShard(t1.b) }
+                    │ └─BatchHashAgg { group_key: [t1.a, t1.b], aggs: [] }
+                    │   └─BatchExchange { order: [], dist: HashShard(t1.a, t1.b) }
+                    │     └─BatchScan { table: t1, columns: [t1.a, t1.b], distribution: SomeShard }
+                    └─BatchExchange { order: [], dist: HashShard(t6.l) }
+                      └─BatchScan { table: t6, columns: [t6.k, t6.l], distribution: SomeShard }

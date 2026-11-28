@@ -309,3 +309,141 @@
             └─StreamProject { exprs: [t.b, t.k, Vnode(t.k) as _vnode] }
               └─StreamFilter { predicate: (t.b = 3:Int32) }
                 └─StreamTableScan { table: t, columns: [t.b, t.k], stream_scan_type: SnapshotBackfill, stream_key: [t.k], pk: [k], dist: UpstreamHashShard(t.k) }
+- id: setup_dist
+  sql: |
+    set streaming_reduce_group_keys = true;
+    set batch_reduce_group_keys = true;
+    create table p (x int, k int primary key, v int);
+    create table q (x int, k int, w int);
+    create table s (xs int[], ys int[], k int primary key);
+- name: a key of the join distribution is kept
+  before:
+  - setup_dist
+  sql: |
+    select p.x, p.k, sum(q.w) from p join q on p.x = q.x and p.k = q.k group by p.x, p.k;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashAgg { group_key: [p.x, p.k], aggs: [sum(q.w)] }
+      └─BatchHashJoin { type: Inner, predicate: p.x = q.x AND p.k = q.k, output: [p.x, p.k, q.w] }
+        ├─BatchExchange { order: [], dist: HashShard(p.x, p.k) }
+        │ └─BatchScan { table: p, columns: [p.x, p.k], distribution: UpstreamHashShard(p.k) }
+        └─BatchExchange { order: [], dist: HashShard(q.x, q.k) }
+          └─BatchScan { table: q, columns: [q.x, q.k, q.w], distribution: SomeShard }
+  stream_plan: |-
+    StreamMaterialize { columns: [x, k, sum], stream_key: [x, k], pk_columns: [x, k], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [p.x, p.k, sum(q.w)] }
+      └─StreamHashAgg { group_key: [p.x, p.k], aggs: [sum(q.w), count] }
+        └─StreamHashJoin { type: Inner, predicate: p.x = q.x AND p.k = q.k, output: [p.x, p.k, q.w, q._row_id] }
+          ├─StreamExchange { dist: HashShard(p.x, p.k) }
+          │ └─StreamTableScan { table: p, columns: [p.x, p.k], stream_scan_type: SnapshotBackfill, stream_key: [p.k], pk: [k], dist: UpstreamHashShard(p.k) }
+          └─StreamExchange { dist: HashShard(q.x, q.k) }
+            └─StreamTableScan { table: q, columns: [q.x, q.k, q.w, q._row_id], stream_scan_type: SnapshotBackfill, stream_key: [q._row_id], pk: [_row_id], dist: UpstreamHashShard(q._row_id) }
+- name: a key outside the join distribution is still removed
+  before:
+  - setup_dist
+  sql: |
+    select p.x, p.k, p.v, sum(q.w) from p join q on p.x = q.x and p.k = q.k group by p.x, p.k, p.v;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashAgg { group_key: [p.x, p.k], aggs: [internal_last_seen_value(p.v), sum(q.w)] }
+      └─BatchHashJoin { type: Inner, predicate: p.x = q.x AND p.k = q.k, output: [p.x, p.k, p.v, q.w] }
+        ├─BatchExchange { order: [], dist: HashShard(p.x, p.k) }
+        │ └─BatchScan { table: p, columns: [p.x, p.k, p.v], distribution: UpstreamHashShard(p.k) }
+        └─BatchExchange { order: [], dist: HashShard(q.x, q.k) }
+          └─BatchScan { table: q, columns: [q.x, q.k, q.w], distribution: SomeShard }
+  stream_plan: |-
+    StreamMaterialize { columns: [x, k, v, sum], stream_key: [x, k], pk_columns: [x, k], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [p.x, p.k, internal_last_seen_value(p.v), sum(q.w)] }
+      └─StreamHashAgg { group_key: [p.x, p.k], aggs: [internal_last_seen_value(p.v), sum(q.w), count] }
+        └─StreamHashJoin { type: Inner, predicate: p.x = q.x AND p.k = q.k, output: [p.x, p.k, p.v, q.w, q._row_id] }
+          ├─StreamExchange { dist: HashShard(p.x, p.k) }
+          │ └─StreamTableScan { table: p, columns: [p.x, p.k, p.v], stream_scan_type: SnapshotBackfill, stream_key: [p.k], pk: [k], dist: UpstreamHashShard(p.k) }
+          └─StreamExchange { dist: HashShard(q.x, q.k) }
+            └─StreamTableScan { table: q, columns: [q.x, q.k, q.w, q._row_id], stream_scan_type: SnapshotBackfill, stream_key: [q._row_id], pk: [_row_id], dist: UpstreamHashShard(q._row_id) }
+- name: correlated sum over an unnested array - the join key is kept
+  before:
+  - setup_dist
+  sql: |
+    select *, (select sum(i) from (select unnest(xs) i, 1 c) Q where k = c) as sum_x from s;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: LeftOuter, predicate: s.xs IS NOT DISTINCT FROM internal_last_seen_value(s.xs) AND s.k IS NOT DISTINCT FROM s.k, output: [s.xs, s.ys, s.k, sum(Unnest($0))] }
+      ├─BatchExchange { order: [], dist: HashShard(s.xs, s.k) }
+      │ └─BatchScan { table: s, columns: [s.xs, s.ys, s.k], distribution: UpstreamHashShard(s.k) }
+      └─BatchHashAgg { group_key: [internal_last_seen_value(s.xs), s.k], aggs: [sum(Unnest($0))] }
+        └─BatchHashJoin { type: LeftOuter, predicate: internal_last_seen_value(s.xs) IS NOT DISTINCT FROM internal_last_seen_value(s.xs) AND s.k IS NOT DISTINCT FROM s.k, output: [internal_last_seen_value(s.xs), s.k, Unnest($0)] }
+          ├─BatchExchange { order: [], dist: HashShard(internal_last_seen_value(s.xs), s.k) }
+          │ └─BatchSortAgg { group_key: [s.k], aggs: [internal_last_seen_value(s.xs)] }
+          │   └─BatchScan { table: s, columns: [s.xs, s.k], distribution: UpstreamHashShard(s.k) }
+          └─BatchExchange { order: [], dist: HashShard(internal_last_seen_value(s.xs), s.k) }
+            └─BatchProject { exprs: [internal_last_seen_value(s.xs), s.k, Unnest($0)] }
+              └─BatchProjectSet { select_list: [$0, $1, Unnest($0)] }
+                └─BatchNestedLoopJoin { type: Inner, predicate: true, output: [internal_last_seen_value(s.xs), s.k] }
+                  ├─BatchExchange { order: [], dist: Single }
+                  │ └─BatchSortAgg { group_key: [s.k], aggs: [internal_last_seen_value(s.xs)] }
+                  │   └─BatchScan { table: s, columns: [s.xs, s.k], scan_ranges: [s.k = Int32(1)], distribution: UpstreamHashShard(s.k) }
+                  └─BatchValues { rows: [[]] }
+- name: a key determined by the distribution key of the table scanned is removed
+  before:
+  - setup_dist
+  sql: |
+    select k, x, count(*) from p group by k, x;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchSortAgg { group_key: [p.k], aggs: [internal_last_seen_value(p.x), count] }
+      └─BatchScan { table: p, columns: [p.x, p.k], distribution: UpstreamHashShard(p.k) }
+  stream_plan: |-
+    StreamMaterialize { columns: [k, x, count], stream_key: [k], pk_columns: [k], pk_conflict: NoCheck }
+    └─StreamHashAgg { group_key: [p.k], aggs: [internal_last_seen_value(p.x), count] }
+      └─StreamTableScan { table: p, columns: [p.x, p.k], stream_scan_type: SnapshotBackfill, stream_key: [p.k], pk: [k], dist: UpstreamHashShard(p.k) }
+- id: setup_sort
+  sql: |
+    set batch_reduce_group_keys = true;
+    create table f (d_id int, i_id int, w_id int, qty int);
+    create table item (i_id int primary key);
+    create table wh (w_id int primary key, w_name varchar);
+    create table dd (d_id int primary key, moy int, yr int);
+- name: self join of reduced aggregations with an order by
+  before:
+  - setup_sort
+  sql: |
+    with g as (
+      select w_name, wh.w_id, item.i_id, moy, stddev_samp(qty) sd, avg(qty) m
+      from f, item, wh, dd
+      where f.i_id = item.i_id and f.w_id = wh.w_id and f.d_id = dd.d_id and yr = 2001
+      group by w_name, wh.w_id, item.i_id, moy),
+    v as (select w_id, i_id, moy, m, case m when 0 then null else sd / m end cov from g
+      where case m when 0 then 0 else sd / m end > 1)
+    select v1.w_id, v1.i_id, v1.moy, v1.m, v1.cov, v2.moy, v2.m, v2.cov
+    from v v1, v v2 where v1.i_id = v2.i_id and v1.w_id = v2.w_id and v1.moy = 1 and v2.moy = 2
+    order by v1.w_id, v1.i_id, v1.moy, v1.m, v1.cov, v2.moy, v2.m, v2.cov;
+  batch_plan: |-
+    BatchExchange { order: [wh.w_id ASC, item.i_id ASC, internal_last_seen_value(dd.moy) ASC, $expr3 ASC, $expr7 ASC, internal_last_seen_value(dd.moy) ASC, $expr6 ASC, $expr8 ASC], dist: Single }
+    └─BatchSort { order: [wh.w_id ASC, item.i_id ASC, internal_last_seen_value(dd.moy) ASC, $expr3 ASC, $expr7 ASC, internal_last_seen_value(dd.moy) ASC, $expr6 ASC, $expr8 ASC] }
+      └─BatchProject { exprs: [wh.w_id, item.i_id, internal_last_seen_value(dd.moy), $expr3, Case(($expr3 = 0:Decimal), null:Decimal, ($expr2 / $expr3)) as $expr7, internal_last_seen_value(dd.moy), $expr6, Case(($expr6 = 0:Decimal), null:Decimal, ($expr5 / $expr6)) as $expr8] }
+        └─BatchSort { order: [wh.w_id ASC, item.i_id ASC, internal_last_seen_value(dd.moy) ASC, $expr3 ASC] }
+          └─BatchHashJoin { type: Inner, predicate: item.i_id = item.i_id AND wh.w_id = wh.w_id, output: all }
+            ├─BatchProject { exprs: [wh.w_id, item.i_id, internal_last_seen_value(dd.moy), Case((count(f.qty) <= 1:Int32), null:Decimal, Sqrt((Greatest((sum($expr1)::Decimal - ((sum(f.qty)::Decimal * sum(f.qty)::Decimal) / count(f.qty)::Decimal)), 0:Decimal) / (count(f.qty) - 1:Int32)::Decimal))) as $expr2, Case((count(f.qty) = 0:Int32), null:Decimal, (sum(f.qty)::Decimal / count(f.qty)::Decimal)) as $expr3] }
+            │ └─BatchFilter { predicate: (Case((Case((count(f.qty) = 0:Int32), null:Decimal, (sum(f.qty)::Decimal / count(f.qty)::Decimal)) = 0:Decimal), 0:Decimal, (Case((count(f.qty) <= 1:Int32), null:Decimal, Sqrt((Greatest((sum($expr1)::Decimal - ((sum(f.qty)::Decimal * sum(f.qty)::Decimal) / count(f.qty)::Decimal)), 0:Decimal) / (count(f.qty) - 1:Int32)::Decimal))) / Case((count(f.qty) = 0:Int32), null:Decimal, (sum(f.qty)::Decimal / count(f.qty)::Decimal)))) > 1:Decimal) }
+            │   └─BatchHashAgg { group_key: [wh.w_id, item.i_id], aggs: [internal_last_seen_value(dd.moy), sum($expr1), sum(f.qty), count(f.qty)] }
+            │     └─BatchExchange { order: [], dist: HashShard(wh.w_id, item.i_id) }
+            │       └─BatchProject { exprs: [wh.w_id, item.i_id, dd.moy, (f.qty * f.qty) as $expr1, f.qty] }
+            │         └─BatchLookupJoin { type: Inner, predicate: f.d_id = dd.d_id AND (dd.moy = 1:Int32) AND (dd.yr = 2001:Int32), output: [f.qty, item.i_id, wh.w_id, dd.moy], lookup table: dd }
+            │           └─BatchExchange { order: [], dist: UpstreamHashShard(f.d_id) }
+            │             └─BatchLookupJoin { type: Inner, predicate: f.w_id = wh.w_id, output: [f.d_id, f.qty, item.i_id, wh.w_id], lookup table: wh }
+            │               └─BatchExchange { order: [], dist: UpstreamHashShard(f.w_id) }
+            │                 └─BatchLookupJoin { type: Inner, predicate: f.i_id = item.i_id, output: [f.d_id, f.w_id, f.qty, item.i_id], lookup table: item }
+            │                   └─BatchExchange { order: [], dist: UpstreamHashShard(f.i_id) }
+            │                     └─BatchScan { table: f, columns: [f.d_id, f.i_id, f.w_id, f.qty], distribution: SomeShard }
+            └─BatchProject { exprs: [wh.w_id, item.i_id, internal_last_seen_value(dd.moy), Case((count(f.qty) <= 1:Int32), null:Decimal, Sqrt((Greatest((sum($expr4)::Decimal - ((sum(f.qty)::Decimal * sum(f.qty)::Decimal) / count(f.qty)::Decimal)), 0:Decimal) / (count(f.qty) - 1:Int32)::Decimal))) as $expr5, Case((count(f.qty) = 0:Int32), null:Decimal, (sum(f.qty)::Decimal / count(f.qty)::Decimal)) as $expr6] }
+              └─BatchFilter { predicate: (Case((Case((count(f.qty) = 0:Int32), null:Decimal, (sum(f.qty)::Decimal / count(f.qty)::Decimal)) = 0:Decimal), 0:Decimal, (Case((count(f.qty) <= 1:Int32), null:Decimal, Sqrt((Greatest((sum($expr4)::Decimal - ((sum(f.qty)::Decimal * sum(f.qty)::Decimal) / count(f.qty)::Decimal)), 0:Decimal) / (count(f.qty) - 1:Int32)::Decimal))) / Case((count(f.qty) = 0:Int32), null:Decimal, (sum(f.qty)::Decimal / count(f.qty)::Decimal)))) > 1:Decimal) }
+                └─BatchHashAgg { group_key: [wh.w_id, item.i_id], aggs: [internal_last_seen_value(dd.moy), sum($expr4), sum(f.qty), count(f.qty)] }
+                  └─BatchExchange { order: [], dist: HashShard(wh.w_id, item.i_id) }
+                    └─BatchProject { exprs: [wh.w_id, item.i_id, dd.moy, (f.qty * f.qty) as $expr4, f.qty] }
+                      └─BatchLookupJoin { type: Inner, predicate: f.d_id = dd.d_id AND (dd.moy = 2:Int32) AND (dd.yr = 2001:Int32), output: [f.qty, item.i_id, wh.w_id, dd.moy], lookup table: dd }
+                        └─BatchExchange { order: [], dist: UpstreamHashShard(f.d_id) }
+                          └─BatchLookupJoin { type: Inner, predicate: f.w_id = wh.w_id, output: [f.d_id, f.qty, item.i_id, wh.w_id], lookup table: wh }
+                            └─BatchExchange { order: [], dist: UpstreamHashShard(f.w_id) }
+                              └─BatchLookupJoin { type: Inner, predicate: f.i_id = item.i_id, output: [f.d_id, f.w_id, f.qty, item.i_id], lookup table: item }
+                                └─BatchExchange { order: [], dist: UpstreamHashShard(f.i_id) }
+                                  └─BatchScan { table: f, columns: [f.d_id, f.i_id, f.w_id, f.qty], distribution: SomeShard }

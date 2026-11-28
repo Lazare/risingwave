@@ -355,3 +355,135 @@
           │ └─BatchScan { table: t, columns: [t.a, t.b], distribution: SomeShard }
           └─BatchExchange { order: [], dist: Single }
             └─BatchScan { table: u, columns: [u.a, u.b], distribution: SomeShard }
+- name: except of constant rows only
+  before:
+  - setup
+  sql: |
+    select 1 except (select 2 except select 1);
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashAgg { group_key: [1:Int32], aggs: [] }
+      └─BatchHashJoin { type: LeftAnti, predicate: 1:Int32 IS NOT DISTINCT FROM 2:Int32, output: all }
+        ├─BatchExchange { order: [], dist: HashShard(1:Int32) }
+        │ └─BatchValues { rows: [[1:Int32]] }
+        └─BatchHashAgg { group_key: [2:Int32], aggs: [] }
+          └─BatchHashJoin { type: LeftAnti, predicate: 2:Int32 IS NOT DISTINCT FROM 1:Int32, output: all }
+            ├─BatchExchange { order: [], dist: HashShard(2:Int32) }
+            │ └─BatchValues { rows: [[2:Int32]] }
+            └─BatchExchange { order: [], dist: HashShard(1:Int32) }
+              └─BatchValues { rows: [[1:Int32]] }
+  stream_plan: |-
+    StreamMaterialize { columns: [?column?], stream_key: [?column?], pk_columns: [?column?], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [1:Int32], noop_update_hint: true }
+      └─StreamHashAgg { group_key: [1:Int32], aggs: [count] }
+        └─StreamHashJoin { type: LeftAnti, predicate: 1:Int32 IS NOT DISTINCT FROM 2:Int32, output: all }
+          ├─StreamExchange { dist: HashShard(1:Int32) }
+          │ └─StreamValues { rows: [[1:Int32, 0:Int64]] }
+          └─StreamProject { exprs: [2:Int32], noop_update_hint: true }
+            └─StreamHashAgg { group_key: [2:Int32], aggs: [count] }
+              └─StreamHashJoin { type: LeftAnti, predicate: 2:Int32 IS NOT DISTINCT FROM 1:Int32, output: all }
+                ├─StreamExchange { dist: HashShard(2:Int32) }
+                │ └─StreamValues { rows: [[2:Int32, 0:Int64]] }
+                └─StreamExchange { dist: HashShard(1:Int32) }
+                  └─StreamValues { rows: [[1:Int32, 0:Int64]] }
+- name: stacked intersect of constant rows only
+  before:
+  - setup
+  sql: |
+    select 1 intersect select 2 intersect select 3 intersect select 4 intersect select 5 intersect select 5;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashAgg { group_key: [1:Int32], aggs: [] }
+      └─BatchHashJoin { type: LeftSemi, predicate: 1:Int32 IS NOT DISTINCT FROM 5:Int32, output: all }
+        ├─BatchHashJoin { type: LeftSemi, predicate: 1:Int32 IS NOT DISTINCT FROM 5:Int32, output: all }
+        │ ├─BatchHashJoin { type: LeftSemi, predicate: 1:Int32 IS NOT DISTINCT FROM 4:Int32, output: all }
+        │ │ ├─BatchHashJoin { type: LeftSemi, predicate: 1:Int32 IS NOT DISTINCT FROM 3:Int32, output: all }
+        │ │ │ ├─BatchHashJoin { type: LeftSemi, predicate: 1:Int32 IS NOT DISTINCT FROM 2:Int32, output: all }
+        │ │ │ │ ├─BatchExchange { order: [], dist: HashShard(1:Int32) }
+        │ │ │ │ │ └─BatchValues { rows: [[1:Int32]] }
+        │ │ │ │ └─BatchExchange { order: [], dist: HashShard(2:Int32) }
+        │ │ │ │   └─BatchValues { rows: [[2:Int32]] }
+        │ │ │ └─BatchExchange { order: [], dist: HashShard(3:Int32) }
+        │ │ │   └─BatchValues { rows: [[3:Int32]] }
+        │ │ └─BatchExchange { order: [], dist: HashShard(4:Int32) }
+        │ │   └─BatchValues { rows: [[4:Int32]] }
+        │ └─BatchExchange { order: [], dist: HashShard(5:Int32) }
+        │   └─BatchValues { rows: [[5:Int32]] }
+        └─BatchExchange { order: [], dist: HashShard(5:Int32) }
+          └─BatchValues { rows: [[5:Int32]] }
+  stream_plan: |-
+    StreamMaterialize { columns: [?column?], stream_key: [?column?], pk_columns: [?column?], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [1:Int32], noop_update_hint: true }
+      └─StreamHashAgg { group_key: [1:Int32], aggs: [count] }
+        └─StreamHashJoin { type: LeftSemi, predicate: 1:Int32 IS NOT DISTINCT FROM 5:Int32, output: all }
+          ├─StreamHashJoin { type: LeftSemi, predicate: 1:Int32 IS NOT DISTINCT FROM 5:Int32, output: all }
+          │ ├─StreamHashJoin { type: LeftSemi, predicate: 1:Int32 IS NOT DISTINCT FROM 4:Int32, output: all }
+          │ │ ├─StreamHashJoin { type: LeftSemi, predicate: 1:Int32 IS NOT DISTINCT FROM 3:Int32, output: all }
+          │ │ │ ├─StreamHashJoin { type: LeftSemi, predicate: 1:Int32 IS NOT DISTINCT FROM 2:Int32, output: all }
+          │ │ │ │ ├─StreamExchange { dist: HashShard(1:Int32) }
+          │ │ │ │ │ └─StreamValues { rows: [[1:Int32, 0:Int64]] }
+          │ │ │ │ └─StreamExchange { dist: HashShard(2:Int32) }
+          │ │ │ │   └─StreamValues { rows: [[2:Int32, 0:Int64]] }
+          │ │ │ └─StreamExchange { dist: HashShard(3:Int32) }
+          │ │ │   └─StreamValues { rows: [[3:Int32, 0:Int64]] }
+          │ │ └─StreamExchange { dist: HashShard(4:Int32) }
+          │ │   └─StreamValues { rows: [[4:Int32, 0:Int64]] }
+          │ └─StreamExchange { dist: HashShard(5:Int32) }
+          │   └─StreamValues { rows: [[5:Int32, 0:Int64]] }
+          └─StreamExchange { dist: HashShard(5:Int32) }
+            └─StreamValues { rows: [[5:Int32, 0:Int64]] }
+- name: stacked except of constant rows only
+  before:
+  - setup
+  sql: |
+    select 1 except select 2 except select 3 except select 4 except select 5 except select 5;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashAgg { group_key: [1:Int32], aggs: [] }
+      └─BatchHashJoin { type: LeftAnti, predicate: 1:Int32 IS NOT DISTINCT FROM 5:Int32, output: all }
+        ├─BatchHashJoin { type: LeftAnti, predicate: 1:Int32 IS NOT DISTINCT FROM 5:Int32, output: all }
+        │ ├─BatchHashJoin { type: LeftAnti, predicate: 1:Int32 IS NOT DISTINCT FROM 4:Int32, output: all }
+        │ │ ├─BatchHashJoin { type: LeftAnti, predicate: 1:Int32 IS NOT DISTINCT FROM 3:Int32, output: all }
+        │ │ │ ├─BatchHashJoin { type: LeftAnti, predicate: 1:Int32 IS NOT DISTINCT FROM 2:Int32, output: all }
+        │ │ │ │ ├─BatchExchange { order: [], dist: HashShard(1:Int32) }
+        │ │ │ │ │ └─BatchValues { rows: [[1:Int32]] }
+        │ │ │ │ └─BatchExchange { order: [], dist: HashShard(2:Int32) }
+        │ │ │ │   └─BatchValues { rows: [[2:Int32]] }
+        │ │ │ └─BatchExchange { order: [], dist: HashShard(3:Int32) }
+        │ │ │   └─BatchValues { rows: [[3:Int32]] }
+        │ │ └─BatchExchange { order: [], dist: HashShard(4:Int32) }
+        │ │   └─BatchValues { rows: [[4:Int32]] }
+        │ └─BatchExchange { order: [], dist: HashShard(5:Int32) }
+        │   └─BatchValues { rows: [[5:Int32]] }
+        └─BatchExchange { order: [], dist: HashShard(5:Int32) }
+          └─BatchValues { rows: [[5:Int32]] }
+- name: except of a table and constant rows is rewritten
+  before:
+  - setup
+  sql: |
+    select a from t except select 1;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchProject { exprs: [t.a] }
+      └─BatchFilter { predicate: (count(1:Int32) > 0:Int64) AND (count(null:Int32) = 0:Int64) }
+        └─BatchHashAgg { group_key: [t.a], aggs: [count(1:Int32), count(null:Int32)] }
+          └─BatchExchange { order: [], dist: HashShard(t.a) }
+            └─BatchUnion { all: true }
+              ├─BatchExchange { order: [], dist: Single }
+              │ └─BatchProject { exprs: [t.a, 1:Int32, null:Int32] }
+              │   └─BatchScan { table: t, columns: [t.a], distribution: SomeShard }
+              └─BatchValues { rows: [[1:Int32, null:Int32, 1:Int32]] }
+  stream_plan: |-
+    StreamMaterialize { columns: [a], stream_key: [a], pk_columns: [a], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [t.a] }
+      └─StreamFilter { predicate: (count(1:Int32) > 0:Int64) AND (count(null:Int32) = 0:Int64) }
+        └─StreamProject { exprs: [t.a, count(1:Int32), count(null:Int32)] }
+          └─StreamHashAgg { group_key: [t.a], aggs: [count(1:Int32), count(null:Int32), count] }
+            └─StreamExchange { dist: HashShard(t.a) }
+              └─StreamUnion { all: true }
+                ├─StreamExchange { dist: HashShard(t.k, null:Int64, 0:Int32) }
+                │ └─StreamProject { exprs: [t.a, 1:Int32, null:Int32, t.k, null:Int64, 0:Int32] }
+                │   └─StreamTableScan { table: t, columns: [t.a, t.k], stream_scan_type: SnapshotBackfill, stream_key: [t.k], pk: [k], dist: UpstreamHashShard(t.k) }
+                └─StreamExchange { dist: HashShard(null:Int32, _row_id, 1:Int32) }
+                  └─StreamProject { exprs: [1:Int32, null:Int32, 1:Int32, null:Int32, _row_id, 1:Int32] }
+                    └─StreamValues { rows: [[1:Int32, 0:Int64]] }

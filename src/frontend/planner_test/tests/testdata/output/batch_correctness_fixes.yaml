@@ -761,3 +761,35 @@
           └─StreamHashAgg { group_key: [gb.x], aggs: [max(gb.y), count] }
             └─StreamExchange { dist: HashShard(gb.x) }
               └─StreamTableScan { table: gb, columns: [gb.x, gb.y, gb._row_id], stream_scan_type: SnapshotBackfill, stream_key: [gb._row_id], pk: [_row_id], dist: UpstreamHashShard(gb._row_id) }
+- id: mv_selection_setup
+  sql: |
+    create table mt (x int, y int);
+    create materialized view mt_rn as select x, y, row_number() over w from mt window w as (partition by y order by x);
+    create materialized view mt_xy as select x, y from mt where x > 0;
+    set enable_mv_selection = true;
+- name: mv selection - a hidden column before the over window column
+  before:
+  - mv_selection_setup
+  sql: |
+    select x, y, row_number() over w from mt window w as (partition by y order by x);
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchScan { table: mt_rn, columns: [mt_rn.x, mt_rn.y, mt_rn.row_number], distribution: UpstreamHashShard(mt_rn.y) }
+- name: mv selection - a filter over the selected view
+  before:
+  - mv_selection_setup
+  sql: |
+    select x, y from (select x, y, row_number() over w as rn from mt window w as (partition by y order by x)) where rn <= 3;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchProject { exprs: [mt_rn.x, mt_rn.y] }
+      └─BatchFilter { predicate: (mt_rn.row_number <= 3:Int32) }
+        └─BatchScan { table: mt_rn, columns: [mt_rn.x, mt_rn.y, mt_rn.row_number], distribution: UpstreamHashShard(mt_rn.y) }
+- name: mv selection - hidden row id after the visible columns (unchanged)
+  before:
+  - mv_selection_setup
+  sql: |
+    select x, y from mt where x > 0;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchScan { table: mt_xy, columns: [mt_xy.x, mt_xy.y], distribution: SomeShard }
