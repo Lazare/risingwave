@@ -159,18 +159,34 @@ impl SemiJoinDistinctRemoveRule {
 }
 
 /// The input of an aggregation without aggregate calls, projected on its group key (the same
-/// columns as the output of the aggregation), when the aggregation removes few duplicates.
+/// columns as the output of the aggregation), when the aggregation removes few duplicates. A
+/// projection of columns of the aggregation above it (a subquery that selects some of them) is
+/// kept as the projection of the corresponding group key columns: a semi or anti join only tests
+/// whether a row with these values exists.
 fn distinct_input(plan: &PlanRef) -> Option<PlanRef> {
-    let agg = plan.as_logical_agg()?;
+    let (agg_plan, columns) = match plan.as_logical_project() {
+        Some(project) => (project.input(), Some(project.try_as_projection()?)),
+        None => (plan.clone(), None),
+    };
+    let agg = agg_plan.as_logical_agg()?;
     if !agg.agg_calls().is_empty() || !agg.grouping_sets().is_empty() || agg.group_key().is_empty()
     {
         return None;
     }
     let input = agg.input();
-    let groups = estimated_rows(plan)?;
+    let groups = estimated_rows(&agg_plan)?;
     let rows = estimated_rows(&input)?;
     if groups < MIN_GROUP_RATIO_TO_REMOVE * rows {
         return None;
     }
-    Some(LogicalProject::with_out_col_idx(input, agg.group_key().indices()).into())
+    // The output columns of the aggregation are its group key columns.
+    let group_key: Vec<usize> = agg.group_key().indices().collect();
+    let columns = columns.unwrap_or_else(|| (0..group_key.len()).collect());
+    Some(
+        LogicalProject::with_out_col_idx(
+            input,
+            columns.into_iter().map(|column| group_key[column]),
+        )
+        .into(),
+    )
 }
