@@ -50,6 +50,7 @@ own rules.
 | SJ18 | Batch: `IS NOT NULL` on equi-join keys, on the sides whose unmatched rows are not output (`batch_join_keys_not_null`) | done (prototype, branch `proto/plan-reduction-batch-joins`, see "SJ" below) |
 | SJ15 | Batch: range form of `date_trunc`, `::date`, `extract(year ...)` compared with constants (`batch_date_range_predicates`) | done for `date`, `timestamp` and `timestamptz` in `UTC` (prototype, branch `proto/plan-reduction-batch-joins`, see "SJ" below); other time zones not done |
 | SJ14 | Batch: semi and anti joins pushed into an input of the inner joins or merged as an inner join on a unique side, by the costs of BJ (`batch_semi_join_ordering`) | first version (prototype, branch `proto/plan-reduction-batch-joins`, see "SJ" below); semi joins reading several inputs not done |
+| SJ16 | Batch: outer-join reordering with the identities of PostgreSQL | design only (see "SJ" below): too large and risky for this round |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -1578,6 +1579,42 @@ select ... where f.w in (select g.id from g where g.x = 1);
   duplicates and `NULL`s in the tested side, stacked semi and anti joins, `NOT IN`, aggregation
   above, after updates, deletes and with a side emptied; a pause after each change for the
   statistics).
+
+**16. Outer-join reordering: design only, not implemented.** After study, this one is too large
+and too risky for this round: it needs a new enumeration, and a wrong reordering of an outer join
+gives wrong results silently. What it would take:
+
+- The identities, from PostgreSQL's `optimizer/README` and `make_outerjoininfo`
+  (`initsplan.c`), with `Pab` a condition reading only `A` and `B`:
+  1. `(A ⟕ B on Pab) ⋈ C on Pac = (A ⋈ C on Pac) ⟕ B on Pab`: an inner join commutes with a left
+     join when its condition does not read the nullable side `B`;
+  2. `(A ⟕ B on Pab) ⟕ C on Pac = (A ⟕ C on Pac) ⟕ B on Pab`: two left joins from the same
+     preserved side commute;
+  3. `(A ⟕ B on Pab) ⟕ C on Pbc = A ⟕ (B ⟕ C on Pbc) on Pab` only if `Pbc` is strict in `B` (it is
+     not true when the columns of `B` are `NULL`, `Strong` of `plan_expr_visitor/strong.rs`); not
+     in the other direction without that proof;
+  4. semi and anti joins follow 1 and 2 with their left side as the preserved side; full joins
+     only commute with themselves (`A ⟗ B = B ⟗ A`) and associate only under strictness of both
+     conditions; never across an as-of join.
+  An inner join above a left join whose condition reads the nullable side is first reduced (the
+  outer join becomes inner when the condition is strict: the reduction of rule 3 of the survey,
+  owned by another branch), which is what makes identity 1 cover most real plans.
+- The enumeration: PostgreSQL keeps one `SpecialJoinInfo` per outer join, with its minimal left
+  and right sets (`min_lefthand`, `min_righthand`) widened by the conflicts the identities do not
+  allow, and `join_is_legal` accepts a pair of sets only when every special join is either fully
+  inside one of them or exactly matched by the pair. The fork's DP (`JoinGraph::dp`) would need:
+  the multi-join builder to absorb left joins as such special edges (today it stops at any
+  non-inner join), the legality test in `linked`, the right estimate for a left join (at least
+  the rows of the preserved side), and `JoinTree::build` to emit the right join type and
+  condition at the node that matches the special edge. Calcite's `DphypJoinReorderRule` uses
+  hyper-edges for the same purpose.
+- Gain: a large preserved side joined to dimensions by left joins and to a selective inner join
+  (identity 1 lets the inner join filter first); chains of left joins to dimensions reordered so
+  that a lookup or a small build side comes first. Batch only (streaming plans are frozen and
+  have no statistics).
+- Tests it would need: the differential test of every identity with `NULL`s on each side, rows
+  without match, duplicates, and conditions that are strict and not strict in the nullable side,
+  before any use on real queries.
 
 ## Not for now: sharing between materialized views
 
