@@ -416,12 +416,14 @@ an aggregate whose value over an empty input is not listed, laterals without a t
 returning function of the outer row only, which needs an outer `ProjectSet` RisingWave does not
 have). Batch plans do not change.
 
-Found on the way, not changed: in the existing rule, `WHERE EXISTS (SELECT min(x) FROM r WHERE
-r.k = t.k)`, which is always true (an aggregation without group key returns one row), is planned
-as a semi join on `r.k = t.k`, and `NOT EXISTS` of the same as an anti join: the semi join
-drops the rows of `t` without a match where the query keeps every row, the anti join keeps them
-where the query returns none (seen in streaming plans, batch not checked). The rule checks the null-rejection of a filter above the apply but not the join
-type of the apply.
+Found on the way, fixed since (port of the upstream fix, see
+`docs/fork/corrections/exists-scalar-aggregate.md`): in the existing rule, `WHERE EXISTS (SELECT
+min(x) FROM r WHERE r.k = t.k)`, which is always true (an aggregation without group key returns
+one row), was planned as a semi join on `r.k = t.k`, and `NOT EXISTS` of the same as an anti
+join: the semi join dropped the rows of `t` without a match where the query keeps every row, the
+anti join kept them where the query returns none. The rule checked the null-rejection of a filter
+above the apply but not the join type of the apply; for a semi or anti apply it now requires the
+condition of the apply to reject the row of NULLs of an empty input.
 
 ### US. Branches of a `UNION ALL` that read the same table (added on 2026-11-25, done on the branch)
 
