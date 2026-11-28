@@ -1,0 +1,83 @@
+# Corrections of wrong results of the optimizer (see `docs/fork/corrections/`). Each section
+# shows the corrected plans and the plans that must not change.
+
+# Predicates derived through the equalities of a join (`derive_predicate_from_eq_condition`).
+# Only predicates that give the same result on two equal values are derived: equal values of
+# `numeric`, floats and `interval` can differ (`1.0 = 1.00`, `-0.0 = 0.0`,
+# `'1 day' = '24 hours'`).
+- id: derive_setup
+  sql: |
+    create table dn (id int primary key, k numeric, i int, s varchar, ts timestamp);
+    create table dm (id int primary key, k numeric, i int, s varchar, ts timestamp);
+    create table df (id int primary key, f float8, r real);
+    create table dg (id int primary key, f float8, r real);
+    create table di (id int primary key, iv interval);
+    create table dj (id int primary key, iv interval);
+  expected_outputs: []
+- name: derive - numeric key, predicate on the text of the value is not derived
+  before: [derive_setup]
+  sql: |
+    select dn.id, dm.id from dn join dm on dn.k = dm.k where dn.k::varchar = '1.0';
+  expected_outputs:
+  - batch_plan
+- name: derive - numeric key, comparison with a constant is derived
+  before: [derive_setup]
+  sql: |
+    select dn.id, dm.id from dn join dm on dn.k = dm.k where dn.k > 1.5 and dn.k in (2, 3.5);
+  expected_outputs:
+  - batch_plan
+- name: derive - numeric key, arithmetic is not derived
+  before: [derive_setup]
+  sql: |
+    select dn.id, dm.id from dn join dm on dn.k = dm.k where dn.k * 2 > 3;
+  expected_outputs:
+  - batch_plan
+- name: derive - numeric key, null test is derived to the inner side of a left join
+  before: [derive_setup]
+  sql: |
+    select dn.id, dm.id from dn left join dm on dn.k = dm.k where dn.k is not null;
+  expected_outputs:
+  - batch_plan
+- name: derive - float key, predicate on the text of the value is not derived
+  before: [derive_setup]
+  sql: |
+    select df.id, dg.id from df join dg on df.f = dg.f where df.f::varchar = '-0';
+  expected_outputs:
+  - batch_plan
+- name: derive - float key, comparison with a constant is derived
+  before: [derive_setup]
+  sql: |
+    select df.id, dg.id from df join dg on df.r = dg.r where df.r between 1 and 2;
+  expected_outputs:
+  - batch_plan
+- name: derive - interval key, extracted field is not derived
+  before: [derive_setup]
+  sql: |
+    select di.id, dj.id from di join dj on di.iv = dj.iv where extract(hour from di.iv) = 24;
+  expected_outputs:
+  - batch_plan
+- name: derive - interval key, comparison with a constant is derived
+  before: [derive_setup]
+  sql: |
+    select di.id, dj.id from di join dj on di.iv = dj.iv where di.iv >= interval '1 day';
+  expected_outputs:
+  - batch_plan
+- name: derive - integer, varchar and timestamp keys, any predicate is derived
+  before: [derive_setup]
+  sql: |
+    select dn.id, dm.id from dn join dm on dn.i = dm.i and dn.s = dm.s and dn.ts = dm.ts
+    where dn.i::varchar = '7' and lower(dn.s) like 'a%' and extract(hour from dn.ts) = 3;
+  expected_outputs:
+  - batch_plan
+- name: derive - mixed predicate on an integer and a numeric key is not derived
+  before: [derive_setup]
+  sql: |
+    select dn.id, dm.id from dn join dm on dn.i = dm.i and dn.k = dm.k where dn.i + dn.k > 3;
+  expected_outputs:
+  - batch_plan
+- name: derive - numeric key, streaming plan does not derive the text predicate
+  before: [derive_setup]
+  sql: |
+    select dn.id, dm.id as mid from dn join dm on dn.k = dm.k where dn.k::varchar = '1.0';
+  expected_outputs:
+  - stream_plan
