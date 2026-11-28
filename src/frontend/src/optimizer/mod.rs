@@ -27,6 +27,8 @@ pub mod property;
 
 // Batch spool (`batch_share_identical_subplans`).
 mod batch_share_subplans;
+// Batch scans whose order no operator uses (`batch_scan_max_open_vnode_iterators`).
+mod batch_scan_order;
 mod delta_join_solver;
 mod heuristic_optimizer;
 mod plan_rewriter;
@@ -618,6 +620,20 @@ impl BatchPlanRoot {
             plan
         };
 
+        // `batch_scan_max_open_vnode_iterators`: the scans whose order no operator uses may read
+        // their vnodes in any order, a few at a time.
+        let plan = if plan
+            .ctx()
+            .session_ctx()
+            .config()
+            .batch_scan_max_open_vnode_iterators()
+            > 0
+        {
+            batch_scan_order::mark_scans_with_unused_order(plan)
+        } else {
+            plan
+        };
+
         Ok(plan)
     }
 
@@ -667,6 +683,20 @@ impl BatchPlanRoot {
             .batch_share_identical_subplans()
         {
             batch_share_subplans::share_identical_batch_subplans(plan)
+        } else {
+            plan
+        };
+
+        // `batch_scan_max_open_vnode_iterators`: the scans whose order no operator uses may read
+        // their vnodes in any order, a few at a time.
+        let plan = if plan
+            .ctx()
+            .session_ctx()
+            .config()
+            .batch_scan_max_open_vnode_iterators()
+            > 0
+        {
+            batch_scan_order::mark_scans_with_unused_order(plan)
         } else {
             plan
         };

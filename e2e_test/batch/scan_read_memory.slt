@@ -57,6 +57,11 @@ SELECT id FROM srm_t ORDER BY id LIMIT 3;
 2
 3
 
+query II
+SELECT count(*), sum(c) FROM (SELECT id, count(*) c FROM srm_t GROUP BY id) s;
+----
+30000 30000
+
 # distributed: one vnode iterator at a time.
 statement ok
 SET batch_scan_max_open_vnode_iterators = 0;
@@ -94,6 +99,11 @@ SELECT id FROM srm_t ORDER BY id LIMIT 3;
 1
 2
 3
+
+query II
+SELECT count(*), sum(c) FROM (SELECT id, count(*) c FROM srm_t GROUP BY id) s;
+----
+30000 30000
 
 # distributed: eight vnode iterators at a time.
 statement ok
@@ -133,6 +143,11 @@ SELECT id FROM srm_t ORDER BY id LIMIT 3;
 2
 3
 
+query II
+SELECT count(*), sum(c) FROM (SELECT id, count(*) c FROM srm_t GROUP BY id) s;
+----
+30000 30000
+
 # distributed: a prefetch budget of 1 MB per scan.
 statement ok
 SET batch_scan_max_open_vnode_iterators = 0;
@@ -170,6 +185,11 @@ SELECT id FROM srm_t ORDER BY id LIMIT 3;
 1
 2
 3
+
+query II
+SELECT count(*), sum(c) FROM (SELECT id, count(*) c FROM srm_t GROUP BY id) s;
+----
+30000 30000
 
 # distributed: no prefetch beyond the limit of the query.
 statement ok
@@ -209,6 +229,11 @@ SELECT id FROM srm_t ORDER BY id LIMIT 3;
 2
 3
 
+query II
+SELECT count(*), sum(c) FROM (SELECT id, count(*) c FROM srm_t GROUP BY id) s;
+----
+30000 30000
+
 # distributed: prefetched blocks dropped after 1 ms of held back output.
 statement ok
 SET batch_scan_max_open_vnode_iterators = 0;
@@ -246,6 +271,11 @@ SELECT id FROM srm_t ORDER BY id LIMIT 3;
 1
 2
 3
+
+query II
+SELECT count(*), sum(c) FROM (SELECT id, count(*) c FROM srm_t GROUP BY id) s;
+----
+30000 30000
 
 # distributed: all together.
 statement ok
@@ -294,6 +324,11 @@ SELECT id FROM srm_t ORDER BY id LIMIT 3;
 2
 3
 
+query II
+SELECT count(*), sum(c) FROM (SELECT id, count(*) c FROM srm_t GROUP BY id) s;
+----
+30000 30000
+
 statement ok
 SET QUERY_MODE TO local;
 
@@ -331,6 +366,11 @@ SELECT id FROM srm_t ORDER BY id LIMIT 3;
 1
 2
 3
+
+query II
+SELECT count(*), sum(c) FROM (SELECT id, count(*) c FROM srm_t GROUP BY id) s;
+----
+30000 30000
 
 # local: one vnode iterator at a time.
 statement ok
@@ -370,6 +410,11 @@ SELECT id FROM srm_t ORDER BY id LIMIT 3;
 2
 3
 
+query II
+SELECT count(*), sum(c) FROM (SELECT id, count(*) c FROM srm_t GROUP BY id) s;
+----
+30000 30000
+
 # local: eight vnode iterators at a time.
 statement ok
 SET batch_scan_max_open_vnode_iterators = 0;
@@ -407,6 +452,11 @@ SELECT id FROM srm_t ORDER BY id LIMIT 3;
 1
 2
 3
+
+query II
+SELECT count(*), sum(c) FROM (SELECT id, count(*) c FROM srm_t GROUP BY id) s;
+----
+30000 30000
 
 # local: a prefetch budget of 1 MB per scan.
 statement ok
@@ -446,6 +496,11 @@ SELECT id FROM srm_t ORDER BY id LIMIT 3;
 2
 3
 
+query II
+SELECT count(*), sum(c) FROM (SELECT id, count(*) c FROM srm_t GROUP BY id) s;
+----
+30000 30000
+
 # local: no prefetch beyond the limit of the query.
 statement ok
 SET batch_scan_max_open_vnode_iterators = 0;
@@ -484,6 +539,11 @@ SELECT id FROM srm_t ORDER BY id LIMIT 3;
 2
 3
 
+query II
+SELECT count(*), sum(c) FROM (SELECT id, count(*) c FROM srm_t GROUP BY id) s;
+----
+30000 30000
+
 # local: prefetched blocks dropped after 1 ms of held back output.
 statement ok
 SET batch_scan_max_open_vnode_iterators = 0;
@@ -521,6 +581,11 @@ SELECT id FROM srm_t ORDER BY id LIMIT 3;
 1
 2
 3
+
+query II
+SELECT count(*), sum(c) FROM (SELECT id, count(*) c FROM srm_t GROUP BY id) s;
+----
+30000 30000
 
 # local: all together.
 statement ok
@@ -568,6 +633,11 @@ SELECT id FROM srm_t ORDER BY id LIMIT 3;
 1
 2
 3
+
+query II
+SELECT count(*), sum(c) FROM (SELECT id, count(*) c FROM srm_t GROUP BY id) s;
+----
+30000 30000
 
 statement ok
 SET batch_scan_max_open_vnode_iterators = 0;
@@ -632,6 +702,11 @@ SELECT id FROM srm_t ORDER BY id LIMIT 3;
 2
 3
 
+query II
+SELECT count(*), sum(c) FROM (SELECT id, count(*) c FROM srm_t GROUP BY id) s;
+----
+24000 24000
+
 # distributed: one vnode iterator at a time.
 statement ok
 SET batch_scan_max_open_vnode_iterators = 0;
@@ -669,6 +744,11 @@ SELECT id FROM srm_t ORDER BY id LIMIT 3;
 1
 2
 3
+
+query II
+SELECT count(*), sum(c) FROM (SELECT id, count(*) c FROM srm_t GROUP BY id) s;
+----
+24000 24000
 
 # distributed: eight vnode iterators at a time.
 statement ok
@@ -708,6 +788,11 @@ SELECT id FROM srm_t ORDER BY id LIMIT 3;
 2
 3
 
+query II
+SELECT count(*), sum(c) FROM (SELECT id, count(*) c FROM srm_t GROUP BY id) s;
+----
+24000 24000
+
 # distributed: a prefetch budget of 1 MB per scan.
 statement ok
 SET batch_scan_max_open_vnode_iterators = 0;
@@ -745,6 +830,11 @@ SELECT id FROM srm_t ORDER BY id LIMIT 3;
 1
 2
 3
+
+query II
+SELECT count(*), sum(c) FROM (SELECT id, count(*) c FROM srm_t GROUP BY id) s;
+----
+24000 24000
 
 # distributed: no prefetch beyond the limit of the query.
 statement ok
@@ -784,6 +874,11 @@ SELECT id FROM srm_t ORDER BY id LIMIT 3;
 2
 3
 
+query II
+SELECT count(*), sum(c) FROM (SELECT id, count(*) c FROM srm_t GROUP BY id) s;
+----
+24000 24000
+
 # distributed: prefetched blocks dropped after 1 ms of held back output.
 statement ok
 SET batch_scan_max_open_vnode_iterators = 0;
@@ -821,6 +916,11 @@ SELECT id FROM srm_t ORDER BY id LIMIT 3;
 1
 2
 3
+
+query II
+SELECT count(*), sum(c) FROM (SELECT id, count(*) c FROM srm_t GROUP BY id) s;
+----
+24000 24000
 
 # distributed: all together.
 statement ok
@@ -869,6 +969,11 @@ SELECT id FROM srm_t ORDER BY id LIMIT 3;
 2
 3
 
+query II
+SELECT count(*), sum(c) FROM (SELECT id, count(*) c FROM srm_t GROUP BY id) s;
+----
+24000 24000
+
 statement ok
 SET QUERY_MODE TO local;
 
@@ -906,6 +1011,11 @@ SELECT id FROM srm_t ORDER BY id LIMIT 3;
 1
 2
 3
+
+query II
+SELECT count(*), sum(c) FROM (SELECT id, count(*) c FROM srm_t GROUP BY id) s;
+----
+24000 24000
 
 # local: one vnode iterator at a time.
 statement ok
@@ -945,6 +1055,11 @@ SELECT id FROM srm_t ORDER BY id LIMIT 3;
 2
 3
 
+query II
+SELECT count(*), sum(c) FROM (SELECT id, count(*) c FROM srm_t GROUP BY id) s;
+----
+24000 24000
+
 # local: eight vnode iterators at a time.
 statement ok
 SET batch_scan_max_open_vnode_iterators = 0;
@@ -982,6 +1097,11 @@ SELECT id FROM srm_t ORDER BY id LIMIT 3;
 1
 2
 3
+
+query II
+SELECT count(*), sum(c) FROM (SELECT id, count(*) c FROM srm_t GROUP BY id) s;
+----
+24000 24000
 
 # local: a prefetch budget of 1 MB per scan.
 statement ok
@@ -1021,6 +1141,11 @@ SELECT id FROM srm_t ORDER BY id LIMIT 3;
 2
 3
 
+query II
+SELECT count(*), sum(c) FROM (SELECT id, count(*) c FROM srm_t GROUP BY id) s;
+----
+24000 24000
+
 # local: no prefetch beyond the limit of the query.
 statement ok
 SET batch_scan_max_open_vnode_iterators = 0;
@@ -1059,6 +1184,11 @@ SELECT id FROM srm_t ORDER BY id LIMIT 3;
 2
 3
 
+query II
+SELECT count(*), sum(c) FROM (SELECT id, count(*) c FROM srm_t GROUP BY id) s;
+----
+24000 24000
+
 # local: prefetched blocks dropped after 1 ms of held back output.
 statement ok
 SET batch_scan_max_open_vnode_iterators = 0;
@@ -1096,6 +1226,11 @@ SELECT id FROM srm_t ORDER BY id LIMIT 3;
 1
 2
 3
+
+query II
+SELECT count(*), sum(c) FROM (SELECT id, count(*) c FROM srm_t GROUP BY id) s;
+----
+24000 24000
 
 # local: all together.
 statement ok
@@ -1143,6 +1278,11 @@ SELECT id FROM srm_t ORDER BY id LIMIT 3;
 1
 2
 3
+
+query II
+SELECT count(*), sum(c) FROM (SELECT id, count(*) c FROM srm_t GROUP BY id) s;
+----
+24000 24000
 
 statement ok
 SET batch_scan_max_open_vnode_iterators = 0;

@@ -62,7 +62,8 @@ pub struct RowSeqScanExecutor<S: StateStore> {
 /// The least peak of the blocks held by a scan for which the scan is reported in the logs.
 const SCAN_MEMORY_REPORT_BYTES: usize = 8 << 20;
 
-/// Reports the memory of the storage reads of a scan when it ends, if it held enough.
+/// Reports the memory of the storage reads of a scan when it ends, if it held enough or if one of
+/// the scan variables is set.
 struct ScanMemoryReport {
     identity: String,
     memory: ScanReadMemory,
@@ -71,7 +72,9 @@ struct ScanMemoryReport {
 impl Drop for ScanMemoryReport {
     fn drop(&mut self) {
         let memory = &self.memory;
-        if memory.peak_bytes() >= SCAN_MEMORY_REPORT_BYTES {
+        if memory.peak_bytes() >= SCAN_MEMORY_REPORT_BYTES
+            || *memory.settings() != ScanReadSettings::default()
+        {
             tracing::info!(
                 identity = %self.identity,
                 peak_bytes = memory.peak_bytes(),

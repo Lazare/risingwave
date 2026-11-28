@@ -267,9 +267,9 @@ evicted from the block cache while an iterator holds them were counted nowhere.
   iterators (streaming and batch) and by the disk cache writer that the block cache no longer
   counts. Blocks that nobody holds are dropped right after their eviction and leave the count at
   once.
-- A scan that held at least 8 MB of blocks at its peak writes one INFO line when it ends
-  (`batch scan storage reads`: peak, held, prefetches given up, prefetched bytes released, the
-  evicted-held gauge, its settings).
+- A scan that held at least 8 MB of blocks at its peak, or that has one of the variables below
+  set, writes one INFO line when it ends (`batch scan storage reads`: peak, held, prefetches
+  given up, prefetched bytes released, the evicted-held gauge, its settings).
 
 **What the scan can do about it (session variables, all off by default).** They travel in
 `RowSeqScanNode` (fields 8 to 11), so they apply in the local and in the distributed mode.
@@ -293,6 +293,18 @@ evicted from the block cache while an iterator holds them were counted nowhere.
   (`try_flatten_unordered`), the next one when one is exhausted. The blocks of a scan are then
   bounded by the bound times the levels times (1 + 16) blocks, instead of 256 times. Ordered
   scans still merge all their vnodes.
+
+  A scan of a whole table reports the order of its primary key (`BatchSeqScan`: no scan range,
+  or one), and is then sent as `ordered`: it merges all its vnodes, all open at once, even when
+  nothing above uses the order. The first measurement on CI showed it: every full scan of the
+  test was ordered and the bound changed nothing. So with the variable set, the frontend also
+  marks the scans whose order no operator uses (`optimizer/batch_scan_order.rs`, last step of
+  the batch plan, local and distributed): a scan is marked when every path from the root to it
+  goes through a hash join, a union, a hash or simple aggregation without `ORDER BY` in its calls, a sort,
+  a top-n or an exchange that does not merge sorted inputs, with only projections and filters in
+  between; every other operator (limit, sort aggregation, merge-sort exchange, window functions,
+  lookup join...) is assumed to use the order of its input. A marked scan is sent unordered: it
+  reads its vnodes in any order (a few at a time with the bound), without the merge.
 
 **Costs and risks.**
 

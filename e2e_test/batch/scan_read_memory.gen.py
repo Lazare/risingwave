@@ -69,6 +69,9 @@ def queries(rows):
          'II', c),
         # An ordered scan keeps the order of the table whatever the variables.
         (f"SELECT id FROM {T} ORDER BY id LIMIT 3;", 'I', d),
+        # A grouping on the primary key may use the order of the scan (sort aggregation).
+        (f"SELECT count(*), sum(c) FROM (SELECT id, count(*) c FROM {T} GROUP BY id) s;",
+         'II', [(len(ids), len(ids))]),
     ]
 
 

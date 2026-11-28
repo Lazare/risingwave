@@ -254,11 +254,14 @@ impl Drop for ScanReadCharge {
     }
 }
 
+/// A prefetch stream and the charge of its blocks.
+pub type ChargedPrefetch = (Box<dyn BlockStream>, Option<ScanReadCharge>);
+
 /// The prefetched blocks of an SST iterator while it is not using them, so that they can be
 /// dropped while the output of the task is held back. The iterator takes them back when it reads.
 #[derive(Default)]
 pub struct PrefetchSlot {
-    stream: Mutex<Option<(Box<dyn BlockStream>, Option<ScanReadCharge>)>>,
+    stream: Mutex<Option<ChargedPrefetch>>,
 }
 
 impl PrefetchSlot {
@@ -266,7 +269,7 @@ impl PrefetchSlot {
         *self.stream.lock() = Some((stream, charge));
     }
 
-    pub fn take(&self) -> Option<(Box<dyn BlockStream>, Option<ScanReadCharge>)> {
+    pub fn take(&self) -> Option<ChargedPrefetch> {
         self.stream.lock().take()
     }
 

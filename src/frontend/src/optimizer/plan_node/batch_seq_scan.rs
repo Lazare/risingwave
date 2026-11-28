@@ -40,6 +40,9 @@ pub struct BatchSeqScan {
     /// The relation of the logical scan it comes from, for the cardinality feedback learning
     /// (`optimizer::cardinality_learning`).
     learning_leaf: Option<LearningLeaf>,
+    /// No operator uses the order of the scan (`optimizer::batch_scan_order`): it may read its
+    /// vnodes in any order.
+    order_unused: bool,
 }
 
 /// The relation of the logical scan that a [`BatchSeqScan`] comes from, for the cardinality
@@ -110,7 +113,18 @@ impl BatchSeqScan {
             limit,
             as_of,
             learning_leaf: None,
+            order_unused: false,
         }
+    }
+
+    /// No operator uses the order of the scan: it may read its vnodes in any order.
+    pub fn with_order_unused(mut self) -> Self {
+        self.order_unused = true;
+        self
+    }
+
+    pub fn order_unused(&self) -> bool {
+        self.order_unused
     }
 
     /// The same scan, from the logical scan described by `leaf`.
@@ -242,7 +256,7 @@ impl TryToBatchPb for BatchSeqScan {
             scan_ranges: self.scan_ranges.iter().map(|r| r.to_protobuf()).collect(),
             // To be filled by the scheduler.
             vnode_bitmap: None,
-            ordered: !self.order().is_any(),
+            ordered: !self.order().is_any() && !self.order_unused,
             limit: *self.limit(),
             query_epoch: to_batch_query_epoch(&self.as_of)?,
             // Memory of the storage reads of the scan.
