@@ -233,7 +233,7 @@ impl<St: ChangeLogRowStream> Stream for VnodeStream<St> {
                         ChangeLogRow::Update {
                             new_value,
                             old_value,
-                        } if new_value == old_value => {
+                        } if risingwave_common::row::identical(&new_value, &old_value) => {
                             ready!(pin!(consume_budget()).poll(cx));
                             continue;
                         }

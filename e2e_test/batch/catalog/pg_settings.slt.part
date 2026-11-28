@@ -101,6 +101,7 @@ user streaming_cache_refill_policy
 user streaming_enable_bushy_join
 user streaming_enable_delta_join
 user streaming_enable_unaligned_join
+user streaming_exact_not_in_without_equality
 user streaming_factor_union_join
 user streaming_force_filter_inside_join
 user streaming_join_encoding

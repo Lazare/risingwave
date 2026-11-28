@@ -23,6 +23,7 @@ use itertools::Itertools;
 use self::empty::EMPTY;
 use crate::hash::HashCode;
 use crate::types::{DatumRef, ToDatumRef, ToOwnedDatum, ToText, hash_datum};
+use crate::util::iter_util::ZipEqDebug;
 use crate::util::row_serde::OrderedRowSerde;
 use crate::util::value_encoding;
 
@@ -476,3 +477,76 @@ pub use owned_row::{OwnedRow, RowDeserializer};
 pub use project::Project;
 pub use repeat_n::{RepeatN, repeat_n};
 pub use slice::Slice;
+
+/// Whether two rows hold the same values with the same representation, so that no expression can
+/// tell them apart. Stronger than [`Row::eq`], which follows the SQL equality: `1.0` and `1.00`
+/// (`numeric`), `0` and `-0` (floats), `'1 day'` and `'24 hours'` (`interval`) are equal but not
+/// identical. An update from one to the other is not a no-op.
+pub fn identical(this: impl Row, other: impl Row) -> bool {
+    this.len() == other.len()
+        && this
+            .iter()
+            .zip_eq_debug(other.iter())
+            .all(|(a, b)| datum_identical(a, b))
+}
+
+/// Whether two datums hold the same value with the same representation, see [`identical`].
+pub fn datum_identical(a: DatumRef<'_>, b: DatumRef<'_>) -> bool {
+    use crate::types::ScalarRefImpl;
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => {
+            a == b
+                && match a {
+                    // Equal values of these types have a single representation.
+                    ScalarRefImpl::Int16(_)
+                    | ScalarRefImpl::Int32(_)
+                    | ScalarRefImpl::Int64(_)
+                    | ScalarRefImpl::Int256(_)
+                    | ScalarRefImpl::Serial(_)
+                    | ScalarRefImpl::Bool(_)
+                    | ScalarRefImpl::Utf8(_)
+                    | ScalarRefImpl::Bytea(_)
+                    | ScalarRefImpl::Date(_)
+                    | ScalarRefImpl::Time(_)
+                    | ScalarRefImpl::Timestamp(_)
+                    | ScalarRefImpl::Timestamptz(_) => true,
+                    // The others may differ in their text while equal.
+                    _ => a.to_text() == b.to_text(),
+                }
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod identical_tests {
+    use super::*;
+    use crate::types::{Decimal, Interval, ScalarImpl};
+
+    #[test]
+    fn test_identical() {
+        let row = |datum: ScalarImpl| OwnedRow::new(vec![Some(ScalarImpl::Int32(1)), Some(datum)]);
+        let one_0: Decimal = "1.0".parse().unwrap();
+        let one_00: Decimal = "1.00".parse().unwrap();
+        assert!(Row::eq(&row(one_0.into()), &row(one_00.into())));
+        assert!(!identical(&row(one_0.into()), &row(one_00.into())));
+        assert!(identical(&row(one_0.into()), &row(one_0.into())));
+
+        let zero = ScalarImpl::from(0.0f64);
+        let neg_zero = ScalarImpl::from(-0.0f64);
+        assert!(!identical(&row(zero.clone()), &row(neg_zero)));
+        assert!(identical(&row(zero.clone()), &row(zero)));
+
+        let day = ScalarImpl::Interval(Interval::from_month_day_usec(0, 1, 0));
+        let hours =
+            ScalarImpl::Interval(Interval::from_month_day_usec(0, 0, 24 * 3600 * 1_000_000));
+        assert!(!identical(&row(day.clone()), &row(hours)));
+        assert!(identical(&row(day.clone()), &row(day)));
+
+        assert!(!identical(
+            &OwnedRow::new(vec![None]),
+            &OwnedRow::new(vec![Some(ScalarImpl::Int32(1))])
+        ));
+    }
+}

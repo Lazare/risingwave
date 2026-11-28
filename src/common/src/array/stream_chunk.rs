@@ -327,7 +327,8 @@ impl StreamChunk {
         }
     }
 
-    /// Remove the adjacent delete-insert and insert-deletes if their row value are the same.
+    /// Remove the adjacent delete-insert and insert-deletes if their row value are the same
+    /// (identical, see [`crate::row::identical`]).
     pub fn eliminate_adjacent_noop_update(self) -> Self {
         let len = self.data_chunk().capacity();
         let mut c: StreamChunkMut = self.into();
@@ -357,7 +358,9 @@ impl StreamChunk {
                     (matches!(c.op(prev), Op::UpdateInsert | Op::Insert)
                     && matches!(c.op(curr), Op::UpdateDelete | Op::Delete))
                 )
-                && c.row_ref(prev) == c.row_ref(curr)
+                // Identical, not only equal: an update from `1.0` to `1.00` (`numeric`) is not a
+                // no-op, the downstream must see the new value.
+                && crate::row::identical(c.row_ref(prev), c.row_ref(curr))
             {
                 c.set_vis(prev, false);
                 c.set_vis(curr, false);

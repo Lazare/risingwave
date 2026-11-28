@@ -24,21 +24,22 @@ use risingwave_expr::ExprError;
 use risingwave_pb::plan_common::JoinType;
 
 use crate::OptimizerContextRef;
-use crate::binder::{BoundDistinct, BoundSelect};
+use crate::binder::{BoundDistinct, BoundQuery, BoundSelect};
 use crate::error::{ErrorCode, Result};
 use crate::expr::{
     CorrelatedId, Expr, ExprImpl, ExprRewriter, ExprType, FunctionCall, InputRef, Subquery,
     SubqueryKind,
 };
+use crate::optimizer::is_never_null;
 pub use crate::optimizer::plan_node::LogicalFilter;
 use crate::optimizer::plan_node::generic::{Agg, GenericPlanRef, Project, ProjectBuilder};
 use crate::optimizer::plan_node::{
     LogicalAgg, LogicalApply, LogicalDedup, LogicalJoin, LogicalOverWindow,
     LogicalPlanRef as PlanRef, LogicalProject, LogicalProjectSet, LogicalTopN, LogicalValues,
-    PlanAggCall,
+    PlanAggCall, PlanTreeNodeUnary,
 };
 use crate::optimizer::property::Order;
-use crate::planner::Planner;
+use crate::planner::{PlanFor, Planner};
 use crate::utils::{Condition, IndexSet};
 
 impl Planner {
@@ -265,16 +266,20 @@ impl Planner {
                 .next_tuple()
                 .unwrap();
 
+        // The plan before the subqueries, whose columns the semi and anti joins below keep: what
+        // is known about the nullability of its columns holds on them.
+        let outer = input.clone();
+
         // EXISTS and IN in WHERE.
         for expr in subquery_conjunctions {
-            self.handle_exists_and_in(expr, false, &mut input)?;
+            self.handle_exists_and_in(expr, false, &mut input, &outer)?;
         }
 
         // NOT EXISTS and NOT IN in WHERE.
         for expr in not_subquery_conjunctions {
             let not = expr.into_function_call().unwrap();
             let (_, expr) = not.decompose_as_unary();
-            self.handle_exists_and_in(expr, true, &mut input)?;
+            self.handle_exists_and_in(expr, true, &mut input, &outer)?;
         }
 
         if others.always_true() {
@@ -294,12 +299,16 @@ impl Planner {
     /// Handle (NOT) EXISTS and (NOT) IN in WHERE clause.
     ///
     /// We will use a = b to replace a in (select b from ....) for (NOT) IN thus avoiding adding a
-    /// `LogicalFilter` on `LogicalApply`.
+    /// `LogicalFilter` on `LogicalApply`. The anti join on `a = b` of `NOT IN` ignores the `NULL`
+    /// values: see [`Self::plan_not_in_nulls`] for the rest of `NOT IN`, unless `a` and `b` are
+    /// never `NULL`. `outer` is the plan before the subqueries of the condition, whose columns
+    /// `input` keeps.
     fn handle_exists_and_in(
         &mut self,
         expr: ExprImpl,
         negated: bool,
         input: &mut PlanRef,
+        outer: &PlanRef,
     ) -> Result<()> {
         let join_type = if negated {
             JoinType::LeftAnti
@@ -308,6 +317,14 @@ impl Planner {
         };
         let correlated_id = self.ctx.next_correlated_id();
         let mut subquery = expr.into_subquery().unwrap();
+        // `NOT IN`: the compared expression and a copy of the sub-query, planned again for the
+        // `NULL` values.
+        let not_in = match &subquery.kind {
+            SubqueryKind::In(left_expr) if negated && !left_expr.has_subquery() => {
+                Some((left_expr.clone(), subquery.query.clone()))
+            }
+            _ => None,
+        };
         // we should call `subquery.query.collect_correlated_indices_by_depth_and_assign_id`
         // instead of `subquery.collect_correlated_indices_by_depth_and_assign_id`.
         // because current subquery containing struct `kind` expr which should never be correlated with the current subquery.
@@ -318,6 +335,11 @@ impl Planner {
         correlated_indices.dedup();
         let output_column_type = subquery.query.data_types()[0].clone();
         let right_plan = self.plan_query(subquery.query)?.into_unordered_subplan();
+        // `x NOT IN (SELECT y ...)` is the anti join on `x = y` when `x` and `y` are never `NULL`.
+        let not_in = not_in.filter(|(left_expr, _)| {
+            let right_expr: ExprImpl = InputRef::new(0, output_column_type.clone()).into();
+            !(is_never_null(outer, left_expr) && is_never_null(&right_plan, &right_expr))
+        });
         let on = match subquery.kind {
             SubqueryKind::Existential => ExprImpl::literal_bool(true),
             SubqueryKind::In(left_expr) => {
@@ -335,7 +357,146 @@ impl Planner {
             join_type,
             false,
         );
+        if let Some((left_expr, query)) = not_in {
+            *input = self.plan_not_in_nulls(input.clone(), left_expr, query)?;
+        }
         Ok(())
+    }
+
+    /// Completes the anti join on `x = y` of `x NOT IN (SELECT y ...)` with the `NULL` values.
+    ///
+    /// `NOT IN` keeps a row when `x <> y` is true for every `y` of the sub-query: when the
+    /// sub-query is empty (whatever `x`), or when `x` is not `NULL`, no `y` is `NULL` and no `y`
+    /// equals `x`. The anti join only checks the last condition, so a row whose `x` is `NULL`, or a
+    /// sub-query that returns a `NULL`, also needs:
+    ///
+    /// - for a sub-query that does not depend on the outer row: one row computed over the
+    ///   sub-query, `0` when it is empty, `2` when it returns a `NULL` and `1` otherwise, and the
+    ///   filter `(CASE WHEN x IS NULL THEN 1 ELSE 2 END) > that value`. A comparison with a single
+    ///   row keeps the anti join on `=` and is a dynamic filter in streaming plans;
+    /// - for a correlated sub-query: a second anti join on `x IS NULL OR y IS NULL`, which gets
+    ///   the correlated conditions of the sub-query as the first one does.
+    ///
+    /// `anti` is the anti join; its columns are those of the outer side.
+    fn plan_not_in_nulls(
+        &mut self,
+        anti: PlanRef,
+        left_expr: ExprImpl,
+        mut query: BoundQuery,
+    ) -> Result<PlanRef> {
+        let outer_len = anti.schema().len();
+        let correlated_id = self.ctx.next_correlated_id();
+        let mut correlated_indices =
+            query.collect_correlated_indices_by_depth_and_assign_id(0, correlated_id);
+        correlated_indices.sort();
+        correlated_indices.dedup();
+        let y_type = query.data_types()[0].clone();
+        let right = self.plan_query(query)?.into_unordered_subplan();
+        let x_is_null: ExprImpl = FunctionCall::new(ExprType::IsNull, vec![left_expr])?.into();
+
+        if correlated_indices.is_empty() {
+            let y_is_null =
+                FunctionCall::new(ExprType::IsNull, vec![InputRef::new(0, y_type).into()])?;
+            let counts = Agg::new(
+                vec![
+                    PlanAggCall::count_star(),
+                    PlanAggCall::count_star()
+                        .with_condition(Condition::with_expr(y_is_null.into())),
+                ],
+                IndexSet::empty(),
+                right,
+            );
+            let is_empty = FunctionCall::new(
+                ExprType::Equal,
+                vec![
+                    InputRef::new(0, DataType::Int64).into(),
+                    ExprImpl::literal_bigint(0),
+                ],
+            )?;
+            let has_null = FunctionCall::new(
+                ExprType::GreaterThan,
+                vec![
+                    InputRef::new(1, DataType::Int64).into(),
+                    ExprImpl::literal_bigint(0),
+                ],
+            )?;
+            let state = FunctionCall::new_unchecked(
+                ExprType::Case,
+                vec![
+                    is_empty.into(),
+                    ExprImpl::literal_int(0),
+                    has_null.into(),
+                    ExprImpl::literal_int(2),
+                    ExprImpl::literal_int(1),
+                ],
+                DataType::Int32,
+            );
+            let right = LogicalProject::create(counts.into(), vec![state.into()]);
+            let apply = Self::create_apply(
+                correlated_id,
+                correlated_indices,
+                anti,
+                right,
+                ExprImpl::literal_bool(true),
+                JoinType::LeftOuter,
+                true,
+            );
+            let rank = FunctionCall::new_unchecked(
+                ExprType::Case,
+                vec![
+                    x_is_null,
+                    ExprImpl::literal_int(1),
+                    ExprImpl::literal_int(2),
+                ],
+                DataType::Int32,
+            );
+            let keep = FunctionCall::new(
+                ExprType::GreaterThan,
+                vec![
+                    rank.into(),
+                    InputRef::new(outer_len, DataType::Int32).into(),
+                ],
+            )?;
+            let filter = LogicalFilter::create_with_expr(apply, keep.into());
+            return Ok(LogicalProject::with_out_col_idx(filter, 0..outer_len).into());
+        }
+
+        // A correlated sub-query whose correlated conditions have no equality: the second anti
+        // join would be a nested-loop join, which streaming jobs do not support, where the anti
+        // join on `x = y` was not. Keep the previous, inexact plan for them unless asked.
+        if matches!(
+            self.plan_for,
+            PlanFor::Stream | PlanFor::StreamIcebergEngineInternal
+        ) && !self
+            .ctx
+            .session_ctx()
+            .config()
+            .streaming_exact_not_in_without_equality()
+            && correlated_without_equality(&right, correlated_id)
+        {
+            self.ctx.warn_to_user(
+                "NOT IN over a correlated subquery without an equality condition is planned as an \
+                 anti join on `=`, which ignores NULL values: rows whose value is NULL are kept, \
+                 and NULL values of the subquery are ignored. Set \
+                 streaming_exact_not_in_without_equality to plan it exactly, with a nested-loop \
+                 join that streaming jobs do not support.",
+            );
+            return Ok(anti);
+        }
+        let y_is_null = FunctionCall::new(
+            ExprType::IsNull,
+            vec![InputRef::new(outer_len, y_type).into()],
+        )?;
+        let on = FunctionCall::new(ExprType::Or, vec![x_is_null, y_is_null.into()])?;
+        Ok(Self::create_apply(
+            correlated_id,
+            correlated_indices,
+            anti,
+            right,
+            on.into(),
+            JoinType::LeftAnti,
+            false,
+        ))
     }
 
     /// Substitutes all [`Subquery`] in `exprs` in a left deep tree way.
@@ -601,4 +762,38 @@ impl Planner {
             max_one_row,
         )
     }
+}
+
+/// Whether the correlated conditions of a planned sub-query, which the unnesting moves into the
+/// condition of the join (a `Filter`, under a `Project`), contain no equality between an
+/// expression of the outer row and one of the sub-query.
+fn correlated_without_equality(plan: &PlanRef, correlated_id: CorrelatedId) -> bool {
+    let input = match plan.as_logical_project() {
+        Some(project) => project.input(),
+        None => plan.clone(),
+    };
+    let Some(filter) = input.as_logical_filter() else {
+        return false;
+    };
+    let outer_only = |expr: &ExprImpl| {
+        expr.has_correlated_input_ref_by_correlated_id(correlated_id) && !expr.has_input_ref()
+    };
+    let inner_only = |expr: &ExprImpl| {
+        !expr.has_correlated_input_ref_by_correlated_id(correlated_id) && expr.has_input_ref()
+    };
+    let conjunctions = &filter.predicate().conjunctions;
+    let correlated_equality = |expr: &ExprImpl| {
+        expr.as_function_call().is_some_and(|call| {
+            matches!(
+                call.func_type(),
+                ExprType::Equal | ExprType::IsNotDistinctFrom
+            ) && call.inputs().len() == 2
+                && ((outer_only(&call.inputs()[0]) && inner_only(&call.inputs()[1]))
+                    || (inner_only(&call.inputs()[0]) && outer_only(&call.inputs()[1])))
+        })
+    };
+    conjunctions
+        .iter()
+        .any(|expr| expr.has_correlated_input_ref_by_correlated_id(correlated_id))
+        && !conjunctions.iter().any(correlated_equality)
 }

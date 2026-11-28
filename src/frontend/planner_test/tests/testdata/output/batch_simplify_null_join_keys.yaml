@@ -367,8 +367,16 @@
   sql: |
     select a.id from a where a.bk not in (select k from b where k is null);
   batch_plan: |-
-    BatchExchange { order: [], dist: Single }
-    └─BatchScan { table: a, columns: [a.id], distribution: UpstreamHashShard(a.id) }
+    BatchNestedLoopJoin { type: Inner, predicate: ($expr1 > $expr2), output: [a.id] }
+    ├─BatchExchange { order: [], dist: Single }
+    │ └─BatchProject { exprs: [a.id, Case(IsNull(a.bk), 1:Int32, 2:Int32) as $expr1] }
+    │   └─BatchScan { table: a, columns: [a.id, a.bk], distribution: UpstreamHashShard(a.id) }
+    └─BatchProject { exprs: [Case((sum0(count) = 0:Int64), 0:Int32, (sum0(count filter(IsNull(b.k))) > 0:Int64), 2:Int32, 1:Int32) as $expr2] }
+      └─BatchSimpleAgg { aggs: [sum0(count), sum0(count filter(IsNull(b.k)))] }
+        └─BatchExchange { order: [], dist: Single }
+          └─BatchSimpleAgg { aggs: [count, count filter(IsNull(b.k))] }
+            └─BatchFilter { predicate: IsNull(b.k) }
+              └─BatchScan { table: b, columns: [b.k], distribution: SomeShard }
 - name: off by default - not in over a subquery of null keys
   before:
   - setup_off
@@ -376,20 +384,41 @@
     select a.id from a where a.bk not in (select k from b where k is null);
   logical_plan: |-
     LogicalProject { exprs: [a.id] }
-    └─LogicalApply { type: LeftAnti, on: (a.bk = b.k), correlated_id: 1 }
-      ├─LogicalScan { table: a, columns: [a.id, a.bk, a.x, a._rw_timestamp] }
-      └─LogicalProject { exprs: [b.k] }
-        └─LogicalFilter { predicate: IsNull(b.k) }
-          └─LogicalScan { table: b, columns: [b.id, b.k, b.label, b._rw_timestamp] }
+    └─LogicalProject { exprs: [a.id, a.bk, a.x, a._rw_timestamp] }
+      └─LogicalFilter { predicate: (Case(IsNull(a.bk), 1:Int32, 2:Int32) > $expr1) }
+        └─LogicalApply { type: LeftOuter, on: true, correlated_id: 2, max_one_row: true }
+          ├─LogicalApply { type: LeftAnti, on: (a.bk = b.k), correlated_id: 1 }
+          │ ├─LogicalScan { table: a, columns: [a.id, a.bk, a.x, a._rw_timestamp] }
+          │ └─LogicalProject { exprs: [b.k] }
+          │   └─LogicalFilter { predicate: IsNull(b.k) }
+          │     └─LogicalScan { table: b, columns: [b.id, b.k, b.label, b._rw_timestamp] }
+          └─LogicalProject { exprs: [Case((count = 0:Int64), 0:Int32, (count filter(IsNull(b.k)) > 0:Int64), 2:Int32, 1:Int32) as $expr1] }
+            └─LogicalAgg { aggs: [count, count filter(IsNull(b.k))] }
+              └─LogicalProject { exprs: [b.k] }
+                └─LogicalFilter { predicate: IsNull(b.k) }
+                  └─LogicalScan { table: b, columns: [b.id, b.k, b.label, b._rw_timestamp] }
   optimized_logical_plan_for_batch: |-
-    LogicalJoin { type: LeftAnti, on: (a.bk = b.k), output: [a.id] }
-    ├─LogicalScan { table: a, columns: [a.id, a.bk] }
-    └─LogicalScan { table: b, columns: [b.k], predicate: IsNull(b.k) }
+    LogicalJoin { type: Inner, on: ($expr1 > $expr2), output: [a.id] }
+    ├─LogicalProject { exprs: [a.id, Case(IsNull(a.bk), 1:Int32, 2:Int32) as $expr1] }
+    │ └─LogicalJoin { type: LeftAnti, on: (a.bk = b.k), output: all }
+    │   ├─LogicalScan { table: a, columns: [a.id, a.bk] }
+    │   └─LogicalScan { table: b, columns: [b.k], predicate: IsNull(b.k) }
+    └─LogicalProject { exprs: [Case((count = 0:Int64), 0:Int32, (count filter(IsNull(b.k)) > 0:Int64), 2:Int32, 1:Int32) as $expr2] }
+      └─LogicalAgg { aggs: [count, count filter(IsNull(b.k))] }
+        └─LogicalScan { table: b, columns: [b.k], predicate: IsNull(b.k) }
   batch_plan: |-
-    BatchExchange { order: [], dist: Single }
-    └─BatchHashJoin { type: LeftAnti, predicate: a.bk = b.k, output: [a.id] }
-      ├─BatchExchange { order: [], dist: HashShard(a.bk) }
-      │ └─BatchScan { table: a, columns: [a.id, a.bk], distribution: UpstreamHashShard(a.id) }
-      └─BatchExchange { order: [], dist: HashShard(b.k) }
-        └─BatchFilter { predicate: IsNull(b.k) }
-          └─BatchScan { table: b, columns: [b.k], distribution: SomeShard }
+    BatchNestedLoopJoin { type: Inner, predicate: ($expr1 > $expr2), output: [a.id] }
+    ├─BatchExchange { order: [], dist: Single }
+    │ └─BatchProject { exprs: [a.id, Case(IsNull(a.bk), 1:Int32, 2:Int32) as $expr1] }
+    │   └─BatchHashJoin { type: LeftAnti, predicate: a.bk = b.k, output: all }
+    │     ├─BatchExchange { order: [], dist: HashShard(a.bk) }
+    │     │ └─BatchScan { table: a, columns: [a.id, a.bk], distribution: UpstreamHashShard(a.id) }
+    │     └─BatchExchange { order: [], dist: HashShard(b.k) }
+    │       └─BatchFilter { predicate: IsNull(b.k) }
+    │         └─BatchScan { table: b, columns: [b.k], distribution: SomeShard }
+    └─BatchProject { exprs: [Case((sum0(count) = 0:Int64), 0:Int32, (sum0(count filter(IsNull(b.k))) > 0:Int64), 2:Int32, 1:Int32) as $expr2] }
+      └─BatchSimpleAgg { aggs: [sum0(count), sum0(count filter(IsNull(b.k)))] }
+        └─BatchExchange { order: [], dist: Single }
+          └─BatchSimpleAgg { aggs: [count, count filter(IsNull(b.k))] }
+            └─BatchFilter { predicate: IsNull(b.k) }
+              └─BatchScan { table: b, columns: [b.k], distribution: SomeShard }

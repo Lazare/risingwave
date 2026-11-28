@@ -72,6 +72,8 @@ use risingwave_common::util::column_index_mapping::ColIndexMapping;
 use risingwave_common::util::iter_util::ZipEqDebug;
 use risingwave_connector::WithPropertiesExt;
 use risingwave_connector::sink::catalog::SinkFormatDesc;
+// Nullability of the columns of a logical plan, for the planning of `NOT IN`.
+pub(crate) use rule::is_never_null;
 
 use self::heuristic_optimizer::ApplyOrder;
 use self::plan_node::generic::{self, PhysicalPlanRef};

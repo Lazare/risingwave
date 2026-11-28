@@ -1,0 +1,267 @@
+# Corrections of wrong results of the optimizer (see `docs/fork/corrections/`). Each section
+# shows the corrected plans and the plans that must not change.
+
+# Predicates derived through the equalities of a join (`derive_predicate_from_eq_condition`).
+# Only predicates that give the same result on two equal values are derived: equal values of
+# `numeric`, floats and `interval` can differ (`1.0 = 1.00`, `-0.0 = 0.0`,
+# `'1 day' = '24 hours'`).
+- id: derive_setup
+  sql: |
+    create table dn (id int primary key, k numeric, i int, s varchar, ts timestamp);
+    create table dm (id int primary key, k numeric, i int, s varchar, ts timestamp);
+    create table df (id int primary key, f float8, r real);
+    create table dg (id int primary key, f float8, r real);
+    create table di (id int primary key, iv interval);
+    create table dj (id int primary key, iv interval);
+  expected_outputs: []
+- name: derive - numeric key, predicate on the text of the value is not derived
+  before: [derive_setup]
+  sql: |
+    select dn.id, dm.id from dn join dm on dn.k = dm.k where dn.k::varchar = '1.0';
+  expected_outputs:
+  - batch_plan
+- name: derive - numeric key, comparison with a constant is derived
+  before: [derive_setup]
+  sql: |
+    select dn.id, dm.id from dn join dm on dn.k = dm.k where dn.k > 1.5 and dn.k in (2, 3.5);
+  expected_outputs:
+  - batch_plan
+- name: derive - numeric key, arithmetic is not derived
+  before: [derive_setup]
+  sql: |
+    select dn.id, dm.id from dn join dm on dn.k = dm.k where dn.k * 2 > 3;
+  expected_outputs:
+  - batch_plan
+- name: derive - numeric key, null test is derived to the inner side of a left join
+  before: [derive_setup]
+  sql: |
+    select dn.id, dm.id from dn left join dm on dn.k = dm.k where dn.k is not null;
+  expected_outputs:
+  - batch_plan
+- name: derive - float key, predicate on the text of the value is not derived
+  before: [derive_setup]
+  sql: |
+    select df.id, dg.id from df join dg on df.f = dg.f where df.f::varchar = '-0';
+  expected_outputs:
+  - batch_plan
+- name: derive - float key, comparison with a constant is derived
+  before: [derive_setup]
+  sql: |
+    select df.id, dg.id from df join dg on df.r = dg.r where df.r between 1 and 2;
+  expected_outputs:
+  - batch_plan
+- name: derive - interval key, extracted field is not derived
+  before: [derive_setup]
+  sql: |
+    select di.id, dj.id from di join dj on di.iv = dj.iv where extract(hour from di.iv) = 24;
+  expected_outputs:
+  - batch_plan
+- name: derive - interval key, comparison with a constant is derived
+  before: [derive_setup]
+  sql: |
+    select di.id, dj.id from di join dj on di.iv = dj.iv where di.iv >= interval '1 day';
+  expected_outputs:
+  - batch_plan
+- name: derive - integer, varchar and timestamp keys, any predicate is derived
+  before: [derive_setup]
+  sql: |
+    select dn.id, dm.id from dn join dm on dn.i = dm.i and dn.s = dm.s and dn.ts = dm.ts
+    where dn.i::varchar = '7' and lower(dn.s) like 'a%' and extract(hour from dn.ts) = 3;
+  expected_outputs:
+  - batch_plan
+- name: derive - mixed predicate on an integer and a numeric key is not derived
+  before: [derive_setup]
+  sql: |
+    select dn.id, dm.id from dn join dm on dn.i = dm.i and dn.k = dm.k where dn.i + dn.k > 3;
+  expected_outputs:
+  - batch_plan
+- name: derive - numeric key, streaming plan does not derive the text predicate
+  before: [derive_setup]
+  sql: |
+    select dn.id, dm.id as mid from dn join dm on dn.k = dm.k where dn.k::varchar = '1.0';
+  expected_outputs:
+  - stream_plan
+
+# `x NOT IN (SELECT y ...)` keeps a row only when `x <> y` is true for every `y`: no row when the
+# subquery returns a NULL, no row with a NULL `x` unless the subquery is empty. The anti join on
+# `x = y` is completed with the NULL cases: a comparison with one row computed over an
+# uncorrelated subquery (a dynamic filter in streaming), or a second anti join on
+# `x IS NULL OR y IS NULL` for a correlated one. Kept as a plain anti join when `x` and `y` are
+# never NULL.
+- id: not_in_setup
+  sql: |
+    create table na (id int primary key, x int, k int);
+    create table nb (id int primary key, y int, k int);
+    create table nn (id int primary key, x int not null, k int not null);
+    create table nm (id int primary key, y int not null, k int not null);
+  expected_outputs: []
+- name: not in - uncorrelated, nullable columns
+  before: [not_in_setup]
+  sql: |
+    select id from na where x not in (select y from nb);
+  expected_outputs:
+  - logical_plan
+  - batch_plan
+  - stream_plan
+- name: not in - uncorrelated, expression compared with a filtered subquery
+  before: [not_in_setup]
+  sql: |
+    select id, x from na where x + 1 not in (select y from nb where k > 0) and k < 10;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: not in - correlated with an equality
+  before: [not_in_setup]
+  sql: |
+    select id from na where x not in (select y from nb where nb.k = na.k);
+  expected_outputs:
+  - logical_plan
+  - batch_plan
+  - stream_plan
+# Without equality in the correlated conditions, a streaming job keeps the anti join on `=`
+# unless `streaming_exact_not_in_without_equality` is set: the exact plan needs a nested-loop
+# join. Batch queries are always exact, but the planner tests plan every query with the planner
+# of streaming jobs: the exact batch plan is shown with the variable set.
+- name: not in - correlated without equality, streaming keeps the anti join on `=`
+  before: [not_in_setup]
+  sql: |
+    select id from na where x not in (select y from nb where nb.k > na.k);
+  expected_outputs:
+  - stream_plan
+- name: not in - correlated without equality, exact (batch nested loop, streaming not plannable)
+  before: [not_in_setup]
+  sql: |
+    set streaming_exact_not_in_without_equality = true;
+    select id from na where x not in (select y from nb where nb.k > na.k);
+  expected_outputs:
+  - batch_plan
+  - stream_error
+- name: not in - two not in conditions
+  before: [not_in_setup]
+  sql: |
+    select id from na where x not in (select y from nb) and k not in (select k from nb where nb.id = na.id);
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: not in - inside a correlated not exists, correlated with the outermost query only
+  before: [not_in_setup]
+  sql: |
+    select id from na where not exists (select 1 from nb where nb.k = na.k and nb.y not in (select y from nm where nm.k = na.id));
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: not in - columns declared not null, plain anti join
+  before: [not_in_setup]
+  sql: |
+    select id from nn where x not in (select y from nm);
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: not in - correlated, columns declared not null, plain anti join
+  before: [not_in_setup]
+  sql: |
+    select id from nn where x not in (select y from nm where nm.k = nn.k);
+  expected_outputs:
+  - batch_plan
+- name: not in - subquery filtered on not null, outer column not null, plain anti join
+  before: [not_in_setup]
+  sql: |
+    select id from nn where x not in (select y from nb where y is not null);
+  expected_outputs:
+  - batch_plan
+- name: not in - outer column not null, subquery column nullable
+  before: [not_in_setup]
+  sql: |
+    select id from nn where x not in (select y from nb);
+  expected_outputs:
+  - batch_plan
+- name: not in - outer column nullable, subquery column not null
+  before: [not_in_setup]
+  sql: |
+    select id from na where x not in (select y from nm);
+  expected_outputs:
+  - batch_plan
+- name: not in - in having
+  before: [not_in_setup]
+  sql: |
+    select k, count(*) from na group by k having k not in (select k from nb);
+  expected_outputs:
+  - batch_plan
+- name: in - in having, the compared column refers to the group key
+  before: [not_in_setup]
+  sql: |
+    select k, count(*) from na group by k having k in (select k from nb);
+  expected_outputs:
+  - batch_plan
+- name: not in - in having, compared with an aggregate
+  before: [not_in_setup]
+  sql: |
+    select k, count(*) from na group by k having count(*) not in (select y from nm);
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: not in - delete
+  before: [not_in_setup]
+  sql: |
+    delete from na where x not in (select y from nb);
+  expected_outputs:
+  - batch_plan
+- name: in - unchanged, a semi join on `=`
+  before: [not_in_setup]
+  sql: |
+    select id from na where x in (select y from nb);
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: not exists - unchanged
+  before: [not_in_setup]
+  sql: |
+    select id from na where not exists (select 1 from nb where nb.y = na.x);
+  expected_outputs:
+  - batch_plan
+- name: not in - in the select list, not supported (unchanged)
+  before: [not_in_setup]
+  sql: |
+    select id, x not in (select y from nb) from na;
+  expected_outputs:
+  - planner_error
+- name: not in - several columns, not supported (unchanged)
+  before: [not_in_setup]
+  sql: |
+    select id from na where (x, k) not in (select y, k from nb);
+  expected_outputs:
+  - binder_error
+
+# `greatest` and `least` skip their NULL arguments (`greatest(1, NULL)` is 1): they are not
+# strict, an expression over them is not NULL just because one argument is.
+- id: greatest_setup
+  sql: |
+    create table ga (x int, k int);
+    create table gb (x int, y int);
+  expected_outputs: []
+- name: greatest - a NULL argument does not make the filter false
+  before: [greatest_setup]
+  sql: |
+    select x from ga where greatest(x, null) > 5 and least(k, null) is not null;
+  expected_outputs:
+  - batch_plan
+- name: greatest - in over a correlated aggregate that is not NULL over an empty input
+  before: [greatest_setup]
+  sql: |
+    select x from ga where x in (select greatest(max(y), 0) from gb where gb.x = ga.x);
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: greatest - in over a correlated aggregate that is NULL over an empty input (still rewritten)
+  before: [greatest_setup]
+  sql: |
+    select x from ga where x in (select greatest(max(y), min(y)) from gb where gb.x = ga.x);
+  expected_outputs:
+  - batch_plan
+- name: greatest - scalar subquery with the streaming unnesting of the prototype
+  before: [greatest_setup]
+  sql: |
+    set streaming_simplify_subquery_unnesting = true;
+    select x, (select greatest(max(y), 0) from gb where gb.x = ga.x) as g from ga;
+  expected_outputs:
+  - stream_plan

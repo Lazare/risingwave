@@ -233,6 +233,12 @@ fn expr_facts(expr: &ExprImpl, input: &ColumnFacts) -> (Option<Literal>, bool) {
     (None, non_null)
 }
 
+/// Whether `expr`, evaluated on the rows of `plan`, is never `NULL` (see [`column_facts`] and
+/// [`expr_facts`]).
+pub(crate) fn is_never_null(plan: &PlanRef, expr: &ExprImpl) -> bool {
+    expr_facts(expr, &column_facts(plan)).1
+}
+
 /// Returns whether the result of an aggregate function is never `NULL`.
 fn agg_is_non_null(agg_type: &AggType) -> bool {
     matches!(

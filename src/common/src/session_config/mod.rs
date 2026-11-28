@@ -241,6 +241,15 @@ pub struct SessionConfig {
     #[parameter(default = false, alias = "rw_streaming_force_filter_inside_join")]
     streaming_force_filter_inside_join: bool,
 
+    /// Plan exactly, in a new streaming job, a `NOT IN` over a correlated subquery whose
+    /// correlated conditions have no equality (`x NOT IN (SELECT y FROM t WHERE t.a > outer.b)`)
+    /// when `x` or `y` may be `NULL`. That needs a nested-loop anti join, which streaming jobs do
+    /// not support: such a job then fails to plan. Off, such a `NOT IN` keeps the anti join on
+    /// `x = y`, which keeps the rows whose `x` is `NULL` and ignores the `NULL` values of `y`.
+    /// Other `NOT IN` subqueries are always planned exactly. Defaults to false.
+    #[parameter(default = false)]
+    streaming_exact_not_in_without_equality: bool,
+
     /// Deprecated. Arrangement backfill is always used as the fallback backfill type for new
     /// streaming jobs, and this setting is ignored.
     #[parameter(

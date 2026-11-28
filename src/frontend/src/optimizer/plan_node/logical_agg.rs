@@ -30,7 +30,7 @@ use super::{
 use crate::error::{ErrorCode, Result, RwError};
 use crate::expr::{
     AggCall, Expr, ExprImpl, ExprRewriter, ExprType, ExprVisitor, FunctionCall, InputRef, Literal,
-    OrderBy, OrderByExpr, WindowFunction,
+    OrderBy, OrderByExpr, SubqueryKind, WindowFunction,
 };
 use crate::optimizer::plan_node::expr_visitable::ExprVisitable;
 use crate::optimizer::plan_node::generic::GenericPlanNode;
@@ -1060,7 +1060,7 @@ impl ExprRewriter for LogicalAggBuilder {
         }
     }
 
-    fn rewrite_subquery(&mut self, subquery: crate::expr::Subquery) -> ExprImpl {
+    fn rewrite_subquery(&mut self, mut subquery: crate::expr::Subquery) -> ExprImpl {
         if subquery.is_correlated_by_depth(0) {
             self.error = Some(
                 not_implemented!(
@@ -1070,6 +1070,14 @@ impl ExprRewriter for LogicalAggBuilder {
                 .into(),
             );
         }
+        // The expression compared by `IN`, `SOME` or `ALL` is evaluated on the rows of the
+        // aggregation, like the rest of the expression: it must refer to its outputs.
+        subquery.kind = match subquery.kind {
+            SubqueryKind::In(expr) => SubqueryKind::In(self.rewrite_expr(expr)),
+            SubqueryKind::Some(expr, op) => SubqueryKind::Some(self.rewrite_expr(expr), op),
+            SubqueryKind::All(expr, op) => SubqueryKind::All(self.rewrite_expr(expr), op),
+            kind => kind,
+        };
         subquery.into()
     }
 }

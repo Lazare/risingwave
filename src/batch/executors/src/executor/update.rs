@@ -184,8 +184,9 @@ impl UpdateExecutor {
                 (old_data_chunk.rows()).zip_eq_debug(updated_data_chunk.rows())
             {
                 rows_updated += 1;
-                // If row_delete == row_insert, we don't need to do an actual update.
-                if row_delete == row_insert {
+                // If row_delete and row_insert are identical, we don't need to do an actual
+                // update. Equal is not enough: `1.0` and `1.00` (`numeric`) differ.
+                if risingwave_common::row::identical(row_delete, row_insert) {
                     continue;
                 }
                 let chunk = if self.upsert {

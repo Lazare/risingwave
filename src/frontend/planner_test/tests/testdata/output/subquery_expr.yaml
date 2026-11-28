@@ -311,10 +311,17 @@
     select x from t1 where y not in (select y from t2);
   logical_plan: |-
     LogicalProject { exprs: [t1.x] }
-    └─LogicalApply { type: LeftAnti, on: (t1.y = t2.y), correlated_id: 1 }
-      ├─LogicalScan { table: t1, columns: [t1.x, t1.y, t1._row_id, t1._rw_timestamp] }
-      └─LogicalProject { exprs: [t2.y] }
-        └─LogicalScan { table: t2, columns: [t2.x, t2.y, t2._row_id, t2._rw_timestamp] }
+    └─LogicalProject { exprs: [t1.x, t1.y, t1._row_id, t1._rw_timestamp] }
+      └─LogicalFilter { predicate: (Case(IsNull(t1.y), 1:Int32, 2:Int32) > $expr1) }
+        └─LogicalApply { type: LeftOuter, on: true, correlated_id: 2, max_one_row: true }
+          ├─LogicalApply { type: LeftAnti, on: (t1.y = t2.y), correlated_id: 1 }
+          │ ├─LogicalScan { table: t1, columns: [t1.x, t1.y, t1._row_id, t1._rw_timestamp] }
+          │ └─LogicalProject { exprs: [t2.y] }
+          │   └─LogicalScan { table: t2, columns: [t2.x, t2.y, t2._row_id, t2._rw_timestamp] }
+          └─LogicalProject { exprs: [Case((count = 0:Int64), 0:Int32, (count filter(IsNull(t2.y)) > 0:Int64), 2:Int32, 1:Int32) as $expr1] }
+            └─LogicalAgg { aggs: [count, count filter(IsNull(t2.y))] }
+              └─LogicalProject { exprs: [t2.y] }
+                └─LogicalScan { table: t2, columns: [t2.x, t2.y, t2._row_id, t2._rw_timestamp] }
 - sql: |
     create table t1 (a int);
     create table t2 (b int);

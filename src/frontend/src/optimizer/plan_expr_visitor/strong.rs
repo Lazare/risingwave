@@ -115,11 +115,14 @@ impl Strong {
             | ExprType::VecConcat
             | ExprType::L2Norm
             | ExprType::L2Normalize
-            | ExprType::Subvector
-            | ExprType::Greatest
-            | ExprType::Least => self.any_null(func_call),
+            | ExprType::Subvector => self.any_null(func_call),
             // ALL: This kind of expression is null if and only if all of its arguments are null.
-            ExprType::And | ExprType::Or | ExprType::Coalesce => self.all_null(func_call),
+            // `greatest` and `least` skip their NULL arguments: `greatest(1, NULL)` is 1.
+            ExprType::And
+            | ExprType::Or
+            | ExprType::Coalesce
+            | ExprType::Greatest
+            | ExprType::Least => self.all_null(func_call),
             // TODO: Function like case when is important but current its structure is complicated, so we need to implement it later if necessary.
             // Assume that any other expressions cannot be simplified.
             #[expect(deprecated)]
@@ -504,6 +507,29 @@ mod tests {
         )
         .into();
         assert!(Strong::is_null(&expr, null_columns));
+    }
+
+    /// `greatest` and `least` skip their NULL arguments: they are NULL only when every argument is.
+    #[test]
+    fn test_greatest_least() {
+        for func_type in [ExprType::Greatest, ExprType::Least] {
+            let expr: ExprImpl = FunctionCall::new_unchecked(
+                func_type,
+                vec![
+                    InputRef::new(0, DataType::Int32).into(),
+                    InputRef::new(1, DataType::Int32).into(),
+                ],
+                DataType::Int32,
+            )
+            .into();
+            let mut one_null = FixedBitSet::with_capacity(2);
+            one_null.insert(0);
+            assert!(!Strong::is_null(&expr, one_null));
+            let mut all_null = FixedBitSet::with_capacity(2);
+            all_null.insert(0);
+            all_null.insert(1);
+            assert!(Strong::is_null(&expr, all_null));
+        }
     }
 
     /// generate test cases for is not null

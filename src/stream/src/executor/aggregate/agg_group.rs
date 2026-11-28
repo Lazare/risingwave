@@ -153,7 +153,12 @@ impl Strategy for OnlyOutputIfHasInput {
             }
             (_, _) => {
                 // Update output row.
-                if prev_row.expect("must exist previous row") == curr_row {
+                // Identical, not only equal: `max` going from `1.0` to `1.00` (`numeric`) changes
+                // the output.
+                if risingwave_common::row::identical(
+                    prev_row.expect("must exist previous row"),
+                    curr_row,
+                ) {
                     // No output change.
                     None
                 } else {

@@ -3095,22 +3095,35 @@
       └─LogicalAgg { group_key: [part.p_brand, part.p_type, part.p_size], aggs: [count(distinct partsupp.ps_suppkey)] }
         └─LogicalProject { exprs: [part.p_brand, part.p_type, part.p_size, partsupp.ps_suppkey] }
           └─LogicalFilter { predicate: (part.p_partkey = partsupp.ps_partkey) AND (part.p_brand <> 'Brand#45':Varchar) AND Not(Like(part.p_type, 'SMALL PLATED%':Varchar)) AND In(part.p_size, 19:Int32, 17:Int32, 16:Int32, 23:Int32, 10:Int32, 4:Int32, 38:Int32, 11:Int32) }
-            └─LogicalApply { type: LeftAnti, on: (partsupp.ps_suppkey = supplier.s_suppkey), correlated_id: 1 }
-              ├─LogicalJoin { type: Inner, on: true, output: all }
-              │ ├─LogicalScan { table: partsupp, columns: [partsupp.ps_partkey, partsupp.ps_suppkey, partsupp.ps_availqty, partsupp.ps_supplycost, partsupp.ps_comment, partsupp._rw_timestamp] }
-              │ └─LogicalScan { table: part, columns: [part.p_partkey, part.p_name, part.p_mfgr, part.p_brand, part.p_type, part.p_size, part.p_container, part.p_retailprice, part.p_comment, part._rw_timestamp] }
-              └─LogicalProject { exprs: [supplier.s_suppkey] }
-                └─LogicalFilter { predicate: Like(supplier.s_comment, '%Customer%Complaints%':Varchar) }
-                  └─LogicalScan { table: supplier, columns: [supplier.s_suppkey, supplier.s_name, supplier.s_address, supplier.s_nationkey, supplier.s_phone, supplier.s_acctbal, supplier.s_comment, supplier._rw_timestamp] }
+            └─LogicalProject { exprs: [partsupp.ps_partkey, partsupp.ps_suppkey, partsupp.ps_availqty, partsupp.ps_supplycost, partsupp.ps_comment, partsupp._rw_timestamp, part.p_partkey, part.p_name, part.p_mfgr, part.p_brand, part.p_type, part.p_size, part.p_container, part.p_retailprice, part.p_comment, part._rw_timestamp] }
+              └─LogicalFilter { predicate: (Case(IsNull(partsupp.ps_suppkey), 1:Int32, 2:Int32) > $expr1) }
+                └─LogicalApply { type: LeftOuter, on: true, correlated_id: 2, max_one_row: true }
+                  ├─LogicalApply { type: LeftAnti, on: (partsupp.ps_suppkey = supplier.s_suppkey), correlated_id: 1 }
+                  │ ├─LogicalJoin { type: Inner, on: true, output: all }
+                  │ │ ├─LogicalScan { table: partsupp, columns: [partsupp.ps_partkey, partsupp.ps_suppkey, partsupp.ps_availqty, partsupp.ps_supplycost, partsupp.ps_comment, partsupp._rw_timestamp] }
+                  │ │ └─LogicalScan { table: part, columns: [part.p_partkey, part.p_name, part.p_mfgr, part.p_brand, part.p_type, part.p_size, part.p_container, part.p_retailprice, part.p_comment, part._rw_timestamp] }
+                  │ └─LogicalProject { exprs: [supplier.s_suppkey] }
+                  │   └─LogicalFilter { predicate: Like(supplier.s_comment, '%Customer%Complaints%':Varchar) }
+                  │     └─LogicalScan { table: supplier, columns: [supplier.s_suppkey, supplier.s_name, supplier.s_address, supplier.s_nationkey, supplier.s_phone, supplier.s_acctbal, supplier.s_comment, supplier._rw_timestamp] }
+                  └─LogicalProject { exprs: [Case((count = 0:Int64), 0:Int32, (count filter(IsNull(supplier.s_suppkey)) > 0:Int64), 2:Int32, 1:Int32) as $expr1] }
+                    └─LogicalAgg { aggs: [count, count filter(IsNull(supplier.s_suppkey))] }
+                      └─LogicalProject { exprs: [supplier.s_suppkey] }
+                        └─LogicalFilter { predicate: Like(supplier.s_comment, '%Customer%Complaints%':Varchar) }
+                          └─LogicalScan { table: supplier, columns: [supplier.s_suppkey, supplier.s_name, supplier.s_address, supplier.s_nationkey, supplier.s_phone, supplier.s_acctbal, supplier.s_comment, supplier._rw_timestamp] }
   optimized_logical_plan_for_batch: |-
     LogicalTopN { order: [count(partsupp.ps_suppkey) DESC, part.p_brand ASC, part.p_type ASC, part.p_size ASC], limit: 1, offset: 0 }
     └─LogicalAgg { group_key: [part.p_brand, part.p_type, part.p_size], aggs: [count(partsupp.ps_suppkey)] }
       └─LogicalAgg { group_key: [part.p_brand, part.p_type, part.p_size, partsupp.ps_suppkey], aggs: [] }
-        └─LogicalJoin { type: LeftAnti, on: (partsupp.ps_suppkey = supplier.s_suppkey), output: [part.p_brand, part.p_type, part.p_size, partsupp.ps_suppkey] }
-          ├─LogicalJoin { type: Inner, on: (part.p_partkey = partsupp.ps_partkey), output: [partsupp.ps_suppkey, part.p_brand, part.p_type, part.p_size] }
-          │ ├─LogicalScan { table: partsupp, columns: [partsupp.ps_partkey, partsupp.ps_suppkey] }
-          │ └─LogicalScan { table: part, columns: [part.p_partkey, part.p_brand, part.p_type, part.p_size], predicate: (part.p_brand <> 'Brand#45':Varchar) AND (Not((part.p_type >= 'SMALL PLATED':Varchar)) OR Not((part.p_type < 'SMALL PLATEE':Varchar))) AND In(part.p_size, 19:Int32, 17:Int32, 16:Int32, 23:Int32, 10:Int32, 4:Int32, 38:Int32, 11:Int32) }
-          └─LogicalScan { table: supplier, output_columns: [supplier.s_suppkey], required_columns: [supplier.s_suppkey, supplier.s_comment], predicate: Like(supplier.s_comment, '%Customer%Complaints%':Varchar) }
+        └─LogicalJoin { type: Inner, on: ($expr1 > $expr2), output: [part.p_brand, part.p_type, part.p_size, partsupp.ps_suppkey] }
+          ├─LogicalProject { exprs: [partsupp.ps_suppkey, part.p_brand, part.p_type, part.p_size, Case(IsNull(partsupp.ps_suppkey), 1:Int32, 2:Int32) as $expr1] }
+          │ └─LogicalJoin { type: LeftAnti, on: (partsupp.ps_suppkey = supplier.s_suppkey), output: all }
+          │   ├─LogicalJoin { type: Inner, on: (part.p_partkey = partsupp.ps_partkey), output: [partsupp.ps_suppkey, part.p_brand, part.p_type, part.p_size] }
+          │   │ ├─LogicalScan { table: partsupp, columns: [partsupp.ps_partkey, partsupp.ps_suppkey] }
+          │   │ └─LogicalScan { table: part, columns: [part.p_partkey, part.p_brand, part.p_type, part.p_size], predicate: (part.p_brand <> 'Brand#45':Varchar) AND (Not((part.p_type >= 'SMALL PLATED':Varchar)) OR Not((part.p_type < 'SMALL PLATEE':Varchar))) AND In(part.p_size, 19:Int32, 17:Int32, 16:Int32, 23:Int32, 10:Int32, 4:Int32, 38:Int32, 11:Int32) }
+          │   └─LogicalScan { table: supplier, output_columns: [supplier.s_suppkey], required_columns: [supplier.s_suppkey, supplier.s_comment], predicate: Like(supplier.s_comment, '%Customer%Complaints%':Varchar) }
+          └─LogicalProject { exprs: [Case((count = 0:Int64), 0:Int32, (count filter(IsNull(supplier.s_suppkey)) > 0:Int64), 2:Int32, 1:Int32) as $expr2] }
+            └─LogicalAgg { aggs: [count, count filter(IsNull(supplier.s_suppkey))] }
+              └─LogicalScan { table: supplier, output_columns: [supplier.s_suppkey], required_columns: [supplier.s_suppkey, supplier.s_comment], predicate: Like(supplier.s_comment, '%Customer%Complaints%':Varchar) }
   batch_plan: |-
     BatchTopN { order: [count(partsupp.ps_suppkey) DESC, part.p_brand ASC, part.p_type ASC, part.p_size ASC], limit: 1, offset: 0 }
     └─BatchExchange { order: [], dist: Single }
@@ -3118,11 +3131,22 @@
         └─BatchHashAgg { group_key: [part.p_brand, part.p_type, part.p_size], aggs: [count(partsupp.ps_suppkey)] }
           └─BatchExchange { order: [], dist: HashShard(part.p_brand, part.p_type, part.p_size) }
             └─BatchHashAgg { group_key: [part.p_brand, part.p_type, part.p_size, partsupp.ps_suppkey], aggs: [] }
-              └─BatchLookupJoin { type: LeftAnti, predicate: partsupp.ps_suppkey = supplier.s_suppkey AND Like(supplier.s_comment, '%Customer%Complaints%':Varchar), output: [part.p_brand, part.p_type, part.p_size, partsupp.ps_suppkey], lookup table: supplier }
-                └─BatchExchange { order: [], dist: UpstreamHashShard(partsupp.ps_suppkey) }
-                  └─BatchLookupJoin { type: Inner, predicate: partsupp.ps_partkey = part.p_partkey AND (part.p_brand <> 'Brand#45':Varchar) AND (Not((part.p_type >= 'SMALL PLATED':Varchar)) OR Not((part.p_type < 'SMALL PLATEE':Varchar))) AND In(part.p_size, 19:Int32, 17:Int32, 16:Int32, 23:Int32, 10:Int32, 4:Int32, 38:Int32, 11:Int32), output: [partsupp.ps_suppkey, part.p_brand, part.p_type, part.p_size], lookup table: part }
-                    └─BatchExchange { order: [], dist: UpstreamHashShard(partsupp.ps_partkey) }
-                      └─BatchScan { table: partsupp, columns: [partsupp.ps_partkey, partsupp.ps_suppkey], distribution: UpstreamHashShard(partsupp.ps_partkey, partsupp.ps_suppkey) }
+              └─BatchExchange { order: [], dist: HashShard(part.p_brand, part.p_type, part.p_size, partsupp.ps_suppkey) }
+                └─BatchNestedLoopJoin { type: Inner, predicate: ($expr1 > $expr2), output: [part.p_brand, part.p_type, part.p_size, partsupp.ps_suppkey] }
+                  ├─BatchExchange { order: [], dist: Single }
+                  │ └─BatchProject { exprs: [partsupp.ps_suppkey, part.p_brand, part.p_type, part.p_size, Case(IsNull(partsupp.ps_suppkey), 1:Int32, 2:Int32) as $expr1] }
+                  │   └─BatchLookupJoin { type: LeftAnti, predicate: partsupp.ps_suppkey = supplier.s_suppkey AND Like(supplier.s_comment, '%Customer%Complaints%':Varchar), output: all, lookup table: supplier }
+                  │     └─BatchExchange { order: [], dist: UpstreamHashShard(partsupp.ps_suppkey) }
+                  │       └─BatchLookupJoin { type: Inner, predicate: partsupp.ps_partkey = part.p_partkey AND (part.p_brand <> 'Brand#45':Varchar) AND (Not((part.p_type >= 'SMALL PLATED':Varchar)) OR Not((part.p_type < 'SMALL PLATEE':Varchar))) AND In(part.p_size, 19:Int32, 17:Int32, 16:Int32, 23:Int32, 10:Int32, 4:Int32, 38:Int32, 11:Int32), output: [partsupp.ps_suppkey, part.p_brand, part.p_type, part.p_size], lookup table: part }
+                  │         └─BatchExchange { order: [], dist: UpstreamHashShard(partsupp.ps_partkey) }
+                  │           └─BatchScan { table: partsupp, columns: [partsupp.ps_partkey, partsupp.ps_suppkey], distribution: UpstreamHashShard(partsupp.ps_partkey, partsupp.ps_suppkey) }
+                  └─BatchProject { exprs: [Case((sum0(count) = 0:Int64), 0:Int32, (sum0(count filter(IsNull(supplier.s_suppkey))) > 0:Int64), 2:Int32, 1:Int32) as $expr2] }
+                    └─BatchSimpleAgg { aggs: [sum0(count), sum0(count filter(IsNull(supplier.s_suppkey)))] }
+                      └─BatchExchange { order: [], dist: Single }
+                        └─BatchSimpleAgg { aggs: [count, count filter(IsNull(supplier.s_suppkey))] }
+                          └─BatchProject { exprs: [supplier.s_suppkey] }
+                            └─BatchFilter { predicate: Like(supplier.s_comment, '%Customer%Complaints%':Varchar) }
+                              └─BatchScan { table: supplier, columns: [supplier.s_suppkey, supplier.s_comment], distribution: UpstreamHashShard(supplier.s_suppkey) }
   stream_plan: |-
     StreamMaterialize { columns: [p_brand, p_type, p_size, supplier_cnt], stream_key: [], pk_columns: [supplier_cnt, p_brand, p_type, p_size], pk_conflict: NoCheck }
     └─StreamProject { exprs: [part.p_brand, part.p_type, part.p_size, count(distinct partsupp.ps_suppkey)] }
@@ -3132,18 +3156,31 @@
             └─StreamProject { exprs: [part.p_brand, part.p_type, part.p_size, count(distinct partsupp.ps_suppkey), Vnode(part.p_brand, part.p_type, part.p_size) as _vnode] }
               └─StreamHashAgg { group_key: [part.p_brand, part.p_type, part.p_size], aggs: [count(distinct partsupp.ps_suppkey), count] }
                 └─StreamExchange { dist: HashShard(part.p_brand, part.p_type, part.p_size) }
-                  └─StreamHashJoin { type: LeftAnti, predicate: partsupp.ps_suppkey = supplier.s_suppkey, output: [partsupp.ps_suppkey, part.p_brand, part.p_type, part.p_size, partsupp.ps_partkey] }
-                    ├─StreamExchange { dist: HashShard(partsupp.ps_suppkey) }
-                    │ └─StreamHashJoin { type: Inner, predicate: partsupp.ps_partkey = part.p_partkey, output: [partsupp.ps_suppkey, part.p_brand, part.p_type, part.p_size, partsupp.ps_partkey, part.p_partkey] }
-                    │   ├─StreamExchange { dist: HashShard(partsupp.ps_partkey) }
-                    │   │ └─StreamTableScan { table: partsupp, columns: [partsupp.ps_partkey, partsupp.ps_suppkey], stream_scan_type: SnapshotBackfill, stream_key: [partsupp.ps_partkey, partsupp.ps_suppkey], pk: [ps_partkey, ps_suppkey], dist: UpstreamHashShard(partsupp.ps_partkey, partsupp.ps_suppkey) }
-                    │   └─StreamExchange { dist: HashShard(part.p_partkey) }
-                    │     └─StreamFilter { predicate: (part.p_brand <> 'Brand#45':Varchar) AND Not(Like(part.p_type, 'SMALL PLATED%':Varchar)) AND In(part.p_size, 19:Int32, 17:Int32, 16:Int32, 23:Int32, 10:Int32, 4:Int32, 38:Int32, 11:Int32) }
-                    │       └─StreamTableScan { table: part, columns: [part.p_partkey, part.p_brand, part.p_type, part.p_size], stream_scan_type: SnapshotBackfill, stream_key: [part.p_partkey], pk: [p_partkey], dist: UpstreamHashShard(part.p_partkey) }
-                    └─StreamExchange { dist: HashShard(supplier.s_suppkey) }
-                      └─StreamProject { exprs: [supplier.s_suppkey] }
-                        └─StreamFilter { predicate: Like(supplier.s_comment, '%Customer%Complaints%':Varchar) }
-                          └─StreamTableScan { table: supplier, columns: [supplier.s_suppkey, supplier.s_comment], stream_scan_type: SnapshotBackfill, stream_key: [supplier.s_suppkey], pk: [s_suppkey], dist: UpstreamHashShard(supplier.s_suppkey) }
+                  └─StreamProject { exprs: [partsupp.ps_suppkey, part.p_brand, part.p_type, part.p_size, partsupp.ps_partkey] }
+                    └─StreamDynamicFilter { predicate: ($expr1 > $expr2), output: [partsupp.ps_suppkey, part.p_brand, part.p_type, part.p_size, $expr1, partsupp.ps_partkey] }
+                      ├─StreamProject { exprs: [partsupp.ps_suppkey, part.p_brand, part.p_type, part.p_size, Case(IsNull(partsupp.ps_suppkey), 1:Int32, 2:Int32) as $expr1, partsupp.ps_partkey] }
+                      │ └─StreamHashJoin { type: LeftAnti, predicate: partsupp.ps_suppkey = supplier.s_suppkey, output: [partsupp.ps_suppkey, part.p_brand, part.p_type, part.p_size, partsupp.ps_partkey] }
+                      │   ├─StreamExchange { dist: HashShard(partsupp.ps_suppkey) }
+                      │   │ └─StreamHashJoin { type: Inner, predicate: partsupp.ps_partkey = part.p_partkey, output: [partsupp.ps_suppkey, part.p_brand, part.p_type, part.p_size, partsupp.ps_partkey, part.p_partkey] }
+                      │   │   ├─StreamExchange { dist: HashShard(partsupp.ps_partkey) }
+                      │   │   │ └─StreamTableScan { table: partsupp, columns: [partsupp.ps_partkey, partsupp.ps_suppkey], stream_scan_type: SnapshotBackfill, stream_key: [partsupp.ps_partkey, partsupp.ps_suppkey], pk: [ps_partkey, ps_suppkey], dist: UpstreamHashShard(partsupp.ps_partkey, partsupp.ps_suppkey) }
+                      │   │   └─StreamExchange { dist: HashShard(part.p_partkey) }
+                      │   │     └─StreamFilter { predicate: (part.p_brand <> 'Brand#45':Varchar) AND Not(Like(part.p_type, 'SMALL PLATED%':Varchar)) AND In(part.p_size, 19:Int32, 17:Int32, 16:Int32, 23:Int32, 10:Int32, 4:Int32, 38:Int32, 11:Int32) }
+                      │   │       └─StreamTableScan { table: part, columns: [part.p_partkey, part.p_brand, part.p_type, part.p_size], stream_scan_type: SnapshotBackfill, stream_key: [part.p_partkey], pk: [p_partkey], dist: UpstreamHashShard(part.p_partkey) }
+                      │   └─StreamExchange { dist: HashShard(supplier.s_suppkey) }
+                      │     └─StreamShare { id: 8 }
+                      │       └─StreamProject { exprs: [supplier.s_suppkey] }
+                      │         └─StreamFilter { predicate: Like(supplier.s_comment, '%Customer%Complaints%':Varchar) }
+                      │           └─StreamTableScan { table: supplier, columns: [supplier.s_suppkey, supplier.s_comment], stream_scan_type: SnapshotBackfill, stream_key: [supplier.s_suppkey], pk: [s_suppkey], dist: UpstreamHashShard(supplier.s_suppkey) }
+                      └─StreamExchange { dist: Broadcast }
+                        └─StreamProject { exprs: [Case((sum0(count) = 0:Int64), 0:Int32, (sum0(count filter(IsNull(supplier.s_suppkey))) > 0:Int64), 2:Int32, 1:Int32) as $expr2] }
+                          └─StreamSimpleAgg [append_only] { aggs: [sum0(count), sum0(count filter(IsNull(supplier.s_suppkey))), count] }
+                            └─StreamExchange { dist: Single }
+                              └─StreamStatelessSimpleAgg { aggs: [count, count filter(IsNull(supplier.s_suppkey))] }
+                                └─StreamShare { id: 8 }
+                                  └─StreamProject { exprs: [supplier.s_suppkey] }
+                                    └─StreamFilter { predicate: Like(supplier.s_comment, '%Customer%Complaints%':Varchar) }
+                                      └─StreamTableScan { table: supplier, columns: [supplier.s_suppkey, supplier.s_comment], stream_scan_type: SnapshotBackfill, stream_key: [supplier.s_suppkey], pk: [s_suppkey], dist: UpstreamHashShard(supplier.s_suppkey) }
   stream_dist_plan: |+
     Fragment 0
     StreamMaterialize { columns: [p_brand, p_type, p_size, supplier_cnt], stream_key: [], pk_columns: [supplier_cnt, p_brand, p_type, p_size], pk_conflict: NoCheck }
@@ -3161,35 +3198,53 @@
             └── StreamExchange Hash([1, 2, 3]) from 2
 
     Fragment 2
-    StreamHashJoin { type: LeftAnti, predicate: partsupp.ps_suppkey = supplier.s_suppkey, output: [partsupp.ps_suppkey, part.p_brand, part.p_type, part.p_size, partsupp.ps_partkey] }
-    ├── tables: [ HashJoinLeft: 4, HashJoinDegreeLeft: 5, HashJoinRight: 6, HashJoinDegreeRight: 7 ]
-    ├── StreamExchange Hash([0]) from 3
-    └── StreamExchange Hash([0]) from 6
+    StreamProject { exprs: [partsupp.ps_suppkey, part.p_brand, part.p_type, part.p_size, partsupp.ps_partkey] }
+    └── StreamDynamicFilter { predicate: ($expr1 > $expr2), output: [partsupp.ps_suppkey, part.p_brand, part.p_type, part.p_size, $expr1, partsupp.ps_partkey] }
+        ├── tables: [ DynamicFilterLeft: 4, DynamicFilterRight: 5 ]
+        ├── StreamProject { exprs: [partsupp.ps_suppkey, part.p_brand, part.p_type, part.p_size, Case(IsNull(partsupp.ps_suppkey), 1:Int32, 2:Int32) as $expr1, partsupp.ps_partkey] }
+        │   └── StreamHashJoin { type: LeftAnti, predicate: partsupp.ps_suppkey = supplier.s_suppkey, output: [partsupp.ps_suppkey, part.p_brand, part.p_type, part.p_size, partsupp.ps_partkey] }
+        │       ├── tables: [ HashJoinLeft: 6, HashJoinDegreeLeft: 7, HashJoinRight: 8, HashJoinDegreeRight: 9 ]
+        │       ├── StreamExchange Hash([0]) from 3
+        │       └── StreamExchange Hash([0]) from 6
+        └── StreamExchange Broadcast from 8
 
     Fragment 3
     StreamHashJoin { type: Inner, predicate: partsupp.ps_partkey = part.p_partkey, output: [partsupp.ps_suppkey, part.p_brand, part.p_type, part.p_size, partsupp.ps_partkey, part.p_partkey] }
-    ├── tables: [ HashJoinLeft: 8, HashJoinDegreeLeft: 9, HashJoinRight: 10, HashJoinDegreeRight: 11 ]
+    ├── tables: [ HashJoinLeft: 10, HashJoinDegreeLeft: 11, HashJoinRight: 12, HashJoinDegreeRight: 13 ]
     ├── StreamExchange Hash([0]) from 4
     └── StreamExchange Hash([0]) from 5
 
     Fragment 4
     StreamTableScan { table: partsupp, columns: [partsupp.ps_partkey, partsupp.ps_suppkey], stream_scan_type: SnapshotBackfill, stream_key: [partsupp.ps_partkey, partsupp.ps_suppkey], pk: [ps_partkey, ps_suppkey], dist: UpstreamHashShard(partsupp.ps_partkey, partsupp.ps_suppkey) }
-    ├── tables: [ StreamScan: 12 ]
+    ├── tables: [ StreamScan: 14 ]
     ├── Upstream
     └── BatchPlanNode
 
     Fragment 5
     StreamFilter { predicate: (part.p_brand <> 'Brand#45':Varchar) AND Not(Like(part.p_type, 'SMALL PLATED%':Varchar)) AND In(part.p_size, 19:Int32, 17:Int32, 16:Int32, 23:Int32, 10:Int32, 4:Int32, 38:Int32, 11:Int32) }
-    └── StreamTableScan { table: part, columns: [part.p_partkey, part.p_brand, part.p_type, part.p_size], stream_scan_type: SnapshotBackfill, stream_key: [part.p_partkey], pk: [p_partkey], dist: UpstreamHashShard(part.p_partkey) } { tables: [ StreamScan: 13 ] }
+    └── StreamTableScan { table: part, columns: [part.p_partkey, part.p_brand, part.p_type, part.p_size], stream_scan_type: SnapshotBackfill, stream_key: [part.p_partkey], pk: [p_partkey], dist: UpstreamHashShard(part.p_partkey) } { tables: [ StreamScan: 15 ] }
         ├── Upstream
         └── BatchPlanNode
 
     Fragment 6
+    StreamNoOp
+    └── StreamExchange NoShuffle from 7
+
+    Fragment 7
     StreamProject { exprs: [supplier.s_suppkey] }
     └── StreamFilter { predicate: Like(supplier.s_comment, '%Customer%Complaints%':Varchar) }
-        └── StreamTableScan { table: supplier, columns: [supplier.s_suppkey, supplier.s_comment], stream_scan_type: SnapshotBackfill, stream_key: [supplier.s_suppkey], pk: [s_suppkey], dist: UpstreamHashShard(supplier.s_suppkey) } { tables: [ StreamScan: 14 ] }
+        └── StreamTableScan { table: supplier, columns: [supplier.s_suppkey, supplier.s_comment], stream_scan_type: SnapshotBackfill, stream_key: [supplier.s_suppkey], pk: [s_suppkey], dist: UpstreamHashShard(supplier.s_suppkey) } { tables: [ StreamScan: 16 ] }
             ├── Upstream
             └── BatchPlanNode
+
+    Fragment 8
+    StreamProject { exprs: [Case((sum0(count) = 0:Int64), 0:Int32, (sum0(count filter(IsNull(supplier.s_suppkey))) > 0:Int64), 2:Int32, 1:Int32) as $expr2] }
+    └── StreamSimpleAgg [append_only] { aggs: [sum0(count), sum0(count filter(IsNull(supplier.s_suppkey))), count] } { tables: [ SimpleAggState: 17 ] }
+        └── StreamExchange Single from 9
+
+    Fragment 9
+    StreamStatelessSimpleAgg { aggs: [count, count filter(IsNull(supplier.s_suppkey))] }
+    └── StreamExchange NoShuffle from 7
 
     Table 0 { columns: [ part_p_brand, part_p_type, part_p_size, count(distinct partsupp_ps_suppkey), _vnode, _rw_timestamp ], primary key: [ $3 DESC, $0 ASC, $1 ASC, $2 ASC, $4 ASC ], value indices: [ 0, 1, 2, 3, 4 ], distribution key: [], read pk prefix len hint: 0 }
 
@@ -3205,27 +3260,33 @@
 
     Table 3 { columns: [ part_p_brand, part_p_type, part_p_size, partsupp_ps_suppkey, count_for_agg_call_0, _rw_timestamp ], primary key: [ $0 ASC, $1 ASC, $2 ASC, $3 ASC ], value indices: [ 4 ], distribution key: [ 0, 1, 2 ], read pk prefix len hint: 4 }
 
-    Table 4 { columns: [ partsupp_ps_suppkey, part_p_brand, part_p_type, part_p_size, partsupp_ps_partkey, part_p_partkey, _rw_timestamp ], primary key: [ $0 ASC, $4 ASC ], value indices: [ 0, 1, 2, 3, 4, 5 ], distribution key: [ 0 ], read pk prefix len hint: 1 }
+    Table 4 { columns: [ partsupp_ps_suppkey, part_p_brand, part_p_type, part_p_size, $expr1, partsupp_ps_partkey, _rw_timestamp ], primary key: [ $4 ASC, $5 ASC, $0 ASC ], value indices: [ 0, 1, 2, 3, 4, 5 ], distribution key: [ 0 ], read pk prefix len hint: 0 }
 
-    Table 5 { columns: [ partsupp_ps_suppkey, partsupp_ps_partkey, _degree, _rw_timestamp ], primary key: [ $0 ASC, $1 ASC ], value indices: [ 2 ], distribution key: [ 0 ], read pk prefix len hint: 1 }
+    Table 5 { columns: [ $expr2, _rw_timestamp ], primary key: [], value indices: [ 0 ], distribution key: [], read pk prefix len hint: 0 }
 
-    Table 6 { columns: [ supplier_s_suppkey, _rw_timestamp ], primary key: [ $0 ASC ], value indices: [ 0 ], distribution key: [ 0 ], read pk prefix len hint: 1 }
+    Table 6 { columns: [ partsupp_ps_suppkey, part_p_brand, part_p_type, part_p_size, partsupp_ps_partkey, part_p_partkey, _rw_timestamp ], primary key: [ $0 ASC, $4 ASC ], value indices: [ 0, 1, 2, 3, 4, 5 ], distribution key: [ 0 ], read pk prefix len hint: 1 }
 
-    Table 7 { columns: [ supplier_s_suppkey, _degree, _rw_timestamp ], primary key: [ $0 ASC ], value indices: [ 1 ], distribution key: [ 0 ], read pk prefix len hint: 1 }
+    Table 7 { columns: [ partsupp_ps_suppkey, partsupp_ps_partkey, _degree, _rw_timestamp ], primary key: [ $0 ASC, $1 ASC ], value indices: [ 2 ], distribution key: [ 0 ], read pk prefix len hint: 1 }
 
-    Table 8 { columns: [ partsupp_ps_partkey, partsupp_ps_suppkey, _rw_timestamp ], primary key: [ $0 ASC, $1 ASC ], value indices: [ 0, 1 ], distribution key: [ 0 ], read pk prefix len hint: 1 }
+    Table 8 { columns: [ supplier_s_suppkey, _rw_timestamp ], primary key: [ $0 ASC ], value indices: [ 0 ], distribution key: [ 0 ], read pk prefix len hint: 1 }
 
-    Table 9 { columns: [ partsupp_ps_partkey, partsupp_ps_suppkey, _degree, _rw_timestamp ], primary key: [ $0 ASC, $1 ASC ], value indices: [ 2 ], distribution key: [ 0 ], read pk prefix len hint: 1 }
+    Table 9 { columns: [ supplier_s_suppkey, _degree, _rw_timestamp ], primary key: [ $0 ASC ], value indices: [ 1 ], distribution key: [ 0 ], read pk prefix len hint: 1 }
 
-    Table 10 { columns: [ part_p_partkey, part_p_brand, part_p_type, part_p_size, _rw_timestamp ], primary key: [ $0 ASC ], value indices: [ 0, 1, 2, 3 ], distribution key: [ 0 ], read pk prefix len hint: 1 }
+    Table 10 { columns: [ partsupp_ps_partkey, partsupp_ps_suppkey, _rw_timestamp ], primary key: [ $0 ASC, $1 ASC ], value indices: [ 0, 1 ], distribution key: [ 0 ], read pk prefix len hint: 1 }
 
-    Table 11 { columns: [ part_p_partkey, _degree, _rw_timestamp ], primary key: [ $0 ASC ], value indices: [ 1 ], distribution key: [ 0 ], read pk prefix len hint: 1 }
+    Table 11 { columns: [ partsupp_ps_partkey, partsupp_ps_suppkey, _degree, _rw_timestamp ], primary key: [ $0 ASC, $1 ASC ], value indices: [ 2 ], distribution key: [ 0 ], read pk prefix len hint: 1 }
 
-    Table 12 { columns: [ vnode, epoch, row_count, is_epoch_finished, ps_partkey, ps_suppkey, _rw_timestamp ], primary key: [ $0 ASC ], value indices: [ 1, 2, 3, 4, 5 ], distribution key: [ 0 ], read pk prefix len hint: 1, vnode column idx: 0 }
+    Table 12 { columns: [ part_p_partkey, part_p_brand, part_p_type, part_p_size, _rw_timestamp ], primary key: [ $0 ASC ], value indices: [ 0, 1, 2, 3 ], distribution key: [ 0 ], read pk prefix len hint: 1 }
 
-    Table 13 { columns: [ vnode, epoch, row_count, is_epoch_finished, p_partkey, _rw_timestamp ], primary key: [ $0 ASC ], value indices: [ 1, 2, 3, 4 ], distribution key: [ 0 ], read pk prefix len hint: 1, vnode column idx: 0 }
+    Table 13 { columns: [ part_p_partkey, _degree, _rw_timestamp ], primary key: [ $0 ASC ], value indices: [ 1 ], distribution key: [ 0 ], read pk prefix len hint: 1 }
 
-    Table 14 { columns: [ vnode, epoch, row_count, is_epoch_finished, s_suppkey, _rw_timestamp ], primary key: [ $0 ASC ], value indices: [ 1, 2, 3, 4 ], distribution key: [ 0 ], read pk prefix len hint: 1, vnode column idx: 0 }
+    Table 14 { columns: [ vnode, epoch, row_count, is_epoch_finished, ps_partkey, ps_suppkey, _rw_timestamp ], primary key: [ $0 ASC ], value indices: [ 1, 2, 3, 4, 5 ], distribution key: [ 0 ], read pk prefix len hint: 1, vnode column idx: 0 }
+
+    Table 15 { columns: [ vnode, epoch, row_count, is_epoch_finished, p_partkey, _rw_timestamp ], primary key: [ $0 ASC ], value indices: [ 1, 2, 3, 4 ], distribution key: [ 0 ], read pk prefix len hint: 1, vnode column idx: 0 }
+
+    Table 16 { columns: [ vnode, epoch, row_count, is_epoch_finished, s_suppkey, _rw_timestamp ], primary key: [ $0 ASC ], value indices: [ 1, 2, 3, 4 ], distribution key: [ 0 ], read pk prefix len hint: 1, vnode column idx: 0 }
+
+    Table 17 { columns: [ sum0(count), sum0(count filter(IsNull(supplier_s_suppkey))), count, _rw_timestamp ], primary key: [], value indices: [ 0, 1, 2 ], distribution key: [], read pk prefix len hint: 0 }
 
     Table 4294967294 { columns: [ p_brand, p_type, p_size, supplier_cnt, _rw_timestamp ], primary key: [ $3 DESC, $0 ASC, $1 ASC, $2 ASC ], value indices: [ 0, 1, 2, 3 ], distribution key: [], read pk prefix len hint: 4 }
 

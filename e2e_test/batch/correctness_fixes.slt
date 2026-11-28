@@ -1,0 +1,494 @@
+# Expected results of the corrections of wrong results of the optimizer (see
+# `docs/fork/corrections/`). Every expected result is computed by hand with the semantics of
+# PostgreSQL.
+
+statement ok
+SET RW_IMPLICIT_FLUSH TO true;
+
+# ---------------------------------------------------------------------------------------------
+# `x NOT IN (SELECT y ...)`: a row is kept only when `x <> y` is true for every `y`.
+# ---------------------------------------------------------------------------------------------
+
+statement ok
+create table cf_a (id int primary key, x int, k int);
+
+statement ok
+create table cf_empty (id int primary key, y int, k int);
+
+statement ok
+create table cf_vals (id int primary key, y int, k int);
+
+statement ok
+create table cf_null (id int primary key, y int, k int);
+
+statement ok
+create table cf_c (id int primary key, y int, k int);
+
+statement ok
+create table cf_nn (id int primary key, x int not null, k int not null);
+
+statement ok
+create table cf_nm (id int primary key, y int not null, k int not null);
+
+# Duplicates (ids 4 and 5) and NULL values on the outer side.
+statement ok
+insert into cf_a values (1, 1, 1), (2, 2, 1), (3, null, 1), (4, 3, 2), (5, 3, 2), (6, null, 3), (7, 5, null);
+
+# Duplicates, no NULL.
+statement ok
+insert into cf_vals values (1, 1, 1), (2, 1, 1), (3, 4, 9);
+
+# One NULL.
+statement ok
+insert into cf_null values (1, 1, 1), (2, null, 5);
+
+# By `k`: 1 -> {1, 1}, 2 -> {NULL}, 4 -> {9}.
+statement ok
+insert into cf_c values (1, 1, 1), (2, 1, 1), (3, null, 2), (4, 9, 4);
+
+statement ok
+insert into cf_nn values (1, 1, 1), (2, 2, 1), (3, 3, 2);
+
+statement ok
+insert into cf_nm values (1, 1, 1), (2, 1, 2);
+
+# Empty subquery: every row, NULL `x` included.
+query I rowsort
+select id from cf_a where x not in (select y from cf_empty);
+----
+1
+2
+3
+4
+5
+6
+7
+
+# No NULL in the subquery: the rows whose `x` is not NULL and not in {1}.
+query I rowsort
+select id from cf_a where x not in (select y from cf_vals);
+----
+2
+4
+5
+7
+
+# A NULL in the subquery: no row.
+query I rowsort
+select id from cf_a where x not in (select y from cf_null);
+----
+
+# The NULL filtered out in the subquery.
+query I rowsort
+select id from cf_a where x not in (select y from cf_null where y is not null);
+----
+2
+4
+5
+7
+
+# An expression on the outer side: `x + 1` is 2, 3, NULL, 4, 4, NULL, 6.
+query I rowsort
+select id from cf_a where x + 1 not in (select y from cf_vals);
+----
+1
+2
+7
+
+# A constant on the outer side.
+query I rowsort
+select id from cf_a where 1 not in (select y from cf_null);
+----
+
+query I rowsort
+select id from cf_a where 7 not in (select y from cf_vals);
+----
+1
+2
+3
+4
+5
+6
+7
+
+# Combined with another condition.
+query II rowsort
+select id, x from cf_a where x not in (select y from cf_vals where k > 0) and k < 3;
+----
+2 2
+4 3
+5 3
+
+# Correlated with an equality: per `k`, 1 -> {1, 1}, 2 -> {NULL}, 3 and NULL -> empty.
+query I rowsort
+select id from cf_a where x not in (select y from cf_c where cf_c.k = cf_a.k);
+----
+2
+6
+7
+
+# Correlated without equality: `cf_c.k > cf_a.k` gives {NULL, 9} for k = 1, {9} for k = 2 and 3,
+# the empty set for a NULL k.
+query I rowsort
+select id from cf_a where x not in (select y from cf_c where cf_c.k > cf_a.k);
+----
+4
+5
+7
+
+# Two NOT IN: the second one is correlated on `id` (id 2 -> {1}, id 4 -> {4}, others empty).
+query I rowsort
+select id from cf_a where x not in (select y from cf_vals) and k not in (select k from cf_c where cf_c.id = cf_a.id);
+----
+4
+5
+7
+
+# Columns declared NOT NULL: a plain anti join.
+query I rowsort
+select id from cf_nn where x not in (select y from cf_nm);
+----
+2
+3
+
+query I rowsort
+select id from cf_nn where x not in (select y from cf_nm where cf_nm.k = cf_nn.k);
+----
+2
+3
+
+# Outer column NOT NULL, subquery with a NULL: no row; with an empty subquery: every row.
+query I rowsort
+select id from cf_nn where x not in (select y from cf_null);
+----
+
+query I rowsort
+select id from cf_nn where x not in (select y from cf_empty);
+----
+1
+2
+3
+
+# Outer column nullable, subquery column NOT NULL ({1, 1}).
+query I rowsort
+select id from cf_a where x not in (select y from cf_nm);
+----
+2
+4
+5
+7
+
+# In HAVING: groups k = 1, 2, 3, NULL; `cf_vals.k` is {1, 1, 9}.
+query II rowsort
+select k, count(*) from cf_a group by k having k not in (select k from cf_vals);
+----
+2 2
+3 1
+
+query II rowsort
+select k, count(*) from cf_a group by k having k not in (select y from cf_null);
+----
+
+query II rowsort
+select k, count(*) from cf_a group by k having k in (select k from cf_vals);
+----
+1 3
+
+# Compared with an aggregate: counts 3, 2, 1, 1 against {1, 1, 4}.
+query II rowsort
+select k, count(*) from cf_a group by k having count(*) not in (select y from cf_vals);
+----
+1 3
+2 2
+
+# Positive IN is unchanged.
+query I rowsort
+select id from cf_a where x in (select y from cf_null);
+----
+1
+
+# DELETE: a row is deleted only when the condition is true.
+statement ok
+create table cf_d (id int primary key, x int, k int);
+
+statement ok
+insert into cf_d select * from cf_a;
+
+statement ok
+delete from cf_d where x not in (select y from cf_null);
+
+query I
+select count(*) from cf_d;
+----
+7
+
+statement ok
+delete from cf_d where x not in (select y from cf_vals);
+
+query I rowsort
+select id from cf_d;
+----
+1
+3
+6
+
+# The subquery changes: a NULL appears, then disappears.
+statement ok
+insert into cf_vals values (4, null, 9);
+
+query I rowsort
+select id from cf_a where x not in (select y from cf_vals);
+----
+
+statement ok
+delete from cf_vals where id = 4;
+
+query I rowsort
+select id from cf_a where x not in (select y from cf_vals);
+----
+2
+4
+5
+7
+
+statement ok
+drop table cf_d;
+
+# ---------------------------------------------------------------------------------------------
+# EXISTS over a correlated scalar aggregate: always one row, so EXISTS is true.
+# ---------------------------------------------------------------------------------------------
+
+query I rowsort
+select id from cf_a where exists (select max(y) from cf_c where cf_c.k = cf_a.k);
+----
+1
+2
+3
+4
+5
+6
+7
+
+query I rowsort
+select id from cf_a where not exists (select sum(y) + 1 from cf_c where cf_c.k = cf_a.k);
+----
+
+query I rowsort
+select id from cf_a where exists (select count(*) from cf_c where cf_c.k = cf_a.k);
+----
+1
+2
+3
+4
+5
+6
+7
+
+# `x IN` of the maximum per `k` (1 -> 1, 2 -> NULL, others NULL): still a semi join.
+query I rowsort
+select id from cf_a where x in (select max(y) from cf_c where cf_c.k = cf_a.k);
+----
+1
+
+# `approx_count_distinct` is 0, not NULL, over an empty input (`cf_vals` by k: 1 -> {1, 1}).
+query I rowsort
+select id from cf_a where 0 in (select approx_count_distinct(y) from cf_vals where cf_vals.k = cf_a.k);
+----
+4
+5
+6
+7
+
+statement ok
+drop table cf_a;
+
+statement ok
+drop table cf_empty;
+
+statement ok
+drop table cf_vals;
+
+statement ok
+drop table cf_null;
+
+statement ok
+drop table cf_c;
+
+statement ok
+drop table cf_nn;
+
+statement ok
+drop table cf_nm;
+
+# ---------------------------------------------------------------------------------------------
+# Predicates derived through the equalities of a join: equal values that differ.
+# ---------------------------------------------------------------------------------------------
+
+statement ok
+create table cf_dn (id int primary key, k numeric);
+
+statement ok
+create table cf_dm (id int primary key, k numeric);
+
+statement ok
+insert into cf_dn values (1, 1.0), (2, 2.5);
+
+statement ok
+insert into cf_dm values (1, 1.00), (2, 1.0), (3, 2.50);
+
+# The scale of the values is kept.
+query IT rowsort
+select id, k::varchar from cf_dm;
+----
+1 1.00
+2 1.0
+3 2.50
+
+query II rowsort
+select cf_dn.id, cf_dm.id from cf_dn join cf_dm on cf_dn.k = cf_dm.k where cf_dn.k::varchar = '1.0';
+----
+1 1
+1 2
+
+query II rowsort
+select cf_dn.id, cf_dm.id from cf_dn join cf_dm on cf_dn.k = cf_dm.k where cf_dm.k::varchar = '1.00';
+----
+1 1
+
+# A comparison is still derived, and exact.
+query II rowsort
+select cf_dn.id, cf_dm.id from cf_dn join cf_dm on cf_dn.k = cf_dm.k where cf_dn.k > 2;
+----
+2 3
+
+statement ok
+create table cf_df (id int primary key, f float8);
+
+statement ok
+create table cf_dg (id int primary key, f float8);
+
+statement ok
+insert into cf_df values (1, 1.5), (2, '-0'::float8);
+
+statement ok
+insert into cf_dg values (1, 0), (2, '-0'::float8);
+
+query IT rowsort
+select id, f::varchar from cf_dg;
+----
+1 0
+2 -0
+
+query II rowsort
+select cf_df.id, cf_dg.id from cf_df join cf_dg on cf_df.f = cf_dg.f where cf_df.f::varchar = '-0';
+----
+2 1
+2 2
+
+statement ok
+create table cf_di (id int primary key, iv interval);
+
+statement ok
+create table cf_dj (id int primary key, iv interval);
+
+statement ok
+insert into cf_di values (1, interval '1 day'), (2, interval '2 hours');
+
+statement ok
+insert into cf_dj values (1, interval '24 hours'), (2, interval '1 day');
+
+query II rowsort
+select cf_di.id, cf_dj.id from cf_di join cf_dj on cf_di.iv = cf_dj.iv where extract(hour from cf_di.iv) = 0;
+----
+1 1
+1 2
+
+query II rowsort
+select cf_di.id, cf_dj.id from cf_di join cf_dj on cf_di.iv = cf_dj.iv where extract(hour from cf_dj.iv) = 24;
+----
+1 1
+
+statement ok
+drop table cf_dn;
+
+statement ok
+drop table cf_dm;
+
+statement ok
+drop table cf_df;
+
+statement ok
+drop table cf_dg;
+
+statement ok
+drop table cf_di;
+
+statement ok
+drop table cf_dj;
+
+# ---------------------------------------------------------------------------------------------
+# `greatest` and `least` skip their NULL arguments.
+# ---------------------------------------------------------------------------------------------
+
+statement ok
+create table cf_ga (x int, k int);
+
+statement ok
+create table cf_gb (x int, y int);
+
+statement ok
+insert into cf_ga values (0, 1), (10, 2), (3, null);
+
+statement ok
+insert into cf_gb values (10, 20), (3, null);
+
+query I rowsort
+select x from cf_ga where greatest(x, null) > 5;
+----
+10
+
+query I rowsort
+select x from cf_ga where least(k, null) is null;
+----
+3
+
+# Per x: 0 -> no row, greatest(NULL, 0) = 0; 10 -> 20; 3 -> greatest(NULL, 0) = 0.
+query I rowsort
+select x from cf_ga where x in (select greatest(max(y), 0) from cf_gb where cf_gb.x = cf_ga.x);
+----
+0
+
+query II rowsort
+select x, (select greatest(max(y), 0) from cf_gb where cf_gb.x = cf_ga.x) from cf_ga;
+----
+0 0
+10 20
+3 0
+
+statement ok
+drop table cf_ga;
+
+statement ok
+drop table cf_gb;
+
+# An update or an upsert to an equal value with a different text changes the table.
+statement ok
+create table cf_n (id int primary key, k numeric, f float8);
+
+statement ok
+insert into cf_n values (1, 1.00, 0), (2, 2.5, 1);
+
+statement ok
+update cf_n set k = 1.0, f = '-0'::float8 where id = 1;
+
+statement ok
+insert into cf_n values (2, 2.50, 1);
+
+query ITT rowsort
+select id, k::varchar, f::varchar from cf_n;
+----
+1 1.0 -0
+2 2.50 1
+
+statement ok
+drop table cf_n;
