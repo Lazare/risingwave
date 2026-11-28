@@ -5,6 +5,7 @@ batchdaterange batch/date_range_predicates 60
 batchexchange batch/exchange_buffer_memory 60
 batchfeedback batch/cardinality_feedback 60
 batchgrouptopn batch/top_n/group_top_n 30
+batchjoingroupops batch/push_join_below_group_ops 60
 batchjoinorder batch/cost_based_join_ordering 60
 batchkeys batch/plan_reduction_keys 60
 batchkeysnotnull batch/join_keys_not_null 60
@@ -37,6 +38,7 @@ groupkeysbatch batch/reduce_group_keys 60
 ladder streaming/status_ladder_case 90
 lateral streaming/unnest_lateral_functions 60
 merge streaming/merge_repeated_lookups 90
+narrowgroupops streaming/narrow_value_group_ops 60
 narrowvalue streaming/narrow_value_aggregates 60
 nullbranches streaming/prune_null_union_branches 60
 nullbranchesbatch batch/prune_null_union_branches 60
