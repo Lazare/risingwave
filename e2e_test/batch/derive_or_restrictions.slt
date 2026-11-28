@@ -99,6 +99,42 @@ statement ok
 create table dor_three_tables_on (id int, bid int, cid int);
 
 statement ok
+create table dor_merged_in_off (id int, bid int);
+
+statement ok
+create table dor_merged_in_on (id int, bid int);
+
+statement ok
+create table dor_same_value_off (id int, bid int);
+
+statement ok
+create table dor_same_value_on (id int, bid int);
+
+statement ok
+create table dor_case_some_values_off (id int, bid int);
+
+statement ok
+create table dor_case_some_values_on (id int, bid int);
+
+statement ok
+create table dor_case_all_values_off (id int, bid int);
+
+statement ok
+create table dor_case_all_values_on (id int, bid int);
+
+statement ok
+create table dor_case_no_else_off (id int, bid int);
+
+statement ok
+create table dor_case_no_else_on (id int, bid int);
+
+statement ok
+create table dor_union_tags_off (id int, uid int);
+
+statement ok
+create table dor_union_tags_on (id int, uid int);
+
+statement ok
 create table dor_kept_anti_off (id int);
 
 statement ok
@@ -359,6 +395,114 @@ statement ok
 set batch_derive_or_restrictions = false;
 
 statement ok
+delete from dor_merged_in_off;
+
+statement ok
+delete from dor_merged_in_on;
+
+statement ok
+insert into dor_merged_in_off select a.id, b.id as bid from dor_a a join dor_b b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'z') and b.y = 4);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_merged_in_on select a.id, b.id as bid from dor_a a join dor_b b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'z') and b.y = 4);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
+delete from dor_same_value_off;
+
+statement ok
+delete from dor_same_value_on;
+
+statement ok
+insert into dor_same_value_off select a.id, b.id as bid from dor_a a join dor_b b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 4);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_same_value_on select a.id, b.id as bid from dor_a a join dor_b b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 4);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
+delete from dor_case_some_values_off;
+
+statement ok
+delete from dor_case_some_values_on;
+
+statement ok
+insert into dor_case_some_values_off select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 else 0 end as f from dor_b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_case_some_values_on select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 else 0 end as f from dor_b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
+delete from dor_case_all_values_off;
+
+statement ok
+delete from dor_case_all_values_on;
+
+statement ok
+insert into dor_case_all_values_off select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 else 0 end as f from dor_b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_case_all_values_on select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 else 0 end as f from dor_b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
+delete from dor_case_no_else_off;
+
+statement ok
+delete from dor_case_no_else_on;
+
+statement ok
+insert into dor_case_no_else_off select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 end as f from dor_b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_case_no_else_on select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 end as f from dor_b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
+delete from dor_union_tags_off;
+
+statement ok
+delete from dor_union_tags_on;
+
+statement ok
+insert into dor_union_tags_off select a.id, u.id as uid from dor_a a join (select id, k, 'x' as tag from dor_b union all select id, k, 'y' as tag from dor_c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_union_tags_on select a.id, u.id as uid from dor_a a join (select id, k, 'x' as tag from dor_b union all select id, k, 'y' as tag from dor_c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
 delete from dor_kept_anti_off;
 
 statement ok
@@ -533,6 +677,54 @@ select
   (select count(*) from (select id, bid, cid, count(*) as dor_rows from dor_three_tables_on group by id, bid, cid except select id, bid, cid, count(*) as dor_rows from dor_three_tables_off group by id, bid, cid) x),
   (select count(*) from (select id, bid, cid, count(*) as dor_rows from dor_three_tables_off group by id, bid, cid except select id, bid, cid, count(*) as dor_rows from dor_three_tables_on group by id, bid, cid) y),
   (select count(*) from dor_three_tables_on) - (select count(*) from dor_three_tables_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_merged_in_on group by id, bid except select id, bid, count(*) as dor_rows from dor_merged_in_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_merged_in_off group by id, bid except select id, bid, count(*) as dor_rows from dor_merged_in_on group by id, bid) y),
+  (select count(*) from dor_merged_in_on) - (select count(*) from dor_merged_in_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_same_value_on group by id, bid except select id, bid, count(*) as dor_rows from dor_same_value_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_same_value_off group by id, bid except select id, bid, count(*) as dor_rows from dor_same_value_on group by id, bid) y),
+  (select count(*) from dor_same_value_on) - (select count(*) from dor_same_value_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_some_values_on group by id, bid except select id, bid, count(*) as dor_rows from dor_case_some_values_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_some_values_off group by id, bid except select id, bid, count(*) as dor_rows from dor_case_some_values_on group by id, bid) y),
+  (select count(*) from dor_case_some_values_on) - (select count(*) from dor_case_some_values_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_all_values_on group by id, bid except select id, bid, count(*) as dor_rows from dor_case_all_values_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_all_values_off group by id, bid except select id, bid, count(*) as dor_rows from dor_case_all_values_on group by id, bid) y),
+  (select count(*) from dor_case_all_values_on) - (select count(*) from dor_case_all_values_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_no_else_on group by id, bid except select id, bid, count(*) as dor_rows from dor_case_no_else_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_no_else_off group by id, bid except select id, bid, count(*) as dor_rows from dor_case_no_else_on group by id, bid) y),
+  (select count(*) from dor_case_no_else_on) - (select count(*) from dor_case_no_else_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, uid, count(*) as dor_rows from dor_union_tags_on group by id, uid except select id, uid, count(*) as dor_rows from dor_union_tags_off group by id, uid) x),
+  (select count(*) from (select id, uid, count(*) as dor_rows from dor_union_tags_off group by id, uid except select id, uid, count(*) as dor_rows from dor_union_tags_on group by id, uid) y),
+  (select count(*) from dor_union_tags_on) - (select count(*) from dor_union_tags_off);
 ----
 0 0 0
 
@@ -819,6 +1011,114 @@ statement ok
 set batch_derive_or_restrictions = false;
 
 statement ok
+delete from dor_merged_in_off;
+
+statement ok
+delete from dor_merged_in_on;
+
+statement ok
+insert into dor_merged_in_off select a.id, b.id as bid from dor_a a join dor_b b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'z') and b.y = 4);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_merged_in_on select a.id, b.id as bid from dor_a a join dor_b b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'z') and b.y = 4);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
+delete from dor_same_value_off;
+
+statement ok
+delete from dor_same_value_on;
+
+statement ok
+insert into dor_same_value_off select a.id, b.id as bid from dor_a a join dor_b b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 4);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_same_value_on select a.id, b.id as bid from dor_a a join dor_b b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 4);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
+delete from dor_case_some_values_off;
+
+statement ok
+delete from dor_case_some_values_on;
+
+statement ok
+insert into dor_case_some_values_off select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 else 0 end as f from dor_b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_case_some_values_on select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 else 0 end as f from dor_b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
+delete from dor_case_all_values_off;
+
+statement ok
+delete from dor_case_all_values_on;
+
+statement ok
+insert into dor_case_all_values_off select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 else 0 end as f from dor_b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_case_all_values_on select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 else 0 end as f from dor_b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
+delete from dor_case_no_else_off;
+
+statement ok
+delete from dor_case_no_else_on;
+
+statement ok
+insert into dor_case_no_else_off select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 end as f from dor_b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_case_no_else_on select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 end as f from dor_b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
+delete from dor_union_tags_off;
+
+statement ok
+delete from dor_union_tags_on;
+
+statement ok
+insert into dor_union_tags_off select a.id, u.id as uid from dor_a a join (select id, k, 'x' as tag from dor_b union all select id, k, 'y' as tag from dor_c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_union_tags_on select a.id, u.id as uid from dor_a a join (select id, k, 'x' as tag from dor_b union all select id, k, 'y' as tag from dor_c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
 delete from dor_kept_anti_off;
 
 statement ok
@@ -993,6 +1293,54 @@ select
   (select count(*) from (select id, bid, cid, count(*) as dor_rows from dor_three_tables_on group by id, bid, cid except select id, bid, cid, count(*) as dor_rows from dor_three_tables_off group by id, bid, cid) x),
   (select count(*) from (select id, bid, cid, count(*) as dor_rows from dor_three_tables_off group by id, bid, cid except select id, bid, cid, count(*) as dor_rows from dor_three_tables_on group by id, bid, cid) y),
   (select count(*) from dor_three_tables_on) - (select count(*) from dor_three_tables_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_merged_in_on group by id, bid except select id, bid, count(*) as dor_rows from dor_merged_in_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_merged_in_off group by id, bid except select id, bid, count(*) as dor_rows from dor_merged_in_on group by id, bid) y),
+  (select count(*) from dor_merged_in_on) - (select count(*) from dor_merged_in_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_same_value_on group by id, bid except select id, bid, count(*) as dor_rows from dor_same_value_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_same_value_off group by id, bid except select id, bid, count(*) as dor_rows from dor_same_value_on group by id, bid) y),
+  (select count(*) from dor_same_value_on) - (select count(*) from dor_same_value_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_some_values_on group by id, bid except select id, bid, count(*) as dor_rows from dor_case_some_values_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_some_values_off group by id, bid except select id, bid, count(*) as dor_rows from dor_case_some_values_on group by id, bid) y),
+  (select count(*) from dor_case_some_values_on) - (select count(*) from dor_case_some_values_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_all_values_on group by id, bid except select id, bid, count(*) as dor_rows from dor_case_all_values_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_all_values_off group by id, bid except select id, bid, count(*) as dor_rows from dor_case_all_values_on group by id, bid) y),
+  (select count(*) from dor_case_all_values_on) - (select count(*) from dor_case_all_values_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_no_else_on group by id, bid except select id, bid, count(*) as dor_rows from dor_case_no_else_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_no_else_off group by id, bid except select id, bid, count(*) as dor_rows from dor_case_no_else_on group by id, bid) y),
+  (select count(*) from dor_case_no_else_on) - (select count(*) from dor_case_no_else_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, uid, count(*) as dor_rows from dor_union_tags_on group by id, uid except select id, uid, count(*) as dor_rows from dor_union_tags_off group by id, uid) x),
+  (select count(*) from (select id, uid, count(*) as dor_rows from dor_union_tags_off group by id, uid except select id, uid, count(*) as dor_rows from dor_union_tags_on group by id, uid) y),
+  (select count(*) from dor_union_tags_on) - (select count(*) from dor_union_tags_off);
 ----
 0 0 0
 
@@ -1281,6 +1629,114 @@ statement ok
 set batch_derive_or_restrictions = false;
 
 statement ok
+delete from dor_merged_in_off;
+
+statement ok
+delete from dor_merged_in_on;
+
+statement ok
+insert into dor_merged_in_off select a.id, b.id as bid from dor_a a join dor_b b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'z') and b.y = 4);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_merged_in_on select a.id, b.id as bid from dor_a a join dor_b b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'z') and b.y = 4);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
+delete from dor_same_value_off;
+
+statement ok
+delete from dor_same_value_on;
+
+statement ok
+insert into dor_same_value_off select a.id, b.id as bid from dor_a a join dor_b b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 4);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_same_value_on select a.id, b.id as bid from dor_a a join dor_b b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 4);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
+delete from dor_case_some_values_off;
+
+statement ok
+delete from dor_case_some_values_on;
+
+statement ok
+insert into dor_case_some_values_off select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 else 0 end as f from dor_b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_case_some_values_on select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 else 0 end as f from dor_b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
+delete from dor_case_all_values_off;
+
+statement ok
+delete from dor_case_all_values_on;
+
+statement ok
+insert into dor_case_all_values_off select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 else 0 end as f from dor_b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_case_all_values_on select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 else 0 end as f from dor_b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
+delete from dor_case_no_else_off;
+
+statement ok
+delete from dor_case_no_else_on;
+
+statement ok
+insert into dor_case_no_else_off select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 end as f from dor_b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_case_no_else_on select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 end as f from dor_b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
+delete from dor_union_tags_off;
+
+statement ok
+delete from dor_union_tags_on;
+
+statement ok
+insert into dor_union_tags_off select a.id, u.id as uid from dor_a a join (select id, k, 'x' as tag from dor_b union all select id, k, 'y' as tag from dor_c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_union_tags_on select a.id, u.id as uid from dor_a a join (select id, k, 'x' as tag from dor_b union all select id, k, 'y' as tag from dor_c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
 delete from dor_kept_anti_off;
 
 statement ok
@@ -1455,6 +1911,54 @@ select
   (select count(*) from (select id, bid, cid, count(*) as dor_rows from dor_three_tables_on group by id, bid, cid except select id, bid, cid, count(*) as dor_rows from dor_three_tables_off group by id, bid, cid) x),
   (select count(*) from (select id, bid, cid, count(*) as dor_rows from dor_three_tables_off group by id, bid, cid except select id, bid, cid, count(*) as dor_rows from dor_three_tables_on group by id, bid, cid) y),
   (select count(*) from dor_three_tables_on) - (select count(*) from dor_three_tables_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_merged_in_on group by id, bid except select id, bid, count(*) as dor_rows from dor_merged_in_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_merged_in_off group by id, bid except select id, bid, count(*) as dor_rows from dor_merged_in_on group by id, bid) y),
+  (select count(*) from dor_merged_in_on) - (select count(*) from dor_merged_in_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_same_value_on group by id, bid except select id, bid, count(*) as dor_rows from dor_same_value_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_same_value_off group by id, bid except select id, bid, count(*) as dor_rows from dor_same_value_on group by id, bid) y),
+  (select count(*) from dor_same_value_on) - (select count(*) from dor_same_value_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_some_values_on group by id, bid except select id, bid, count(*) as dor_rows from dor_case_some_values_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_some_values_off group by id, bid except select id, bid, count(*) as dor_rows from dor_case_some_values_on group by id, bid) y),
+  (select count(*) from dor_case_some_values_on) - (select count(*) from dor_case_some_values_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_all_values_on group by id, bid except select id, bid, count(*) as dor_rows from dor_case_all_values_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_all_values_off group by id, bid except select id, bid, count(*) as dor_rows from dor_case_all_values_on group by id, bid) y),
+  (select count(*) from dor_case_all_values_on) - (select count(*) from dor_case_all_values_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_no_else_on group by id, bid except select id, bid, count(*) as dor_rows from dor_case_no_else_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_no_else_off group by id, bid except select id, bid, count(*) as dor_rows from dor_case_no_else_on group by id, bid) y),
+  (select count(*) from dor_case_no_else_on) - (select count(*) from dor_case_no_else_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, uid, count(*) as dor_rows from dor_union_tags_on group by id, uid except select id, uid, count(*) as dor_rows from dor_union_tags_off group by id, uid) x),
+  (select count(*) from (select id, uid, count(*) as dor_rows from dor_union_tags_off group by id, uid except select id, uid, count(*) as dor_rows from dor_union_tags_on group by id, uid) y),
+  (select count(*) from dor_union_tags_on) - (select count(*) from dor_union_tags_off);
 ----
 0 0 0
 
@@ -1756,6 +2260,114 @@ statement ok
 set batch_derive_or_restrictions = false;
 
 statement ok
+delete from dor_merged_in_off;
+
+statement ok
+delete from dor_merged_in_on;
+
+statement ok
+insert into dor_merged_in_off select a.id, b.id as bid from dor_a a join dor_b b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'z') and b.y = 4);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_merged_in_on select a.id, b.id as bid from dor_a a join dor_b b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'z') and b.y = 4);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
+delete from dor_same_value_off;
+
+statement ok
+delete from dor_same_value_on;
+
+statement ok
+insert into dor_same_value_off select a.id, b.id as bid from dor_a a join dor_b b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 4);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_same_value_on select a.id, b.id as bid from dor_a a join dor_b b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 4);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
+delete from dor_case_some_values_off;
+
+statement ok
+delete from dor_case_some_values_on;
+
+statement ok
+insert into dor_case_some_values_off select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 else 0 end as f from dor_b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_case_some_values_on select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 else 0 end as f from dor_b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
+delete from dor_case_all_values_off;
+
+statement ok
+delete from dor_case_all_values_on;
+
+statement ok
+insert into dor_case_all_values_off select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 else 0 end as f from dor_b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_case_all_values_on select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 else 0 end as f from dor_b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
+delete from dor_case_no_else_off;
+
+statement ok
+delete from dor_case_no_else_on;
+
+statement ok
+insert into dor_case_no_else_off select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 end as f from dor_b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_case_no_else_on select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 end as f from dor_b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
+delete from dor_union_tags_off;
+
+statement ok
+delete from dor_union_tags_on;
+
+statement ok
+insert into dor_union_tags_off select a.id, u.id as uid from dor_a a join (select id, k, 'x' as tag from dor_b union all select id, k, 'y' as tag from dor_c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_union_tags_on select a.id, u.id as uid from dor_a a join (select id, k, 'x' as tag from dor_b union all select id, k, 'y' as tag from dor_c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
 delete from dor_kept_anti_off;
 
 statement ok
@@ -1930,6 +2542,54 @@ select
   (select count(*) from (select id, bid, cid, count(*) as dor_rows from dor_three_tables_on group by id, bid, cid except select id, bid, cid, count(*) as dor_rows from dor_three_tables_off group by id, bid, cid) x),
   (select count(*) from (select id, bid, cid, count(*) as dor_rows from dor_three_tables_off group by id, bid, cid except select id, bid, cid, count(*) as dor_rows from dor_three_tables_on group by id, bid, cid) y),
   (select count(*) from dor_three_tables_on) - (select count(*) from dor_three_tables_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_merged_in_on group by id, bid except select id, bid, count(*) as dor_rows from dor_merged_in_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_merged_in_off group by id, bid except select id, bid, count(*) as dor_rows from dor_merged_in_on group by id, bid) y),
+  (select count(*) from dor_merged_in_on) - (select count(*) from dor_merged_in_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_same_value_on group by id, bid except select id, bid, count(*) as dor_rows from dor_same_value_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_same_value_off group by id, bid except select id, bid, count(*) as dor_rows from dor_same_value_on group by id, bid) y),
+  (select count(*) from dor_same_value_on) - (select count(*) from dor_same_value_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_some_values_on group by id, bid except select id, bid, count(*) as dor_rows from dor_case_some_values_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_some_values_off group by id, bid except select id, bid, count(*) as dor_rows from dor_case_some_values_on group by id, bid) y),
+  (select count(*) from dor_case_some_values_on) - (select count(*) from dor_case_some_values_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_all_values_on group by id, bid except select id, bid, count(*) as dor_rows from dor_case_all_values_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_all_values_off group by id, bid except select id, bid, count(*) as dor_rows from dor_case_all_values_on group by id, bid) y),
+  (select count(*) from dor_case_all_values_on) - (select count(*) from dor_case_all_values_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_no_else_on group by id, bid except select id, bid, count(*) as dor_rows from dor_case_no_else_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_no_else_off group by id, bid except select id, bid, count(*) as dor_rows from dor_case_no_else_on group by id, bid) y),
+  (select count(*) from dor_case_no_else_on) - (select count(*) from dor_case_no_else_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, uid, count(*) as dor_rows from dor_union_tags_on group by id, uid except select id, uid, count(*) as dor_rows from dor_union_tags_off group by id, uid) x),
+  (select count(*) from (select id, uid, count(*) as dor_rows from dor_union_tags_off group by id, uid except select id, uid, count(*) as dor_rows from dor_union_tags_on group by id, uid) y),
+  (select count(*) from dor_union_tags_on) - (select count(*) from dor_union_tags_off);
 ----
 0 0 0
 
@@ -2207,6 +2867,114 @@ statement ok
 set batch_derive_or_restrictions = false;
 
 statement ok
+delete from dor_merged_in_off;
+
+statement ok
+delete from dor_merged_in_on;
+
+statement ok
+insert into dor_merged_in_off select a.id, b.id as bid from dor_a a join dor_b b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'z') and b.y = 4);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_merged_in_on select a.id, b.id as bid from dor_a a join dor_b b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'z') and b.y = 4);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
+delete from dor_same_value_off;
+
+statement ok
+delete from dor_same_value_on;
+
+statement ok
+insert into dor_same_value_off select a.id, b.id as bid from dor_a a join dor_b b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 4);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_same_value_on select a.id, b.id as bid from dor_a a join dor_b b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 4);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
+delete from dor_case_some_values_off;
+
+statement ok
+delete from dor_case_some_values_on;
+
+statement ok
+insert into dor_case_some_values_off select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 else 0 end as f from dor_b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_case_some_values_on select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 else 0 end as f from dor_b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
+delete from dor_case_all_values_off;
+
+statement ok
+delete from dor_case_all_values_on;
+
+statement ok
+insert into dor_case_all_values_off select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 else 0 end as f from dor_b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_case_all_values_on select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 else 0 end as f from dor_b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
+delete from dor_case_no_else_off;
+
+statement ok
+delete from dor_case_no_else_on;
+
+statement ok
+insert into dor_case_no_else_off select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 end as f from dor_b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_case_no_else_on select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 end as f from dor_b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
+delete from dor_union_tags_off;
+
+statement ok
+delete from dor_union_tags_on;
+
+statement ok
+insert into dor_union_tags_off select a.id, u.id as uid from dor_a a join (select id, k, 'x' as tag from dor_b union all select id, k, 'y' as tag from dor_c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_union_tags_on select a.id, u.id as uid from dor_a a join (select id, k, 'x' as tag from dor_b union all select id, k, 'y' as tag from dor_c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
 delete from dor_kept_anti_off;
 
 statement ok
@@ -2381,6 +3149,54 @@ select
   (select count(*) from (select id, bid, cid, count(*) as dor_rows from dor_three_tables_on group by id, bid, cid except select id, bid, cid, count(*) as dor_rows from dor_three_tables_off group by id, bid, cid) x),
   (select count(*) from (select id, bid, cid, count(*) as dor_rows from dor_three_tables_off group by id, bid, cid except select id, bid, cid, count(*) as dor_rows from dor_three_tables_on group by id, bid, cid) y),
   (select count(*) from dor_three_tables_on) - (select count(*) from dor_three_tables_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_merged_in_on group by id, bid except select id, bid, count(*) as dor_rows from dor_merged_in_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_merged_in_off group by id, bid except select id, bid, count(*) as dor_rows from dor_merged_in_on group by id, bid) y),
+  (select count(*) from dor_merged_in_on) - (select count(*) from dor_merged_in_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_same_value_on group by id, bid except select id, bid, count(*) as dor_rows from dor_same_value_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_same_value_off group by id, bid except select id, bid, count(*) as dor_rows from dor_same_value_on group by id, bid) y),
+  (select count(*) from dor_same_value_on) - (select count(*) from dor_same_value_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_some_values_on group by id, bid except select id, bid, count(*) as dor_rows from dor_case_some_values_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_some_values_off group by id, bid except select id, bid, count(*) as dor_rows from dor_case_some_values_on group by id, bid) y),
+  (select count(*) from dor_case_some_values_on) - (select count(*) from dor_case_some_values_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_all_values_on group by id, bid except select id, bid, count(*) as dor_rows from dor_case_all_values_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_all_values_off group by id, bid except select id, bid, count(*) as dor_rows from dor_case_all_values_on group by id, bid) y),
+  (select count(*) from dor_case_all_values_on) - (select count(*) from dor_case_all_values_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_no_else_on group by id, bid except select id, bid, count(*) as dor_rows from dor_case_no_else_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_no_else_off group by id, bid except select id, bid, count(*) as dor_rows from dor_case_no_else_on group by id, bid) y),
+  (select count(*) from dor_case_no_else_on) - (select count(*) from dor_case_no_else_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, uid, count(*) as dor_rows from dor_union_tags_on group by id, uid except select id, uid, count(*) as dor_rows from dor_union_tags_off group by id, uid) x),
+  (select count(*) from (select id, uid, count(*) as dor_rows from dor_union_tags_off group by id, uid except select id, uid, count(*) as dor_rows from dor_union_tags_on group by id, uid) y),
+  (select count(*) from dor_union_tags_on) - (select count(*) from dor_union_tags_off);
 ----
 0 0 0
 
@@ -2659,6 +3475,114 @@ statement ok
 set batch_derive_or_restrictions = false;
 
 statement ok
+delete from dor_merged_in_off;
+
+statement ok
+delete from dor_merged_in_on;
+
+statement ok
+insert into dor_merged_in_off select a.id, b.id as bid from dor_a a join dor_b b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'z') and b.y = 4);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_merged_in_on select a.id, b.id as bid from dor_a a join dor_b b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'z') and b.y = 4);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
+delete from dor_same_value_off;
+
+statement ok
+delete from dor_same_value_on;
+
+statement ok
+insert into dor_same_value_off select a.id, b.id as bid from dor_a a join dor_b b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 4);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_same_value_on select a.id, b.id as bid from dor_a a join dor_b b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 4);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
+delete from dor_case_some_values_off;
+
+statement ok
+delete from dor_case_some_values_on;
+
+statement ok
+insert into dor_case_some_values_off select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 else 0 end as f from dor_b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_case_some_values_on select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 else 0 end as f from dor_b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
+delete from dor_case_all_values_off;
+
+statement ok
+delete from dor_case_all_values_on;
+
+statement ok
+insert into dor_case_all_values_off select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 else 0 end as f from dor_b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_case_all_values_on select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 else 0 end as f from dor_b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
+delete from dor_case_no_else_off;
+
+statement ok
+delete from dor_case_no_else_on;
+
+statement ok
+insert into dor_case_no_else_off select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 end as f from dor_b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_case_no_else_on select a.id, bb.id as bid from dor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 end as f from dor_b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
+delete from dor_union_tags_off;
+
+statement ok
+delete from dor_union_tags_on;
+
+statement ok
+insert into dor_union_tags_off select a.id, u.id as uid from dor_a a join (select id, k, 'x' as tag from dor_b union all select id, k, 'y' as tag from dor_c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = true;
+
+statement ok
+insert into dor_union_tags_on select a.id, u.id as uid from dor_a a join (select id, k, 'x' as tag from dor_b union all select id, k, 'y' as tag from dor_c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3);
+
+statement ok
+set batch_derive_or_restrictions = false;
+
+statement ok
 delete from dor_kept_anti_off;
 
 statement ok
@@ -2838,6 +3762,54 @@ select
 
 query III
 select
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_merged_in_on group by id, bid except select id, bid, count(*) as dor_rows from dor_merged_in_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_merged_in_off group by id, bid except select id, bid, count(*) as dor_rows from dor_merged_in_on group by id, bid) y),
+  (select count(*) from dor_merged_in_on) - (select count(*) from dor_merged_in_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_same_value_on group by id, bid except select id, bid, count(*) as dor_rows from dor_same_value_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_same_value_off group by id, bid except select id, bid, count(*) as dor_rows from dor_same_value_on group by id, bid) y),
+  (select count(*) from dor_same_value_on) - (select count(*) from dor_same_value_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_some_values_on group by id, bid except select id, bid, count(*) as dor_rows from dor_case_some_values_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_some_values_off group by id, bid except select id, bid, count(*) as dor_rows from dor_case_some_values_on group by id, bid) y),
+  (select count(*) from dor_case_some_values_on) - (select count(*) from dor_case_some_values_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_all_values_on group by id, bid except select id, bid, count(*) as dor_rows from dor_case_all_values_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_all_values_off group by id, bid except select id, bid, count(*) as dor_rows from dor_case_all_values_on group by id, bid) y),
+  (select count(*) from dor_case_all_values_on) - (select count(*) from dor_case_all_values_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_no_else_on group by id, bid except select id, bid, count(*) as dor_rows from dor_case_no_else_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as dor_rows from dor_case_no_else_off group by id, bid except select id, bid, count(*) as dor_rows from dor_case_no_else_on group by id, bid) y),
+  (select count(*) from dor_case_no_else_on) - (select count(*) from dor_case_no_else_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, uid, count(*) as dor_rows from dor_union_tags_on group by id, uid except select id, uid, count(*) as dor_rows from dor_union_tags_off group by id, uid) x),
+  (select count(*) from (select id, uid, count(*) as dor_rows from dor_union_tags_off group by id, uid except select id, uid, count(*) as dor_rows from dor_union_tags_on group by id, uid) y),
+  (select count(*) from dor_union_tags_on) - (select count(*) from dor_union_tags_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, count(*) as dor_rows from dor_kept_anti_on group by id except select id, count(*) as dor_rows from dor_kept_anti_off group by id) x),
   (select count(*) from (select id, count(*) as dor_rows from dor_kept_anti_off group by id except select id, count(*) as dor_rows from dor_kept_anti_on group by id) y),
   (select count(*) from dor_kept_anti_on) - (select count(*) from dor_kept_anti_off);
@@ -2893,6 +3865,42 @@ drop table dor_kept_anti_on;
 
 statement ok
 drop table dor_kept_anti_off;
+
+statement ok
+drop table dor_union_tags_on;
+
+statement ok
+drop table dor_union_tags_off;
+
+statement ok
+drop table dor_case_no_else_on;
+
+statement ok
+drop table dor_case_no_else_off;
+
+statement ok
+drop table dor_case_all_values_on;
+
+statement ok
+drop table dor_case_all_values_off;
+
+statement ok
+drop table dor_case_some_values_on;
+
+statement ok
+drop table dor_case_some_values_off;
+
+statement ok
+drop table dor_same_value_on;
+
+statement ok
+drop table dor_same_value_off;
+
+statement ok
+drop table dor_merged_in_on;
+
+statement ok
+drop table dor_merged_in_off;
 
 statement ok
 drop table dor_three_tables_on;

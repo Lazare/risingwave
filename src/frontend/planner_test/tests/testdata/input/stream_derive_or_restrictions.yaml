@@ -123,3 +123,42 @@
     select a.id, b.y from a join b on a.k = b.k where (a.ts > now() - interval '1 hour' and b.y = 2) or (a.ts is null and b.y = 4);
   expected_outputs:
   - optimized_logical_plan_for_stream
+
+# Restrictions written without redundancy, and not derived when they can not remove a row.
+
+- name: rewritten - equalities and in lists of a column merged into one in list without duplicates
+  before: [setup]
+  sql: |
+    select a.id, b.y from a join b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'r') and b.y = 4);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: rewritten - the same value in every disjunct gives one equality
+  before: [setup]
+  sql: |
+    select a.id, b.y from a join b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 3);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: rewritten - a case compared with some of its values restricts its side
+  before: [setup]
+  sql: |
+    select a.id, bb.z from a join (select id, k, z, case when y > 0 then 1 when y < 0 then 2 else 0 end as f from b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - a case that returns 0 or 1 compared with both values derives nothing on its side
+  before: [setup]
+  sql: |
+    select a.id, bb.z from a join (select id, k, z, case when y > 0 then 1 else 0 end as f from b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - a case without else compared with all its values derives nothing on its side
+  before: [setup]
+  sql: |
+    select a.id, bb.z from a join (select id, k, z, case when y > 0 then 1 when y < 0 then 2 end as f from b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - a constant of each union branch compared with all its values derives nothing on its side
+  before: [setup]
+  sql: |
+    select a.id, u.k from a join (select id, k, 'x' as tag from b union all select id, k, 'y' as tag from c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3);
+  expected_outputs:
+  - optimized_logical_plan_for_stream

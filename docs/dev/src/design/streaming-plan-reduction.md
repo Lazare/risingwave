@@ -1511,20 +1511,36 @@ into the other side when it may).
   unable to fail, since they are now evaluated on rows that the join would not have compared
   (`10 / b.z`, `lower(a.s)`, `random()`, `now()` are never derived). Temporal and as-of joins are
   left untouched.
+- Form: the equalities and `IN` lists that compare a column with constants are merged into one
+  `IN` list per column without duplicates (`c = 'p' OR c = 'q' OR c = 'p' OR c IN ('p', 'z')`
+  becomes `c IN ('p', 'q', 'z')`, one equality for a single value), other parts are deduplicated,
+  and the condition goes through the usual simplification of conditions.
+- Useless restrictions are not derived: a restriction that is a single `IN` list (or equality) on
+  a column whose values other than `NULL` are a known set of literals, all in the list, removes
+  no row the join keeps (only `NULL`s, which the join condition rejects anyway). The known values
+  come from a literal or a `CASE` whose results are all literals in a projection, or the literals
+  of a `VALUES`, followed through filters, projections of the column, joins (each side, `NULL`s
+  of outer joins aside), unions (all branches), group keys, shares, dedups, top-n and limits.
+  Example: `CASE WHEN y > 2 THEN 1 ELSE 0 END = 0 OR ... = 1`, or the constant tag of each branch
+  of a union compared with every tag: before this check, such a tautology was evaluated on every
+  row for nothing. A `CASE` compared with some of its values is still derived.
 - Placement: batch and streaming, after the first predicate pushdown (the `WHERE` conjuncts of
   inner joins are in the join conditions), before join ordering; predicate pushdown right after.
   The rule adds a conjunct only if the condition changes (a join reached again through a shared
   sub-plan is not extended twice).
 - Not done: a `WHERE` filter above an outer join (its preserved side could be restricted too);
-  derivation inside a single scan for index ranges (Calcite `ExpandDisjunctionForTableRule`); an
-  `OR` of equalities is not turned into an `IN` list (scan ranges already merge the arms of an
-  `OR`).
+  derivation inside a single scan for index ranges (Calcite `ExpandDisjunctionForTableRule`); the
+  derived `IN` list is not intersected with an `IN` list already on that side (both stay as
+  conjuncts of the same filter).
 - Tests: `stream_derive_or_restrictions.yaml`, `batch_derive_or_restrictions.yaml` (inner joins with
   one or several parts per side, `IS NULL`, `IN`, a disjunct with one side only, no equality, left,
   right and semi joins, three tables, scan ranges on a primary key; kept: an `OR` on one side, the
   preserved side of a left join, anti and full joins, parts that may fail, volatile parts, `now()`;
-  off by default), and the differentials `e2e_test/batch/derive_or_restrictions.gen.py` and
-  `e2e_test/streaming/derive_or_restrictions.gen.py` (17 and 16 queries compared with the variable
+  form: equalities and `IN` lists merged without duplicates, the same value in every disjunct, a
+  `CASE` compared with some of its values; not derived: a `CASE` with or without `ELSE` compared
+  with all its values, the constants of union branches compared with all of them; off by
+  default), and the differentials `e2e_test/batch/derive_or_restrictions.gen.py` and
+  `e2e_test/streaming/derive_or_restrictions.gen.py` (23 and 22 queries compared with the variable
   off and on, and with batch, over `NULL` keys and compared columns, duplicates, upserts, updates of
   the compared columns and of the keys, deletes and empty sides).
 

@@ -77,6 +77,24 @@ statement ok
 create materialized view sdor_three_tables_off as select a.id, b.id as bid, c.id as cid from sdor_a a join sdor_b b on a.k = b.k join sdor_c c on c.k = b.k where ((a.x = 1 and c.w = 2) or (a.x = 3 and c.w = 4)) and ((b.y = 2 and c.w = 2) or (b.y = 4 and c.w = 4));
 
 statement ok
+create materialized view sdor_merged_in_off as select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'z') and b.y = 4);
+
+statement ok
+create materialized view sdor_same_value_off as select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 4);
+
+statement ok
+create materialized view sdor_case_some_values_off as select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3);
+
+statement ok
+create materialized view sdor_case_all_values_off as select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3);
+
+statement ok
+create materialized view sdor_case_no_else_off as select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 end as f from sdor_b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3);
+
+statement ok
+create materialized view sdor_union_tags_off as select a.id, u.id as uid from sdor_a a join (select id, k, 'x' as tag from sdor_b union all select id, k, 'y' as tag from sdor_c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3);
+
+statement ok
 create materialized view sdor_kept_anti_off as select a.id from sdor_a a where not exists (select 1 from sdor_b b where b.k = a.k and ((a.x = 1 and b.y = 2) or (a.x = 3 and b.y = 4)));
 
 statement ok
@@ -126,6 +144,24 @@ create materialized view sdor_unsafe_part_on as select a.id, b.id as bid from sd
 
 statement ok
 create materialized view sdor_three_tables_on as select a.id, b.id as bid, c.id as cid from sdor_a a join sdor_b b on a.k = b.k join sdor_c c on c.k = b.k where ((a.x = 1 and c.w = 2) or (a.x = 3 and c.w = 4)) and ((b.y = 2 and c.w = 2) or (b.y = 4 and c.w = 4));
+
+statement ok
+create materialized view sdor_merged_in_on as select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'z') and b.y = 4);
+
+statement ok
+create materialized view sdor_same_value_on as select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 4);
+
+statement ok
+create materialized view sdor_case_some_values_on as select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3);
+
+statement ok
+create materialized view sdor_case_all_values_on as select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3);
+
+statement ok
+create materialized view sdor_case_no_else_on as select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 end as f from sdor_b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3);
+
+statement ok
+create materialized view sdor_union_tags_on as select a.id, u.id as uid from sdor_a a join (select id, k, 'x' as tag from sdor_b union all select id, k, 'y' as tag from sdor_c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3);
 
 statement ok
 create materialized view sdor_kept_anti_on as select a.id from sdor_a a where not exists (select 1 from sdor_b b where b.k = a.k and ((a.x = 1 and b.y = 2) or (a.x = 3 and b.y = 4)));
@@ -346,6 +382,102 @@ select
   (select count(*) from (select id, bid, cid, count(*) as sdor_rows from sdor_three_tables_on group by id, bid, cid except select id, bid, cid, count(*) as sdor_rows from (select a.id, b.id as bid, c.id as cid from sdor_a a join sdor_b b on a.k = b.k join sdor_c c on c.k = b.k where ((a.x = 1 and c.w = 2) or (a.x = 3 and c.w = 4)) and ((b.y = 2 and c.w = 2) or (b.y = 4 and c.w = 4))) q group by id, bid, cid) x),
   (select count(*) from (select id, bid, cid, count(*) as sdor_rows from (select a.id, b.id as bid, c.id as cid from sdor_a a join sdor_b b on a.k = b.k join sdor_c c on c.k = b.k where ((a.x = 1 and c.w = 2) or (a.x = 3 and c.w = 4)) and ((b.y = 2 and c.w = 2) or (b.y = 4 and c.w = 4))) q group by id, bid, cid except select id, bid, cid, count(*) as sdor_rows from sdor_three_tables_on group by id, bid, cid) y),
   (select count(*) from sdor_three_tables_on) - (select count(*) from (select a.id, b.id as bid, c.id as cid from sdor_a a join sdor_b b on a.k = b.k join sdor_c c on c.k = b.k where ((a.x = 1 and c.w = 2) or (a.x = 3 and c.w = 4)) and ((b.y = 2 and c.w = 2) or (b.y = 4 and c.w = 4))) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_merged_in_on group by id, bid except select id, bid, count(*) as sdor_rows from sdor_merged_in_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_merged_in_off group by id, bid except select id, bid, count(*) as sdor_rows from sdor_merged_in_on group by id, bid) y),
+  (select count(*) from sdor_merged_in_on) - (select count(*) from sdor_merged_in_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_merged_in_on group by id, bid except select id, bid, count(*) as sdor_rows from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'z') and b.y = 4)) q group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'z') and b.y = 4)) q group by id, bid except select id, bid, count(*) as sdor_rows from sdor_merged_in_on group by id, bid) y),
+  (select count(*) from sdor_merged_in_on) - (select count(*) from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'z') and b.y = 4)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_same_value_on group by id, bid except select id, bid, count(*) as sdor_rows from sdor_same_value_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_same_value_off group by id, bid except select id, bid, count(*) as sdor_rows from sdor_same_value_on group by id, bid) y),
+  (select count(*) from sdor_same_value_on) - (select count(*) from sdor_same_value_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_same_value_on group by id, bid except select id, bid, count(*) as sdor_rows from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 4)) q group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 4)) q group by id, bid except select id, bid, count(*) as sdor_rows from sdor_same_value_on group by id, bid) y),
+  (select count(*) from sdor_same_value_on) - (select count(*) from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 4)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_some_values_on group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_some_values_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_some_values_off group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_some_values_on group by id, bid) y),
+  (select count(*) from sdor_case_some_values_on) - (select count(*) from sdor_case_some_values_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_some_values_on group by id, bid except select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3)) q group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3)) q group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_some_values_on group by id, bid) y),
+  (select count(*) from sdor_case_some_values_on) - (select count(*) from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_all_values_on group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_all_values_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_all_values_off group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_all_values_on group by id, bid) y),
+  (select count(*) from sdor_case_all_values_on) - (select count(*) from sdor_case_all_values_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_all_values_on group by id, bid except select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3)) q group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3)) q group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_all_values_on group by id, bid) y),
+  (select count(*) from sdor_case_all_values_on) - (select count(*) from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_no_else_on group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_no_else_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_no_else_off group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_no_else_on group by id, bid) y),
+  (select count(*) from sdor_case_no_else_on) - (select count(*) from sdor_case_no_else_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_no_else_on group by id, bid except select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 end as f from sdor_b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3)) q group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 end as f from sdor_b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3)) q group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_no_else_on group by id, bid) y),
+  (select count(*) from sdor_case_no_else_on) - (select count(*) from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 end as f from sdor_b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, uid, count(*) as sdor_rows from sdor_union_tags_on group by id, uid except select id, uid, count(*) as sdor_rows from sdor_union_tags_off group by id, uid) x),
+  (select count(*) from (select id, uid, count(*) as sdor_rows from sdor_union_tags_off group by id, uid except select id, uid, count(*) as sdor_rows from sdor_union_tags_on group by id, uid) y),
+  (select count(*) from sdor_union_tags_on) - (select count(*) from sdor_union_tags_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, uid, count(*) as sdor_rows from sdor_union_tags_on group by id, uid except select id, uid, count(*) as sdor_rows from (select a.id, u.id as uid from sdor_a a join (select id, k, 'x' as tag from sdor_b union all select id, k, 'y' as tag from sdor_c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3)) q group by id, uid) x),
+  (select count(*) from (select id, uid, count(*) as sdor_rows from (select a.id, u.id as uid from sdor_a a join (select id, k, 'x' as tag from sdor_b union all select id, k, 'y' as tag from sdor_c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3)) q group by id, uid except select id, uid, count(*) as sdor_rows from sdor_union_tags_on group by id, uid) y),
+  (select count(*) from sdor_union_tags_on) - (select count(*) from (select a.id, u.id as uid from sdor_a a join (select id, k, 'x' as tag from sdor_b union all select id, k, 'y' as tag from sdor_c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3)) q);
 ----
 0 0 0
 
@@ -620,6 +752,102 @@ select
   (select count(*) from (select id, bid, cid, count(*) as sdor_rows from sdor_three_tables_on group by id, bid, cid except select id, bid, cid, count(*) as sdor_rows from (select a.id, b.id as bid, c.id as cid from sdor_a a join sdor_b b on a.k = b.k join sdor_c c on c.k = b.k where ((a.x = 1 and c.w = 2) or (a.x = 3 and c.w = 4)) and ((b.y = 2 and c.w = 2) or (b.y = 4 and c.w = 4))) q group by id, bid, cid) x),
   (select count(*) from (select id, bid, cid, count(*) as sdor_rows from (select a.id, b.id as bid, c.id as cid from sdor_a a join sdor_b b on a.k = b.k join sdor_c c on c.k = b.k where ((a.x = 1 and c.w = 2) or (a.x = 3 and c.w = 4)) and ((b.y = 2 and c.w = 2) or (b.y = 4 and c.w = 4))) q group by id, bid, cid except select id, bid, cid, count(*) as sdor_rows from sdor_three_tables_on group by id, bid, cid) y),
   (select count(*) from sdor_three_tables_on) - (select count(*) from (select a.id, b.id as bid, c.id as cid from sdor_a a join sdor_b b on a.k = b.k join sdor_c c on c.k = b.k where ((a.x = 1 and c.w = 2) or (a.x = 3 and c.w = 4)) and ((b.y = 2 and c.w = 2) or (b.y = 4 and c.w = 4))) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_merged_in_on group by id, bid except select id, bid, count(*) as sdor_rows from sdor_merged_in_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_merged_in_off group by id, bid except select id, bid, count(*) as sdor_rows from sdor_merged_in_on group by id, bid) y),
+  (select count(*) from sdor_merged_in_on) - (select count(*) from sdor_merged_in_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_merged_in_on group by id, bid except select id, bid, count(*) as sdor_rows from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'z') and b.y = 4)) q group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'z') and b.y = 4)) q group by id, bid except select id, bid, count(*) as sdor_rows from sdor_merged_in_on group by id, bid) y),
+  (select count(*) from sdor_merged_in_on) - (select count(*) from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'z') and b.y = 4)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_same_value_on group by id, bid except select id, bid, count(*) as sdor_rows from sdor_same_value_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_same_value_off group by id, bid except select id, bid, count(*) as sdor_rows from sdor_same_value_on group by id, bid) y),
+  (select count(*) from sdor_same_value_on) - (select count(*) from sdor_same_value_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_same_value_on group by id, bid except select id, bid, count(*) as sdor_rows from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 4)) q group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 4)) q group by id, bid except select id, bid, count(*) as sdor_rows from sdor_same_value_on group by id, bid) y),
+  (select count(*) from sdor_same_value_on) - (select count(*) from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 4)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_some_values_on group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_some_values_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_some_values_off group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_some_values_on group by id, bid) y),
+  (select count(*) from sdor_case_some_values_on) - (select count(*) from sdor_case_some_values_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_some_values_on group by id, bid except select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3)) q group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3)) q group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_some_values_on group by id, bid) y),
+  (select count(*) from sdor_case_some_values_on) - (select count(*) from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_all_values_on group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_all_values_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_all_values_off group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_all_values_on group by id, bid) y),
+  (select count(*) from sdor_case_all_values_on) - (select count(*) from sdor_case_all_values_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_all_values_on group by id, bid except select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3)) q group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3)) q group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_all_values_on group by id, bid) y),
+  (select count(*) from sdor_case_all_values_on) - (select count(*) from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_no_else_on group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_no_else_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_no_else_off group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_no_else_on group by id, bid) y),
+  (select count(*) from sdor_case_no_else_on) - (select count(*) from sdor_case_no_else_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_no_else_on group by id, bid except select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 end as f from sdor_b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3)) q group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 end as f from sdor_b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3)) q group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_no_else_on group by id, bid) y),
+  (select count(*) from sdor_case_no_else_on) - (select count(*) from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 end as f from sdor_b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, uid, count(*) as sdor_rows from sdor_union_tags_on group by id, uid except select id, uid, count(*) as sdor_rows from sdor_union_tags_off group by id, uid) x),
+  (select count(*) from (select id, uid, count(*) as sdor_rows from sdor_union_tags_off group by id, uid except select id, uid, count(*) as sdor_rows from sdor_union_tags_on group by id, uid) y),
+  (select count(*) from sdor_union_tags_on) - (select count(*) from sdor_union_tags_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, uid, count(*) as sdor_rows from sdor_union_tags_on group by id, uid except select id, uid, count(*) as sdor_rows from (select a.id, u.id as uid from sdor_a a join (select id, k, 'x' as tag from sdor_b union all select id, k, 'y' as tag from sdor_c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3)) q group by id, uid) x),
+  (select count(*) from (select id, uid, count(*) as sdor_rows from (select a.id, u.id as uid from sdor_a a join (select id, k, 'x' as tag from sdor_b union all select id, k, 'y' as tag from sdor_c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3)) q group by id, uid except select id, uid, count(*) as sdor_rows from sdor_union_tags_on group by id, uid) y),
+  (select count(*) from sdor_union_tags_on) - (select count(*) from (select a.id, u.id as uid from sdor_a a join (select id, k, 'x' as tag from sdor_b union all select id, k, 'y' as tag from sdor_c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3)) q);
 ----
 0 0 0
 
@@ -912,6 +1140,102 @@ select
 
 query III
 select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_merged_in_on group by id, bid except select id, bid, count(*) as sdor_rows from sdor_merged_in_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_merged_in_off group by id, bid except select id, bid, count(*) as sdor_rows from sdor_merged_in_on group by id, bid) y),
+  (select count(*) from sdor_merged_in_on) - (select count(*) from sdor_merged_in_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_merged_in_on group by id, bid except select id, bid, count(*) as sdor_rows from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'z') and b.y = 4)) q group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'z') and b.y = 4)) q group by id, bid except select id, bid, count(*) as sdor_rows from sdor_merged_in_on group by id, bid) y),
+  (select count(*) from sdor_merged_in_on) - (select count(*) from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'z') and b.y = 4)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_same_value_on group by id, bid except select id, bid, count(*) as sdor_rows from sdor_same_value_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_same_value_off group by id, bid except select id, bid, count(*) as sdor_rows from sdor_same_value_on group by id, bid) y),
+  (select count(*) from sdor_same_value_on) - (select count(*) from sdor_same_value_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_same_value_on group by id, bid except select id, bid, count(*) as sdor_rows from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 4)) q group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 4)) q group by id, bid except select id, bid, count(*) as sdor_rows from sdor_same_value_on group by id, bid) y),
+  (select count(*) from sdor_same_value_on) - (select count(*) from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 4)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_some_values_on group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_some_values_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_some_values_off group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_some_values_on group by id, bid) y),
+  (select count(*) from sdor_case_some_values_on) - (select count(*) from sdor_case_some_values_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_some_values_on group by id, bid except select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3)) q group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3)) q group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_some_values_on group by id, bid) y),
+  (select count(*) from sdor_case_some_values_on) - (select count(*) from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_all_values_on group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_all_values_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_all_values_off group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_all_values_on group by id, bid) y),
+  (select count(*) from sdor_case_all_values_on) - (select count(*) from sdor_case_all_values_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_all_values_on group by id, bid except select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3)) q group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3)) q group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_all_values_on group by id, bid) y),
+  (select count(*) from sdor_case_all_values_on) - (select count(*) from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_no_else_on group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_no_else_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_no_else_off group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_no_else_on group by id, bid) y),
+  (select count(*) from sdor_case_no_else_on) - (select count(*) from sdor_case_no_else_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_no_else_on group by id, bid except select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 end as f from sdor_b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3)) q group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 end as f from sdor_b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3)) q group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_no_else_on group by id, bid) y),
+  (select count(*) from sdor_case_no_else_on) - (select count(*) from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 end as f from sdor_b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, uid, count(*) as sdor_rows from sdor_union_tags_on group by id, uid except select id, uid, count(*) as sdor_rows from sdor_union_tags_off group by id, uid) x),
+  (select count(*) from (select id, uid, count(*) as sdor_rows from sdor_union_tags_off group by id, uid except select id, uid, count(*) as sdor_rows from sdor_union_tags_on group by id, uid) y),
+  (select count(*) from sdor_union_tags_on) - (select count(*) from sdor_union_tags_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, uid, count(*) as sdor_rows from sdor_union_tags_on group by id, uid except select id, uid, count(*) as sdor_rows from (select a.id, u.id as uid from sdor_a a join (select id, k, 'x' as tag from sdor_b union all select id, k, 'y' as tag from sdor_c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3)) q group by id, uid) x),
+  (select count(*) from (select id, uid, count(*) as sdor_rows from (select a.id, u.id as uid from sdor_a a join (select id, k, 'x' as tag from sdor_b union all select id, k, 'y' as tag from sdor_c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3)) q group by id, uid except select id, uid, count(*) as sdor_rows from sdor_union_tags_on group by id, uid) y),
+  (select count(*) from sdor_union_tags_on) - (select count(*) from (select a.id, u.id as uid from sdor_a a join (select id, k, 'x' as tag from sdor_b union all select id, k, 'y' as tag from sdor_c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3)) q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, count(*) as sdor_rows from sdor_kept_anti_on group by id except select id, count(*) as sdor_rows from sdor_kept_anti_off group by id) x),
   (select count(*) from (select id, count(*) as sdor_rows from sdor_kept_anti_off group by id except select id, count(*) as sdor_rows from sdor_kept_anti_on group by id) y),
   (select count(*) from sdor_kept_anti_on) - (select count(*) from sdor_kept_anti_off);
@@ -1175,6 +1499,102 @@ select
 
 query III
 select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_merged_in_on group by id, bid except select id, bid, count(*) as sdor_rows from sdor_merged_in_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_merged_in_off group by id, bid except select id, bid, count(*) as sdor_rows from sdor_merged_in_on group by id, bid) y),
+  (select count(*) from sdor_merged_in_on) - (select count(*) from sdor_merged_in_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_merged_in_on group by id, bid except select id, bid, count(*) as sdor_rows from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'z') and b.y = 4)) q group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'z') and b.y = 4)) q group by id, bid except select id, bid, count(*) as sdor_rows from sdor_merged_in_on group by id, bid) y),
+  (select count(*) from sdor_merged_in_on) - (select count(*) from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'z') and b.y = 4)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_same_value_on group by id, bid except select id, bid, count(*) as sdor_rows from sdor_same_value_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_same_value_off group by id, bid except select id, bid, count(*) as sdor_rows from sdor_same_value_on group by id, bid) y),
+  (select count(*) from sdor_same_value_on) - (select count(*) from sdor_same_value_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_same_value_on group by id, bid except select id, bid, count(*) as sdor_rows from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 4)) q group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 4)) q group by id, bid except select id, bid, count(*) as sdor_rows from sdor_same_value_on group by id, bid) y),
+  (select count(*) from sdor_same_value_on) - (select count(*) from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 4)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_some_values_on group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_some_values_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_some_values_off group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_some_values_on group by id, bid) y),
+  (select count(*) from sdor_case_some_values_on) - (select count(*) from sdor_case_some_values_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_some_values_on group by id, bid except select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3)) q group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3)) q group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_some_values_on group by id, bid) y),
+  (select count(*) from sdor_case_some_values_on) - (select count(*) from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_all_values_on group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_all_values_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_all_values_off group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_all_values_on group by id, bid) y),
+  (select count(*) from sdor_case_all_values_on) - (select count(*) from sdor_case_all_values_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_all_values_on group by id, bid except select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3)) q group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3)) q group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_all_values_on group by id, bid) y),
+  (select count(*) from sdor_case_all_values_on) - (select count(*) from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_no_else_on group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_no_else_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_no_else_off group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_no_else_on group by id, bid) y),
+  (select count(*) from sdor_case_no_else_on) - (select count(*) from sdor_case_no_else_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_no_else_on group by id, bid except select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 end as f from sdor_b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3)) q group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 end as f from sdor_b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3)) q group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_no_else_on group by id, bid) y),
+  (select count(*) from sdor_case_no_else_on) - (select count(*) from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 end as f from sdor_b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, uid, count(*) as sdor_rows from sdor_union_tags_on group by id, uid except select id, uid, count(*) as sdor_rows from sdor_union_tags_off group by id, uid) x),
+  (select count(*) from (select id, uid, count(*) as sdor_rows from sdor_union_tags_off group by id, uid except select id, uid, count(*) as sdor_rows from sdor_union_tags_on group by id, uid) y),
+  (select count(*) from sdor_union_tags_on) - (select count(*) from sdor_union_tags_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, uid, count(*) as sdor_rows from sdor_union_tags_on group by id, uid except select id, uid, count(*) as sdor_rows from (select a.id, u.id as uid from sdor_a a join (select id, k, 'x' as tag from sdor_b union all select id, k, 'y' as tag from sdor_c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3)) q group by id, uid) x),
+  (select count(*) from (select id, uid, count(*) as sdor_rows from (select a.id, u.id as uid from sdor_a a join (select id, k, 'x' as tag from sdor_b union all select id, k, 'y' as tag from sdor_c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3)) q group by id, uid except select id, uid, count(*) as sdor_rows from sdor_union_tags_on group by id, uid) y),
+  (select count(*) from sdor_union_tags_on) - (select count(*) from (select a.id, u.id as uid from sdor_a a join (select id, k, 'x' as tag from sdor_b union all select id, k, 'y' as tag from sdor_c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3)) q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, count(*) as sdor_rows from sdor_kept_anti_on group by id except select id, count(*) as sdor_rows from sdor_kept_anti_off group by id) x),
   (select count(*) from (select id, count(*) as sdor_rows from sdor_kept_anti_off group by id except select id, count(*) as sdor_rows from sdor_kept_anti_on group by id) y),
   (select count(*) from sdor_kept_anti_on) - (select count(*) from sdor_kept_anti_off);
@@ -1431,6 +1851,102 @@ select
   (select count(*) from (select id, bid, cid, count(*) as sdor_rows from sdor_three_tables_on group by id, bid, cid except select id, bid, cid, count(*) as sdor_rows from (select a.id, b.id as bid, c.id as cid from sdor_a a join sdor_b b on a.k = b.k join sdor_c c on c.k = b.k where ((a.x = 1 and c.w = 2) or (a.x = 3 and c.w = 4)) and ((b.y = 2 and c.w = 2) or (b.y = 4 and c.w = 4))) q group by id, bid, cid) x),
   (select count(*) from (select id, bid, cid, count(*) as sdor_rows from (select a.id, b.id as bid, c.id as cid from sdor_a a join sdor_b b on a.k = b.k join sdor_c c on c.k = b.k where ((a.x = 1 and c.w = 2) or (a.x = 3 and c.w = 4)) and ((b.y = 2 and c.w = 2) or (b.y = 4 and c.w = 4))) q group by id, bid, cid except select id, bid, cid, count(*) as sdor_rows from sdor_three_tables_on group by id, bid, cid) y),
   (select count(*) from sdor_three_tables_on) - (select count(*) from (select a.id, b.id as bid, c.id as cid from sdor_a a join sdor_b b on a.k = b.k join sdor_c c on c.k = b.k where ((a.x = 1 and c.w = 2) or (a.x = 3 and c.w = 4)) and ((b.y = 2 and c.w = 2) or (b.y = 4 and c.w = 4))) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_merged_in_on group by id, bid except select id, bid, count(*) as sdor_rows from sdor_merged_in_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_merged_in_off group by id, bid except select id, bid, count(*) as sdor_rows from sdor_merged_in_on group by id, bid) y),
+  (select count(*) from sdor_merged_in_on) - (select count(*) from sdor_merged_in_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_merged_in_on group by id, bid except select id, bid, count(*) as sdor_rows from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'z') and b.y = 4)) q group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'z') and b.y = 4)) q group by id, bid except select id, bid, count(*) as sdor_rows from sdor_merged_in_on group by id, bid) y),
+  (select count(*) from sdor_merged_in_on) - (select count(*) from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'z') and b.y = 4)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_same_value_on group by id, bid except select id, bid, count(*) as sdor_rows from sdor_same_value_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_same_value_off group by id, bid except select id, bid, count(*) as sdor_rows from sdor_same_value_on group by id, bid) y),
+  (select count(*) from sdor_same_value_on) - (select count(*) from sdor_same_value_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_same_value_on group by id, bid except select id, bid, count(*) as sdor_rows from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 4)) q group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 4)) q group by id, bid except select id, bid, count(*) as sdor_rows from sdor_same_value_on group by id, bid) y),
+  (select count(*) from sdor_same_value_on) - (select count(*) from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 4)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_some_values_on group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_some_values_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_some_values_off group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_some_values_on group by id, bid) y),
+  (select count(*) from sdor_case_some_values_on) - (select count(*) from sdor_case_some_values_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_some_values_on group by id, bid except select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3)) q group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3)) q group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_some_values_on group by id, bid) y),
+  (select count(*) from sdor_case_some_values_on) - (select count(*) from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_all_values_on group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_all_values_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_all_values_off group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_all_values_on group by id, bid) y),
+  (select count(*) from sdor_case_all_values_on) - (select count(*) from sdor_case_all_values_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_all_values_on group by id, bid except select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3)) q group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3)) q group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_all_values_on group by id, bid) y),
+  (select count(*) from sdor_case_all_values_on) - (select count(*) from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_no_else_on group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_no_else_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_no_else_off group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_no_else_on group by id, bid) y),
+  (select count(*) from sdor_case_no_else_on) - (select count(*) from sdor_case_no_else_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_no_else_on group by id, bid except select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 end as f from sdor_b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3)) q group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 end as f from sdor_b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3)) q group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_no_else_on group by id, bid) y),
+  (select count(*) from sdor_case_no_else_on) - (select count(*) from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 end as f from sdor_b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, uid, count(*) as sdor_rows from sdor_union_tags_on group by id, uid except select id, uid, count(*) as sdor_rows from sdor_union_tags_off group by id, uid) x),
+  (select count(*) from (select id, uid, count(*) as sdor_rows from sdor_union_tags_off group by id, uid except select id, uid, count(*) as sdor_rows from sdor_union_tags_on group by id, uid) y),
+  (select count(*) from sdor_union_tags_on) - (select count(*) from sdor_union_tags_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, uid, count(*) as sdor_rows from sdor_union_tags_on group by id, uid except select id, uid, count(*) as sdor_rows from (select a.id, u.id as uid from sdor_a a join (select id, k, 'x' as tag from sdor_b union all select id, k, 'y' as tag from sdor_c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3)) q group by id, uid) x),
+  (select count(*) from (select id, uid, count(*) as sdor_rows from (select a.id, u.id as uid from sdor_a a join (select id, k, 'x' as tag from sdor_b union all select id, k, 'y' as tag from sdor_c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3)) q group by id, uid except select id, uid, count(*) as sdor_rows from sdor_union_tags_on group by id, uid) y),
+  (select count(*) from sdor_union_tags_on) - (select count(*) from (select a.id, u.id as uid from sdor_a a join (select id, k, 'x' as tag from sdor_b union all select id, k, 'y' as tag from sdor_c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3)) q);
 ----
 0 0 0
 
@@ -1700,6 +2216,102 @@ select
 
 query III
 select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_merged_in_on group by id, bid except select id, bid, count(*) as sdor_rows from sdor_merged_in_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_merged_in_off group by id, bid except select id, bid, count(*) as sdor_rows from sdor_merged_in_on group by id, bid) y),
+  (select count(*) from sdor_merged_in_on) - (select count(*) from sdor_merged_in_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_merged_in_on group by id, bid except select id, bid, count(*) as sdor_rows from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'z') and b.y = 4)) q group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'z') and b.y = 4)) q group by id, bid except select id, bid, count(*) as sdor_rows from sdor_merged_in_on group by id, bid) y),
+  (select count(*) from sdor_merged_in_on) - (select count(*) from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.s = 'p' and b.y = 1) or (a.s = 'q' and b.y = 2) or (a.s = 'p' and b.y = 3) or (a.s in ('p', 'z') and b.y = 4)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_same_value_on group by id, bid except select id, bid, count(*) as sdor_rows from sdor_same_value_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_same_value_off group by id, bid except select id, bid, count(*) as sdor_rows from sdor_same_value_on group by id, bid) y),
+  (select count(*) from sdor_same_value_on) - (select count(*) from sdor_same_value_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_same_value_on group by id, bid except select id, bid, count(*) as sdor_rows from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 4)) q group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 4)) q group by id, bid except select id, bid, count(*) as sdor_rows from sdor_same_value_on group by id, bid) y),
+  (select count(*) from sdor_same_value_on) - (select count(*) from (select a.id, b.id as bid from sdor_a a join sdor_b b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 1 and b.y = 4)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_some_values_on group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_some_values_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_some_values_off group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_some_values_on group by id, bid) y),
+  (select count(*) from sdor_case_some_values_on) - (select count(*) from sdor_case_some_values_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_some_values_on group by id, bid except select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3)) q group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3)) q group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_some_values_on group by id, bid) y),
+  (select count(*) from sdor_case_some_values_on) - (select count(*) from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 1 and a.x = 1) or (bb.f = 2 and a.x = 3)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_all_values_on group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_all_values_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_all_values_off group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_all_values_on group by id, bid) y),
+  (select count(*) from sdor_case_all_values_on) - (select count(*) from sdor_case_all_values_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_all_values_on group by id, bid except select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3)) q group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3)) q group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_all_values_on group by id, bid) y),
+  (select count(*) from sdor_case_all_values_on) - (select count(*) from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 else 0 end as f from sdor_b) bb on a.k = bb.k where (bb.f = 0 and a.x = 1) or (bb.f = 1 and a.x = 3)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_no_else_on group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_no_else_off group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_no_else_off group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_no_else_on group by id, bid) y),
+  (select count(*) from sdor_case_no_else_on) - (select count(*) from sdor_case_no_else_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bid, count(*) as sdor_rows from sdor_case_no_else_on group by id, bid except select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 end as f from sdor_b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3)) q group by id, bid) x),
+  (select count(*) from (select id, bid, count(*) as sdor_rows from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 end as f from sdor_b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3)) q group by id, bid except select id, bid, count(*) as sdor_rows from sdor_case_no_else_on group by id, bid) y),
+  (select count(*) from sdor_case_no_else_on) - (select count(*) from (select a.id, bb.id as bid from sdor_a a join (select id, k, case when y > 2 then 1 when y < 2 then 2 end as f from sdor_b) bb on a.k = bb.k where (bb.f in (1, 2) and a.x = 1) or (bb.f = 1 and a.x = 3)) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, uid, count(*) as sdor_rows from sdor_union_tags_on group by id, uid except select id, uid, count(*) as sdor_rows from sdor_union_tags_off group by id, uid) x),
+  (select count(*) from (select id, uid, count(*) as sdor_rows from sdor_union_tags_off group by id, uid except select id, uid, count(*) as sdor_rows from sdor_union_tags_on group by id, uid) y),
+  (select count(*) from sdor_union_tags_on) - (select count(*) from sdor_union_tags_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, uid, count(*) as sdor_rows from sdor_union_tags_on group by id, uid except select id, uid, count(*) as sdor_rows from (select a.id, u.id as uid from sdor_a a join (select id, k, 'x' as tag from sdor_b union all select id, k, 'y' as tag from sdor_c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3)) q group by id, uid) x),
+  (select count(*) from (select id, uid, count(*) as sdor_rows from (select a.id, u.id as uid from sdor_a a join (select id, k, 'x' as tag from sdor_b union all select id, k, 'y' as tag from sdor_c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3)) q group by id, uid except select id, uid, count(*) as sdor_rows from sdor_union_tags_on group by id, uid) y),
+  (select count(*) from sdor_union_tags_on) - (select count(*) from (select a.id, u.id as uid from sdor_a a join (select id, k, 'x' as tag from sdor_b union all select id, k, 'y' as tag from sdor_c) u on a.k = u.k where (u.tag = 'x' and a.x = 1) or (u.tag = 'y' and a.x = 3)) q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, count(*) as sdor_rows from sdor_kept_anti_on group by id except select id, count(*) as sdor_rows from sdor_kept_anti_off group by id) x),
   (select count(*) from (select id, count(*) as sdor_rows from sdor_kept_anti_off group by id except select id, count(*) as sdor_rows from sdor_kept_anti_on group by id) y),
   (select count(*) from sdor_kept_anti_on) - (select count(*) from sdor_kept_anti_off);
@@ -1758,6 +2370,24 @@ statement ok
 drop materialized view sdor_kept_anti_on;
 
 statement ok
+drop materialized view sdor_union_tags_on;
+
+statement ok
+drop materialized view sdor_case_no_else_on;
+
+statement ok
+drop materialized view sdor_case_all_values_on;
+
+statement ok
+drop materialized view sdor_case_some_values_on;
+
+statement ok
+drop materialized view sdor_same_value_on;
+
+statement ok
+drop materialized view sdor_merged_in_on;
+
+statement ok
 drop materialized view sdor_three_tables_on;
 
 statement ok
@@ -1804,6 +2434,24 @@ drop materialized view sdor_kept_left_preserved_off;
 
 statement ok
 drop materialized view sdor_kept_anti_off;
+
+statement ok
+drop materialized view sdor_union_tags_off;
+
+statement ok
+drop materialized view sdor_case_no_else_off;
+
+statement ok
+drop materialized view sdor_case_all_values_off;
+
+statement ok
+drop materialized view sdor_case_some_values_off;
+
+statement ok
+drop materialized view sdor_same_value_off;
+
+statement ok
+drop materialized view sdor_merged_in_off;
 
 statement ok
 drop materialized view sdor_three_tables_off;
