@@ -12,16 +12,17 @@
 Two GitHub workflows and a script keep the `fork/*` branches independent and the integration
 branch tested:
 
-- `fork-branches-check.yml` (push to `check/**`): builds every `fork/*` branch on its own on the
-  upstream tag, runs the unit tests of the main crates, then checks that the branches merge without
-  conflict with `scripts/fork/rebuild-integration.sh`.
-- `selective-barriers-validation.yml` (push to `validate/**`): builds with the embedded UDF
-  runtimes and runs `scripts/selective_barriers/ci_validate.sh`: a matrix of source and sink
-  connectors (`connector_matrix.py`), sinks into tables, chaos tests, the streaming, batch and UDF
-  SLT suites, unit tests, and an in-place upgrade from a base commit.
+- `fork-branches-check.yml` (push to `check/**`): builds every code branch (`fork/*` except the
+  tooling and documentation branches) on its own on the upstream tag, runs the unit tests of the
+  main crates, then checks that all the branches merge without conflict with
+  `scripts/fork/rebuild-integration.sh`.
+- `fork-validation.yml`, workflow "Fork Validation" (push to `validate/**`): builds with the
+  embedded UDF runtimes and runs `scripts/selective_barriers/ci_validate.sh`: a matrix of source
+  and sink connectors (`connector_matrix.py`), sinks into tables, chaos tests, the streaming, batch
+  and UDF SLT suites, unit tests, and an in-place upgrade from a base commit.
 - `scripts/fork/rebuild-integration.sh <tag> <integration branch> [remote]`: rebuilds the
   integration branch as the tag plus the `fork/*` branches merged `--no-ff` in a fixed order (fixes
-  of upstream code, then features, then tooling).
+  of upstream code, then features, then tooling, then `fork/docs`).
 
 ## Motivation
 
@@ -47,9 +48,12 @@ Not applicable (tooling).
 
 ## Status and versions
 
-Integrated in `integration/v3.1.2`. The rebuild script lists 13 branches: it does not yet include
-the later fix branches `fork/fix-last-seen-value-null` and `fork/fix-webhook-unready-worker`, which
-were merged into the plan-reduction line directly.
+Integrated in `integration/v3.1.2`. The rebuild script lists 16 branches: the five fixes of
+upstream code (`fork/fix-snapshot-backfill`, `fork/fix-batch-hash-agg-spill`,
+`fork/fix-last-seen-value-null`, `fork/fix-webhook-unready-worker`, `fork/optimizer`), the eight
+features, the two tooling branches and `fork/docs`. The validation workflow was named
+`selective-barriers-validation.yml` until it was renamed `fork-validation.yml`; runs before the
+rename appear under "Selective Barriers Validation".
 
 ## Tests
 
@@ -57,9 +61,9 @@ The workflows are the tests.
 
 ## Limits and risks
 
-- `selective-barriers-validation.yml` tests every feature of the fork: it is only meaningful on an
-  integration branch, not on a single `fork/*` branch.
-- The name of the validation workflow is historical: it validates the whole fork.
+- `fork-validation.yml` tests every feature of the fork: it is only meaningful on an integration
+  branch, not on a single `fork/*` branch. Its scripts still live under
+  `scripts/selective_barriers/`, where the validation started.
 
 ## Upstream relation
 

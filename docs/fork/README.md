@@ -21,13 +21,20 @@ Every `fork/*` branch starts from the tag `v3.1.2` and holds one theme in one to
 (code, tests, docs), so that it can be carried alone to a new upstream version
 (`git rebase --onto <new tag> <old tag> fork/<name>`).
 
-`integration/v3.1.2` is the tag plus the `fork/*` branches merged `--no-ff` in the fixed order of
-`scripts/fork/rebuild-integration.sh <tag> <integration branch> [remote]` (on `fork/ci-validation`):
-fixes of upstream code first, then features, then tooling. Between two upstream versions, a change
-is committed on the `fork/*` branch concerned and merged again into the integration branch.
+`integration/v3.1.2` is the tag plus the 16 `fork/*` branches merged `--no-ff` in the fixed order
+of `scripts/fork/rebuild-integration.sh <tag> <integration branch> [remote]` (on
+`fork/ci-validation`): fixes of upstream code first (`fork/fix-snapshot-backfill`,
+`fork/fix-batch-hash-agg-spill`, `fork/fix-last-seen-value-null`, `fork/fix-webhook-unready-worker`,
+`fork/optimizer`), then features (`fork/selective-barriers`, `fork/pg-cdc-native-engine`,
+`fork/postgres-sink-group`, `fork/sink-append-only-force-compaction`, `fork/udf-volatility`,
+`fork/batch-resource-governance`, `fork/resource-journal-and-nofile-limit`, `fork/license`), then
+tooling (`fork/ci-multiarch-image`, `fork/ci-validation`), and this documentation (`fork/docs`)
+last. Between two upstream versions, a change is committed on the `fork/*` branch concerned and
+merged again into the integration branch.
 
-Two workflows (see [ci-validation](evolutions/ci-validation.md)) check each branch alone (push to
-`check/**`) and validate the integration branch end to end (push to `validate/**`).
+Two workflows (see [ci-validation](evolutions/ci-validation.md)) check each branch alone
+(`fork-branches-check.yml`, push to `check/**`) and validate the integration branch end to end
+(`fork-validation.yml`, push to `validate/**`).
 
 ### Plan-reduction prototype line
 
@@ -71,7 +78,7 @@ in any image), **in progress** (no published code).
 | [Postgres sink groups](evolutions/postgres-sink-group.md) | feature | `fork/postgres-sink-group` | integrated | `postgres` connection, `sink_order = 'last'`, `pool.max_size` (4) |
 | [`force_compaction` for `force_append_only` sinks](evolutions/sink-append-only-force-compaction.md) | feature | `fork/sink-append-only-force-compaction` | integrated | sink option `force_compaction` (false) |
 | [UDF volatility](evolutions/udf-volatility.md) | feature | `fork/udf-volatility` | integrated | `IMMUTABLE` / `STABLE` / `VOLATILE` |
-| [Batch resource governance](evolutions/batch-resource-governance.md) | engine | `fork/batch-resource-governance` | integrated (overflow wait follow-up: rc4) | `[batch]` memory ratios and limits, `overflow_memory_wait_secs` (300), `[storage] batch_read_stale_snapshot_from_meta` (false) |
+| [Batch resource governance](evolutions/batch-resource-governance.md) | engine | `fork/batch-resource-governance` | integrated | `[batch]` memory ratios and limits, `overflow_memory_wait_secs` (300), `[storage] batch_read_stale_snapshot_from_meta` (false) |
 | [Resource journal and open file limit](evolutions/resource-journal-and-nofile-limit.md) | operations | `fork/resource-journal-and-nofile-limit` | integrated | `RW_RESOURCE_JOURNAL_INTERVAL_SECS` (60) |
 | [Default license](evolutions/license.md) | operations | `fork/license` | integrated | none |
 | [Multi-arch image workflow](evolutions/ci-multiarch-image.md) | tooling | `fork/ci-multiarch-image` | integrated | workflow inputs |
@@ -138,8 +145,8 @@ one file per fix. The fix branches are:
 | `fork/fix-snapshot-backfill` | snapshot backfill deadlock, scan stream key, `now()` epoch | yes |
 | `fork/fix-batch-hash-agg-spill` | spill of the batch hash aggregation | yes |
 | `fork/optimizer` | first/last value pruning, empty group key, empty relations in batch | yes |
-| `fork/fix-last-seen-value-null` | `internal_last_seen_value` and `NULL` inputs | no (plan-reduction line only) |
-| `fork/fix-webhook-unready-worker` | webhook request during recovery answers 503 | no (plan-reduction line only) |
+| `fork/fix-last-seen-value-null` | `internal_last_seen_value` and `NULL` inputs | yes |
+| `fork/fix-webhook-unready-worker` | webhook request during recovery answers 503 | yes |
 
 Fixes made inside the plan-reduction line (for example the column pruning of set operations shipped
 in rc6) are documented there too.

@@ -3,9 +3,9 @@
 | | |
 |---|---|
 | Kind | engine (batch) |
-| Branch | `fork/batch-resource-governance`; follow-ups on `fix/batch-overflow-wait-limit` (plan-reduction line only) |
-| Status | integrated (`integration/v3.1.2`); the follow-ups are in the plan-reduction images from rc4 |
-| Configuration | `[batch]` `memory_usable_ratio` (0.9), `query_memory_ratio` (0.3), `query_memory_max_ratio` (0.7), `spillable_operator_min_memory_mb` (8), `spillable_operator_avg_memory_mb` (64), `overflow_memory_wait_secs` (300, follow-up); `[storage]` `batch_read_stale_snapshot_from_meta` (false) |
+| Branch | `fork/batch-resource-governance` |
+| Status | integrated (`integration/v3.1.2`); the follow-ups (overflow wait limit, release on cancellation) were first shipped in the plan-reduction images from rc4 |
+| Configuration | `[batch]` `memory_usable_ratio` (0.9), `query_memory_ratio` (0.3), `query_memory_max_ratio` (0.7), `spillable_operator_min_memory_mb` (8), `spillable_operator_avg_memory_mb` (64), `overflow_memory_wait_secs` (300); `[storage]` `batch_read_stale_snapshot_from_meta` (false) |
 | Related | [batch memory safety and spill on memory wait](batch-memory-safety.md), [exchange buffer accounting](exchange-buffer-accounting.md) |
 
 ## Summary
@@ -47,14 +47,15 @@ key, which can take hours.
 - The stateful operators of the root stage run on a compute node.
 - Waits for memory that last are logged; peaks are recorded per query.
 
-Follow-ups on `fix/batch-overflow-wait-limit` (merged into the plan-reduction line, not into
-`fork/batch-resource-governance` yet):
+Follow-ups, developed on `fix/batch-overflow-wait-limit` and now part of
+`fork/batch-resource-governance`:
 
 - `overflow_memory_wait_secs` (default 300): an operator waiting for memory beyond its query gives
   up after that time, so that queries do not wait forever for a query that is itself stuck; 0 waits
   without limit;
 - a cancelled or timed-out task releases its memory reservation and ends even when nobody reads its
-  output.
+  output; a task that ends normally releases only its reservation and keeps its outputs until a
+  consumer takes them (a consumer may take an output after the task has ended).
 
 ## Configuration
 
@@ -64,12 +65,13 @@ variables.
 ## Correctness / safety argument
 
 The limits change when a query runs, spills, waits or fails, never what it returns. The admission
-reservation is released when the last task of the query ends (or is cancelled, follow-up).
+reservation is released when the last task of the query ends or is cancelled.
 
 ## Status and versions
 
-Integrated in `integration/v3.1.2`. The follow-ups are in the plan-reduction images since rc4
-(rc4 was rebuilt under the same tag after a regression of the cancellation follow-up was fixed).
+Integrated in `integration/v3.1.2`, follow-ups included. The follow-ups were first shipped in the
+plan-reduction images since rc4 (rc4 was rebuilt under the same tag after a regression of the
+cancellation follow-up was fixed), before they were added to `fork/batch-resource-governance`.
 
 ## Tests
 
