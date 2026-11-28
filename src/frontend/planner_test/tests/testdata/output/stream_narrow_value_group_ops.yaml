@@ -270,3 +270,27 @@
                 └─StreamHashAgg { group_key: [eb.k], aggs: [last_value(eb.doc order_by(eb.ts ASC)), max(eb.ts), count] }
                   └─StreamExchange { dist: HashShard(eb.k) }
                     └─StreamTableScan { table: eb, columns: [eb.k, eb.ts, eb.doc, eb.id], stream_scan_type: SnapshotBackfill, stream_key: [eb.id], pk: [id], dist: UpstreamHashShard(eb.id) }
+- name: kept - deduplicated on the value
+  before:
+  - tables
+  - setup
+  sql: |
+    set rw_streaming_allow_jsonb_in_stream_key to true;
+    select distinct on (doc) k, doc->>'c' as c from vab;
+  stream_plan: |-
+    StreamMaterialize { columns: [k, c, last_value(ea.doc order_by(ea.ts ASC))(hidden)], stream_key: [last_value(ea.doc order_by(ea.ts ASC))], pk_columns: [last_value(ea.doc order_by(ea.ts ASC))], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [ea.k, $expr1, last_value(ea.doc order_by(ea.ts ASC))] }
+      └─StreamGroupTopN { order: [], limit: 1, offset: 0, group_key: [last_value(ea.doc order_by(ea.ts ASC))] }
+        └─StreamExchange { dist: HashShard(last_value(ea.doc order_by(ea.ts ASC))) }
+          └─StreamProject { exprs: [ea.k, JsonbAccessStr(last_value(ea.doc order_by(ea.ts ASC)), 'c':Varchar) as $expr1, last_value(ea.doc order_by(ea.ts ASC)), $src], noop_update_hint: true }
+            └─StreamUnion { all: true }
+              ├─StreamExchange { dist: HashShard(ea.k, 0:Int32) }
+              │ └─StreamProject { exprs: [ea.k, last_value(ea.doc order_by(ea.ts ASC)), 0:Int32] }
+              │   └─StreamHashAgg { group_key: [ea.k], aggs: [last_value(ea.doc order_by(ea.ts ASC)), count] }
+              │     └─StreamExchange { dist: HashShard(ea.k) }
+              │       └─StreamTableScan { table: ea, columns: [ea.k, ea.ts, ea.doc, ea.id], stream_scan_type: SnapshotBackfill, stream_key: [ea.id], pk: [id], dist: UpstreamHashShard(ea.id) }
+              └─StreamExchange { dist: HashShard(eb.k, 1:Int32) }
+                └─StreamProject { exprs: [eb.k, last_value(eb.doc order_by(eb.ts ASC)), 1:Int32] }
+                  └─StreamHashAgg { group_key: [eb.k], aggs: [last_value(eb.doc order_by(eb.ts ASC)), count] }
+                    └─StreamExchange { dist: HashShard(eb.k) }
+                      └─StreamTableScan { table: eb, columns: [eb.k, eb.ts, eb.doc, eb.id], stream_scan_type: SnapshotBackfill, stream_key: [eb.id], pk: [id], dist: UpstreamHashShard(eb.id) }
