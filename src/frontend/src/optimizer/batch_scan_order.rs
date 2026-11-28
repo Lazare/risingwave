@@ -26,7 +26,7 @@
 //! their parent) in between. Every other operator is assumed to use the order of its input.
 
 use crate::optimizer::plan_node::BatchPlanRef as PlanRef;
-use crate::optimizer::plan_node::generic::PhysicalPlanRef;
+use crate::optimizer::plan_node::batch::BatchPlanNodeMetadata;
 
 /// Marks the table scans of `plan` whose order no operator uses.
 pub fn mark_scans_with_unused_order(plan: PlanRef) -> PlanRef {
