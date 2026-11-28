@@ -69,6 +69,21 @@
   - batch_plan
   - stream_plan
 
+- name: with a group key - the group by of the null branch goes, on a column that is not a key
+  before: [setup]
+  sql: |
+    select x, sum(m) as s from (select x, sum(y) as m from a group by x union all select x, null::bigint from b group by x) v group by x;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: with a group key - the distinct of the null branch goes, on a column that is not a key
+  before: [setup]
+  sql: |
+    select y, max(m) as mx from (select y, x as m from a union all select distinct y, null::int from b) v group by y;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+
 # Left as they are.
 - name: count star counts the null rows
   before: [setup]

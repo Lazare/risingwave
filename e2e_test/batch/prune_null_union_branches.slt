@@ -54,6 +54,12 @@ statement ok
 create table nbb_group_distinct_on (k int, mx int, n bigint);
 
 statement ok
+create table nbb_group_by_x_off (x int, s numeric);
+
+statement ok
+create table nbb_group_by_x_on (x int, s numeric);
+
+statement ok
 create table nbb_group_distinct_y_off (y int, mx int);
 
 statement ok
@@ -189,6 +195,24 @@ set batch_prune_null_union_branches = true;
 
 statement ok
 insert into nbb_group_distinct_on select k, max(m) as mx, count(m) as n from (select k, x as m from nbb_a union all select distinct k, null::int from nbb_b) v group by k;
+
+statement ok
+set batch_prune_null_union_branches = false;
+
+statement ok
+delete from nbb_group_by_x_off;
+
+statement ok
+delete from nbb_group_by_x_on;
+
+statement ok
+insert into nbb_group_by_x_off select x, sum(m) as s from (select x, sum(y) as m from nbb_a group by x union all select x, null::bigint from nbb_b group by x) v group by x;
+
+statement ok
+set batch_prune_null_union_branches = true;
+
+statement ok
+insert into nbb_group_by_x_on select x, sum(m) as s from (select x, sum(y) as m from nbb_a group by x union all select x, null::bigint from nbb_b group by x) v group by x;
 
 statement ok
 set batch_prune_null_union_branches = false;
@@ -330,6 +354,14 @@ select
   (select count(*) from (select k, mx, n, count(*) as nbb_rows from nbb_group_distinct_on group by k, mx, n except select k, mx, n, count(*) as nbb_rows from nbb_group_distinct_off group by k, mx, n) x),
   (select count(*) from (select k, mx, n, count(*) as nbb_rows from nbb_group_distinct_off group by k, mx, n except select k, mx, n, count(*) as nbb_rows from nbb_group_distinct_on group by k, mx, n) y),
   (select count(*) from nbb_group_distinct_on) - (select count(*) from nbb_group_distinct_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, s, count(*) as nbb_rows from nbb_group_by_x_on group by x, s except select x, s, count(*) as nbb_rows from nbb_group_by_x_off group by x, s) x),
+  (select count(*) from (select x, s, count(*) as nbb_rows from nbb_group_by_x_off group by x, s except select x, s, count(*) as nbb_rows from nbb_group_by_x_on group by x, s) y),
+  (select count(*) from nbb_group_by_x_on) - (select count(*) from nbb_group_by_x_off);
 ----
 0 0 0
 
@@ -495,6 +527,24 @@ statement ok
 set batch_prune_null_union_branches = false;
 
 statement ok
+delete from nbb_group_by_x_off;
+
+statement ok
+delete from nbb_group_by_x_on;
+
+statement ok
+insert into nbb_group_by_x_off select x, sum(m) as s from (select x, sum(y) as m from nbb_a group by x union all select x, null::bigint from nbb_b group by x) v group by x;
+
+statement ok
+set batch_prune_null_union_branches = true;
+
+statement ok
+insert into nbb_group_by_x_on select x, sum(m) as s from (select x, sum(y) as m from nbb_a group by x union all select x, null::bigint from nbb_b group by x) v group by x;
+
+statement ok
+set batch_prune_null_union_branches = false;
+
+statement ok
 delete from nbb_group_distinct_y_off;
 
 statement ok
@@ -631,6 +681,14 @@ select
   (select count(*) from (select k, mx, n, count(*) as nbb_rows from nbb_group_distinct_on group by k, mx, n except select k, mx, n, count(*) as nbb_rows from nbb_group_distinct_off group by k, mx, n) x),
   (select count(*) from (select k, mx, n, count(*) as nbb_rows from nbb_group_distinct_off group by k, mx, n except select k, mx, n, count(*) as nbb_rows from nbb_group_distinct_on group by k, mx, n) y),
   (select count(*) from nbb_group_distinct_on) - (select count(*) from nbb_group_distinct_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, s, count(*) as nbb_rows from nbb_group_by_x_on group by x, s except select x, s, count(*) as nbb_rows from nbb_group_by_x_off group by x, s) x),
+  (select count(*) from (select x, s, count(*) as nbb_rows from nbb_group_by_x_off group by x, s except select x, s, count(*) as nbb_rows from nbb_group_by_x_on group by x, s) y),
+  (select count(*) from nbb_group_by_x_on) - (select count(*) from nbb_group_by_x_off);
 ----
 0 0 0
 
@@ -793,6 +851,24 @@ statement ok
 set batch_prune_null_union_branches = false;
 
 statement ok
+delete from nbb_group_by_x_off;
+
+statement ok
+delete from nbb_group_by_x_on;
+
+statement ok
+insert into nbb_group_by_x_off select x, sum(m) as s from (select x, sum(y) as m from nbb_a group by x union all select x, null::bigint from nbb_b group by x) v group by x;
+
+statement ok
+set batch_prune_null_union_branches = true;
+
+statement ok
+insert into nbb_group_by_x_on select x, sum(m) as s from (select x, sum(y) as m from nbb_a group by x union all select x, null::bigint from nbb_b group by x) v group by x;
+
+statement ok
+set batch_prune_null_union_branches = false;
+
+statement ok
 delete from nbb_group_distinct_y_off;
 
 statement ok
@@ -929,6 +1005,14 @@ select
   (select count(*) from (select k, mx, n, count(*) as nbb_rows from nbb_group_distinct_on group by k, mx, n except select k, mx, n, count(*) as nbb_rows from nbb_group_distinct_off group by k, mx, n) x),
   (select count(*) from (select k, mx, n, count(*) as nbb_rows from nbb_group_distinct_off group by k, mx, n except select k, mx, n, count(*) as nbb_rows from nbb_group_distinct_on group by k, mx, n) y),
   (select count(*) from nbb_group_distinct_on) - (select count(*) from nbb_group_distinct_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, s, count(*) as nbb_rows from nbb_group_by_x_on group by x, s except select x, s, count(*) as nbb_rows from nbb_group_by_x_off group by x, s) x),
+  (select count(*) from (select x, s, count(*) as nbb_rows from nbb_group_by_x_off group by x, s except select x, s, count(*) as nbb_rows from nbb_group_by_x_on group by x, s) y),
+  (select count(*) from nbb_group_by_x_on) - (select count(*) from nbb_group_by_x_off);
 ----
 0 0 0
 
@@ -1100,6 +1184,24 @@ statement ok
 set batch_prune_null_union_branches = false;
 
 statement ok
+delete from nbb_group_by_x_off;
+
+statement ok
+delete from nbb_group_by_x_on;
+
+statement ok
+insert into nbb_group_by_x_off select x, sum(m) as s from (select x, sum(y) as m from nbb_a group by x union all select x, null::bigint from nbb_b group by x) v group by x;
+
+statement ok
+set batch_prune_null_union_branches = true;
+
+statement ok
+insert into nbb_group_by_x_on select x, sum(m) as s from (select x, sum(y) as m from nbb_a group by x union all select x, null::bigint from nbb_b group by x) v group by x;
+
+statement ok
+set batch_prune_null_union_branches = false;
+
+statement ok
 delete from nbb_group_distinct_y_off;
 
 statement ok
@@ -1236,6 +1338,14 @@ select
   (select count(*) from (select k, mx, n, count(*) as nbb_rows from nbb_group_distinct_on group by k, mx, n except select k, mx, n, count(*) as nbb_rows from nbb_group_distinct_off group by k, mx, n) x),
   (select count(*) from (select k, mx, n, count(*) as nbb_rows from nbb_group_distinct_off group by k, mx, n except select k, mx, n, count(*) as nbb_rows from nbb_group_distinct_on group by k, mx, n) y),
   (select count(*) from nbb_group_distinct_on) - (select count(*) from nbb_group_distinct_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, s, count(*) as nbb_rows from nbb_group_by_x_on group by x, s except select x, s, count(*) as nbb_rows from nbb_group_by_x_off group by x, s) x),
+  (select count(*) from (select x, s, count(*) as nbb_rows from nbb_group_by_x_off group by x, s except select x, s, count(*) as nbb_rows from nbb_group_by_x_on group by x, s) y),
+  (select count(*) from nbb_group_by_x_on) - (select count(*) from nbb_group_by_x_off);
 ----
 0 0 0
 
@@ -1395,6 +1505,24 @@ statement ok
 set batch_prune_null_union_branches = false;
 
 statement ok
+delete from nbb_group_by_x_off;
+
+statement ok
+delete from nbb_group_by_x_on;
+
+statement ok
+insert into nbb_group_by_x_off select x, sum(m) as s from (select x, sum(y) as m from nbb_a group by x union all select x, null::bigint from nbb_b group by x) v group by x;
+
+statement ok
+set batch_prune_null_union_branches = true;
+
+statement ok
+insert into nbb_group_by_x_on select x, sum(m) as s from (select x, sum(y) as m from nbb_a group by x union all select x, null::bigint from nbb_b group by x) v group by x;
+
+statement ok
+set batch_prune_null_union_branches = false;
+
+statement ok
 delete from nbb_group_distinct_y_off;
 
 statement ok
@@ -1531,6 +1659,14 @@ select
   (select count(*) from (select k, mx, n, count(*) as nbb_rows from nbb_group_distinct_on group by k, mx, n except select k, mx, n, count(*) as nbb_rows from nbb_group_distinct_off group by k, mx, n) x),
   (select count(*) from (select k, mx, n, count(*) as nbb_rows from nbb_group_distinct_off group by k, mx, n except select k, mx, n, count(*) as nbb_rows from nbb_group_distinct_on group by k, mx, n) y),
   (select count(*) from nbb_group_distinct_on) - (select count(*) from nbb_group_distinct_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, s, count(*) as nbb_rows from nbb_group_by_x_on group by x, s except select x, s, count(*) as nbb_rows from nbb_group_by_x_off group by x, s) x),
+  (select count(*) from (select x, s, count(*) as nbb_rows from nbb_group_by_x_off group by x, s except select x, s, count(*) as nbb_rows from nbb_group_by_x_on group by x, s) y),
+  (select count(*) from nbb_group_by_x_on) - (select count(*) from nbb_group_by_x_off);
 ----
 0 0 0
 
@@ -1693,6 +1829,24 @@ statement ok
 set batch_prune_null_union_branches = false;
 
 statement ok
+delete from nbb_group_by_x_off;
+
+statement ok
+delete from nbb_group_by_x_on;
+
+statement ok
+insert into nbb_group_by_x_off select x, sum(m) as s from (select x, sum(y) as m from nbb_a group by x union all select x, null::bigint from nbb_b group by x) v group by x;
+
+statement ok
+set batch_prune_null_union_branches = true;
+
+statement ok
+insert into nbb_group_by_x_on select x, sum(m) as s from (select x, sum(y) as m from nbb_a group by x union all select x, null::bigint from nbb_b group by x) v group by x;
+
+statement ok
+set batch_prune_null_union_branches = false;
+
+statement ok
 delete from nbb_group_distinct_y_off;
 
 statement ok
@@ -1834,6 +1988,14 @@ select
 
 query III
 select
+  (select count(*) from (select x, s, count(*) as nbb_rows from nbb_group_by_x_on group by x, s except select x, s, count(*) as nbb_rows from nbb_group_by_x_off group by x, s) x),
+  (select count(*) from (select x, s, count(*) as nbb_rows from nbb_group_by_x_off group by x, s except select x, s, count(*) as nbb_rows from nbb_group_by_x_on group by x, s) y),
+  (select count(*) from nbb_group_by_x_on) - (select count(*) from nbb_group_by_x_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select y, mx, count(*) as nbb_rows from nbb_group_distinct_y_on group by y, mx except select y, mx, count(*) as nbb_rows from nbb_group_distinct_y_off group by y, mx) x),
   (select count(*) from (select y, mx, count(*) as nbb_rows from nbb_group_distinct_y_off group by y, mx except select y, mx, count(*) as nbb_rows from nbb_group_distinct_y_on group by y, mx) y),
   (select count(*) from nbb_group_distinct_y_on) - (select count(*) from nbb_group_distinct_y_off);
@@ -1903,6 +2065,12 @@ drop table nbb_group_distinct_y_on;
 
 statement ok
 drop table nbb_group_distinct_y_off;
+
+statement ok
+drop table nbb_group_by_x_on;
+
+statement ok
+drop table nbb_group_by_x_off;
 
 statement ok
 drop table nbb_group_distinct_on;

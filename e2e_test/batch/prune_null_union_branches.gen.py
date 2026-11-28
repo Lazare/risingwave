@@ -24,6 +24,7 @@ CASES = [
     ('filter_null', 's bigint', 'select sum(m) as s from (select x as m from {p}a union all select y from {p}b where y is null) v'),
     ('group_by', 'k int, s numeric', 'select k, sum(m) as s from (select k, sum(x) as m from {p}a group by k union all select k, null::bigint from {p}b group by k) v group by k'),
     ('group_distinct', 'k int, mx int, n bigint', 'select k, max(m) as mx, count(m) as n from (select k, x as m from {p}a union all select distinct k, null::int from {p}b) v group by k'),
+    ('group_by_x', 'x int, s numeric', 'select x, sum(m) as s from (select x, sum(y) as m from {p}a group by x union all select x, null::bigint from {p}b group by x) v group by x'),
     ('group_distinct_y', 'y int, mx int', 'select y, max(m) as mx from (select y, x as m from {p}a union all select distinct y, null::int from {p}b) v group by y'),
     # Left as they are by the rule.
     ('kept_count_star', 's bigint, n bigint', 'select sum(m) as s, count(*) as n from (select k, x as m from {p}a union all select k, null::int from {p}b) v'),

@@ -50,6 +50,9 @@ statement ok
 create materialized view nbs_group_distinct_off as select k, max(m) as mx, count(m) as n from (select k, x as m from nbs_a union all select distinct k, null::int from nbs_b) v group by k;
 
 statement ok
+create materialized view nbs_group_by_x_off as select x, coalesce(sum(m), 0) as s from (select x, sum(y) as m from nbs_a group by x union all select x, null::bigint from nbs_b group by x) v group by x;
+
+statement ok
 create materialized view nbs_group_distinct_y_off as select y, max(m) as mx from (select y, x as m from nbs_a union all select distinct y, null::int from nbs_b) v group by y;
 
 statement ok
@@ -84,6 +87,9 @@ create materialized view nbs_group_by_on as select k, coalesce(sum(m), 0) as s f
 
 statement ok
 create materialized view nbs_group_distinct_on as select k, max(m) as mx, count(m) as n from (select k, x as m from nbs_a union all select distinct k, null::int from nbs_b) v group by k;
+
+statement ok
+create materialized view nbs_group_by_x_on as select x, coalesce(sum(m), 0) as s from (select x, sum(y) as m from nbs_a group by x union all select x, null::bigint from nbs_b group by x) v group by x;
 
 statement ok
 create materialized view nbs_group_distinct_y_on as select y, max(m) as mx from (select y, x as m from nbs_a union all select distinct y, null::int from nbs_b) v group by y;
@@ -198,6 +204,22 @@ select
   (select count(*) from (select k, mx, n, count(*) as nbs_rows from nbs_group_distinct_on group by k, mx, n except select k, mx, n, count(*) as nbs_rows from (select k, max(m) as mx, count(m) as n from (select k, x as m from nbs_a union all select distinct k, null::int from nbs_b) v group by k) q group by k, mx, n) x),
   (select count(*) from (select k, mx, n, count(*) as nbs_rows from (select k, max(m) as mx, count(m) as n from (select k, x as m from nbs_a union all select distinct k, null::int from nbs_b) v group by k) q group by k, mx, n except select k, mx, n, count(*) as nbs_rows from nbs_group_distinct_on group by k, mx, n) y),
   (select count(*) from nbs_group_distinct_on) - (select count(*) from (select k, max(m) as mx, count(m) as n from (select k, x as m from nbs_a union all select distinct k, null::int from nbs_b) v group by k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, s, count(*) as nbs_rows from nbs_group_by_x_on group by x, s except select x, s, count(*) as nbs_rows from nbs_group_by_x_off group by x, s) x),
+  (select count(*) from (select x, s, count(*) as nbs_rows from nbs_group_by_x_off group by x, s except select x, s, count(*) as nbs_rows from nbs_group_by_x_on group by x, s) y),
+  (select count(*) from nbs_group_by_x_on) - (select count(*) from nbs_group_by_x_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, s, count(*) as nbs_rows from nbs_group_by_x_on group by x, s except select x, s, count(*) as nbs_rows from (select x, coalesce(sum(m), 0) as s from (select x, sum(y) as m from nbs_a group by x union all select x, null::bigint from nbs_b group by x) v group by x) q group by x, s) x),
+  (select count(*) from (select x, s, count(*) as nbs_rows from (select x, coalesce(sum(m), 0) as s from (select x, sum(y) as m from nbs_a group by x union all select x, null::bigint from nbs_b group by x) v group by x) q group by x, s except select x, s, count(*) as nbs_rows from nbs_group_by_x_on group by x, s) y),
+  (select count(*) from nbs_group_by_x_on) - (select count(*) from (select x, coalesce(sum(m), 0) as s from (select x, sum(y) as m from nbs_a group by x union all select x, null::bigint from nbs_b group by x) v group by x) q);
 ----
 0 0 0
 
@@ -384,6 +406,22 @@ select
   (select count(*) from (select k, mx, n, count(*) as nbs_rows from nbs_group_distinct_on group by k, mx, n except select k, mx, n, count(*) as nbs_rows from (select k, max(m) as mx, count(m) as n from (select k, x as m from nbs_a union all select distinct k, null::int from nbs_b) v group by k) q group by k, mx, n) x),
   (select count(*) from (select k, mx, n, count(*) as nbs_rows from (select k, max(m) as mx, count(m) as n from (select k, x as m from nbs_a union all select distinct k, null::int from nbs_b) v group by k) q group by k, mx, n except select k, mx, n, count(*) as nbs_rows from nbs_group_distinct_on group by k, mx, n) y),
   (select count(*) from nbs_group_distinct_on) - (select count(*) from (select k, max(m) as mx, count(m) as n from (select k, x as m from nbs_a union all select distinct k, null::int from nbs_b) v group by k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, s, count(*) as nbs_rows from nbs_group_by_x_on group by x, s except select x, s, count(*) as nbs_rows from nbs_group_by_x_off group by x, s) x),
+  (select count(*) from (select x, s, count(*) as nbs_rows from nbs_group_by_x_off group by x, s except select x, s, count(*) as nbs_rows from nbs_group_by_x_on group by x, s) y),
+  (select count(*) from nbs_group_by_x_on) - (select count(*) from nbs_group_by_x_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, s, count(*) as nbs_rows from nbs_group_by_x_on group by x, s except select x, s, count(*) as nbs_rows from (select x, coalesce(sum(m), 0) as s from (select x, sum(y) as m from nbs_a group by x union all select x, null::bigint from nbs_b group by x) v group by x) q group by x, s) x),
+  (select count(*) from (select x, s, count(*) as nbs_rows from (select x, coalesce(sum(m), 0) as s from (select x, sum(y) as m from nbs_a group by x union all select x, null::bigint from nbs_b group by x) v group by x) q group by x, s except select x, s, count(*) as nbs_rows from nbs_group_by_x_on group by x, s) y),
+  (select count(*) from nbs_group_by_x_on) - (select count(*) from (select x, coalesce(sum(m), 0) as s from (select x, sum(y) as m from nbs_a group by x union all select x, null::bigint from nbs_b group by x) v group by x) q);
 ----
 0 0 0
 
@@ -584,6 +622,22 @@ select
 
 query III
 select
+  (select count(*) from (select x, s, count(*) as nbs_rows from nbs_group_by_x_on group by x, s except select x, s, count(*) as nbs_rows from nbs_group_by_x_off group by x, s) x),
+  (select count(*) from (select x, s, count(*) as nbs_rows from nbs_group_by_x_off group by x, s except select x, s, count(*) as nbs_rows from nbs_group_by_x_on group by x, s) y),
+  (select count(*) from nbs_group_by_x_on) - (select count(*) from nbs_group_by_x_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, s, count(*) as nbs_rows from nbs_group_by_x_on group by x, s except select x, s, count(*) as nbs_rows from (select x, coalesce(sum(m), 0) as s from (select x, sum(y) as m from nbs_a group by x union all select x, null::bigint from nbs_b group by x) v group by x) q group by x, s) x),
+  (select count(*) from (select x, s, count(*) as nbs_rows from (select x, coalesce(sum(m), 0) as s from (select x, sum(y) as m from nbs_a group by x union all select x, null::bigint from nbs_b group by x) v group by x) q group by x, s except select x, s, count(*) as nbs_rows from nbs_group_by_x_on group by x, s) y),
+  (select count(*) from nbs_group_by_x_on) - (select count(*) from (select x, coalesce(sum(m), 0) as s from (select x, sum(y) as m from nbs_a group by x union all select x, null::bigint from nbs_b group by x) v group by x) q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select y, mx, count(*) as nbs_rows from nbs_group_distinct_y_on group by y, mx except select y, mx, count(*) as nbs_rows from nbs_group_distinct_y_off group by y, mx) x),
   (select count(*) from (select y, mx, count(*) as nbs_rows from nbs_group_distinct_y_off group by y, mx except select y, mx, count(*) as nbs_rows from nbs_group_distinct_y_on group by y, mx) y),
   (select count(*) from nbs_group_distinct_y_on) - (select count(*) from nbs_group_distinct_y_off);
@@ -762,6 +816,22 @@ select
   (select count(*) from (select k, mx, n, count(*) as nbs_rows from nbs_group_distinct_on group by k, mx, n except select k, mx, n, count(*) as nbs_rows from (select k, max(m) as mx, count(m) as n from (select k, x as m from nbs_a union all select distinct k, null::int from nbs_b) v group by k) q group by k, mx, n) x),
   (select count(*) from (select k, mx, n, count(*) as nbs_rows from (select k, max(m) as mx, count(m) as n from (select k, x as m from nbs_a union all select distinct k, null::int from nbs_b) v group by k) q group by k, mx, n except select k, mx, n, count(*) as nbs_rows from nbs_group_distinct_on group by k, mx, n) y),
   (select count(*) from nbs_group_distinct_on) - (select count(*) from (select k, max(m) as mx, count(m) as n from (select k, x as m from nbs_a union all select distinct k, null::int from nbs_b) v group by k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, s, count(*) as nbs_rows from nbs_group_by_x_on group by x, s except select x, s, count(*) as nbs_rows from nbs_group_by_x_off group by x, s) x),
+  (select count(*) from (select x, s, count(*) as nbs_rows from nbs_group_by_x_off group by x, s except select x, s, count(*) as nbs_rows from nbs_group_by_x_on group by x, s) y),
+  (select count(*) from nbs_group_by_x_on) - (select count(*) from nbs_group_by_x_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, s, count(*) as nbs_rows from nbs_group_by_x_on group by x, s except select x, s, count(*) as nbs_rows from (select x, coalesce(sum(m), 0) as s from (select x, sum(y) as m from nbs_a group by x union all select x, null::bigint from nbs_b group by x) v group by x) q group by x, s) x),
+  (select count(*) from (select x, s, count(*) as nbs_rows from (select x, coalesce(sum(m), 0) as s from (select x, sum(y) as m from nbs_a group by x union all select x, null::bigint from nbs_b group by x) v group by x) q group by x, s except select x, s, count(*) as nbs_rows from nbs_group_by_x_on group by x, s) y),
+  (select count(*) from nbs_group_by_x_on) - (select count(*) from (select x, coalesce(sum(m), 0) as s from (select x, sum(y) as m from nbs_a group by x union all select x, null::bigint from nbs_b group by x) v group by x) q);
 ----
 0 0 0
 
@@ -953,6 +1023,22 @@ select
 
 query III
 select
+  (select count(*) from (select x, s, count(*) as nbs_rows from nbs_group_by_x_on group by x, s except select x, s, count(*) as nbs_rows from nbs_group_by_x_off group by x, s) x),
+  (select count(*) from (select x, s, count(*) as nbs_rows from nbs_group_by_x_off group by x, s except select x, s, count(*) as nbs_rows from nbs_group_by_x_on group by x, s) y),
+  (select count(*) from nbs_group_by_x_on) - (select count(*) from nbs_group_by_x_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select x, s, count(*) as nbs_rows from nbs_group_by_x_on group by x, s except select x, s, count(*) as nbs_rows from (select x, coalesce(sum(m), 0) as s from (select x, sum(y) as m from nbs_a group by x union all select x, null::bigint from nbs_b group by x) v group by x) q group by x, s) x),
+  (select count(*) from (select x, s, count(*) as nbs_rows from (select x, coalesce(sum(m), 0) as s from (select x, sum(y) as m from nbs_a group by x union all select x, null::bigint from nbs_b group by x) v group by x) q group by x, s except select x, s, count(*) as nbs_rows from nbs_group_by_x_on group by x, s) y),
+  (select count(*) from nbs_group_by_x_on) - (select count(*) from (select x, coalesce(sum(m), 0) as s from (select x, sum(y) as m from nbs_a group by x union all select x, null::bigint from nbs_b group by x) v group by x) q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select y, mx, count(*) as nbs_rows from nbs_group_distinct_y_on group by y, mx except select y, mx, count(*) as nbs_rows from nbs_group_distinct_y_off group by y, mx) x),
   (select count(*) from (select y, mx, count(*) as nbs_rows from nbs_group_distinct_y_off group by y, mx except select y, mx, count(*) as nbs_rows from nbs_group_distinct_y_on group by y, mx) y),
   (select count(*) from nbs_group_distinct_y_on) - (select count(*) from nbs_group_distinct_y_off);
@@ -1049,6 +1135,9 @@ statement ok
 drop materialized view nbs_group_distinct_y_on;
 
 statement ok
+drop materialized view nbs_group_by_x_on;
+
+statement ok
 drop materialized view nbs_group_distinct_on;
 
 statement ok
@@ -1080,6 +1169,9 @@ drop materialized view nbs_kept_count_star_off;
 
 statement ok
 drop materialized view nbs_group_distinct_y_off;
+
+statement ok
+drop materialized view nbs_group_by_x_off;
 
 statement ok
 drop materialized view nbs_group_distinct_off;
