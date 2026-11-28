@@ -504,6 +504,15 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_spill_on_memory_wait: bool,
 
+    // `LogicalUnion::to_stream_with_dist_required` (`streaming_distributed_union`).
+    /// In the plan of a new streaming job, shuffle the inputs of a `UNION ALL` directly by the
+    /// columns that the operator above needs (the group key of an aggregation or a top-n, the key
+    /// of a join, the partition key of a window), when those columns are part of the stream key of
+    /// the union, instead of shuffling them by the whole stream key and then the union by those
+    /// columns: one exchange and one fragment fewer per union. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    streaming_distributed_union: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,

@@ -46,6 +46,7 @@ own rules.
 | BP | Batch: second pass of the reductions on keys after the stages that create aggregations (`batch_reduce_keys_after_conversions`) | done (prototype, branch `proto/plan-reduction-batch-pass2`, see "BP and BT" below) |
 | BT | Batch: `row_number() <= n` per partition becomes a top-n per group, small `n` only (`batch_over_window_to_topn`) | done (prototype, branch `proto/plan-reduction-batch-pass2`, see "BP and BT" below) |
 | BU | Batch: `UNION ALL` run in parallel tasks instead of one (`batch_distributed_union`) | done (prototype, branch `proto/plan-reduction-batch-union-dist`, see "BU" below) |
+| SU | Streaming: inputs of a `UNION ALL` shuffled directly by the key the operator above needs, when that key is part of the stream key of the union (`streaming_distributed_union`) | done (prototype, branch `proto/plan-reduction-stream-union-dist`, see "SU" below); key outside the stream key not done (see "SU") |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -1399,6 +1400,98 @@ projection; without the variable, or without a union below, they convert their i
   empty branches, after updates and deletes, and with a single branch left).
 - Not done: a round-robin exchange, which would let a union with no requirement keep its inputs
   in their stages without hashing; a partial aggregation pushed into each branch.
+
+### SU. Streaming: union distributed by the key of its parent (added on 2026-11-28)
+
+`LogicalUnion::to_stream` always shuffles every input by the stream key of the union, which holds
+the branch tag (`$src`). The operator above usually needs another distribution (its group key,
+join key, partition key, dedup key), so a second exchange follows above the union:
+
+```sql
+create table a (id int primary key, v int);
+create table b (id int primary key, v int);
+select id, count(*) from (select id, v from a union all select id, v from b) u group by id;
+-- before: HashAgg <- Exchange(Hash id) <- Union <- [Exchange(Hash id, $src) <- Project <- Scan(a), ...]
+-- SU:     HashAgg <- Union <- [Exchange(Hash id) <- Project <- Scan(a), ...]
+```
+
+**What SU does (variable `streaming_distributed_union`, default false).** The union implements
+`to_stream_with_dist_required`. When the requirement is `HashShard(k)` (second side of a hash
+join), `ShardByKey(k)` or `ShardByExactKey(k)` (hash aggregation, group top-n, window, first side
+of a hash join), the stream key of the union does not already satisfy it, and `k` (the columns the
+parent would hash the union by, `RequiredDist::to_dist`) is a subset of the stream key of the
+union, each input is converted with the requirement `HashShard(k)` (an exchange, or nothing if it
+is already distributed exactly so) and the union is distributed as `HashShard(k)`, which the
+parent sees satisfied. Otherwise the plan is the default one. Only for a union with a branch tag
+(every union planned from a query; the unions of table plans have none).
+
+The parents that used to convert their input and then hash it themselves (hash aggregation when it
+does not try two phases, group top-n, `LogicalDedup`, over window, both modes) now pass their
+requirement down when their input is a union, possibly below projections, that takes it
+(`input_to_stream_for_required_dist`); a projection passes it through its column mapping when every
+required column is a distinct input column (`LogicalProject::input_required_dist_for_union`; upstream
+a projection never passes a shard requirement down). Joins already passed their requirements. With
+the variable off, or without such a union, every node converts its input exactly as before.
+
+- Exactness: the union is stateless and positional; the inputs have its schema, so `k` designates
+  the same columns, with the same types, in every input, and the hash of a row is the same whichever
+  branch it comes from. Every row reaches the actor of `hash(k)` of the parent's fragment, as with
+  the exchange above the union. Let `K` be a value of the stream key of the union. Its rows come from
+  one branch (the tag is in the key) and, in that branch, from one value of the branch's stream key
+  (which is part of the union's): by the invariant every streaming plan keeps, they are emitted by
+  one actor of the branch, in order. Since `k` is part of the stream key, they all have the same `k`,
+  so they go through one exchange channel to one actor of the union, in order. The default plan is
+  the case `k = stream key`; the same argument holds for any subset. The union's output therefore
+  keeps "a stream key value lives in one actor" and its distribution key is inside its stream key,
+  which `StreamExchange::new` asserts of the input of a hash exchange over a retractable stream (an
+  exchange may still be put above the union, e.g. by a projection whose output column mapping
+  differs).
+- Properties: the stream key, append-only kind, `EMIT ON WINDOW CLOSE` flag and watermark columns of
+  `StreamUnion` are derived from its inputs as before and do not depend on the distribution; the
+  watermark of a column is still the minimum over all inputs and actors. A union is the parent's
+  input with exactly the distribution the removed exchange had, so the parent is planned the same.
+- Inputs: a scan (`UpstreamHashShard`), a single input (a global aggregation, values) or an input
+  hashed otherwise gets an exchange `HashShard(k)`; an input already distributed as `HashShard(k)`
+  (an aggregation on the key below a projection) stays in the fragment of the parent without
+  exchange, as an input distributed by the stream key already did.
+- Nested unions: the inputs of a union are projections that append the tag; a requirement holding
+  the outer tag cannot be mapped through them (a literal), so an inner union is converted as before
+  and the projection above it adds the exchange the outer union needs. A requirement without the tag
+  reaches the inner union, which applies the same test to its own stream key.
+- Kept on purpose: a required single distribution (aggregation without group key, top-n without
+  group key, forced two-phase aggregation), the root of a materialized view or a sink (the stream
+  key of the union already satisfies the materialized view; a sink enforces its distribution after
+  conversion, above the union), a union under a `Share`, and a key outside the stream key: the
+  frequent case of a union whose branches do not all output their key, where the union appends
+  key slots (`null` in the other branches) and the parent's key designates the original column,
+  never the slot.
+- Existing streaming jobs are not affected: their plans are frozen; only new jobs created with the
+  variable on.
+- Tests: `stream_distributed_union.yaml` (planner: union under a hash aggregation, with a projection
+  between, of three branches, of aggregations already hashed on the key, `UNION`, group top-n,
+  `DISTINCT ON`, over window, hash join with the union on either side, a left join, a join of two
+  unions, nested unions, the union created by the union-join factoring; kept: key outside the stream
+  key, non-key group column, constant columns of the branches, single distributions, forced
+  two-phase aggregation, materialized view root, off by default), and the differential
+  `e2e_test/streaming/distributed_union.gen.py` (20 queries materialized with and without the
+  variable, compared with each other and with the batch query after the backfill, inserts, updates
+  that move rows between branches, updates of grouped columns that change the key of aggregation
+  branches, keys changed by a delete and an insert, deletes, an emptied and refilled input).
+
+**Open idea: a key outside the stream key.** The exchanges and the union are stateless and work row
+by row, so moving the hash exchange from above the union to each of its inputs gives every actor of
+the parent the same events in each epoch as before, for any `k`: in the default plan an event goes
+from an actor of a branch through one actor of the union to the parent, and only the events of one
+branch actor and one stream key value keep their order; with the exchange on the input they keep
+it per branch actor, a stronger order that the default plan can also produce. An update pair whose
+key changes is split into a delete and an insert by the one hash exchange in both plans. The
+`StreamUnion` would have the distribution and stream key the exchange had, an exchange whose
+distribution key is outside the stream key, as every aggregation on a non-key column has today.
+Not done: the union's output would no longer satisfy the invariant asserted by `StreamExchange::new`
+(a later exchange over it would fail in debug builds), and a frozen plan is not the place to
+extend a shape that upstream asserts against. A narrower variant, the parent's key mapped to the
+union's key slot when every branch fills the slot with the very column, does not help the
+frequent case (the other branches fill the slot with `null`) and is not done either.
 
 ## Not for now: sharing between materialized views
 

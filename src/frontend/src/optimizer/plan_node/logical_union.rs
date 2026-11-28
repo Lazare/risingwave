@@ -31,9 +31,9 @@ use crate::optimizer::plan_node::generic::GenericPlanRef;
 use crate::optimizer::plan_node::stream_union::StreamUnion;
 use crate::optimizer::plan_node::{
     BatchHashAgg, BatchUnion, ColumnPruningContext, LogicalProject, PlanTreeNode,
-    PredicatePushdownContext, RewriteStreamContext, ToStreamContext, generic,
+    PlanTreeNodeUnary, PredicatePushdownContext, RewriteStreamContext, ToStreamContext, generic,
 };
-use crate::optimizer::property::RequiredDist;
+use crate::optimizer::property::{Distribution, RequiredDist};
 use crate::utils::{ColIndexMapping, Condition};
 
 /// `LogicalUnion` returns the union of the rows of its inputs.
@@ -72,6 +72,82 @@ impl LogicalUnion {
 
     pub fn source_col(&self) -> Option<usize> {
         self.core.source_col
+    }
+
+    /// `streaming_distributed_union`: the distribution key by which the inputs of this union are
+    /// shuffled to satisfy `required` directly, instead of being shuffled by the stream key of the
+    /// union and the union then shuffled again by its parent. `None` keeps the default plan.
+    ///
+    /// The key must be a subset of the stream key of the union: every change of a row of the
+    /// union (identified by its stream key) then has the same key, hence goes through the same
+    /// exchange channel to the same actor, in order, as with the default shuffle by the whole
+    /// stream key (which is the case `key == stream key`). The union then also satisfies the
+    /// invariant asserted by `StreamExchange::new`, a distribution key inside the stream key.
+    fn distributed_target(&self, required: &RequiredDist) -> Option<Vec<usize>> {
+        if !streaming_distributed_union_enabled(&self.base.ctx())
+            || !self.all()
+            || self.source_col().is_none()
+        {
+            return None;
+        }
+        let stream_key = self.base.stream_key()?;
+        // The default distribution already satisfies the requirement: no exchange to remove.
+        if Distribution::HashShard(stream_key.to_vec()).satisfies(required) {
+            return None;
+        }
+        // The distribution that the parent would enforce above the union (`RequiredDist::to_dist`).
+        let key = match required {
+            RequiredDist::ShardByKey(cols) | RequiredDist::ShardByExactKey(cols) => {
+                cols.ones().collect_vec()
+            }
+            RequiredDist::PhysicalDist(Distribution::HashShard(key)) => key.clone(),
+            _ => return None,
+        };
+        if key.is_empty() || !key.iter().all(|col| stream_key.contains(col)) {
+            return None;
+        }
+        Some(key)
+    }
+}
+
+/// Whether `streaming_distributed_union` applies to this streaming job (not to the plan built
+/// without the prototype's rewrites to report what they saved).
+fn streaming_distributed_union_enabled(ctx: &crate::optimizer::OptimizerContextRef) -> bool {
+    ctx.session_ctx().config().streaming_distributed_union() && !ctx.is_stream_prune_baseline()
+}
+
+/// `streaming_distributed_union`: whether `plan`, a union possibly below projections, would
+/// satisfy `required` by shuffling its inputs directly (see `LogicalUnion::distributed_target`).
+/// The projections pass the requirement down through their column mapping.
+pub(crate) fn union_takes_required_dist(plan: &PlanRef, required: &RequiredDist) -> bool {
+    if !streaming_distributed_union_enabled(&plan.ctx()) {
+        return false;
+    }
+    if let Some(union) = plan.as_logical_union() {
+        return union.distributed_target(required).is_some();
+    }
+    if let Some(project) = plan.as_logical_project() {
+        return union_takes_required_dist(
+            &project.input(),
+            &project.input_required_dist_for_union(required),
+        );
+    }
+    false
+}
+
+/// Converts the input of a parent that shuffles it by `required` itself after `to_stream`. With
+/// `streaming_distributed_union` and a union (possibly below projections) that can satisfy
+/// `required` by shuffling its inputs directly, the requirement is passed down to the union; any
+/// other input is converted as before. The parent still enforces `required` on the result.
+pub(crate) fn input_to_stream_for_required_dist(
+    input: &PlanRef,
+    required: &RequiredDist,
+    ctx: &mut ToStreamContext,
+) -> Result<crate::optimizer::plan_node::StreamPlanRef> {
+    if union_takes_required_dist(input, required) {
+        input.to_stream_with_dist_required(required, ctx)
+    } else {
+        input.to_stream(ctx)
     }
 }
 
@@ -184,6 +260,31 @@ impl ToStream for LogicalUnion {
             "After UnionToDistinctRule, union should become union all"
         );
         Ok(StreamUnion::new(core).into())
+    }
+
+    fn to_stream_with_dist_required(
+        &self,
+        required_dist: &RequiredDist,
+        ctx: &mut ToStreamContext,
+    ) -> Result<crate::optimizer::plan_node::StreamPlanRef> {
+        // `streaming_distributed_union`: shuffle each input by the key the parent needs, so that
+        // the union is distributed as the parent requires, without an exchange above it.
+        let Some(key) = self.distributed_target(required_dist) else {
+            let plan = self.to_stream(ctx)?;
+            return required_dist.streaming_enforce_if_not_satisfies(plan);
+        };
+        // The inputs have the schema of the union: the key designates the same columns in each.
+        let input_dist = RequiredDist::hash_shard(&key);
+        let new_inputs: Vec<_> = self
+            .inputs()
+            .iter()
+            .map(|input| input.to_stream_with_dist_required(&input_dist, ctx))
+            .try_collect()?;
+        let core = self.core.clone_with_inputs(new_inputs);
+        // `StreamUnion::new` checks that every input is distributed as `HashShard(key)`.
+        let plan: crate::optimizer::plan_node::StreamPlanRef = StreamUnion::new(core).into();
+        self.base.ctx().add_stream_prune_rule_applied(1);
+        required_dist.streaming_enforce_if_not_satisfies(plan)
     }
 
     fn logical_rewrite_for_stream(
@@ -358,7 +459,7 @@ mod tests {
 
     use super::*;
     use crate::optimizer::optimizer_context::OptimizerContext;
-    use crate::optimizer::plan_node::{LogicalValues, PlanTreeNodeUnary};
+    use crate::optimizer::plan_node::LogicalValues;
 
     #[tokio::test]
     async fn test_prune_union() {

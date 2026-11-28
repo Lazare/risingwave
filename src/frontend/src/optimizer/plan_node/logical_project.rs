@@ -28,6 +28,7 @@ use crate::error::Result;
 use crate::expr::{Expr, ExprImpl, ExprRewriter, ExprVisitor, InputRef, collect_input_refs};
 use crate::optimizer::plan_node::expr_visitable::ExprVisitable;
 use crate::optimizer::plan_node::generic::GenericPlanRef;
+use crate::optimizer::plan_node::logical_union::union_takes_required_dist;
 use crate::optimizer::plan_node::stream::StreamPlanNodeMetadata;
 use crate::optimizer::plan_node::{
     ColumnPruningContext, PredicatePushdownContext, RewriteStreamContext, ToStreamContext,
@@ -235,13 +236,39 @@ impl ToBatch for LogicalProject {
     }
 }
 
+impl LogicalProject {
+    /// `streaming_distributed_union`: the distribution required from the input of this projection
+    /// for the projection to be distributed as `required`, through its column mapping. Only when
+    /// every required column is a distinct column of the input (otherwise `Any`), so that the
+    /// union below is shuffled by the same columns as the parent would shuffle the projection.
+    pub(crate) fn input_required_dist_for_union(&self, required: &RequiredDist) -> RequiredDist {
+        let input_required = self
+            .o2i_col_mapping()
+            .rewrite_required_distribution(required);
+        match (required, &input_required) {
+            (RequiredDist::ShardByKey(cols), RequiredDist::ShardByKey(input_cols))
+                if input_cols.count_ones(..) != cols.count_ones(..) =>
+            {
+                RequiredDist::Any
+            }
+            _ => input_required,
+        }
+    }
+}
+
 impl ToStream for LogicalProject {
     fn to_stream_with_dist_required(
         &self,
         required_dist: &RequiredDist,
         ctx: &mut ToStreamContext,
     ) -> Result<StreamPlanRef> {
-        let input_required = if required_dist.satisfies(&RequiredDist::AnyShard) {
+        let input_required = if union_takes_required_dist(
+            &self.input(),
+            &self.input_required_dist_for_union(required_dist),
+        ) {
+            // `streaming_distributed_union`: the union below distributes its inputs as required.
+            self.input_required_dist_for_union(required_dist)
+        } else if required_dist.satisfies(&RequiredDist::AnyShard) {
             RequiredDist::Any
         } else {
             let input_required = self

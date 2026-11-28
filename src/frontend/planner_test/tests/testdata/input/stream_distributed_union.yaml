@@ -1,0 +1,172 @@
+# Tests for `streaming_distributed_union`: when the operator above a `UNION ALL` needs the union
+# hashed by a key (group key, join key, partition key, dedup key) that is part of the stream key of
+# the union, each input is shuffled by that key directly, the union is distributed by it, and the
+# exchange above the union disappears (one fragment fewer). Any other key, a required single
+# distribution, and the variable off keep the default plan: inputs shuffled by the whole stream
+# key of the union, and the exchange above it.
+- id: setup_off
+  sql: |
+    create table a (id int primary key, k int, v int);
+    create table b (id int primary key, k int, v int);
+    create table c (k int, v int);
+    create table d (id int primary key, w int);
+    create table e (id int primary key, k int, x int);
+  expected_outputs: []
+- id: setup
+  sql: |
+    set streaming_distributed_union = true;
+    create table a (id int primary key, k int, v int);
+    create table b (id int primary key, k int, v int);
+    create table c (k int, v int);
+    create table d (id int primary key, w int);
+    create table e (id int primary key, k int, x int);
+  expected_outputs: []
+
+# Variable off: the default plan.
+- name: off by default - hash aggregation over a union on its key
+  before: [setup_off]
+  sql: |
+    select id, count(*) as cnt, sum(v) as s from (select id, v from a union all select id, v from b) u group by id;
+  expected_outputs:
+  - stream_plan
+- name: off by default - hash join over a union on its key
+  before: [setup_off]
+  sql: |
+    select u.id, u.v, d.w from (select id, v from a union all select id, v from b) u join d on u.id = d.id;
+  expected_outputs:
+  - stream_plan
+
+# Rewritten: the key the parent needs is part of the stream key of the union.
+- name: hash aggregation over a union on its key
+  before: [setup]
+  sql: |
+    select id, count(*) as cnt, sum(v) as s from (select id, v from a union all select id, v from b) u group by id;
+  expected_outputs:
+  - stream_plan
+  - stream_dist_plan
+- name: hash aggregation over a union of three branches on its key
+  before: [setup]
+  sql: |
+    select id, max(v) as mx from (select id, v from a union all select id, v from b union all select id, x as v from e) u group by id;
+  expected_outputs:
+  - stream_plan
+- name: hash aggregation with a projection between it and the union
+  before: [setup]
+  sql: |
+    select id, count(*) as cnt, sum(w) as s from (select id, v + 1 as w from (select id, v from a union all select id, v from b) u) x group by id;
+  expected_outputs:
+  - stream_plan
+- name: union distinct (aggregation on all the columns) of keys
+  before: [setup]
+  sql: |
+    select id from a union select id from b;
+  expected_outputs:
+  - stream_plan
+- name: hash aggregation over a union of aggregations already hashed on the key
+  before: [setup]
+  sql: |
+    select k, sum(cnt) as cnt from (select k, count(*) as cnt from c group by k union all select k, count(*) as cnt from a group by k) u group by k;
+  expected_outputs:
+  - stream_plan
+- name: group top-n over a union on its key
+  before: [setup]
+  sql: |
+    select * from (select id, v, row_number() over (partition by id order by v) as rn from (select id, v from a union all select id, v from b) u) x where rn <= 2;
+  expected_outputs:
+  - stream_plan
+- name: distinct on over a union on its key
+  before: [setup]
+  sql: |
+    select distinct on (id) id, v from (select id, v from a union all select id, v from b) u order by id, v;
+  expected_outputs:
+  - stream_plan
+- name: over window over a union on its key
+  before: [setup]
+  sql: |
+    select id, v, sum(v) over (partition by id order by v) as sv from (select id, v from a union all select id, v from b) u;
+  expected_outputs:
+  - stream_plan
+- name: hash join with the union on the left
+  before: [setup]
+  sql: |
+    select u.id, u.v, d.w from (select id, v from a union all select id, v from b) u join d on u.id = d.id;
+  expected_outputs:
+  - stream_plan
+- name: hash join with the union on the right
+  before: [setup]
+  sql: |
+    select d.id, d.w, u.v from d join (select id, v from a union all select id, v from b) u on d.id = u.id;
+  expected_outputs:
+  - stream_plan
+- name: left join of a table with a union on a non-key column of the table
+  before: [setup]
+  sql: |
+    select e.id, e.x, u.v from e left join (select id, v from a union all select id, v from b) u on e.k = u.id;
+  expected_outputs:
+  - stream_plan
+- name: hash join of two unions on their keys
+  before: [setup]
+  sql: |
+    select u1.id, u1.v, u2.v as v2 from (select id, v from a union all select id, v from b) u1 join (select id, x as v from e union all select id, w as v from d) u2 on u1.id = u2.id;
+  expected_outputs:
+  - stream_plan
+- name: nested unions (an inner union distinct inside a union all) under an aggregation
+  before: [setup]
+  sql: |
+    select id, count(*) as cnt from (select id from a union all (select id from b union select id from e)) u group by id;
+  expected_outputs:
+  - stream_plan
+- name: union produced by the union-join factoring, under the factored join
+  before: [setup]
+  sql: |
+    set streaming_factor_union_join = true;
+    select x.id, x.v, d.w from a x join d on x.id = d.id
+    union all
+    select y.id, y.v, d.w from b y join d on y.id = d.id;
+  expected_outputs:
+  - stream_plan
+
+# Kept: the default plan.
+- name: kept - group key outside the stream key of the union (other branch keyed by a row id)
+  before: [setup]
+  sql: |
+    select k, count(*) as cnt from (select id as k, v from a union all select k, v from c) u group by k;
+  expected_outputs:
+  - stream_plan
+- name: kept - group key on a non-key column
+  before: [setup]
+  sql: |
+    select k, count(*) as cnt from (select k, v from a union all select k, v from b) u group by k;
+  expected_outputs:
+  - stream_plan
+- name: kept - group key with a constant column of the branches
+  before: [setup]
+  sql: |
+    select id, src, count(*) as cnt from (select id, 1 as src from a union all select id, 2 as src from b) u group by id, src;
+  expected_outputs:
+  - stream_plan
+- name: kept - aggregation without group key (single distribution)
+  before: [setup]
+  sql: |
+    select count(*) as cnt, sum(v) as s from (select id, v from a union all select id, v from b) u;
+  expected_outputs:
+  - stream_plan
+- name: kept - top-n without group key (single distribution)
+  before: [setup]
+  sql: |
+    select id, v from (select id, v from a union all select id, v from b) u order by v limit 3;
+  expected_outputs:
+  - stream_plan
+- name: kept - two-phase aggregation forced
+  before: [setup]
+  sql: |
+    set force_two_phase_agg = true;
+    select id, count(*) as cnt from (select id, v from a union all select id, v from b) u group by id;
+  expected_outputs:
+  - stream_plan
+- name: kept - materialized view root over a union (its stream key already satisfies it)
+  before: [setup]
+  sql: |
+    select id, v from a union all select id, v from b;
+  expected_outputs:
+  - stream_plan

@@ -393,6 +393,8 @@ pub(crate) fn gen_create_mv_graph(
             || config.streaming_simplify_null_join_keys()
             // Rules `NarrowValueAggRule` and `NarrowValuePushRule`.
             || config.streaming_narrow_value_aggregates()
+            // `LogicalUnion::to_stream_with_dist_required`.
+            || config.streaming_distributed_union()
     };
     let baseline_args = prune_enabled.then(|| {
         (
