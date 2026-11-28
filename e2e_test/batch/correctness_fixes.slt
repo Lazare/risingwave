@@ -425,3 +425,48 @@ drop table cf_di;
 
 statement ok
 drop table cf_dj;
+
+# ---------------------------------------------------------------------------------------------
+# `greatest` and `least` skip their NULL arguments.
+# ---------------------------------------------------------------------------------------------
+
+statement ok
+create table cf_ga (x int, k int);
+
+statement ok
+create table cf_gb (x int, y int);
+
+statement ok
+insert into cf_ga values (0, 1), (10, 2), (3, null);
+
+statement ok
+insert into cf_gb values (10, 20), (3, null);
+
+query I rowsort
+select x from cf_ga where greatest(x, null) > 5;
+----
+10
+
+query I rowsort
+select x from cf_ga where least(k, null) is null;
+----
+3
+
+# Per x: 0 -> no row, greatest(NULL, 0) = 0; 10 -> 20; 3 -> greatest(NULL, 0) = 0.
+query I rowsort
+select x from cf_ga where x in (select greatest(max(y), 0) from cf_gb where cf_gb.x = cf_ga.x);
+----
+0
+
+query II rowsort
+select x, (select greatest(max(y), 0) from cf_gb where cf_gb.x = cf_ga.x) from cf_ga;
+----
+0 0
+10 20
+3 0
+
+statement ok
+drop table cf_ga;
+
+statement ok
+drop table cf_gb;

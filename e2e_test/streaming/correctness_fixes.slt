@@ -484,3 +484,92 @@ drop table cfs_b;
 
 statement ok
 drop table cfs_c;
+
+# `greatest` and `least` skip their NULL arguments.
+statement ok
+create table cfs_ga (x int, k int);
+
+statement ok
+create table cfs_gb (x int, y int);
+
+statement ok
+create materialized view cfs_g1 as select x from cfs_ga where x in (select greatest(max(y), 0) from cfs_gb where cfs_gb.x = cfs_ga.x);
+
+statement ok
+create materialized view cfs_g2 as select x from cfs_ga where greatest(x, null) > 5;
+
+statement ok
+set streaming_simplify_subquery_unnesting = true;
+
+statement ok
+create materialized view cfs_g3 as select x, (select greatest(max(y), 0) from cfs_gb where cfs_gb.x = cfs_ga.x) as g from cfs_ga;
+
+statement ok
+set streaming_simplify_subquery_unnesting = false;
+
+statement ok
+insert into cfs_ga values (0, 1), (10, 2), (3, null);
+
+statement ok
+insert into cfs_gb values (10, 20), (3, null);
+
+query I rowsort
+select x from cfs_g1;
+----
+0
+
+query I rowsort
+select x from cfs_g2;
+----
+10
+
+query II rowsort
+select x, g from cfs_g3;
+----
+0 0
+10 20
+3 0
+
+statement ok
+insert into cfs_gb values (0, 5);
+
+query I rowsort
+select x from cfs_g1;
+----
+
+query II rowsort
+select x, g from cfs_g3;
+----
+0 5
+10 20
+3 0
+
+statement ok
+delete from cfs_gb where x = 0;
+
+query I rowsort
+select x from cfs_g1;
+----
+0
+
+query II rowsort
+select x, g from cfs_g3;
+----
+0 0
+10 20
+3 0
+
+statement ok
+drop materialized view cfs_g1;
+
+statement ok
+drop materialized view cfs_g2;
+
+statement ok
+drop materialized view cfs_g3;
+
+statement ok
+drop table cfs_ga;
+
+statement ok
+drop table cfs_gb;

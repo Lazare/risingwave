@@ -231,3 +231,37 @@
     select id from na where (x, k) not in (select y, k from nb);
   expected_outputs:
   - binder_error
+
+# `greatest` and `least` skip their NULL arguments (`greatest(1, NULL)` is 1): they are not
+# strict, an expression over them is not NULL just because one argument is.
+- id: greatest_setup
+  sql: |
+    create table ga (x int, k int);
+    create table gb (x int, y int);
+  expected_outputs: []
+- name: greatest - a NULL argument does not make the filter false
+  before: [greatest_setup]
+  sql: |
+    select x from ga where greatest(x, null) > 5 and least(k, null) is not null;
+  expected_outputs:
+  - batch_plan
+- name: greatest - in over a correlated aggregate that is not NULL over an empty input
+  before: [greatest_setup]
+  sql: |
+    select x from ga where x in (select greatest(max(y), 0) from gb where gb.x = ga.x);
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: greatest - in over a correlated aggregate that is NULL over an empty input (still rewritten)
+  before: [greatest_setup]
+  sql: |
+    select x from ga where x in (select greatest(max(y), min(y)) from gb where gb.x = ga.x);
+  expected_outputs:
+  - batch_plan
+- name: greatest - scalar subquery with the streaming unnesting of the prototype
+  before: [greatest_setup]
+  sql: |
+    set streaming_simplify_subquery_unnesting = true;
+    select x, (select greatest(max(y), 0) from gb where gb.x = ga.x) as g from ga;
+  expected_outputs:
+  - stream_plan
