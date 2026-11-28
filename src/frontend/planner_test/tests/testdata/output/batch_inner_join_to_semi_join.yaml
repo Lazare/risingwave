@@ -316,3 +316,83 @@
   table_row_counts:
     ijs_t: 1000
     ijs_u: 100000
+- name: kept, the only equality compares constant columns (one-row VALUES joined to a union)
+  before:
+  - tables
+  sql: |
+    set batch_inner_join_to_semi_join = true;
+    select s.id, s.v from (select id, v, 1 as one from ijs_t union all select id, w, 1 as one from ijs_u) s
+    join (values (1)) as c(x) on s.one = c.x and s.v = any(array[1, 2, 3]);
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: Inner, predicate: 1:Int32 = *VALUES*_0.column_0, output: [ijs_t.id, ijs_t.v] }
+      ├─BatchExchange { order: [], dist: HashShard(1:Int32) }
+      │ └─BatchUnion { all: true }
+      │   ├─BatchExchange { order: [], dist: Single }
+      │   │ └─BatchProject { exprs: [ijs_t.id, ijs_t.v, 1:Int32] }
+      │   │   └─BatchFilter { predicate: Some((ijs_t.v = ARRAY[1, 2, 3]:List(Int32))) }
+      │   │     └─BatchScan { table: ijs_t, columns: [ijs_t.id, ijs_t.v], distribution: UpstreamHashShard(ijs_t.id) }
+      │   └─BatchExchange { order: [], dist: Single }
+      │     └─BatchProject { exprs: [ijs_u.id, ijs_u.w, 1:Int32] }
+      │       └─BatchFilter { predicate: Some((ijs_u.w = ARRAY[1, 2, 3]:List(Int32))) }
+      │         └─BatchScan { table: ijs_u, columns: [ijs_u.id, ijs_u.w], distribution: UpstreamHashShard(ijs_u.id) }
+      └─BatchExchange { order: [], dist: HashShard(*VALUES*_0.column_0) }
+        └─BatchValues { rows: [[1:Int32]] }
+- name: kept and folded by the reductions on keys and constants, the filter reaches the scans
+  before:
+  - tables
+  sql: |
+    set batch_inner_join_to_semi_join = true;
+    set batch_simplify_column_facts = true;
+    set batch_reduce_keys_after_conversions = true;
+    select s.id, s.v from (select id, v, 1 as one from ijs_t union all select id, w, 1 as one from ijs_u) s
+    join (select 1 as x) as c on s.one = c.x where s.v = any(array[1, 2, 3]);
+  batch_plan: |-
+    BatchUnion { all: true }
+    ├─BatchExchange { order: [], dist: Single }
+    │ └─BatchFilter { predicate: Some((ijs_t.v = ARRAY[1, 2, 3]:List(Int32))) }
+    │   └─BatchScan { table: ijs_t, columns: [ijs_t.id, ijs_t.v], distribution: UpstreamHashShard(ijs_t.id) }
+    └─BatchExchange { order: [], dist: Single }
+      └─BatchFilter { predicate: Some((ijs_u.w = ARRAY[1, 2, 3]:List(Int32))) }
+        └─BatchScan { table: ijs_u, columns: [ijs_u.id, ijs_u.w], distribution: UpstreamHashShard(ijs_u.id) }
+- name: kept, a constant column of the kept side compared with the key of a table
+  before:
+  - tables
+  sql: |
+    set batch_inner_join_to_semi_join = true;
+    select s.id, s.v from (select id, v, 2 as two from ijs_t) s join ijs_d d on s.two = d.id;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchLookupJoin { type: Inner, predicate: 2:Int32 = ijs_d.id, output: [ijs_t.id, ijs_t.v], lookup table: ijs_d }
+      └─BatchExchange { order: [], dist: UpstreamHashShard(2:Int32) }
+        └─BatchProject { exprs: [ijs_t.id, ijs_t.v, 2:Int32] }
+          └─BatchScan { table: ijs_t, columns: [ijs_t.id, ijs_t.v], distribution: UpstreamHashShard(ijs_t.id) }
+- name: kept, the other side is a scalar subquery (at most one row)
+  before:
+  - tables
+  sql: |
+    set batch_inner_join_to_semi_join = true;
+    select t.* from ijs_t t where t.v = (select max(w) from ijs_u);
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: Inner, predicate: ijs_t.v = max(max(ijs_u.w)), output: [ijs_t.id, ijs_t.k, ijs_t.v] }
+      ├─BatchExchange { order: [], dist: HashShard(ijs_t.v) }
+      │ └─BatchScan { table: ijs_t, columns: [ijs_t.id, ijs_t.k, ijs_t.v], distribution: UpstreamHashShard(ijs_t.id) }
+      └─BatchExchange { order: [], dist: HashShard(max(max(ijs_u.w))) }
+        └─BatchSimpleAgg { aggs: [max(max(ijs_u.w))] }
+          └─BatchExchange { order: [], dist: Single }
+            └─BatchSimpleAgg { aggs: [max(ijs_u.w)] }
+              └─BatchScan { table: ijs_u, columns: [ijs_u.w], distribution: SomeShard }
+- name: kept, the other side is a one-row VALUES compared with a column
+  before:
+  - tables
+  sql: |
+    set batch_inner_join_to_semi_join = true;
+    select t.* from ijs_t t join (values (1)) as c(x) on t.k = c.x;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: Inner, predicate: ijs_t.k = *VALUES*_0.column_0, output: [ijs_t.id, ijs_t.k, ijs_t.v] }
+      ├─BatchExchange { order: [], dist: HashShard(ijs_t.k) }
+      │ └─BatchScan { table: ijs_t, columns: [ijs_t.id, ijs_t.k, ijs_t.v], distribution: UpstreamHashShard(ijs_t.id) }
+      └─BatchExchange { order: [], dist: HashShard(*VALUES*_0.column_0) }
+        └─BatchValues { rows: [[1:Int32]] }
