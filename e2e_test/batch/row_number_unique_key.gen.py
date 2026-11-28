@@ -1,7 +1,7 @@
 """Generates `e2e_test/batch/row_number_unique_key.slt`, the differential test of the unique key
-that a filter `row_number() OVER (PARTITION BY k ...) = 1` (or `<= 1`, `< 2`) gives to its output
-(the partition columns `k`), used by `batch_simplify_on_unique_key` (rules
-`AggOnKeyEliminateRule`, `UnusedOuterJoinEliminateRule`).
+that a filter `row_number() OVER (PARTITION BY k ...) = n` (or `<= 1`, `< 2`) gives to its output
+(the partition columns `k`; without `PARTITION BY`, the empty key: at most one row), used by
+`batch_simplify_on_unique_key` (rules `AggOnKeyEliminateRule`, `UnusedOuterJoinEliminateRule`).
 
 Every query runs twice, with and without the variable, through `INSERT ... SELECT` (the batch
 plan), and both results must hold the same rows with the same multiplicities, after each round of
@@ -17,10 +17,13 @@ VAR = 'batch_simplify_on_unique_key'
 TABLES = [('t', 'id int primary key, k int, k2 int, v int, w int'), ('u', 'id int primary key, k int, x int')]
 
 # The rows of `t` numbered per partition `k`, with a second window function on the same window,
-# and a top-1 per (`k`, `k2`).
+# a top-1 per (`k`, `k2`).
 RN = ("(select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, "
       "count(w) over (partition by k order by v, id) as sw from {p}t)")
 RN2 = "(select id, k, k2, v, row_number() over (partition by k, k2 order by v desc, id) as rn from {p}t)"
+# The rows of `t` numbered without partition, with a second window function on the same window.
+RN0 = ("(select id, k, k2, v, w, row_number() over (order by v, id) as rn, "
+       "count(w) over (order by v, id) as sw from {p}t)")
 
 # (name, columns of the result with their types, query)
 CASES = [
@@ -36,18 +39,28 @@ CASES = [
     ('two_columns', 'k int, k2 int, n bigint, mv int', f'select k, k2, count(*) as n, max(v) as mv from {RN2} s where rn = 1 group by k, k2'),
     ('left_join', 'id int, x int', f'select u.id, u.x from {{p}}u u left join (select k, v from {RN} s where rn = 1) s on u.k = s.k'),
     ('group_superset', 'k int, v int, n bigint', f'select k, v, count(*) as n from {RN} s where rn = 1 group by k, v'),
-    # Left as they are: ties, another row number, no partition, a filter on another column.
+    # Another row number than 1: still at most one row per partition.
+    ('second_row', 'k int, n bigint', f'select k, count(*) as n from {RN} s where rn = 2 group by k'),
+    ('second_join', 'id int, x int', f'select u.id, u.x from {{p}}u u left join (select k, v from {RN} s where rn = 2) s on u.k = s.k'),
+    ('third_used_join', 'id int, v int', f'select u.id, s.v from {{p}}u u left join (select k, v from {RN} s where rn = 3) s on u.k = s.k'),
+    # Without partition: at most one row in total.
+    ('no_partition', 'k int, n bigint, sw bigint',
+     f'select k, count(*) as n, max(sw) as sw from {RN0} s where rn = 1 group by k'),
+    ('no_partition_second', 'k int, v int, w int', f'select distinct k, v, w from {RN0} s where rn = 2'),
+    ('no_partition_join', 'id int, x int', f'select u.id, u.x from {{p}}u u left join (select k, v from {RN0} s where rn <= 1) s on u.k = s.k'),
+    # Left as they are: ties, several rows per partition or in total, a filter on another column,
+    # an aggregation without group key.
     ('rank', 'k int, n bigint',
      'select k, count(*) as n from (select k, v, rank() over (partition by k order by v) as rk from {p}t) s '
      'where rk = 1 group by k'),
-    ('second_row', 'k int, n bigint', f'select k, count(*) as n from {RN} s where rn = 2 group by k'),
-    ('no_partition', 'k int, n bigint',
-     'select k, count(*) as n from (select k, v, row_number() over (order by v, id) as rn from {p}t) s '
-     'where rn = 1 group by k'),
     ('other_filter', 'k int, n bigint', f'select k, count(*) as n from {RN} s where v = 1 group by k'),
     ('first_rows', 'k int, n bigint', f'select k, count(*) as n from {RN} s where rn <= 2 group by k'),
     ('other_group', 'v int, n bigint', f'select v, count(*) as n from {RN} s where rn = 1 group by v'),
-    ('used_join', 'id int, v int', f'select u.id, s.v from {{p}}u u left join (select k, v from {RN} s where rn = 2) s on u.k = s.k'),
+    ('used_join', 'id int, v int', f'select u.id, s.v from {{p}}u u left join (select k, v from {RN} s where rn <= 2) s on u.k = s.k'),
+    ('kept_join', 'id int, x int', f'select u.id, u.x from {{p}}u u left join (select k, v from {RN} s where rn <= 2) s on u.k = s.k'),
+    ('no_partition_two', 'k int, n bigint', f'select k, count(*) as n from {RN0} s where rn <= 2 group by k'),
+    ('no_partition_scalar', 'n bigint, sw bigint', f'select count(*) as n, max(sw) as sw from {RN0} s where rn = 1'),
+    ('later_rows', 'k int, n bigint', f'select k, count(*) as n from {RN} s where rn > 1 group by k'),
 ]
 CASES = [(name, cols, sql.format(p=P)) for name, cols, sql in CASES]
 
@@ -115,7 +128,7 @@ def run_all(title):
               ["0 0 0"])
 
 
-out.append(f"""# Differential test of the unique key that `row_number() = 1` gives to the partition columns,
+out.append(f"""# Differential test of the unique key that `row_number() = n` gives to the partition columns,
 # under `{VAR}`: every query runs through `INSERT ... SELECT` without, then with the variable, and
 # both results must hold the same rows with the same multiplicities, after each round of changes
 # of the data.

@@ -1,4 +1,4 @@
-# Differential test of the unique key that `row_number() = 1` gives to the partition columns,
+# Differential test of the unique key that `row_number() = n` gives to the partition columns,
 # under `batch_simplify_on_unique_key`: every query runs through `INSERT ... SELECT` without, then with the variable, and
 # both results must hold the same rows with the same multiplicities, after each round of changes
 # of the data.
@@ -76,22 +76,46 @@ statement ok
 create table rnk_group_superset_on (k int, v int, n bigint);
 
 statement ok
-create table rnk_rank_off (k int, n bigint);
-
-statement ok
-create table rnk_rank_on (k int, n bigint);
-
-statement ok
 create table rnk_second_row_off (k int, n bigint);
 
 statement ok
 create table rnk_second_row_on (k int, n bigint);
 
 statement ok
-create table rnk_no_partition_off (k int, n bigint);
+create table rnk_second_join_off (id int, x int);
 
 statement ok
-create table rnk_no_partition_on (k int, n bigint);
+create table rnk_second_join_on (id int, x int);
+
+statement ok
+create table rnk_third_used_join_off (id int, v int);
+
+statement ok
+create table rnk_third_used_join_on (id int, v int);
+
+statement ok
+create table rnk_no_partition_off (k int, n bigint, sw bigint);
+
+statement ok
+create table rnk_no_partition_on (k int, n bigint, sw bigint);
+
+statement ok
+create table rnk_no_partition_second_off (k int, v int, w int);
+
+statement ok
+create table rnk_no_partition_second_on (k int, v int, w int);
+
+statement ok
+create table rnk_no_partition_join_off (id int, x int);
+
+statement ok
+create table rnk_no_partition_join_on (id int, x int);
+
+statement ok
+create table rnk_rank_off (k int, n bigint);
+
+statement ok
+create table rnk_rank_on (k int, n bigint);
 
 statement ok
 create table rnk_other_filter_off (k int, n bigint);
@@ -116,6 +140,30 @@ create table rnk_used_join_off (id int, v int);
 
 statement ok
 create table rnk_used_join_on (id int, v int);
+
+statement ok
+create table rnk_kept_join_off (id int, x int);
+
+statement ok
+create table rnk_kept_join_on (id int, x int);
+
+statement ok
+create table rnk_no_partition_two_off (k int, n bigint);
+
+statement ok
+create table rnk_no_partition_two_on (k int, n bigint);
+
+statement ok
+create table rnk_no_partition_scalar_off (n bigint, sw bigint);
+
+statement ok
+create table rnk_no_partition_scalar_on (n bigint, sw bigint);
+
+statement ok
+create table rnk_later_rows_off (k int, n bigint);
+
+statement ok
+create table rnk_later_rows_on (k int, n bigint);
 
 # Empty tables: every query runs without, then with the variable.
 
@@ -300,24 +348,6 @@ statement ok
 set batch_simplify_on_unique_key = false;
 
 statement ok
-delete from rnk_rank_off;
-
-statement ok
-delete from rnk_rank_on;
-
-statement ok
-insert into rnk_rank_off select k, count(*) as n from (select k, v, rank() over (partition by k order by v) as rk from rnk_t) s where rk = 1 group by k;
-
-statement ok
-set batch_simplify_on_unique_key = true;
-
-statement ok
-insert into rnk_rank_on select k, count(*) as n from (select k, v, rank() over (partition by k order by v) as rk from rnk_t) s where rk = 1 group by k;
-
-statement ok
-set batch_simplify_on_unique_key = false;
-
-statement ok
 delete from rnk_second_row_off;
 
 statement ok
@@ -336,19 +366,109 @@ statement ok
 set batch_simplify_on_unique_key = false;
 
 statement ok
+delete from rnk_second_join_off;
+
+statement ok
+delete from rnk_second_join_on;
+
+statement ok
+insert into rnk_second_join_off select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 2) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_second_join_on select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 2) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_third_used_join_off;
+
+statement ok
+delete from rnk_third_used_join_on;
+
+statement ok
+insert into rnk_third_used_join_off select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 3) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_third_used_join_on select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 3) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
 delete from rnk_no_partition_off;
 
 statement ok
 delete from rnk_no_partition_on;
 
 statement ok
-insert into rnk_no_partition_off select k, count(*) as n from (select k, v, row_number() over (order by v, id) as rn from rnk_t) s where rn = 1 group by k;
+insert into rnk_no_partition_off select k, count(*) as n, max(sw) as sw from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 1 group by k;
 
 statement ok
 set batch_simplify_on_unique_key = true;
 
 statement ok
-insert into rnk_no_partition_on select k, count(*) as n from (select k, v, row_number() over (order by v, id) as rn from rnk_t) s where rn = 1 group by k;
+insert into rnk_no_partition_on select k, count(*) as n, max(sw) as sw from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 1 group by k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_no_partition_second_off;
+
+statement ok
+delete from rnk_no_partition_second_on;
+
+statement ok
+insert into rnk_no_partition_second_off select distinct k, v, w from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 2;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_no_partition_second_on select distinct k, v, w from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 2;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_no_partition_join_off;
+
+statement ok
+delete from rnk_no_partition_join_on;
+
+statement ok
+insert into rnk_no_partition_join_off select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn <= 1) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_no_partition_join_on select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn <= 1) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_rank_off;
+
+statement ok
+delete from rnk_rank_on;
+
+statement ok
+insert into rnk_rank_off select k, count(*) as n from (select k, v, rank() over (partition by k order by v) as rk from rnk_t) s where rk = 1 group by k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_rank_on select k, count(*) as n from (select k, v, rank() over (partition by k order by v) as rk from rnk_t) s where rk = 1 group by k;
 
 statement ok
 set batch_simplify_on_unique_key = false;
@@ -414,13 +534,85 @@ statement ok
 delete from rnk_used_join_on;
 
 statement ok
-insert into rnk_used_join_off select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 2) s on u.k = s.k;
+insert into rnk_used_join_off select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn <= 2) s on u.k = s.k;
 
 statement ok
 set batch_simplify_on_unique_key = true;
 
 statement ok
-insert into rnk_used_join_on select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 2) s on u.k = s.k;
+insert into rnk_used_join_on select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn <= 2) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_kept_join_off;
+
+statement ok
+delete from rnk_kept_join_on;
+
+statement ok
+insert into rnk_kept_join_off select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn <= 2) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_kept_join_on select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn <= 2) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_no_partition_two_off;
+
+statement ok
+delete from rnk_no_partition_two_on;
+
+statement ok
+insert into rnk_no_partition_two_off select k, count(*) as n from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn <= 2 group by k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_no_partition_two_on select k, count(*) as n from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn <= 2 group by k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_no_partition_scalar_off;
+
+statement ok
+delete from rnk_no_partition_scalar_on;
+
+statement ok
+insert into rnk_no_partition_scalar_off select count(*) as n, max(sw) as sw from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 1;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_no_partition_scalar_on select count(*) as n, max(sw) as sw from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 1;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_later_rows_off;
+
+statement ok
+delete from rnk_later_rows_on;
+
+statement ok
+insert into rnk_later_rows_off select k, count(*) as n from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn > 1 group by k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_later_rows_on select k, count(*) as n from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn > 1 group by k;
 
 statement ok
 set batch_simplify_on_unique_key = false;
@@ -509,14 +701,6 @@ select
 
 query III
 select
-  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_rank_on group by k, n except select k, n, count(*) as rnk_rows from rnk_rank_off group by k, n) x),
-  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_rank_off group by k, n except select k, n, count(*) as rnk_rows from rnk_rank_on group by k, n) y),
-  (select count(*) from rnk_rank_on) - (select count(*) from rnk_rank_off);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select k, n, count(*) as rnk_rows from rnk_second_row_on group by k, n except select k, n, count(*) as rnk_rows from rnk_second_row_off group by k, n) x),
   (select count(*) from (select k, n, count(*) as rnk_rows from rnk_second_row_off group by k, n except select k, n, count(*) as rnk_rows from rnk_second_row_on group by k, n) y),
   (select count(*) from rnk_second_row_on) - (select count(*) from rnk_second_row_off);
@@ -525,9 +709,49 @@ select
 
 query III
 select
-  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_no_partition_on group by k, n except select k, n, count(*) as rnk_rows from rnk_no_partition_off group by k, n) x),
-  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_no_partition_off group by k, n except select k, n, count(*) as rnk_rows from rnk_no_partition_on group by k, n) y),
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_second_join_on group by id, x except select id, x, count(*) as rnk_rows from rnk_second_join_off group by id, x) x),
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_second_join_off group by id, x except select id, x, count(*) as rnk_rows from rnk_second_join_on group by id, x) y),
+  (select count(*) from rnk_second_join_on) - (select count(*) from rnk_second_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as rnk_rows from rnk_third_used_join_on group by id, v except select id, v, count(*) as rnk_rows from rnk_third_used_join_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as rnk_rows from rnk_third_used_join_off group by id, v except select id, v, count(*) as rnk_rows from rnk_third_used_join_on group by id, v) y),
+  (select count(*) from rnk_third_used_join_on) - (select count(*) from rnk_third_used_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select k, n, sw, count(*) as rnk_rows from rnk_no_partition_on group by k, n, sw except select k, n, sw, count(*) as rnk_rows from rnk_no_partition_off group by k, n, sw) x),
+  (select count(*) from (select k, n, sw, count(*) as rnk_rows from rnk_no_partition_off group by k, n, sw except select k, n, sw, count(*) as rnk_rows from rnk_no_partition_on group by k, n, sw) y),
   (select count(*) from rnk_no_partition_on) - (select count(*) from rnk_no_partition_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select k, v, w, count(*) as rnk_rows from rnk_no_partition_second_on group by k, v, w except select k, v, w, count(*) as rnk_rows from rnk_no_partition_second_off group by k, v, w) x),
+  (select count(*) from (select k, v, w, count(*) as rnk_rows from rnk_no_partition_second_off group by k, v, w except select k, v, w, count(*) as rnk_rows from rnk_no_partition_second_on group by k, v, w) y),
+  (select count(*) from rnk_no_partition_second_on) - (select count(*) from rnk_no_partition_second_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_no_partition_join_on group by id, x except select id, x, count(*) as rnk_rows from rnk_no_partition_join_off group by id, x) x),
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_no_partition_join_off group by id, x except select id, x, count(*) as rnk_rows from rnk_no_partition_join_on group by id, x) y),
+  (select count(*) from rnk_no_partition_join_on) - (select count(*) from rnk_no_partition_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_rank_on group by k, n except select k, n, count(*) as rnk_rows from rnk_rank_off group by k, n) x),
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_rank_off group by k, n except select k, n, count(*) as rnk_rows from rnk_rank_on group by k, n) y),
+  (select count(*) from rnk_rank_on) - (select count(*) from rnk_rank_off);
 ----
 0 0 0
 
@@ -560,6 +784,38 @@ select
   (select count(*) from (select id, v, count(*) as rnk_rows from rnk_used_join_on group by id, v except select id, v, count(*) as rnk_rows from rnk_used_join_off group by id, v) x),
   (select count(*) from (select id, v, count(*) as rnk_rows from rnk_used_join_off group by id, v except select id, v, count(*) as rnk_rows from rnk_used_join_on group by id, v) y),
   (select count(*) from rnk_used_join_on) - (select count(*) from rnk_used_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_kept_join_on group by id, x except select id, x, count(*) as rnk_rows from rnk_kept_join_off group by id, x) x),
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_kept_join_off group by id, x except select id, x, count(*) as rnk_rows from rnk_kept_join_on group by id, x) y),
+  (select count(*) from rnk_kept_join_on) - (select count(*) from rnk_kept_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_no_partition_two_on group by k, n except select k, n, count(*) as rnk_rows from rnk_no_partition_two_off group by k, n) x),
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_no_partition_two_off group by k, n except select k, n, count(*) as rnk_rows from rnk_no_partition_two_on group by k, n) y),
+  (select count(*) from rnk_no_partition_two_on) - (select count(*) from rnk_no_partition_two_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select n, sw, count(*) as rnk_rows from rnk_no_partition_scalar_on group by n, sw except select n, sw, count(*) as rnk_rows from rnk_no_partition_scalar_off group by n, sw) x),
+  (select count(*) from (select n, sw, count(*) as rnk_rows from rnk_no_partition_scalar_off group by n, sw except select n, sw, count(*) as rnk_rows from rnk_no_partition_scalar_on group by n, sw) y),
+  (select count(*) from rnk_no_partition_scalar_on) - (select count(*) from rnk_no_partition_scalar_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_later_rows_on group by k, n except select k, n, count(*) as rnk_rows from rnk_later_rows_off group by k, n) x),
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_later_rows_off group by k, n except select k, n, count(*) as rnk_rows from rnk_later_rows_on group by k, n) y),
+  (select count(*) from rnk_later_rows_on) - (select count(*) from rnk_later_rows_off);
 ----
 0 0 0
 
@@ -754,24 +1010,6 @@ statement ok
 set batch_simplify_on_unique_key = false;
 
 statement ok
-delete from rnk_rank_off;
-
-statement ok
-delete from rnk_rank_on;
-
-statement ok
-insert into rnk_rank_off select k, count(*) as n from (select k, v, rank() over (partition by k order by v) as rk from rnk_t) s where rk = 1 group by k;
-
-statement ok
-set batch_simplify_on_unique_key = true;
-
-statement ok
-insert into rnk_rank_on select k, count(*) as n from (select k, v, rank() over (partition by k order by v) as rk from rnk_t) s where rk = 1 group by k;
-
-statement ok
-set batch_simplify_on_unique_key = false;
-
-statement ok
 delete from rnk_second_row_off;
 
 statement ok
@@ -790,19 +1028,109 @@ statement ok
 set batch_simplify_on_unique_key = false;
 
 statement ok
+delete from rnk_second_join_off;
+
+statement ok
+delete from rnk_second_join_on;
+
+statement ok
+insert into rnk_second_join_off select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 2) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_second_join_on select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 2) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_third_used_join_off;
+
+statement ok
+delete from rnk_third_used_join_on;
+
+statement ok
+insert into rnk_third_used_join_off select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 3) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_third_used_join_on select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 3) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
 delete from rnk_no_partition_off;
 
 statement ok
 delete from rnk_no_partition_on;
 
 statement ok
-insert into rnk_no_partition_off select k, count(*) as n from (select k, v, row_number() over (order by v, id) as rn from rnk_t) s where rn = 1 group by k;
+insert into rnk_no_partition_off select k, count(*) as n, max(sw) as sw from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 1 group by k;
 
 statement ok
 set batch_simplify_on_unique_key = true;
 
 statement ok
-insert into rnk_no_partition_on select k, count(*) as n from (select k, v, row_number() over (order by v, id) as rn from rnk_t) s where rn = 1 group by k;
+insert into rnk_no_partition_on select k, count(*) as n, max(sw) as sw from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 1 group by k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_no_partition_second_off;
+
+statement ok
+delete from rnk_no_partition_second_on;
+
+statement ok
+insert into rnk_no_partition_second_off select distinct k, v, w from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 2;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_no_partition_second_on select distinct k, v, w from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 2;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_no_partition_join_off;
+
+statement ok
+delete from rnk_no_partition_join_on;
+
+statement ok
+insert into rnk_no_partition_join_off select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn <= 1) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_no_partition_join_on select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn <= 1) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_rank_off;
+
+statement ok
+delete from rnk_rank_on;
+
+statement ok
+insert into rnk_rank_off select k, count(*) as n from (select k, v, rank() over (partition by k order by v) as rk from rnk_t) s where rk = 1 group by k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_rank_on select k, count(*) as n from (select k, v, rank() over (partition by k order by v) as rk from rnk_t) s where rk = 1 group by k;
 
 statement ok
 set batch_simplify_on_unique_key = false;
@@ -868,13 +1196,85 @@ statement ok
 delete from rnk_used_join_on;
 
 statement ok
-insert into rnk_used_join_off select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 2) s on u.k = s.k;
+insert into rnk_used_join_off select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn <= 2) s on u.k = s.k;
 
 statement ok
 set batch_simplify_on_unique_key = true;
 
 statement ok
-insert into rnk_used_join_on select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 2) s on u.k = s.k;
+insert into rnk_used_join_on select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn <= 2) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_kept_join_off;
+
+statement ok
+delete from rnk_kept_join_on;
+
+statement ok
+insert into rnk_kept_join_off select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn <= 2) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_kept_join_on select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn <= 2) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_no_partition_two_off;
+
+statement ok
+delete from rnk_no_partition_two_on;
+
+statement ok
+insert into rnk_no_partition_two_off select k, count(*) as n from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn <= 2 group by k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_no_partition_two_on select k, count(*) as n from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn <= 2 group by k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_no_partition_scalar_off;
+
+statement ok
+delete from rnk_no_partition_scalar_on;
+
+statement ok
+insert into rnk_no_partition_scalar_off select count(*) as n, max(sw) as sw from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 1;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_no_partition_scalar_on select count(*) as n, max(sw) as sw from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 1;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_later_rows_off;
+
+statement ok
+delete from rnk_later_rows_on;
+
+statement ok
+insert into rnk_later_rows_off select k, count(*) as n from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn > 1 group by k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_later_rows_on select k, count(*) as n from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn > 1 group by k;
 
 statement ok
 set batch_simplify_on_unique_key = false;
@@ -963,14 +1363,6 @@ select
 
 query III
 select
-  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_rank_on group by k, n except select k, n, count(*) as rnk_rows from rnk_rank_off group by k, n) x),
-  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_rank_off group by k, n except select k, n, count(*) as rnk_rows from rnk_rank_on group by k, n) y),
-  (select count(*) from rnk_rank_on) - (select count(*) from rnk_rank_off);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select k, n, count(*) as rnk_rows from rnk_second_row_on group by k, n except select k, n, count(*) as rnk_rows from rnk_second_row_off group by k, n) x),
   (select count(*) from (select k, n, count(*) as rnk_rows from rnk_second_row_off group by k, n except select k, n, count(*) as rnk_rows from rnk_second_row_on group by k, n) y),
   (select count(*) from rnk_second_row_on) - (select count(*) from rnk_second_row_off);
@@ -979,9 +1371,49 @@ select
 
 query III
 select
-  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_no_partition_on group by k, n except select k, n, count(*) as rnk_rows from rnk_no_partition_off group by k, n) x),
-  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_no_partition_off group by k, n except select k, n, count(*) as rnk_rows from rnk_no_partition_on group by k, n) y),
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_second_join_on group by id, x except select id, x, count(*) as rnk_rows from rnk_second_join_off group by id, x) x),
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_second_join_off group by id, x except select id, x, count(*) as rnk_rows from rnk_second_join_on group by id, x) y),
+  (select count(*) from rnk_second_join_on) - (select count(*) from rnk_second_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as rnk_rows from rnk_third_used_join_on group by id, v except select id, v, count(*) as rnk_rows from rnk_third_used_join_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as rnk_rows from rnk_third_used_join_off group by id, v except select id, v, count(*) as rnk_rows from rnk_third_used_join_on group by id, v) y),
+  (select count(*) from rnk_third_used_join_on) - (select count(*) from rnk_third_used_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select k, n, sw, count(*) as rnk_rows from rnk_no_partition_on group by k, n, sw except select k, n, sw, count(*) as rnk_rows from rnk_no_partition_off group by k, n, sw) x),
+  (select count(*) from (select k, n, sw, count(*) as rnk_rows from rnk_no_partition_off group by k, n, sw except select k, n, sw, count(*) as rnk_rows from rnk_no_partition_on group by k, n, sw) y),
   (select count(*) from rnk_no_partition_on) - (select count(*) from rnk_no_partition_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select k, v, w, count(*) as rnk_rows from rnk_no_partition_second_on group by k, v, w except select k, v, w, count(*) as rnk_rows from rnk_no_partition_second_off group by k, v, w) x),
+  (select count(*) from (select k, v, w, count(*) as rnk_rows from rnk_no_partition_second_off group by k, v, w except select k, v, w, count(*) as rnk_rows from rnk_no_partition_second_on group by k, v, w) y),
+  (select count(*) from rnk_no_partition_second_on) - (select count(*) from rnk_no_partition_second_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_no_partition_join_on group by id, x except select id, x, count(*) as rnk_rows from rnk_no_partition_join_off group by id, x) x),
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_no_partition_join_off group by id, x except select id, x, count(*) as rnk_rows from rnk_no_partition_join_on group by id, x) y),
+  (select count(*) from rnk_no_partition_join_on) - (select count(*) from rnk_no_partition_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_rank_on group by k, n except select k, n, count(*) as rnk_rows from rnk_rank_off group by k, n) x),
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_rank_off group by k, n except select k, n, count(*) as rnk_rows from rnk_rank_on group by k, n) y),
+  (select count(*) from rnk_rank_on) - (select count(*) from rnk_rank_off);
 ----
 0 0 0
 
@@ -1014,6 +1446,38 @@ select
   (select count(*) from (select id, v, count(*) as rnk_rows from rnk_used_join_on group by id, v except select id, v, count(*) as rnk_rows from rnk_used_join_off group by id, v) x),
   (select count(*) from (select id, v, count(*) as rnk_rows from rnk_used_join_off group by id, v except select id, v, count(*) as rnk_rows from rnk_used_join_on group by id, v) y),
   (select count(*) from rnk_used_join_on) - (select count(*) from rnk_used_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_kept_join_on group by id, x except select id, x, count(*) as rnk_rows from rnk_kept_join_off group by id, x) x),
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_kept_join_off group by id, x except select id, x, count(*) as rnk_rows from rnk_kept_join_on group by id, x) y),
+  (select count(*) from rnk_kept_join_on) - (select count(*) from rnk_kept_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_no_partition_two_on group by k, n except select k, n, count(*) as rnk_rows from rnk_no_partition_two_off group by k, n) x),
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_no_partition_two_off group by k, n except select k, n, count(*) as rnk_rows from rnk_no_partition_two_on group by k, n) y),
+  (select count(*) from rnk_no_partition_two_on) - (select count(*) from rnk_no_partition_two_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select n, sw, count(*) as rnk_rows from rnk_no_partition_scalar_on group by n, sw except select n, sw, count(*) as rnk_rows from rnk_no_partition_scalar_off group by n, sw) x),
+  (select count(*) from (select n, sw, count(*) as rnk_rows from rnk_no_partition_scalar_off group by n, sw except select n, sw, count(*) as rnk_rows from rnk_no_partition_scalar_on group by n, sw) y),
+  (select count(*) from rnk_no_partition_scalar_on) - (select count(*) from rnk_no_partition_scalar_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_later_rows_on group by k, n except select k, n, count(*) as rnk_rows from rnk_later_rows_off group by k, n) x),
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_later_rows_off group by k, n except select k, n, count(*) as rnk_rows from rnk_later_rows_on group by k, n) y),
+  (select count(*) from rnk_later_rows_on) - (select count(*) from rnk_later_rows_off);
 ----
 0 0 0
 
@@ -1211,24 +1675,6 @@ statement ok
 set batch_simplify_on_unique_key = false;
 
 statement ok
-delete from rnk_rank_off;
-
-statement ok
-delete from rnk_rank_on;
-
-statement ok
-insert into rnk_rank_off select k, count(*) as n from (select k, v, rank() over (partition by k order by v) as rk from rnk_t) s where rk = 1 group by k;
-
-statement ok
-set batch_simplify_on_unique_key = true;
-
-statement ok
-insert into rnk_rank_on select k, count(*) as n from (select k, v, rank() over (partition by k order by v) as rk from rnk_t) s where rk = 1 group by k;
-
-statement ok
-set batch_simplify_on_unique_key = false;
-
-statement ok
 delete from rnk_second_row_off;
 
 statement ok
@@ -1247,19 +1693,109 @@ statement ok
 set batch_simplify_on_unique_key = false;
 
 statement ok
+delete from rnk_second_join_off;
+
+statement ok
+delete from rnk_second_join_on;
+
+statement ok
+insert into rnk_second_join_off select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 2) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_second_join_on select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 2) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_third_used_join_off;
+
+statement ok
+delete from rnk_third_used_join_on;
+
+statement ok
+insert into rnk_third_used_join_off select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 3) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_third_used_join_on select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 3) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
 delete from rnk_no_partition_off;
 
 statement ok
 delete from rnk_no_partition_on;
 
 statement ok
-insert into rnk_no_partition_off select k, count(*) as n from (select k, v, row_number() over (order by v, id) as rn from rnk_t) s where rn = 1 group by k;
+insert into rnk_no_partition_off select k, count(*) as n, max(sw) as sw from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 1 group by k;
 
 statement ok
 set batch_simplify_on_unique_key = true;
 
 statement ok
-insert into rnk_no_partition_on select k, count(*) as n from (select k, v, row_number() over (order by v, id) as rn from rnk_t) s where rn = 1 group by k;
+insert into rnk_no_partition_on select k, count(*) as n, max(sw) as sw from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 1 group by k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_no_partition_second_off;
+
+statement ok
+delete from rnk_no_partition_second_on;
+
+statement ok
+insert into rnk_no_partition_second_off select distinct k, v, w from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 2;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_no_partition_second_on select distinct k, v, w from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 2;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_no_partition_join_off;
+
+statement ok
+delete from rnk_no_partition_join_on;
+
+statement ok
+insert into rnk_no_partition_join_off select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn <= 1) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_no_partition_join_on select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn <= 1) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_rank_off;
+
+statement ok
+delete from rnk_rank_on;
+
+statement ok
+insert into rnk_rank_off select k, count(*) as n from (select k, v, rank() over (partition by k order by v) as rk from rnk_t) s where rk = 1 group by k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_rank_on select k, count(*) as n from (select k, v, rank() over (partition by k order by v) as rk from rnk_t) s where rk = 1 group by k;
 
 statement ok
 set batch_simplify_on_unique_key = false;
@@ -1325,13 +1861,85 @@ statement ok
 delete from rnk_used_join_on;
 
 statement ok
-insert into rnk_used_join_off select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 2) s on u.k = s.k;
+insert into rnk_used_join_off select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn <= 2) s on u.k = s.k;
 
 statement ok
 set batch_simplify_on_unique_key = true;
 
 statement ok
-insert into rnk_used_join_on select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 2) s on u.k = s.k;
+insert into rnk_used_join_on select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn <= 2) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_kept_join_off;
+
+statement ok
+delete from rnk_kept_join_on;
+
+statement ok
+insert into rnk_kept_join_off select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn <= 2) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_kept_join_on select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn <= 2) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_no_partition_two_off;
+
+statement ok
+delete from rnk_no_partition_two_on;
+
+statement ok
+insert into rnk_no_partition_two_off select k, count(*) as n from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn <= 2 group by k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_no_partition_two_on select k, count(*) as n from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn <= 2 group by k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_no_partition_scalar_off;
+
+statement ok
+delete from rnk_no_partition_scalar_on;
+
+statement ok
+insert into rnk_no_partition_scalar_off select count(*) as n, max(sw) as sw from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 1;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_no_partition_scalar_on select count(*) as n, max(sw) as sw from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 1;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_later_rows_off;
+
+statement ok
+delete from rnk_later_rows_on;
+
+statement ok
+insert into rnk_later_rows_off select k, count(*) as n from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn > 1 group by k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_later_rows_on select k, count(*) as n from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn > 1 group by k;
 
 statement ok
 set batch_simplify_on_unique_key = false;
@@ -1420,14 +2028,6 @@ select
 
 query III
 select
-  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_rank_on group by k, n except select k, n, count(*) as rnk_rows from rnk_rank_off group by k, n) x),
-  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_rank_off group by k, n except select k, n, count(*) as rnk_rows from rnk_rank_on group by k, n) y),
-  (select count(*) from rnk_rank_on) - (select count(*) from rnk_rank_off);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select k, n, count(*) as rnk_rows from rnk_second_row_on group by k, n except select k, n, count(*) as rnk_rows from rnk_second_row_off group by k, n) x),
   (select count(*) from (select k, n, count(*) as rnk_rows from rnk_second_row_off group by k, n except select k, n, count(*) as rnk_rows from rnk_second_row_on group by k, n) y),
   (select count(*) from rnk_second_row_on) - (select count(*) from rnk_second_row_off);
@@ -1436,9 +2036,49 @@ select
 
 query III
 select
-  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_no_partition_on group by k, n except select k, n, count(*) as rnk_rows from rnk_no_partition_off group by k, n) x),
-  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_no_partition_off group by k, n except select k, n, count(*) as rnk_rows from rnk_no_partition_on group by k, n) y),
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_second_join_on group by id, x except select id, x, count(*) as rnk_rows from rnk_second_join_off group by id, x) x),
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_second_join_off group by id, x except select id, x, count(*) as rnk_rows from rnk_second_join_on group by id, x) y),
+  (select count(*) from rnk_second_join_on) - (select count(*) from rnk_second_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as rnk_rows from rnk_third_used_join_on group by id, v except select id, v, count(*) as rnk_rows from rnk_third_used_join_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as rnk_rows from rnk_third_used_join_off group by id, v except select id, v, count(*) as rnk_rows from rnk_third_used_join_on group by id, v) y),
+  (select count(*) from rnk_third_used_join_on) - (select count(*) from rnk_third_used_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select k, n, sw, count(*) as rnk_rows from rnk_no_partition_on group by k, n, sw except select k, n, sw, count(*) as rnk_rows from rnk_no_partition_off group by k, n, sw) x),
+  (select count(*) from (select k, n, sw, count(*) as rnk_rows from rnk_no_partition_off group by k, n, sw except select k, n, sw, count(*) as rnk_rows from rnk_no_partition_on group by k, n, sw) y),
   (select count(*) from rnk_no_partition_on) - (select count(*) from rnk_no_partition_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select k, v, w, count(*) as rnk_rows from rnk_no_partition_second_on group by k, v, w except select k, v, w, count(*) as rnk_rows from rnk_no_partition_second_off group by k, v, w) x),
+  (select count(*) from (select k, v, w, count(*) as rnk_rows from rnk_no_partition_second_off group by k, v, w except select k, v, w, count(*) as rnk_rows from rnk_no_partition_second_on group by k, v, w) y),
+  (select count(*) from rnk_no_partition_second_on) - (select count(*) from rnk_no_partition_second_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_no_partition_join_on group by id, x except select id, x, count(*) as rnk_rows from rnk_no_partition_join_off group by id, x) x),
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_no_partition_join_off group by id, x except select id, x, count(*) as rnk_rows from rnk_no_partition_join_on group by id, x) y),
+  (select count(*) from rnk_no_partition_join_on) - (select count(*) from rnk_no_partition_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_rank_on group by k, n except select k, n, count(*) as rnk_rows from rnk_rank_off group by k, n) x),
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_rank_off group by k, n except select k, n, count(*) as rnk_rows from rnk_rank_on group by k, n) y),
+  (select count(*) from rnk_rank_on) - (select count(*) from rnk_rank_off);
 ----
 0 0 0
 
@@ -1471,6 +2111,38 @@ select
   (select count(*) from (select id, v, count(*) as rnk_rows from rnk_used_join_on group by id, v except select id, v, count(*) as rnk_rows from rnk_used_join_off group by id, v) x),
   (select count(*) from (select id, v, count(*) as rnk_rows from rnk_used_join_off group by id, v except select id, v, count(*) as rnk_rows from rnk_used_join_on group by id, v) y),
   (select count(*) from rnk_used_join_on) - (select count(*) from rnk_used_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_kept_join_on group by id, x except select id, x, count(*) as rnk_rows from rnk_kept_join_off group by id, x) x),
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_kept_join_off group by id, x except select id, x, count(*) as rnk_rows from rnk_kept_join_on group by id, x) y),
+  (select count(*) from rnk_kept_join_on) - (select count(*) from rnk_kept_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_no_partition_two_on group by k, n except select k, n, count(*) as rnk_rows from rnk_no_partition_two_off group by k, n) x),
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_no_partition_two_off group by k, n except select k, n, count(*) as rnk_rows from rnk_no_partition_two_on group by k, n) y),
+  (select count(*) from rnk_no_partition_two_on) - (select count(*) from rnk_no_partition_two_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select n, sw, count(*) as rnk_rows from rnk_no_partition_scalar_on group by n, sw except select n, sw, count(*) as rnk_rows from rnk_no_partition_scalar_off group by n, sw) x),
+  (select count(*) from (select n, sw, count(*) as rnk_rows from rnk_no_partition_scalar_off group by n, sw except select n, sw, count(*) as rnk_rows from rnk_no_partition_scalar_on group by n, sw) y),
+  (select count(*) from rnk_no_partition_scalar_on) - (select count(*) from rnk_no_partition_scalar_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_later_rows_on group by k, n except select k, n, count(*) as rnk_rows from rnk_later_rows_off group by k, n) x),
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_later_rows_off group by k, n except select k, n, count(*) as rnk_rows from rnk_later_rows_on group by k, n) y),
+  (select count(*) from rnk_later_rows_on) - (select count(*) from rnk_later_rows_off);
 ----
 0 0 0
 
@@ -1674,24 +2346,6 @@ statement ok
 set batch_simplify_on_unique_key = false;
 
 statement ok
-delete from rnk_rank_off;
-
-statement ok
-delete from rnk_rank_on;
-
-statement ok
-insert into rnk_rank_off select k, count(*) as n from (select k, v, rank() over (partition by k order by v) as rk from rnk_t) s where rk = 1 group by k;
-
-statement ok
-set batch_simplify_on_unique_key = true;
-
-statement ok
-insert into rnk_rank_on select k, count(*) as n from (select k, v, rank() over (partition by k order by v) as rk from rnk_t) s where rk = 1 group by k;
-
-statement ok
-set batch_simplify_on_unique_key = false;
-
-statement ok
 delete from rnk_second_row_off;
 
 statement ok
@@ -1710,19 +2364,109 @@ statement ok
 set batch_simplify_on_unique_key = false;
 
 statement ok
+delete from rnk_second_join_off;
+
+statement ok
+delete from rnk_second_join_on;
+
+statement ok
+insert into rnk_second_join_off select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 2) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_second_join_on select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 2) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_third_used_join_off;
+
+statement ok
+delete from rnk_third_used_join_on;
+
+statement ok
+insert into rnk_third_used_join_off select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 3) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_third_used_join_on select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 3) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
 delete from rnk_no_partition_off;
 
 statement ok
 delete from rnk_no_partition_on;
 
 statement ok
-insert into rnk_no_partition_off select k, count(*) as n from (select k, v, row_number() over (order by v, id) as rn from rnk_t) s where rn = 1 group by k;
+insert into rnk_no_partition_off select k, count(*) as n, max(sw) as sw from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 1 group by k;
 
 statement ok
 set batch_simplify_on_unique_key = true;
 
 statement ok
-insert into rnk_no_partition_on select k, count(*) as n from (select k, v, row_number() over (order by v, id) as rn from rnk_t) s where rn = 1 group by k;
+insert into rnk_no_partition_on select k, count(*) as n, max(sw) as sw from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 1 group by k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_no_partition_second_off;
+
+statement ok
+delete from rnk_no_partition_second_on;
+
+statement ok
+insert into rnk_no_partition_second_off select distinct k, v, w from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 2;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_no_partition_second_on select distinct k, v, w from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 2;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_no_partition_join_off;
+
+statement ok
+delete from rnk_no_partition_join_on;
+
+statement ok
+insert into rnk_no_partition_join_off select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn <= 1) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_no_partition_join_on select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn <= 1) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_rank_off;
+
+statement ok
+delete from rnk_rank_on;
+
+statement ok
+insert into rnk_rank_off select k, count(*) as n from (select k, v, rank() over (partition by k order by v) as rk from rnk_t) s where rk = 1 group by k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_rank_on select k, count(*) as n from (select k, v, rank() over (partition by k order by v) as rk from rnk_t) s where rk = 1 group by k;
 
 statement ok
 set batch_simplify_on_unique_key = false;
@@ -1788,13 +2532,85 @@ statement ok
 delete from rnk_used_join_on;
 
 statement ok
-insert into rnk_used_join_off select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 2) s on u.k = s.k;
+insert into rnk_used_join_off select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn <= 2) s on u.k = s.k;
 
 statement ok
 set batch_simplify_on_unique_key = true;
 
 statement ok
-insert into rnk_used_join_on select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 2) s on u.k = s.k;
+insert into rnk_used_join_on select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn <= 2) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_kept_join_off;
+
+statement ok
+delete from rnk_kept_join_on;
+
+statement ok
+insert into rnk_kept_join_off select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn <= 2) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_kept_join_on select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn <= 2) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_no_partition_two_off;
+
+statement ok
+delete from rnk_no_partition_two_on;
+
+statement ok
+insert into rnk_no_partition_two_off select k, count(*) as n from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn <= 2 group by k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_no_partition_two_on select k, count(*) as n from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn <= 2 group by k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_no_partition_scalar_off;
+
+statement ok
+delete from rnk_no_partition_scalar_on;
+
+statement ok
+insert into rnk_no_partition_scalar_off select count(*) as n, max(sw) as sw from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 1;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_no_partition_scalar_on select count(*) as n, max(sw) as sw from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 1;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_later_rows_off;
+
+statement ok
+delete from rnk_later_rows_on;
+
+statement ok
+insert into rnk_later_rows_off select k, count(*) as n from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn > 1 group by k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_later_rows_on select k, count(*) as n from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn > 1 group by k;
 
 statement ok
 set batch_simplify_on_unique_key = false;
@@ -1883,14 +2699,6 @@ select
 
 query III
 select
-  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_rank_on group by k, n except select k, n, count(*) as rnk_rows from rnk_rank_off group by k, n) x),
-  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_rank_off group by k, n except select k, n, count(*) as rnk_rows from rnk_rank_on group by k, n) y),
-  (select count(*) from rnk_rank_on) - (select count(*) from rnk_rank_off);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select k, n, count(*) as rnk_rows from rnk_second_row_on group by k, n except select k, n, count(*) as rnk_rows from rnk_second_row_off group by k, n) x),
   (select count(*) from (select k, n, count(*) as rnk_rows from rnk_second_row_off group by k, n except select k, n, count(*) as rnk_rows from rnk_second_row_on group by k, n) y),
   (select count(*) from rnk_second_row_on) - (select count(*) from rnk_second_row_off);
@@ -1899,9 +2707,49 @@ select
 
 query III
 select
-  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_no_partition_on group by k, n except select k, n, count(*) as rnk_rows from rnk_no_partition_off group by k, n) x),
-  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_no_partition_off group by k, n except select k, n, count(*) as rnk_rows from rnk_no_partition_on group by k, n) y),
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_second_join_on group by id, x except select id, x, count(*) as rnk_rows from rnk_second_join_off group by id, x) x),
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_second_join_off group by id, x except select id, x, count(*) as rnk_rows from rnk_second_join_on group by id, x) y),
+  (select count(*) from rnk_second_join_on) - (select count(*) from rnk_second_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as rnk_rows from rnk_third_used_join_on group by id, v except select id, v, count(*) as rnk_rows from rnk_third_used_join_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as rnk_rows from rnk_third_used_join_off group by id, v except select id, v, count(*) as rnk_rows from rnk_third_used_join_on group by id, v) y),
+  (select count(*) from rnk_third_used_join_on) - (select count(*) from rnk_third_used_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select k, n, sw, count(*) as rnk_rows from rnk_no_partition_on group by k, n, sw except select k, n, sw, count(*) as rnk_rows from rnk_no_partition_off group by k, n, sw) x),
+  (select count(*) from (select k, n, sw, count(*) as rnk_rows from rnk_no_partition_off group by k, n, sw except select k, n, sw, count(*) as rnk_rows from rnk_no_partition_on group by k, n, sw) y),
   (select count(*) from rnk_no_partition_on) - (select count(*) from rnk_no_partition_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select k, v, w, count(*) as rnk_rows from rnk_no_partition_second_on group by k, v, w except select k, v, w, count(*) as rnk_rows from rnk_no_partition_second_off group by k, v, w) x),
+  (select count(*) from (select k, v, w, count(*) as rnk_rows from rnk_no_partition_second_off group by k, v, w except select k, v, w, count(*) as rnk_rows from rnk_no_partition_second_on group by k, v, w) y),
+  (select count(*) from rnk_no_partition_second_on) - (select count(*) from rnk_no_partition_second_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_no_partition_join_on group by id, x except select id, x, count(*) as rnk_rows from rnk_no_partition_join_off group by id, x) x),
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_no_partition_join_off group by id, x except select id, x, count(*) as rnk_rows from rnk_no_partition_join_on group by id, x) y),
+  (select count(*) from rnk_no_partition_join_on) - (select count(*) from rnk_no_partition_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_rank_on group by k, n except select k, n, count(*) as rnk_rows from rnk_rank_off group by k, n) x),
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_rank_off group by k, n except select k, n, count(*) as rnk_rows from rnk_rank_on group by k, n) y),
+  (select count(*) from rnk_rank_on) - (select count(*) from rnk_rank_off);
 ----
 0 0 0
 
@@ -1934,6 +2782,38 @@ select
   (select count(*) from (select id, v, count(*) as rnk_rows from rnk_used_join_on group by id, v except select id, v, count(*) as rnk_rows from rnk_used_join_off group by id, v) x),
   (select count(*) from (select id, v, count(*) as rnk_rows from rnk_used_join_off group by id, v except select id, v, count(*) as rnk_rows from rnk_used_join_on group by id, v) y),
   (select count(*) from rnk_used_join_on) - (select count(*) from rnk_used_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_kept_join_on group by id, x except select id, x, count(*) as rnk_rows from rnk_kept_join_off group by id, x) x),
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_kept_join_off group by id, x except select id, x, count(*) as rnk_rows from rnk_kept_join_on group by id, x) y),
+  (select count(*) from rnk_kept_join_on) - (select count(*) from rnk_kept_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_no_partition_two_on group by k, n except select k, n, count(*) as rnk_rows from rnk_no_partition_two_off group by k, n) x),
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_no_partition_two_off group by k, n except select k, n, count(*) as rnk_rows from rnk_no_partition_two_on group by k, n) y),
+  (select count(*) from rnk_no_partition_two_on) - (select count(*) from rnk_no_partition_two_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select n, sw, count(*) as rnk_rows from rnk_no_partition_scalar_on group by n, sw except select n, sw, count(*) as rnk_rows from rnk_no_partition_scalar_off group by n, sw) x),
+  (select count(*) from (select n, sw, count(*) as rnk_rows from rnk_no_partition_scalar_off group by n, sw except select n, sw, count(*) as rnk_rows from rnk_no_partition_scalar_on group by n, sw) y),
+  (select count(*) from rnk_no_partition_scalar_on) - (select count(*) from rnk_no_partition_scalar_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_later_rows_on group by k, n except select k, n, count(*) as rnk_rows from rnk_later_rows_off group by k, n) x),
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_later_rows_off group by k, n except select k, n, count(*) as rnk_rows from rnk_later_rows_on group by k, n) y),
+  (select count(*) from rnk_later_rows_on) - (select count(*) from rnk_later_rows_off);
 ----
 0 0 0
 
@@ -2128,24 +3008,6 @@ statement ok
 set batch_simplify_on_unique_key = false;
 
 statement ok
-delete from rnk_rank_off;
-
-statement ok
-delete from rnk_rank_on;
-
-statement ok
-insert into rnk_rank_off select k, count(*) as n from (select k, v, rank() over (partition by k order by v) as rk from rnk_t) s where rk = 1 group by k;
-
-statement ok
-set batch_simplify_on_unique_key = true;
-
-statement ok
-insert into rnk_rank_on select k, count(*) as n from (select k, v, rank() over (partition by k order by v) as rk from rnk_t) s where rk = 1 group by k;
-
-statement ok
-set batch_simplify_on_unique_key = false;
-
-statement ok
 delete from rnk_second_row_off;
 
 statement ok
@@ -2164,19 +3026,109 @@ statement ok
 set batch_simplify_on_unique_key = false;
 
 statement ok
+delete from rnk_second_join_off;
+
+statement ok
+delete from rnk_second_join_on;
+
+statement ok
+insert into rnk_second_join_off select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 2) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_second_join_on select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 2) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_third_used_join_off;
+
+statement ok
+delete from rnk_third_used_join_on;
+
+statement ok
+insert into rnk_third_used_join_off select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 3) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_third_used_join_on select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 3) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
 delete from rnk_no_partition_off;
 
 statement ok
 delete from rnk_no_partition_on;
 
 statement ok
-insert into rnk_no_partition_off select k, count(*) as n from (select k, v, row_number() over (order by v, id) as rn from rnk_t) s where rn = 1 group by k;
+insert into rnk_no_partition_off select k, count(*) as n, max(sw) as sw from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 1 group by k;
 
 statement ok
 set batch_simplify_on_unique_key = true;
 
 statement ok
-insert into rnk_no_partition_on select k, count(*) as n from (select k, v, row_number() over (order by v, id) as rn from rnk_t) s where rn = 1 group by k;
+insert into rnk_no_partition_on select k, count(*) as n, max(sw) as sw from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 1 group by k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_no_partition_second_off;
+
+statement ok
+delete from rnk_no_partition_second_on;
+
+statement ok
+insert into rnk_no_partition_second_off select distinct k, v, w from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 2;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_no_partition_second_on select distinct k, v, w from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 2;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_no_partition_join_off;
+
+statement ok
+delete from rnk_no_partition_join_on;
+
+statement ok
+insert into rnk_no_partition_join_off select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn <= 1) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_no_partition_join_on select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn <= 1) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_rank_off;
+
+statement ok
+delete from rnk_rank_on;
+
+statement ok
+insert into rnk_rank_off select k, count(*) as n from (select k, v, rank() over (partition by k order by v) as rk from rnk_t) s where rk = 1 group by k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_rank_on select k, count(*) as n from (select k, v, rank() over (partition by k order by v) as rk from rnk_t) s where rk = 1 group by k;
 
 statement ok
 set batch_simplify_on_unique_key = false;
@@ -2242,13 +3194,85 @@ statement ok
 delete from rnk_used_join_on;
 
 statement ok
-insert into rnk_used_join_off select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 2) s on u.k = s.k;
+insert into rnk_used_join_off select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn <= 2) s on u.k = s.k;
 
 statement ok
 set batch_simplify_on_unique_key = true;
 
 statement ok
-insert into rnk_used_join_on select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 2) s on u.k = s.k;
+insert into rnk_used_join_on select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn <= 2) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_kept_join_off;
+
+statement ok
+delete from rnk_kept_join_on;
+
+statement ok
+insert into rnk_kept_join_off select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn <= 2) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_kept_join_on select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn <= 2) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_no_partition_two_off;
+
+statement ok
+delete from rnk_no_partition_two_on;
+
+statement ok
+insert into rnk_no_partition_two_off select k, count(*) as n from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn <= 2 group by k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_no_partition_two_on select k, count(*) as n from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn <= 2 group by k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_no_partition_scalar_off;
+
+statement ok
+delete from rnk_no_partition_scalar_on;
+
+statement ok
+insert into rnk_no_partition_scalar_off select count(*) as n, max(sw) as sw from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 1;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_no_partition_scalar_on select count(*) as n, max(sw) as sw from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 1;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_later_rows_off;
+
+statement ok
+delete from rnk_later_rows_on;
+
+statement ok
+insert into rnk_later_rows_off select k, count(*) as n from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn > 1 group by k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_later_rows_on select k, count(*) as n from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn > 1 group by k;
 
 statement ok
 set batch_simplify_on_unique_key = false;
@@ -2337,14 +3361,6 @@ select
 
 query III
 select
-  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_rank_on group by k, n except select k, n, count(*) as rnk_rows from rnk_rank_off group by k, n) x),
-  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_rank_off group by k, n except select k, n, count(*) as rnk_rows from rnk_rank_on group by k, n) y),
-  (select count(*) from rnk_rank_on) - (select count(*) from rnk_rank_off);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select k, n, count(*) as rnk_rows from rnk_second_row_on group by k, n except select k, n, count(*) as rnk_rows from rnk_second_row_off group by k, n) x),
   (select count(*) from (select k, n, count(*) as rnk_rows from rnk_second_row_off group by k, n except select k, n, count(*) as rnk_rows from rnk_second_row_on group by k, n) y),
   (select count(*) from rnk_second_row_on) - (select count(*) from rnk_second_row_off);
@@ -2353,9 +3369,49 @@ select
 
 query III
 select
-  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_no_partition_on group by k, n except select k, n, count(*) as rnk_rows from rnk_no_partition_off group by k, n) x),
-  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_no_partition_off group by k, n except select k, n, count(*) as rnk_rows from rnk_no_partition_on group by k, n) y),
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_second_join_on group by id, x except select id, x, count(*) as rnk_rows from rnk_second_join_off group by id, x) x),
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_second_join_off group by id, x except select id, x, count(*) as rnk_rows from rnk_second_join_on group by id, x) y),
+  (select count(*) from rnk_second_join_on) - (select count(*) from rnk_second_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as rnk_rows from rnk_third_used_join_on group by id, v except select id, v, count(*) as rnk_rows from rnk_third_used_join_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as rnk_rows from rnk_third_used_join_off group by id, v except select id, v, count(*) as rnk_rows from rnk_third_used_join_on group by id, v) y),
+  (select count(*) from rnk_third_used_join_on) - (select count(*) from rnk_third_used_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select k, n, sw, count(*) as rnk_rows from rnk_no_partition_on group by k, n, sw except select k, n, sw, count(*) as rnk_rows from rnk_no_partition_off group by k, n, sw) x),
+  (select count(*) from (select k, n, sw, count(*) as rnk_rows from rnk_no_partition_off group by k, n, sw except select k, n, sw, count(*) as rnk_rows from rnk_no_partition_on group by k, n, sw) y),
   (select count(*) from rnk_no_partition_on) - (select count(*) from rnk_no_partition_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select k, v, w, count(*) as rnk_rows from rnk_no_partition_second_on group by k, v, w except select k, v, w, count(*) as rnk_rows from rnk_no_partition_second_off group by k, v, w) x),
+  (select count(*) from (select k, v, w, count(*) as rnk_rows from rnk_no_partition_second_off group by k, v, w except select k, v, w, count(*) as rnk_rows from rnk_no_partition_second_on group by k, v, w) y),
+  (select count(*) from rnk_no_partition_second_on) - (select count(*) from rnk_no_partition_second_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_no_partition_join_on group by id, x except select id, x, count(*) as rnk_rows from rnk_no_partition_join_off group by id, x) x),
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_no_partition_join_off group by id, x except select id, x, count(*) as rnk_rows from rnk_no_partition_join_on group by id, x) y),
+  (select count(*) from rnk_no_partition_join_on) - (select count(*) from rnk_no_partition_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_rank_on group by k, n except select k, n, count(*) as rnk_rows from rnk_rank_off group by k, n) x),
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_rank_off group by k, n except select k, n, count(*) as rnk_rows from rnk_rank_on group by k, n) y),
+  (select count(*) from rnk_rank_on) - (select count(*) from rnk_rank_off);
 ----
 0 0 0
 
@@ -2388,6 +3444,38 @@ select
   (select count(*) from (select id, v, count(*) as rnk_rows from rnk_used_join_on group by id, v except select id, v, count(*) as rnk_rows from rnk_used_join_off group by id, v) x),
   (select count(*) from (select id, v, count(*) as rnk_rows from rnk_used_join_off group by id, v except select id, v, count(*) as rnk_rows from rnk_used_join_on group by id, v) y),
   (select count(*) from rnk_used_join_on) - (select count(*) from rnk_used_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_kept_join_on group by id, x except select id, x, count(*) as rnk_rows from rnk_kept_join_off group by id, x) x),
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_kept_join_off group by id, x except select id, x, count(*) as rnk_rows from rnk_kept_join_on group by id, x) y),
+  (select count(*) from rnk_kept_join_on) - (select count(*) from rnk_kept_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_no_partition_two_on group by k, n except select k, n, count(*) as rnk_rows from rnk_no_partition_two_off group by k, n) x),
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_no_partition_two_off group by k, n except select k, n, count(*) as rnk_rows from rnk_no_partition_two_on group by k, n) y),
+  (select count(*) from rnk_no_partition_two_on) - (select count(*) from rnk_no_partition_two_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select n, sw, count(*) as rnk_rows from rnk_no_partition_scalar_on group by n, sw except select n, sw, count(*) as rnk_rows from rnk_no_partition_scalar_off group by n, sw) x),
+  (select count(*) from (select n, sw, count(*) as rnk_rows from rnk_no_partition_scalar_off group by n, sw except select n, sw, count(*) as rnk_rows from rnk_no_partition_scalar_on group by n, sw) y),
+  (select count(*) from rnk_no_partition_scalar_on) - (select count(*) from rnk_no_partition_scalar_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_later_rows_on group by k, n except select k, n, count(*) as rnk_rows from rnk_later_rows_off group by k, n) x),
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_later_rows_off group by k, n except select k, n, count(*) as rnk_rows from rnk_later_rows_on group by k, n) y),
+  (select count(*) from rnk_later_rows_on) - (select count(*) from rnk_later_rows_off);
 ----
 0 0 0
 
@@ -2582,24 +3670,6 @@ statement ok
 set batch_simplify_on_unique_key = false;
 
 statement ok
-delete from rnk_rank_off;
-
-statement ok
-delete from rnk_rank_on;
-
-statement ok
-insert into rnk_rank_off select k, count(*) as n from (select k, v, rank() over (partition by k order by v) as rk from rnk_t) s where rk = 1 group by k;
-
-statement ok
-set batch_simplify_on_unique_key = true;
-
-statement ok
-insert into rnk_rank_on select k, count(*) as n from (select k, v, rank() over (partition by k order by v) as rk from rnk_t) s where rk = 1 group by k;
-
-statement ok
-set batch_simplify_on_unique_key = false;
-
-statement ok
 delete from rnk_second_row_off;
 
 statement ok
@@ -2618,19 +3688,109 @@ statement ok
 set batch_simplify_on_unique_key = false;
 
 statement ok
+delete from rnk_second_join_off;
+
+statement ok
+delete from rnk_second_join_on;
+
+statement ok
+insert into rnk_second_join_off select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 2) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_second_join_on select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 2) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_third_used_join_off;
+
+statement ok
+delete from rnk_third_used_join_on;
+
+statement ok
+insert into rnk_third_used_join_off select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 3) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_third_used_join_on select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 3) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
 delete from rnk_no_partition_off;
 
 statement ok
 delete from rnk_no_partition_on;
 
 statement ok
-insert into rnk_no_partition_off select k, count(*) as n from (select k, v, row_number() over (order by v, id) as rn from rnk_t) s where rn = 1 group by k;
+insert into rnk_no_partition_off select k, count(*) as n, max(sw) as sw from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 1 group by k;
 
 statement ok
 set batch_simplify_on_unique_key = true;
 
 statement ok
-insert into rnk_no_partition_on select k, count(*) as n from (select k, v, row_number() over (order by v, id) as rn from rnk_t) s where rn = 1 group by k;
+insert into rnk_no_partition_on select k, count(*) as n, max(sw) as sw from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 1 group by k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_no_partition_second_off;
+
+statement ok
+delete from rnk_no_partition_second_on;
+
+statement ok
+insert into rnk_no_partition_second_off select distinct k, v, w from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 2;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_no_partition_second_on select distinct k, v, w from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 2;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_no_partition_join_off;
+
+statement ok
+delete from rnk_no_partition_join_on;
+
+statement ok
+insert into rnk_no_partition_join_off select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn <= 1) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_no_partition_join_on select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn <= 1) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_rank_off;
+
+statement ok
+delete from rnk_rank_on;
+
+statement ok
+insert into rnk_rank_off select k, count(*) as n from (select k, v, rank() over (partition by k order by v) as rk from rnk_t) s where rk = 1 group by k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_rank_on select k, count(*) as n from (select k, v, rank() over (partition by k order by v) as rk from rnk_t) s where rk = 1 group by k;
 
 statement ok
 set batch_simplify_on_unique_key = false;
@@ -2696,13 +3856,85 @@ statement ok
 delete from rnk_used_join_on;
 
 statement ok
-insert into rnk_used_join_off select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 2) s on u.k = s.k;
+insert into rnk_used_join_off select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn <= 2) s on u.k = s.k;
 
 statement ok
 set batch_simplify_on_unique_key = true;
 
 statement ok
-insert into rnk_used_join_on select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn = 2) s on u.k = s.k;
+insert into rnk_used_join_on select u.id, s.v from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn <= 2) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_kept_join_off;
+
+statement ok
+delete from rnk_kept_join_on;
+
+statement ok
+insert into rnk_kept_join_off select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn <= 2) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_kept_join_on select u.id, u.x from rnk_u u left join (select k, v from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn <= 2) s on u.k = s.k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_no_partition_two_off;
+
+statement ok
+delete from rnk_no_partition_two_on;
+
+statement ok
+insert into rnk_no_partition_two_off select k, count(*) as n from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn <= 2 group by k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_no_partition_two_on select k, count(*) as n from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn <= 2 group by k;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_no_partition_scalar_off;
+
+statement ok
+delete from rnk_no_partition_scalar_on;
+
+statement ok
+insert into rnk_no_partition_scalar_off select count(*) as n, max(sw) as sw from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 1;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_no_partition_scalar_on select count(*) as n, max(sw) as sw from (select id, k, k2, v, w, row_number() over (order by v, id) as rn, count(w) over (order by v, id) as sw from rnk_t) s where rn = 1;
+
+statement ok
+set batch_simplify_on_unique_key = false;
+
+statement ok
+delete from rnk_later_rows_off;
+
+statement ok
+delete from rnk_later_rows_on;
+
+statement ok
+insert into rnk_later_rows_off select k, count(*) as n from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn > 1 group by k;
+
+statement ok
+set batch_simplify_on_unique_key = true;
+
+statement ok
+insert into rnk_later_rows_on select k, count(*) as n from (select id, k, k2, v, w, row_number() over (partition by k order by v, id) as rn, count(w) over (partition by k order by v, id) as sw from rnk_t) s where rn > 1 group by k;
 
 statement ok
 set batch_simplify_on_unique_key = false;
@@ -2791,14 +4023,6 @@ select
 
 query III
 select
-  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_rank_on group by k, n except select k, n, count(*) as rnk_rows from rnk_rank_off group by k, n) x),
-  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_rank_off group by k, n except select k, n, count(*) as rnk_rows from rnk_rank_on group by k, n) y),
-  (select count(*) from rnk_rank_on) - (select count(*) from rnk_rank_off);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select k, n, count(*) as rnk_rows from rnk_second_row_on group by k, n except select k, n, count(*) as rnk_rows from rnk_second_row_off group by k, n) x),
   (select count(*) from (select k, n, count(*) as rnk_rows from rnk_second_row_off group by k, n except select k, n, count(*) as rnk_rows from rnk_second_row_on group by k, n) y),
   (select count(*) from rnk_second_row_on) - (select count(*) from rnk_second_row_off);
@@ -2807,9 +4031,49 @@ select
 
 query III
 select
-  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_no_partition_on group by k, n except select k, n, count(*) as rnk_rows from rnk_no_partition_off group by k, n) x),
-  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_no_partition_off group by k, n except select k, n, count(*) as rnk_rows from rnk_no_partition_on group by k, n) y),
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_second_join_on group by id, x except select id, x, count(*) as rnk_rows from rnk_second_join_off group by id, x) x),
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_second_join_off group by id, x except select id, x, count(*) as rnk_rows from rnk_second_join_on group by id, x) y),
+  (select count(*) from rnk_second_join_on) - (select count(*) from rnk_second_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, v, count(*) as rnk_rows from rnk_third_used_join_on group by id, v except select id, v, count(*) as rnk_rows from rnk_third_used_join_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as rnk_rows from rnk_third_used_join_off group by id, v except select id, v, count(*) as rnk_rows from rnk_third_used_join_on group by id, v) y),
+  (select count(*) from rnk_third_used_join_on) - (select count(*) from rnk_third_used_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select k, n, sw, count(*) as rnk_rows from rnk_no_partition_on group by k, n, sw except select k, n, sw, count(*) as rnk_rows from rnk_no_partition_off group by k, n, sw) x),
+  (select count(*) from (select k, n, sw, count(*) as rnk_rows from rnk_no_partition_off group by k, n, sw except select k, n, sw, count(*) as rnk_rows from rnk_no_partition_on group by k, n, sw) y),
   (select count(*) from rnk_no_partition_on) - (select count(*) from rnk_no_partition_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select k, v, w, count(*) as rnk_rows from rnk_no_partition_second_on group by k, v, w except select k, v, w, count(*) as rnk_rows from rnk_no_partition_second_off group by k, v, w) x),
+  (select count(*) from (select k, v, w, count(*) as rnk_rows from rnk_no_partition_second_off group by k, v, w except select k, v, w, count(*) as rnk_rows from rnk_no_partition_second_on group by k, v, w) y),
+  (select count(*) from rnk_no_partition_second_on) - (select count(*) from rnk_no_partition_second_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_no_partition_join_on group by id, x except select id, x, count(*) as rnk_rows from rnk_no_partition_join_off group by id, x) x),
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_no_partition_join_off group by id, x except select id, x, count(*) as rnk_rows from rnk_no_partition_join_on group by id, x) y),
+  (select count(*) from rnk_no_partition_join_on) - (select count(*) from rnk_no_partition_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_rank_on group by k, n except select k, n, count(*) as rnk_rows from rnk_rank_off group by k, n) x),
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_rank_off group by k, n except select k, n, count(*) as rnk_rows from rnk_rank_on group by k, n) y),
+  (select count(*) from rnk_rank_on) - (select count(*) from rnk_rank_off);
 ----
 0 0 0
 
@@ -2845,6 +4109,38 @@ select
 ----
 0 0 0
 
+query III
+select
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_kept_join_on group by id, x except select id, x, count(*) as rnk_rows from rnk_kept_join_off group by id, x) x),
+  (select count(*) from (select id, x, count(*) as rnk_rows from rnk_kept_join_off group by id, x except select id, x, count(*) as rnk_rows from rnk_kept_join_on group by id, x) y),
+  (select count(*) from rnk_kept_join_on) - (select count(*) from rnk_kept_join_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_no_partition_two_on group by k, n except select k, n, count(*) as rnk_rows from rnk_no_partition_two_off group by k, n) x),
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_no_partition_two_off group by k, n except select k, n, count(*) as rnk_rows from rnk_no_partition_two_on group by k, n) y),
+  (select count(*) from rnk_no_partition_two_on) - (select count(*) from rnk_no_partition_two_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select n, sw, count(*) as rnk_rows from rnk_no_partition_scalar_on group by n, sw except select n, sw, count(*) as rnk_rows from rnk_no_partition_scalar_off group by n, sw) x),
+  (select count(*) from (select n, sw, count(*) as rnk_rows from rnk_no_partition_scalar_off group by n, sw except select n, sw, count(*) as rnk_rows from rnk_no_partition_scalar_on group by n, sw) y),
+  (select count(*) from rnk_no_partition_scalar_on) - (select count(*) from rnk_no_partition_scalar_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_later_rows_on group by k, n except select k, n, count(*) as rnk_rows from rnk_later_rows_off group by k, n) x),
+  (select count(*) from (select k, n, count(*) as rnk_rows from rnk_later_rows_off group by k, n except select k, n, count(*) as rnk_rows from rnk_later_rows_on group by k, n) y),
+  (select count(*) from rnk_later_rows_on) - (select count(*) from rnk_later_rows_off);
+----
+0 0 0
+
 # Spot checks: no partition holds two first rows; the counts per key.
 
 query I
@@ -2859,6 +4155,30 @@ select k, n from rnk_count_on order by k;
 2 1
 
 # Cleanup.
+
+statement ok
+drop table rnk_later_rows_on;
+
+statement ok
+drop table rnk_later_rows_off;
+
+statement ok
+drop table rnk_no_partition_scalar_on;
+
+statement ok
+drop table rnk_no_partition_scalar_off;
+
+statement ok
+drop table rnk_no_partition_two_on;
+
+statement ok
+drop table rnk_no_partition_two_off;
+
+statement ok
+drop table rnk_kept_join_on;
+
+statement ok
+drop table rnk_kept_join_off;
 
 statement ok
 drop table rnk_used_join_on;
@@ -2885,22 +4205,46 @@ statement ok
 drop table rnk_other_filter_off;
 
 statement ok
+drop table rnk_rank_on;
+
+statement ok
+drop table rnk_rank_off;
+
+statement ok
+drop table rnk_no_partition_join_on;
+
+statement ok
+drop table rnk_no_partition_join_off;
+
+statement ok
+drop table rnk_no_partition_second_on;
+
+statement ok
+drop table rnk_no_partition_second_off;
+
+statement ok
 drop table rnk_no_partition_on;
 
 statement ok
 drop table rnk_no_partition_off;
 
 statement ok
+drop table rnk_third_used_join_on;
+
+statement ok
+drop table rnk_third_used_join_off;
+
+statement ok
+drop table rnk_second_join_on;
+
+statement ok
+drop table rnk_second_join_off;
+
+statement ok
 drop table rnk_second_row_on;
 
 statement ok
 drop table rnk_second_row_off;
-
-statement ok
-drop table rnk_rank_on;
-
-statement ok
-drop table rnk_rank_off;
 
 statement ok
 drop table rnk_group_superset_on;

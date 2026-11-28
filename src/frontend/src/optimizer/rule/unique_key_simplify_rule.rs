@@ -52,7 +52,7 @@ type Key = BTreeSet<usize>;
 /// - `Values` with at most one row, `Limit` of at most one row: the empty key.
 /// - `Filter`, `Share`, `Limit`: the keys of the input, whose rows they only select.
 /// - `Filter` over an `OverWindow`: also the partition columns of a `row_number()` that it keeps
-///   at 1 (see [`first_row_number_keys`]).
+///   at a single number, the empty key without `PARTITION BY` (see [`single_row_number_keys`]).
 /// - `OverWindow`: the keys of the input, whose rows and columns it outputs first.
 /// - `TopN`: the keys of the input, and the group key if it keeps one row per group.
 /// - `Dedup`: the keys of the input, and the columns it deduplicates on.
@@ -146,7 +146,7 @@ fn derive_unique_keys(plan: &PlanRef, memo: &mut HashMap<PlanNodeId, Vec<Key>>) 
     };
     if let Some(filter) = plan.as_logical_filter() {
         let mut keys = input_keys(memo);
-        keys.extend(first_row_number_keys(filter));
+        keys.extend(single_row_number_keys(filter));
         return keys;
     }
     if plan.as_logical_share().is_some() || plan.as_logical_over_window().is_some() {
@@ -175,14 +175,14 @@ fn derive_unique_keys(plan: &PlanRef, memo: &mut HashMap<PlanNodeId, Vec<Key>>) 
 }
 
 /// The keys that a filter over an over window gets from `row_number()`: the partition columns
-/// of each `row_number()` that a conjunct of the filter keeps at 1 (`= 1`, `<= 1` or `< 2`, the
-/// constant on either side). `row_number()` numbers the rows of each partition 1, 2, 3...
+/// of each `row_number()` that a conjunct of the filter keeps at a single value (`= n`, see
+/// [`column_kept_at_one_value`]). `row_number()` numbers the rows of each partition 1, 2, 3...
 /// without ties, so at most one row of a partition passes, and two rows that agree on the
-/// partition columns (`NULL` included, a partition like any other) are the same row.
+/// partition columns (`NULL` included, a partition like any other) are the same row. Without
+/// `PARTITION BY` the whole input is one partition: at most one row passes, the empty key.
 ///
-/// Not for `rank()` or `dense_rank()`, whose ties all get 1, nor for a `row_number()` without
-/// `PARTITION BY`.
-fn first_row_number_keys(filter: &LogicalFilter) -> Vec<Key> {
+/// Not for `rank()` or `dense_rank()`, whose ties get the same number.
+fn single_row_number_keys(filter: &LogicalFilter) -> Vec<Key> {
     let input = filter.input();
     let Some(over_window) = input.as_logical_over_window() else {
         return vec![];
@@ -194,26 +194,25 @@ fn first_row_number_keys(filter: &LogicalFilter) -> Vec<Key> {
         .conjunctions
         .iter()
         .filter_map(|conjunct| {
-            let column = column_kept_at_one(conjunct)?;
+            let column = column_kept_at_one_value(conjunct)?;
             let function = over_window
                 .window_functions()
                 .get(column.checked_sub(input_len)?)?;
-            (function.kind == WindowFuncKind::RowNumber && !function.partition_by.is_empty()).then(
-                || {
-                    function
-                        .partition_by
-                        .iter()
-                        .map(|i| i.index)
-                        .collect::<Key>()
-                },
-            )
+            (function.kind == WindowFuncKind::RowNumber).then(|| {
+                function
+                    .partition_by
+                    .iter()
+                    .map(|i| i.index)
+                    .collect::<Key>()
+            })
         })
         .collect()
 }
 
-/// The column `c` of a conjunct `c = 1`, `c <= 1` or `c < 2` (or the same comparison written
-/// the other way round), on an integer constant.
-fn column_kept_at_one(conjunct: &ExprImpl) -> Option<usize> {
+/// The column `c` of a conjunct that lets at most one value of `c` pass: `c = n` on any integer
+/// constant `n`, `c <= 1` or `c < 2` (each written either way round). The last two keep at
+/// most the value 1 of a row number, which starts at 1.
+fn column_kept_at_one_value(conjunct: &ExprImpl) -> Option<usize> {
     let to_int = |value: ExprImpl| -> Option<i64> {
         let value = value
             .cast_implicit(&DataType::Int64)
@@ -223,7 +222,7 @@ fn column_kept_at_one(conjunct: &ExprImpl) -> Option<usize> {
         Some(*value.as_int64())
     };
     if let Some((input_ref, value)) = conjunct.as_eq_const() {
-        return (to_int(value)? == 1).then_some(input_ref.index());
+        return to_int(value).map(|_| input_ref.index());
     }
     let (input_ref, comparison, value) = conjunct.as_comparison_const()?;
     let value = to_int(value)?;
