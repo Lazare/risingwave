@@ -504,6 +504,19 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_spill_on_memory_wait: bool,
 
+    // Rule `ValuesJoinInlineRule`.
+    /// In the plan of a new streaming job, replace a join with a small relation of constant rows
+    /// (`VALUES` of at most 64 rows) with a filter (`IN` list) and a projection (`CASE`) of the
+    /// other side: semi and anti joins always; inner and outer joins when a key of the constant
+    /// rows, compared with `=`, holds distinct literals (each row matches at most one constant
+    /// row). No join state and no fragment for the constant rows. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    streaming_inline_values_join: bool,
+
+    /// The same as `streaming_inline_values_join`, for batch queries. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_inline_values_join: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,

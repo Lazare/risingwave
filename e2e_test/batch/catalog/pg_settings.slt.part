@@ -33,6 +33,7 @@ user batch_enable_sort_agg
 user batch_expr_strict_mode
 user batch_factor_union_join
 user batch_hnsw_ef_search
+user batch_inline_values_join
 user batch_merge_repeated_lookups
 user batch_merge_union_scans
 user batch_narrow_value_aggregates
@@ -98,6 +99,7 @@ user streaming_enable_delta_join
 user streaming_enable_unaligned_join
 user streaming_factor_union_join
 user streaming_force_filter_inside_join
+user streaming_inline_values_join
 user streaming_join_encoding
 user streaming_max_parallelism
 user streaming_merge_lookups_under_dedup

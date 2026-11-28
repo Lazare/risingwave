@@ -250,6 +250,9 @@ pub use widened_subplan_share::*;
 // Rule `StatusLadderCaseRule` (`streaming_status_ladder_case`, `batch_status_ladder_case`).
 mod status_ladder_case_rule;
 pub use status_ladder_case_rule::*;
+// Rule `ValuesJoinInlineRule` (`batch_inline_values_join`, `streaming_inline_values_join`).
+mod values_join_inline_rule;
+pub use values_join_inline_rule::*;
 mod repeated_lookup_merge_rule;
 pub use repeated_lookup_merge_rule::*;
 // The default branch of a top-1 over a union, the unused joins below an operator that does not
@@ -427,6 +430,7 @@ macro_rules! for_all_rules {
             , { SelfAggregateJoinRule }
             , { StackedAggOverUnionMergeRule }
             , { StatusLadderCaseRule }
+            , { ValuesJoinInlineRule }
             , { BushyTreeJoinOrderingRule }
             , { StreamProjectMergeRule }
             , { StreamProjectSplitRule }

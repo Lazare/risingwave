@@ -46,6 +46,7 @@ own rules.
 | BP | Batch: second pass of the reductions on keys after the stages that create aggregations (`batch_reduce_keys_after_conversions`) | done (prototype, branch `proto/plan-reduction-batch-pass2`, see "BP and BT" below) |
 | BT | Batch: `row_number() <= n` per partition becomes a top-n per group, small `n` only (`batch_over_window_to_topn`) | done (prototype, branch `proto/plan-reduction-batch-pass2`, see "BP and BT" below) |
 | BU | Batch: `UNION ALL` run in parallel tasks instead of one (`batch_distributed_union`) | done (prototype, branch `proto/plan-reduction-batch-union-dist`, see "BU" below) |
+| IV | Join with a small constant `VALUES` becomes a filter (`IN` list) and a `CASE` (`batch_inline_values_join`, `streaming_inline_values_join`; survey rule 8) | done (prototype, branch `proto/plan-reduction-or-values`), see "IV" below |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -1399,6 +1400,79 @@ projection; without the variable, or without a union below, they convert their i
   empty branches, after updates and deletes, and with a single branch left).
 - Not done: a round-robin exchange, which would let a union with no requirement keep its inputs
   in their stages without hashing; a partial aggregation pushed into each branch.
+
+### IV. Join with a small constant `VALUES` (added on 2026-11-28, survey rule 8)
+
+Source: PostgreSQL 18 `convert_VALUES_to_ANY` (`x IN (VALUES (1), (2))` becomes `x = ANY(...)`).
+The prototype's `ConstantRowJoinRule` (G) only handled an inner join with *one* constant row; a
+join with several rows stayed a hash join, which in streaming keeps the whole other input in its
+state, plus a fragment for the constant rows.
+
+```sql
+create table t (k int primary key, code varchar, x int);
+with m(code, label) as (values ('a', 'Alpha'), ('b', 'Beta'))
+select t.k, m.label from t left join m on t.code = m.code;
+-- IV: Project(t.k, CASE WHEN t.code = 'a' THEN 'Alpha' WHEN t.code = 'b' THEN 'Beta' END) <- Scan(t)
+select * from t where t.code in (select c from (values ('a'), ('b')) v(c));
+-- IV: Filter(t.code IN ('a', 'b')) <- Scan(t)
+```
+
+**Rule** (`ValuesJoinInlineRule`, variables `batch_inline_values_join` and
+`streaming_inline_values_join`, default false). One side of the join is a `LogicalValues` of 1 to
+64 rows of constants of the declared types (read directly or through a share); it must be the side
+whose rows are neither preserved nor output on their own: either side of an inner join, the right
+side of a left outer, left semi or left anti join, the left side of their right counterparts. Let
+`cond_i` be the conjuncts of the condition that refer to the constant side, with the values of row
+`i` in place of its columns, and `kept` the conjuncts on the other side only. Every conjunct must
+be pure, since `cond_i` is evaluated once per row.
+
+- Semi join: `Filter(kept AND (cond_1 OR ... OR cond_n))`; anti join:
+  `Filter((kept AND (cond_1 OR ... OR cond_n)) IS NOT TRUE)`. A row of the kept side is output by
+  the semi join iff some constant row satisfies the condition, i.e. iff some `kept AND cond_i` is
+  true; the anti join keeps it iff none is (`IS NOT TRUE`: a condition that is `NULL` does not
+  match, as in the join). Duplicate constant rows do not change either. Any condition qualifies,
+  ranges included.
+- Inner join: a row of the kept side must match at most one constant row. The rule requires a
+  conjunct `k = v.c` (the key), `k` a column of the kept side and `c` one of the constant side of
+  the same type, a type whose equal values are identical (integers, `varchar`, `boolean`, dates
+  and times, see `is_simple_type`), with distinct literal values. The join becomes
+  `Project(Filter(kept AND matched))` where each column `j` of the constant side is
+  `CASE WHEN cond_1 THEN r_1[j] ... WHEN cond_n THEN r_n[j] END`: exactly one `cond_i` is true on a
+  row that passes the filter, the one of the row it joined. The key column is `k` itself (equal,
+  hence identical), a column with the same value in every row is that value.
+- Left join (constant side on the right, or a right join with it on the left): no filter, and the
+  guards of the `CASE` are `kept AND cond_i`, the whole `ON` condition for row `i`. A row without
+  a match gets `NULL` (no `ELSE`), which is the padding of the join.
+- Rows whose key, or any column of the constant side compared with `=`, is a `NULL` literal never
+  match and are dropped first (if none is left the rule does nothing: the rules on empty relations
+  take over). When the only conjunct with the constant side is `k = v.c`, `matched` is the list
+  `k IN (c_1, ..., c_n)` without duplicates (`k = c_1` for one value), which becomes scan ranges on
+  a key in batch; otherwise it is the `OR` of the `cond_i`.
+- `NOT IN` is planned as an anti join on `x = c`; the rule keeps exactly the semantics of that
+  join (`(x IN (...)) IS NOT TRUE`), whatever they are: it only replaces the join, not the planning
+  of `NOT IN`.
+
+**Placement.** Batch and streaming: after the first predicate pushdown (subqueries are unnested and
+`ON` conditions are in place), before join ordering, which would take the constant rows as an
+input; the new filter is pushed down right after. The result has no join state, no exchange and
+no fragment for the constant rows; the constant side has no watermark, the kept side keeps its own.
+
+- Not done: inner and outer joins without a key of distinct literals (a range join, or duplicate
+  keys, would multiply rows: the join is kept); a constant side under a projection or a filter;
+  `decimal`, floats, intervals as keys of inner and outer joins (equal values may print
+  differently, so the key column could not be replaced by `k`); full joins and the preserved side
+  of an outer join (every constant row must be output).
+- Tests: `stream_inline_values_join.yaml`, `batch_inline_values_join.yaml` (semi joins with
+  duplicates and `NULL`s, a single value left, anti joins from `NOT EXISTS` and `NOT IN`, range
+  conditions, inner joins with the constant side on either side, a constant column, an extra
+  condition, left and right joins, a guard of the preserved side, a `NULL` key, a CTE read twice,
+  a side with a watermark, 64 rows; kept: duplicate keys, a `decimal` key, the preserved side, full
+  join, only `NULL` keys, 65 rows, no equality, a volatile condition; off by default), and the
+  differentials `e2e_test/batch/inline_values_join.gen.py` and
+  `e2e_test/streaming/inline_values_join.gen.py` (29 and 28 queries, results with the variable off
+  and on, and the batch query, compared as multisets over `NULL` codes, duplicate rows, upserts,
+  updates of the key and of the flag, deletes, no match at all and empty tables; the range
+  queries, which streaming can only plan with the rule, are compared with batch only).
 
 ## Not for now: sharing between materialized views
 

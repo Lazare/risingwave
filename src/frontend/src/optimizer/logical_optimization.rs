@@ -1184,6 +1184,26 @@ impl LogicalOptimizer {
         // Predicate Push-down
         plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
 
+        // Rule `ValuesJoinInlineRule` (`streaming_inline_values_join`): a join with a small
+        // relation of constant rows becomes a filter (`IN` list) and a projection (`CASE`) of its
+        // other side. Before join ordering, which would take the constant rows as one of its
+        // inputs; the new filter is then pushed down. On demand only.
+        if ctx.session_ctx().config().streaming_inline_values_join()
+            && !ctx.is_stream_prune_baseline()
+        {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&OptimizationStage::new(
+                "Inline Values Join For Stream",
+                vec![ValuesJoinInlineRule::create()],
+                ApplyOrder::BottomUp,
+            ))?;
+            let applied = ctx.total_rule_applied() - applied_before;
+            if applied > 0 {
+                ctx.add_stream_prune_rule_applied(applied);
+                plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+            }
+        }
+
         if plan.ctx().session_ctx().config().enable_join_ordering() {
             // Merge inner joins and intermediate filters into multijoin
             // This rule assumes that filters have already been pushed down near to
@@ -1698,6 +1718,21 @@ impl LogicalOptimizer {
             if ctx.total_rule_applied() != applied_before {
                 plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
                 plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
+            }
+        }
+
+        // Rule `ValuesJoinInlineRule` (`batch_inline_values_join`): a join with a small relation
+        // of constant rows becomes a filter (`IN` list, scan ranges) and a projection (`CASE`) of
+        // its other side, before join ordering. The new filter is then pushed down.
+        if ctx.session_ctx().config().batch_inline_values_join() {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&OptimizationStage::new(
+                "Inline Values Join For Batch",
+                vec![ValuesJoinInlineRule::create()],
+                ApplyOrder::BottomUp,
+            ))?;
+            if ctx.total_rule_applied() != applied_before {
+                plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
             }
         }
 
