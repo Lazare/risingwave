@@ -1,7 +1,7 @@
 # Sink groups: shared connection pool and `last` sinks
 
-Status: first version on branch `feat/sink-group` (base `feat/selective-barriers`), Postgres sink
-only.
+Status: first version on branch `fork/postgres-sink-group` (base `v3.1.2`, independent of selective
+barriers), Postgres sink only.
 
 ## Goal
 
