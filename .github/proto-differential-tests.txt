@@ -3,3 +3,4 @@ fncbatch batch/fold_null_contradictions 60
 fncstream streaming/fold_null_contradictions 60
 silbatch batch/simplify_in_lists_and_coalesce 45
 silstream streaming/simplify_in_lists_and_coalesce 45
+emptybuild batch/join/hash_join_empty_build_side 30

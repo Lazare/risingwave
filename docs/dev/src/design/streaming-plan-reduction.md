@@ -73,6 +73,7 @@ default.
 | SU | Streaming: inputs of a `UNION ALL` shuffled directly by the key the operator above needs, when that key is part of the stream key of the union (`streaming_distributed_union`) | done (prototype, branch `proto/plan-reduction-stream-union-dist`, see "SU" below); key outside the stream key not done (see "SU") |
 | NC | `e IS NULL` together with a conjunct that is strict in `e` (comparison, `LIKE`, regular expression, arithmetic, cast...), for any deterministic `e` (a `COALESCE` of columns...): the filter, scan or join matches nothing (`batch_fold_null_contradictions`, `streaming_fold_null_contradictions`) | done (prototype, branch `proto/plan-reduction-contradictions`), see "NC" below |
 | IL | Intersection of the `IN` lists / equalities on the same expression, repeated arguments of `COALESCE` removed (`batch_simplify_in_lists_and_coalesce`, `streaming_simplify_in_lists_and_coalesce`) | done (prototype, branch `proto/plan-reduction-contradictions`), see "IL" below |
+| EB | Batch executor: a hash join whose build side holds no key that can match does not execute its probe side, when the output can not depend on it and the probe side reads nothing from other tasks | done (unconditional, branch `proto/plan-reduction-contradictions`), see "EB" below |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -2844,6 +2845,52 @@ different expressions, `numeric` / floating point lists, volatile arguments of `
   `stream_simplify_in_lists_and_coalesce.yaml`; differential tests
   `e2e_test/batch/simplify_in_lists_and_coalesce` and
   `e2e_test/streaming/simplify_in_lists_and_coalesce`.
+
+### EB. Batch executor: empty build side of a hash join (added on 2026-11-28, done on the branch)
+
+The batch hash join reads its build (right) side into a hash table, then streams its probe (left)
+side. When the build side turns out to hold no key that can match (no row at all, or only `NULL`
+keys that are not compared with `IS NOT DISTINCT FROM`), the output of some join types is empty
+whatever the probe side, which was still read to its end:
+
+| join type | output with no matching build key | probe side needed |
+|---|---|---|
+| inner, as-of inner, left semi, right semi | empty | no |
+| right outer, right anti | the build rows, padded / unmatched | only if there are build rows |
+| left outer, left anti, full outer, as-of left outer | every probe row | yes |
+
+**What EB does (unconditional).** After the hash table is built (not spilling), when the table is
+empty and the join is inner / as-of inner / left semi / right semi, or the build side has no row
+and the join is right outer / right anti, the executor ends without executing its probe side,
+**only when the probe side runs entirely in the task**: the builder walks the plan node of the
+probe side and refuses any `Exchange` / `MergeSortExchange` in it. The partitions of a spilled join
+read their probe side from a spill file of the task and qualify too.
+
+Why only then: an exchange that is never executed never takes the output of the tasks of the stage
+below; those tasks block on a full channel once their rows exceed its buffer, their stage never
+completes, and the query keeps their memory until it is cancelled (the batch query scheduler waits
+for every stage). Dropping an exchange *after* it was opened is fine (the producer sees a closed channel and
+finishes), but opening it means polling the probe side, which runs every blocking operator below
+first. So, in distributed plans, EB applies to the joins whose probe side is a pipeline over a
+table already distributed by the join key (a self-join on a key, co-located scans), not to a probe
+side behind a shuffle. The general fix is in the batch query scheduler (stop a stage once every
+consumer of its output has completed), left for later: it changes the completion protocol of
+queries.
+
+**Correctness.** Exactly the definitions of the join types above; the probe side has no side
+effect (a read-only plan in the task). No variable: the change only skips work whose result is
+discarded, and only in the shape where nothing waits for it.
+
+- Tests: unit tests in `hash_join.rs` (`test_empty_build_side_skips_probe_side`,
+  `test_build_side_without_matching_key`: every join type, with and without a probe side in the
+  task, `NULL` build keys); e2e `e2e_test/batch/join/hash_join_empty_build_side.slt` (local and
+  distributed modes).
+- Nested loop join, the converse (empty buffered left side): not done. Both inputs of a batch
+  nested loop join are always behind an exchange (it runs as a single task), so the same reason
+  forbids leaving its right side unexecuted.
+- Effect on the sample workload: none on the data test that motivated it. Its join with the empty
+  side reads the large side through exchanges (and in the replayed plan the large side is the build
+  side); NC removes the work there at planning time instead.
 
 ## Not for now: sharing between materialized views
 
