@@ -474,3 +474,54 @@
     select b, y from m where b > 0;
   expected_outputs:
   - batch_plan
+
+# The subqueries of one select list are split into one apply each only when all of them but at
+# most one are then unnested alone: otherwise each would join its own copy of the domain (a batch
+# plan does not share them), and the outer side of each apply would contain the applies before it.
+- name: unnesting - one of two subqueries is not unnested alone, it joins the only domain
+  before: [tables, setup_unnest]
+  sql: |
+    select p.id,
+      (select sum(r.x) from r where r.pid = p.id) as s,
+      (select count(*) from r where r.pid = p.id and r.x > p.v) as c
+    from p;
+  expected_outputs:
+  - batch_plan
+- name: unnesting kept - two of three subqueries are not unnested alone, one apply for all
+  before: [tables, setup_unnest]
+  sql: |
+    select p.id,
+      (select sum(r.x) from r where r.pid = p.id) as s,
+      (select count(*) from r where r.pid = p.id and r.x > p.v) as c,
+      (select max(r.x) from r where r.pid = p.id and r.x < p.g) as m
+    from p;
+  expected_outputs:
+  - batch_plan
+- name: unnesting kept - ARRAY subqueries over functions of the outer row, one apply for all
+  before: [tables, setup_unnest]
+  sql: |
+    with input as (select 'empty' as test_case, ('{}'::jsonb) as item)
+    select test_case,
+      case when jsonb_path_query_first(item, '$.a') is null then null
+        else array(select v #>> '{}' from jsonb_array_elements(jsonb_path_query_first(item, '$.a')) as x(v) order by 1) end as a,
+      case when jsonb_path_query_first(item, '$.b') is null then null
+        else array(select (v #>> '{}')::bigint from jsonb_array_elements(jsonb_path_query_first(item, '$.b')) as x(v) order by 1) end as b,
+      case when jsonb_path_query_first(item, '$.c') is null then null
+        else array(select (v #>> '{}')::float from jsonb_array_elements(jsonb_path_query_first(item, '$.c')) as x(v) order by 1) end as c
+    from input;
+  expected_outputs:
+  - batch_plan
+- name: lateral - the same ARRAY subqueries, each evaluated on the outer row
+  before: [tables, setup_unnest, setup_lateral]
+  sql: |
+    with input as (select 'empty' as test_case, ('{}'::jsonb) as item)
+    select test_case,
+      case when jsonb_path_query_first(item, '$.a') is null then null
+        else array(select v #>> '{}' from jsonb_array_elements(jsonb_path_query_first(item, '$.a')) as x(v) order by 1) end as a,
+      case when jsonb_path_query_first(item, '$.b') is null then null
+        else array(select (v #>> '{}')::bigint from jsonb_array_elements(jsonb_path_query_first(item, '$.b')) as x(v) order by 1) end as b,
+      case when jsonb_path_query_first(item, '$.c') is null then null
+        else array(select (v #>> '{}')::float from jsonb_array_elements(jsonb_path_query_first(item, '$.c')) as x(v) order by 1) end as c
+    from input;
+  expected_outputs:
+  - batch_plan

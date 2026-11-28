@@ -292,3 +292,17 @@
           │ └─BatchScan { table: ta, columns: [ta.x, ta.p], distribution: UpstreamHashShard(ta.x) }
           └─BatchExchange { order: [], dist: HashShard(tb.y) }
             └─BatchScan { table: tb, columns: [tb.y, tb.q], distribution: SomeShard }
+- name: an IN list of constant rows is copied onto a primary key (one scan with ranges)
+  before:
+  - setup
+  sql: |
+    set batch_transitive_predicates = true;
+    set batch_enable_lookup_join = false;
+    select v.x, o.amount from (values (1), (2), (3)) v(x) join o on o.id = v.x;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: Inner, predicate: *VALUES*_0.column_0 = o.id, output: [*VALUES*_0.column_0, o.amount] }
+      ├─BatchExchange { order: [], dist: HashShard(*VALUES*_0.column_0) }
+      │ └─BatchValues { rows: [[1:Int32], [2:Int32], [3:Int32]] }
+      └─BatchExchange { order: [], dist: HashShard(o.id) }
+        └─BatchScan { table: o, columns: [o.id, o.amount], scan_ranges: [o.id = Int32(1), o.id = Int32(2), o.id = Int32(3)], distribution: UpstreamHashShard(o.id) }

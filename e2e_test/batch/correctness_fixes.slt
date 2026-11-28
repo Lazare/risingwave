@@ -492,3 +492,58 @@ select id, k::varchar, f::varchar from cf_n;
 
 statement ok
 drop table cf_n;
+
+# ---------------------------------------------------------------------------------------------
+# `enable_mv_selection`: a batch query answered from a materialized view reads its visible
+# columns, also when a hidden column (the row id of the table) comes before one of them.
+# ---------------------------------------------------------------------------------------------
+
+statement ok
+create table cf_mt (x int, y int);
+
+statement ok
+insert into cf_mt values (1, 10), (2, 10), (3, 10), (4, 10), (5, 20), (6, 20);
+
+statement ok
+create materialized view cf_mt_rn as select x, y, row_number() over w from cf_mt window w as (partition by y order by x);
+
+statement ok
+set enable_mv_selection = true;
+
+query III rowsort
+select x, y, row_number() over w from cf_mt window w as (partition by y order by x);
+----
+1 10 1
+2 10 2
+3 10 3
+4 10 4
+5 20 1
+6 20 2
+
+query II rowsort
+select x, y from (select x, y, row_number() over w as rn from cf_mt window w as (partition by y order by x)) where rn <= 3;
+----
+1 10
+2 10
+3 10
+5 20
+6 20
+
+statement ok
+set enable_mv_selection = false;
+
+query III rowsort
+select x, y, row_number() over w from cf_mt window w as (partition by y order by x);
+----
+1 10 1
+2 10 2
+3 10 3
+4 10 4
+5 20 1
+6 20 2
+
+statement ok
+drop materialized view cf_mt_rn;
+
+statement ok
+drop table cf_mt;

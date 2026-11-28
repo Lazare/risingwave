@@ -253,9 +253,19 @@ static STREAM_SIMPLE_UNNESTING_AGG: LazyLock<OptimizationStage> = LazyLock::new(
 // outer join whose padded rows a filter or a join above rejects becomes an inner join, and one
 // filtered on `r.c IS NULL` for a column never `NULL` in a matched row becomes an anti join.
 // Top-down: a join reduced above lets the conditions it pushes down reach the joins below.
+// Before join ordering, an outer join whose padded side is an inner join is not made inner: it is
+// reduced by `REDUCE_OUTER_JOINS_AFTER_JOIN_ORDERING`, which keeps the join order.
 static REDUCE_OUTER_JOINS: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Reduce Outer Joins",
+        vec![OuterJoinReduceRule::create_before_join_ordering()],
+        ApplyOrder::TopDown,
+    )
+});
+
+static REDUCE_OUTER_JOINS_AFTER_JOIN_ORDERING: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Reduce Outer Joins After Join Ordering",
         vec![OuterJoinReduceRule::create()],
         ApplyOrder::TopDown,
     )
@@ -311,7 +321,11 @@ static BATCH_SIMPLE_UNNESTING_AGG: LazyLock<OptimizationStage> = LazyLock::new(|
     OptimizationStage::new(
         "Batch Simple Unnesting of Aggregations",
         vec![
-            ApplyOneRowJoinSplitRule::create(),
+            // Split only when every subquery is then unnested alone: a batch plan copies the
+            // domain of each apply that goes through the general unnesting.
+            ApplyOneRowJoinSplitRule::create_for_batch(
+                PullUpCorrelatedPredicateAggRule::create_for_stream(),
+            ),
             PullUpCorrelatedPredicateAggRule::create_for_stream(),
         ],
         ApplyOrder::BottomUp,
@@ -375,7 +389,8 @@ static BATCH_UNNEST_LATERAL_FUNCTIONS: LazyLock<OptimizationStage> = LazyLock::n
     OptimizationStage::new(
         "Batch Unnest Lateral Functions",
         vec![
-            ApplyOneRowJoinSplitRule::create(),
+            // As above: split only when every subquery is then unnested alone.
+            ApplyOneRowJoinSplitRule::create_for_batch(LateralTableFunctionRule::create_for_batch()),
             LateralTableFunctionRule::create_for_batch(),
         ],
         ApplyOrder::BottomUp,
@@ -972,10 +987,18 @@ static STREAM_SIMPLIFY_ON_UNIQUE_KEY: LazyLock<OptimizationStage> = LazyLock::ne
 // the predicates that hold on every row of a side of a join are copied to its other side through
 // the equalities of the join. Bottom-up, so that a join sees the filters that the rule added below
 // it; the caller pushes the new filters down.
-static TRANSITIVE_PREDICATES: LazyLock<OptimizationStage> = LazyLock::new(|| {
+static STREAM_TRANSITIVE_PREDICATES: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Transitive Predicates",
-        vec![TransitivePredicateRule::create()],
+        vec![TransitivePredicateRule::create_for_stream()],
+        ApplyOrder::BottomUp,
+    )
+});
+
+static BATCH_TRANSITIVE_PREDICATES: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Transitive Predicates",
+        vec![TransitivePredicateRule::create_for_batch()],
         ApplyOrder::BottomUp,
     )
 });
@@ -1537,7 +1560,7 @@ impl LogicalOptimizer {
         {
             for _ in 0..2 {
                 let applied_before = ctx.total_rule_applied();
-                plan = plan.optimize_by_rules(&TRANSITIVE_PREDICATES)?;
+                plan = plan.optimize_by_rules(&STREAM_TRANSITIVE_PREDICATES)?;
                 let applied = ctx.total_rule_applied() - applied_before;
                 if applied == 0 {
                     break;
@@ -1563,6 +1586,24 @@ impl LogicalOptimizer {
                 plan = plan.optimize_by_rules(&BUSHY_TREE_JOIN_ORDERING)?;
             } else {
                 plan = plan.optimize_by_rules(&LEFT_DEEP_JOIN_ORDERING)?;
+            }
+        }
+
+        // Rule `OuterJoinReduceRule` (`streaming_reduce_outer_joins`), second pass: the outer joins
+        // whose padded side is an inner join, left by the pass before join ordering so that they
+        // keep their order. Each round pushes down the conjuncts that a reduced join lets through.
+        if ctx.session_ctx().config().streaming_reduce_outer_joins()
+            && !ctx.is_stream_prune_baseline()
+        {
+            for _ in 0..3 {
+                let applied_before = ctx.total_rule_applied();
+                plan = plan.optimize_by_rules(&REDUCE_OUTER_JOINS_AFTER_JOIN_ORDERING)?;
+                let applied = ctx.total_rule_applied() - applied_before;
+                if applied == 0 {
+                    break;
+                }
+                ctx.add_stream_prune_rule_applied(applied);
+                plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
             }
         }
 
@@ -1925,7 +1966,9 @@ impl LogicalOptimizer {
         // Rule `AggGroupKeyReduceRule` (`streaming_reduce_group_keys`): after the final column
         // pruning, which leaves in the input of an aggregation only the columns that it reads, so
         // that the functional dependencies of the input are those of the columns read. On demand
-        // only. The columns that a replaced aggregate read may no longer be needed.
+        // only. The columns that a replaced aggregate read may no longer be needed. The projections
+        // are removed by the `PROJECT_REMOVE` below only: one more round would pull the
+        // computations of both sides of a join above it (`JoinProjectTransposeRule`).
         if ctx.session_ctx().config().streaming_reduce_group_keys()
             && !ctx.is_stream_prune_baseline()
         {
@@ -1935,7 +1978,6 @@ impl LogicalOptimizer {
             if applied > 0 {
                 ctx.add_stream_prune_rule_applied(applied);
                 plan = Self::column_pruning(plan, explain_trace, &ctx);
-                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
             }
         }
         crate::optimizer::rule::diagnose_repeated_reads(&plan);
@@ -2351,7 +2393,7 @@ impl LogicalOptimizer {
         if ctx.session_ctx().config().batch_transitive_predicates() {
             for _ in 0..2 {
                 let applied_before = ctx.total_rule_applied();
-                plan = plan.optimize_by_rules(&TRANSITIVE_PREDICATES)?;
+                plan = plan.optimize_by_rules(&BATCH_TRANSITIVE_PREDICATES)?;
                 if ctx.total_rule_applied() == applied_before {
                     break;
                 }
@@ -2399,6 +2441,19 @@ impl LogicalOptimizer {
 
             // Reorder multijoin into left-deep join tree.
             plan = plan.optimize_by_rules(&LEFT_DEEP_JOIN_ORDERING)?;
+        }
+
+        // Rule `OuterJoinReduceRule` (`batch_reduce_outer_joins`), second pass: the outer joins
+        // whose padded side is an inner join, which keep their order (see streaming).
+        if ctx.session_ctx().config().batch_reduce_outer_joins() {
+            for _ in 0..3 {
+                let applied_before = ctx.total_rule_applied();
+                plan = plan.optimize_by_rules(&REDUCE_OUTER_JOINS_AFTER_JOIN_ORDERING)?;
+                if ctx.total_rule_applied() == applied_before {
+                    break;
+                }
+                plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+            }
         }
 
         // Predicate Push-down: apply filter pushdown rules again since we pullup all join
@@ -2600,13 +2655,12 @@ impl LogicalOptimizer {
             }
         }
         // Rule `AggGroupKeyReduceRule` (`batch_reduce_group_keys`): after the final column pruning,
-        // as for streaming. On demand.
+        // as for streaming (the `PROJECT_REMOVE` below only). On demand.
         if ctx.session_ctx().config().batch_reduce_group_keys() {
             let applied_before = ctx.total_rule_applied();
             plan = plan.optimize_by_rules(&BATCH_REDUCE_GROUP_KEYS)?;
             if ctx.total_rule_applied() != applied_before {
                 plan = Self::column_pruning(plan, explain_trace, &ctx);
-                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
             }
         }
 

@@ -99,6 +99,12 @@ statement ok
 create table ro_semi_above_on (id int);
 
 statement ok
+create table ro_padded_inner_join_off (id int, v int);
+
+statement ok
+create table ro_padded_inner_join_on (id int, v int);
+
+statement ok
 create table ro_anti_key_off (id int);
 
 statement ok
@@ -462,6 +468,24 @@ set batch_reduce_outer_joins = true;
 
 statement ok
 insert into ro_semi_above_on select t.id from ro_t t left join ro_r r on t.k = r.id where exists (select 1 from ro_s s where s.k = r.c);
+
+statement ok
+set batch_reduce_outer_joins = false;
+
+statement ok
+delete from ro_padded_inner_join_off;
+
+statement ok
+delete from ro_padded_inner_join_on;
+
+statement ok
+insert into ro_padded_inner_join_off select t.id, s.v from ro_t t left join (ro_r r join ro_s s on s.k = r.c) on t.k = r.id where s.v + 1 > 0;
+
+statement ok
+set batch_reduce_outer_joins = true;
+
+statement ok
+insert into ro_padded_inner_join_on select t.id, s.v from ro_t t left join (ro_r r join ro_s s on s.k = r.c) on t.k = r.id where s.v + 1 > 0;
 
 statement ok
 set batch_reduce_outer_joins = false;
@@ -970,6 +994,14 @@ select
 
 query III
 select
+  (select count(*) from (select id, v, count(*) as ro_rows from ro_padded_inner_join_on group by id, v except select id, v, count(*) as ro_rows from ro_padded_inner_join_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as ro_rows from ro_padded_inner_join_off group by id, v except select id, v, count(*) as ro_rows from ro_padded_inner_join_on group by id, v) y),
+  (select count(*) from ro_padded_inner_join_on) - (select count(*) from ro_padded_inner_join_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, count(*) as ro_rows from ro_anti_key_on group by id except select id, count(*) as ro_rows from ro_anti_key_off group by id) x),
   (select count(*) from (select id, count(*) as ro_rows from ro_anti_key_off group by id except select id, count(*) as ro_rows from ro_anti_key_on group by id) y),
   (select count(*) from ro_anti_key_on) - (select count(*) from ro_anti_key_off);
@@ -1390,6 +1422,24 @@ set batch_reduce_outer_joins = true;
 
 statement ok
 insert into ro_semi_above_on select t.id from ro_t t left join ro_r r on t.k = r.id where exists (select 1 from ro_s s where s.k = r.c);
+
+statement ok
+set batch_reduce_outer_joins = false;
+
+statement ok
+delete from ro_padded_inner_join_off;
+
+statement ok
+delete from ro_padded_inner_join_on;
+
+statement ok
+insert into ro_padded_inner_join_off select t.id, s.v from ro_t t left join (ro_r r join ro_s s on s.k = r.c) on t.k = r.id where s.v + 1 > 0;
+
+statement ok
+set batch_reduce_outer_joins = true;
+
+statement ok
+insert into ro_padded_inner_join_on select t.id, s.v from ro_t t left join (ro_r r join ro_s s on s.k = r.c) on t.k = r.id where s.v + 1 > 0;
 
 statement ok
 set batch_reduce_outer_joins = false;
@@ -1898,6 +1948,14 @@ select
 
 query III
 select
+  (select count(*) from (select id, v, count(*) as ro_rows from ro_padded_inner_join_on group by id, v except select id, v, count(*) as ro_rows from ro_padded_inner_join_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as ro_rows from ro_padded_inner_join_off group by id, v except select id, v, count(*) as ro_rows from ro_padded_inner_join_on group by id, v) y),
+  (select count(*) from ro_padded_inner_join_on) - (select count(*) from ro_padded_inner_join_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, count(*) as ro_rows from ro_anti_key_on group by id except select id, count(*) as ro_rows from ro_anti_key_off group by id) x),
   (select count(*) from (select id, count(*) as ro_rows from ro_anti_key_off group by id except select id, count(*) as ro_rows from ro_anti_key_on group by id) y),
   (select count(*) from ro_anti_key_on) - (select count(*) from ro_anti_key_off);
@@ -2328,6 +2386,24 @@ set batch_reduce_outer_joins = true;
 
 statement ok
 insert into ro_semi_above_on select t.id from ro_t t left join ro_r r on t.k = r.id where exists (select 1 from ro_s s where s.k = r.c);
+
+statement ok
+set batch_reduce_outer_joins = false;
+
+statement ok
+delete from ro_padded_inner_join_off;
+
+statement ok
+delete from ro_padded_inner_join_on;
+
+statement ok
+insert into ro_padded_inner_join_off select t.id, s.v from ro_t t left join (ro_r r join ro_s s on s.k = r.c) on t.k = r.id where s.v + 1 > 0;
+
+statement ok
+set batch_reduce_outer_joins = true;
+
+statement ok
+insert into ro_padded_inner_join_on select t.id, s.v from ro_t t left join (ro_r r join ro_s s on s.k = r.c) on t.k = r.id where s.v + 1 > 0;
 
 statement ok
 set batch_reduce_outer_joins = false;
@@ -2836,6 +2912,14 @@ select
 
 query III
 select
+  (select count(*) from (select id, v, count(*) as ro_rows from ro_padded_inner_join_on group by id, v except select id, v, count(*) as ro_rows from ro_padded_inner_join_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as ro_rows from ro_padded_inner_join_off group by id, v except select id, v, count(*) as ro_rows from ro_padded_inner_join_on group by id, v) y),
+  (select count(*) from ro_padded_inner_join_on) - (select count(*) from ro_padded_inner_join_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, count(*) as ro_rows from ro_anti_key_on group by id except select id, count(*) as ro_rows from ro_anti_key_off group by id) x),
   (select count(*) from (select id, count(*) as ro_rows from ro_anti_key_off group by id except select id, count(*) as ro_rows from ro_anti_key_on group by id) y),
   (select count(*) from ro_anti_key_on) - (select count(*) from ro_anti_key_off);
@@ -3274,6 +3358,24 @@ set batch_reduce_outer_joins = true;
 
 statement ok
 insert into ro_semi_above_on select t.id from ro_t t left join ro_r r on t.k = r.id where exists (select 1 from ro_s s where s.k = r.c);
+
+statement ok
+set batch_reduce_outer_joins = false;
+
+statement ok
+delete from ro_padded_inner_join_off;
+
+statement ok
+delete from ro_padded_inner_join_on;
+
+statement ok
+insert into ro_padded_inner_join_off select t.id, s.v from ro_t t left join (ro_r r join ro_s s on s.k = r.c) on t.k = r.id where s.v + 1 > 0;
+
+statement ok
+set batch_reduce_outer_joins = true;
+
+statement ok
+insert into ro_padded_inner_join_on select t.id, s.v from ro_t t left join (ro_r r join ro_s s on s.k = r.c) on t.k = r.id where s.v + 1 > 0;
 
 statement ok
 set batch_reduce_outer_joins = false;
@@ -3782,6 +3884,14 @@ select
 
 query III
 select
+  (select count(*) from (select id, v, count(*) as ro_rows from ro_padded_inner_join_on group by id, v except select id, v, count(*) as ro_rows from ro_padded_inner_join_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as ro_rows from ro_padded_inner_join_off group by id, v except select id, v, count(*) as ro_rows from ro_padded_inner_join_on group by id, v) y),
+  (select count(*) from ro_padded_inner_join_on) - (select count(*) from ro_padded_inner_join_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, count(*) as ro_rows from ro_anti_key_on group by id except select id, count(*) as ro_rows from ro_anti_key_off group by id) x),
   (select count(*) from (select id, count(*) as ro_rows from ro_anti_key_off group by id except select id, count(*) as ro_rows from ro_anti_key_on group by id) y),
   (select count(*) from ro_anti_key_on) - (select count(*) from ro_anti_key_off);
@@ -4196,6 +4306,24 @@ set batch_reduce_outer_joins = true;
 
 statement ok
 insert into ro_semi_above_on select t.id from ro_t t left join ro_r r on t.k = r.id where exists (select 1 from ro_s s where s.k = r.c);
+
+statement ok
+set batch_reduce_outer_joins = false;
+
+statement ok
+delete from ro_padded_inner_join_off;
+
+statement ok
+delete from ro_padded_inner_join_on;
+
+statement ok
+insert into ro_padded_inner_join_off select t.id, s.v from ro_t t left join (ro_r r join ro_s s on s.k = r.c) on t.k = r.id where s.v + 1 > 0;
+
+statement ok
+set batch_reduce_outer_joins = true;
+
+statement ok
+insert into ro_padded_inner_join_on select t.id, s.v from ro_t t left join (ro_r r join ro_s s on s.k = r.c) on t.k = r.id where s.v + 1 > 0;
 
 statement ok
 set batch_reduce_outer_joins = false;
@@ -4704,6 +4832,14 @@ select
 
 query III
 select
+  (select count(*) from (select id, v, count(*) as ro_rows from ro_padded_inner_join_on group by id, v except select id, v, count(*) as ro_rows from ro_padded_inner_join_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as ro_rows from ro_padded_inner_join_off group by id, v except select id, v, count(*) as ro_rows from ro_padded_inner_join_on group by id, v) y),
+  (select count(*) from ro_padded_inner_join_on) - (select count(*) from ro_padded_inner_join_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, count(*) as ro_rows from ro_anti_key_on group by id except select id, count(*) as ro_rows from ro_anti_key_off group by id) x),
   (select count(*) from (select id, count(*) as ro_rows from ro_anti_key_off group by id except select id, count(*) as ro_rows from ro_anti_key_on group by id) y),
   (select count(*) from ro_anti_key_on) - (select count(*) from ro_anti_key_off);
@@ -5124,6 +5260,24 @@ set batch_reduce_outer_joins = true;
 
 statement ok
 insert into ro_semi_above_on select t.id from ro_t t left join ro_r r on t.k = r.id where exists (select 1 from ro_s s where s.k = r.c);
+
+statement ok
+set batch_reduce_outer_joins = false;
+
+statement ok
+delete from ro_padded_inner_join_off;
+
+statement ok
+delete from ro_padded_inner_join_on;
+
+statement ok
+insert into ro_padded_inner_join_off select t.id, s.v from ro_t t left join (ro_r r join ro_s s on s.k = r.c) on t.k = r.id where s.v + 1 > 0;
+
+statement ok
+set batch_reduce_outer_joins = true;
+
+statement ok
+insert into ro_padded_inner_join_on select t.id, s.v from ro_t t left join (ro_r r join ro_s s on s.k = r.c) on t.k = r.id where s.v + 1 > 0;
 
 statement ok
 set batch_reduce_outer_joins = false;
@@ -5632,6 +5786,14 @@ select
 
 query III
 select
+  (select count(*) from (select id, v, count(*) as ro_rows from ro_padded_inner_join_on group by id, v except select id, v, count(*) as ro_rows from ro_padded_inner_join_off group by id, v) x),
+  (select count(*) from (select id, v, count(*) as ro_rows from ro_padded_inner_join_off group by id, v except select id, v, count(*) as ro_rows from ro_padded_inner_join_on group by id, v) y),
+  (select count(*) from ro_padded_inner_join_on) - (select count(*) from ro_padded_inner_join_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, count(*) as ro_rows from ro_anti_key_on group by id except select id, count(*) as ro_rows from ro_anti_key_off group by id) x),
   (select count(*) from (select id, count(*) as ro_rows from ro_anti_key_off group by id except select id, count(*) as ro_rows from ro_anti_key_on group by id) y),
   (select count(*) from ro_anti_key_on) - (select count(*) from ro_anti_key_off);
@@ -5939,6 +6101,12 @@ drop table ro_anti_key_on;
 
 statement ok
 drop table ro_anti_key_off;
+
+statement ok
+drop table ro_padded_inner_join_on;
+
+statement ok
+drop table ro_padded_inner_join_off;
 
 statement ok
 drop table ro_semi_above_on;

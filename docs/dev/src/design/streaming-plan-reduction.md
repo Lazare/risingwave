@@ -1008,6 +1008,15 @@ Filter(IsNull(r.k))                           Project(t.*, NULL)
 - Stages: `REDUCE_OUTER_JOINS` (top-down) right after the first predicate pushdown, before
   `NullSafeEqToEqRule` and join ordering, in up to three rounds, each followed by predicate
   pushdown (a reduced join lets conjuncts through to the joins below).
+- Join order: before join ordering, an outer join that would become inner while its padded side
+  is itself an inner join (below projections and filters) is not reduced; a second pass
+  (`REDUCE_OUTER_JOINS_AFTER_JOIN_ORDERING`, same rounds) reduces it after join ordering, where it
+  keeps its place. Reduced before, the inner join of the padded side was merged into the join
+  ordering of the joins above and ordered again, losing its order and its distribution (often on
+  the keys of the outer join, as after the unnesting of a correlated subquery): one more exchange
+  per such join on the upstream case "improve multi-scalar subqueries optimization time". An outer
+  join over a padded table or aggregation is still reduced before join ordering, which may then
+  move it.
 - Tests: planner tests `batch_reduce_outer_joins.yaml`, `stream_reduce_outer_joins.yaml`;
   differential tests `e2e_test/batch/reduce_outer_joins` and `e2e_test/streaming/reduce_outer_joins`
   (NULL keys and values on both sides, duplicates on both sides, left, right and full joins, joins
@@ -1370,6 +1379,13 @@ side again for the domain.
     generated (it is `NULL`), so its stream key tells no rows apart;
   - a table with a watermark is merged by `UnionScanMergeRule` (the watermark only matters to a
     streaming union);
+  - `ApplyOneRowJoinSplitRule::create_for_batch` splits the apply of the subqueries of a select
+    list only when the rule that follows it in its stage unnests all of them alone but at most
+    one: a subquery that goes through the general unnesting joins its own domain, and the outer
+    side of each apply holds the applies before it. Streaming shares these copies; a batch plan
+    copies them, and the upstream case "subqueries in case when exprs" (four `ARRAY` subqueries
+    over functions of one outer row) grew from 8 to 80 joins. With at most one such subquery,
+    there is one domain, as with one apply for all;
   - no `UnionScanShareRule` and no sharing of identical sub-plans: a batch plan has no shared
     sub-plan (`DAG_TO_TREE` runs first). Two copies of a view in two branches are matched by
     `CommonJoinOverUnionRule` as equal sub-plans: in one batch query they read the same snapshot.
@@ -2248,6 +2264,18 @@ Join(o.region = s.region AND o.id = s.order_id)       Join(...)
 - Risk: the batch estimates count a copied filter on both sides of a join whose selectivity
   already accounts for it (PostgreSQL documents the same problem); the learned selectivities of
   `batch_cardinality_feedback_learning` correct it once observed.
+- Streaming: an `IN` list or an `OR` is not copied onto a column that may reach a column of the
+  primary key or of an index of a scanned table (followed through projections, filters, joins,
+  unions, group keys, hop windows and the operators that keep their input columns): the scan would
+  become one scan per value under a `UNION ALL` (`StreamingIndexSelectionRule`), each subscribing
+  to all the changes of the table and backfilling it (upstream case "test hop window subquery 1").
+  A single value is copied (one range scan replaces the full scan). Batch reads the ranges in one
+  scan and copies them all.
+- An equality of two columns `x = y` is not copied into a side whose top inner join (below
+  projections and filters) has `x` and `y` on different inputs while one of them already is a key
+  of that join: the join would be keyed on `(x, x) = (z, y)`, a new distribution and one more
+  exchange, for a filter `z = y` of one input (the six scalar subqueries of the upstream case
+  "improve multi-scalar subqueries optimization time": one more exchange per subquery).
 - Stages: `TRANSITIVE_PREDICATES` (bottom-up) after the first predicate pushdown and before join
   ordering, in both pipelines, each round followed by predicate pushdown.
 - Tests: planner tests `stream_transitive_predicates.yaml`, `batch_transitive_predicates.yaml`;
@@ -2327,6 +2355,10 @@ Project(a, b)
   join and a hash aggregation. Without `batch_distributed_union` the `UNION ALL` gathers both
   inputs on one node before the exchange to the aggregation, which is worse than the distributed
   hash join: use the batch variable only together with `batch_distributed_union`.
+- Not over constant rows only (every leaf of every input is a `VALUES`): constant folding reduces
+  `SELECT 1 EXCEPT (SELECT 2 EXCEPT SELECT 1)` and the stacked set operations of constants of the
+  upstream tests to one `Values`, which the aggregation over a `UNION ALL` of the rows prevented
+  (found by the public benchmark measurement of 2026-11-28).
 - Stage: `SET_OPERATION_TO_COUNT`, right after `SET_OPERATION_MERGE` and before
   `SET_OPERATION_TO_JOIN`, in both pipelines.
 - `INTERSECT ALL` and `EXCEPT ALL` are rejected by the binder ("not implemented"); their rewrite
@@ -2412,6 +2444,17 @@ SELECT k, max(k), min(k) FROM t GROUP BY k                => GROUP BY k, project
   aggregation), where `max` is `NULL` but `internal_last_seen_value` keeps the last value seen.
   The differential tests found this on a first version (`max(b) ... WHERE b = 3` without
   `GROUP BY`, wrong in both batch and streaming).
+- A key column is kept when removing it would lose the distribution of the input: the hash
+  distributions that the input will likely have once physical (a hash join by the key of its side
+  that is not padded, a scan by the distribution key of its table, an aggregation by its group
+  key, through projections and filters) are computed; when one is within the group key and would
+  no longer be after the removal, the column stays (otherwise every input row is exchanged again,
+  as on the upstream case "CorrelatedInputRef in ProjectSet and apply on condition refers to no
+  table function": `GROUP BY x, k` over a join on `(x, k)` with `k -> x`).
+- After the rule only column pruning runs; the projections are merged by the `PROJECT_REMOVE` of
+  the pipeline. A second `PROJECT_REMOVE` pulled the computations of both sides of a join above it
+  (`JoinProjectTransposeRule` once more), and the `ORDER BY` above then got a third stacked sort
+  (TPC-DS q39).
 - Stage: `STREAM_REDUCE_GROUP_KEYS` after the last stages of the prototype (after the final column
   pruning, so that the dependencies are those of the columns read), then column pruning;
   `BATCH_REDUCE_GROUP_KEYS` after the status ladder stage.

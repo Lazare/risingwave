@@ -28,6 +28,7 @@ CASES = [
     ('last_value_left', 'id, lc, n', 'select o.id, last_value(o.cust order by i.iid) as lc, count(i.iid) as n from {p}o o left join {p}i i on i.o_id = o.id group by o.id'),
     ('first_value_key', 'a, f, n', 'select a, first_value(a order by b) as f, count(c) as n from {p}t group by a'),
     ('simple_const', 'mb, n', 'select max(b) as mb, count(*) as n from {p}t where b = 3'),
+    ('dist_key', 'id, cust, placed, n', 'select o.id, o.cust, o.placed, count(*) as n from {p}o o join {p}i i on i.o_id = o.id and i.iid = o.cust group by o.id, o.cust, o.placed'),
     ('sub_agg', 'a, mb, n', 'select a, mb, count(*) as n from (select a, max(b) as mb from {p}t group by a) x group by a, mb'),
     # Left as they are by the rule.
     ('kept_left', 'iid, placed, n', 'select i.iid, o.placed, count(*) as n from {p}i i left join {p}o o on i.o_id = o.id group by i.iid, o.placed'),

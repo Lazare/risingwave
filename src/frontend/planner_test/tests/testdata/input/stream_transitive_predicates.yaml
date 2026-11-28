@@ -176,3 +176,43 @@
     join o for system_time as of proctime() on s.order_id = o.id;
   expected_outputs:
   - stream_plan
+# An IN list is not copied onto a column that reaches a key of a scanned table: the scan would
+# become one scan per value under a union (each one subscribing to the whole table). A single
+# value is copied: one range scan replaces the full scan.
+- name: kept - an IN list is not copied onto the primary key of a hop window input
+  before: [setup]
+  sql: |
+    select * from (select 1 as col union select 2) u,
+      lateral(select * from hop(h, ts, interval '10' minute, interval '30' minute) where col = id);
+  expected_outputs:
+  - stream_plan
+- name: kept - an IN list of constant rows is not copied onto a primary key
+  before: [setup]
+  sql: |
+    select v.x, o.amount from (values (1), (2), (3)) v(x) join o on o.id = v.x;
+  expected_outputs:
+  - stream_plan
+- name: a single constant is copied onto a primary key
+  before: [setup]
+  sql: |
+    select v.x, o.amount from (values (1), (1)) v(x) join o on o.id = v.x;
+  expected_outputs:
+  - stream_plan
+# A copied equality of two columns is not copied when it would add a second key on a column that
+# the inner join below already uses (the keys `(a, a) = (e, f)` would change its distribution).
+- id: setup_correlated
+  sql: |
+    set streaming_transitive_predicates = true;
+    create table t1(a int, b int);
+    create table t2(c int primary key, d int);
+    create table t3(e int, f int);
+    create table t4(g int, h int);
+    create table t5(i int, j int);
+    create table t6(k int, l int);
+  expected_outputs: []
+- name: kept - a copied equality that would be a second key of the join below
+  before: [setup_correlated]
+  sql: |
+    select coalesce((select sum(d) from t2 left join t3 on e = a and f = c left join t4 on g = a and h = c left join t5 on i = a and j = c where t1.a = t2.c and j in (select k from t6 where b = l)), 0) as col1, coalesce((select sum(d) from t2 left join t3 on e = a and f = c left join t4 on g = a and h = c left join t5 on i = a and j = c where t1.a = t2.c and j in (select k from t6 where b = l)), 0) as col2 from t1;
+  expected_outputs:
+  - stream_plan

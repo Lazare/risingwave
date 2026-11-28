@@ -1028,3 +1028,202 @@
           └─BatchExchange { order: [], dist: Single }
             └─BatchFilter { predicate: (m.b > 0:Int32) }
               └─BatchScan { table: m, columns: [m.b, m.y], distribution: SomeShard }
+- name: unnesting - one of two subqueries is not unnested alone, it joins the only domain
+  before:
+  - tables
+  - setup_unnest
+  sql: |
+    select p.id,
+      (select sum(r.x) from r where r.pid = p.id) as s,
+      (select count(*) from r where r.pid = p.id and r.x > p.v) as c
+    from p;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: LeftOuter, predicate: p.id IS NOT DISTINCT FROM p.id AND p.v IS NOT DISTINCT FROM internal_last_seen_value(p.v), output: [p.id, sum(r.x), count(1:Int32)] }
+      ├─BatchHashJoin { type: LeftOuter, predicate: p.id = r.pid, output: [p.id, p.v, sum(r.x)] }
+      │ ├─BatchExchange { order: [], dist: HashShard(p.id) }
+      │ │ └─BatchScan { table: p, columns: [p.id, p.v], distribution: UpstreamHashShard(p.id) }
+      │ └─BatchProject { exprs: [sum(r.x), r.pid] }
+      │   └─BatchHashAgg { group_key: [r.pid], aggs: [sum(r.x)] }
+      │     └─BatchExchange { order: [], dist: HashShard(r.pid) }
+      │       └─BatchScan { table: r, columns: [r.pid, r.x], distribution: SomeShard }
+      └─BatchHashAgg { group_key: [p.id, internal_last_seen_value(p.v)], aggs: [count(1:Int32)] }
+        └─BatchHashJoin { type: LeftOuter, predicate: p.id IS NOT DISTINCT FROM p.id AND internal_last_seen_value(p.v) IS NOT DISTINCT FROM internal_last_seen_value(p.v), output: [p.id, internal_last_seen_value(p.v), 1:Int32] }
+          ├─BatchExchange { order: [], dist: HashShard(p.id) }
+          │ └─BatchSortAgg { group_key: [p.id], aggs: [internal_last_seen_value(p.v)] }
+          │   └─BatchScan { table: p, columns: [p.id, p.v], distribution: UpstreamHashShard(p.id) }
+          └─BatchProject { exprs: [p.id, internal_last_seen_value(p.v), 1:Int32] }
+            └─BatchHashJoin { type: Inner, predicate: p.id = r.pid AND (r.x > internal_last_seen_value(p.v)), output: [p.id, internal_last_seen_value(p.v)] }
+              ├─BatchExchange { order: [], dist: HashShard(p.id) }
+              │ └─BatchSortAgg { group_key: [p.id], aggs: [internal_last_seen_value(p.v)] }
+              │   └─BatchScan { table: p, columns: [p.id, p.v], distribution: UpstreamHashShard(p.id) }
+              └─BatchExchange { order: [], dist: HashShard(r.pid) }
+                └─BatchScan { table: r, columns: [r.pid, r.x], distribution: SomeShard }
+- name: unnesting kept - two of three subqueries are not unnested alone, one apply for all
+  before:
+  - tables
+  - setup_unnest
+  sql: |
+    select p.id,
+      (select sum(r.x) from r where r.pid = p.id) as s,
+      (select count(*) from r where r.pid = p.id and r.x > p.v) as c,
+      (select max(r.x) from r where r.pid = p.id and r.x < p.g) as m
+    from p;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: LeftOuter, predicate: p.id IS NOT DISTINCT FROM p.id AND p.v IS NOT DISTINCT FROM internal_last_seen_value(p.v) AND p.g IS NOT DISTINCT FROM internal_last_seen_value(p.g), output: [p.id, sum(r.x), count(1:Int32), max(r.x)] }
+      ├─BatchExchange { order: [], dist: HashShard(p.id, p.v, p.g) }
+      │ └─BatchScan { table: p, columns: [p.id, p.v, p.g], distribution: UpstreamHashShard(p.id) }
+      └─BatchExchange { order: [], dist: HashShard(p.id, internal_last_seen_value(p.v), internal_last_seen_value(p.g)) }
+        └─BatchHashJoin { type: FullOuter, predicate: p.id IS NOT DISTINCT FROM p.id AND internal_last_seen_value(p.v) IS NOT DISTINCT FROM internal_last_seen_value(p.v) AND internal_last_seen_value(p.g) IS NOT DISTINCT FROM internal_last_seen_value(p.g), output: [p.id, internal_last_seen_value(p.v), internal_last_seen_value(p.g), sum(r.x), count(1:Int32), max(r.x)] }
+          ├─BatchExchange { order: [], dist: HashShard(p.id) }
+          │ └─BatchHashJoin { type: FullOuter, predicate: p.id IS NOT DISTINCT FROM p.id AND internal_last_seen_value(p.v) IS NOT DISTINCT FROM internal_last_seen_value(p.v) AND internal_last_seen_value(p.g) IS NOT DISTINCT FROM internal_last_seen_value(p.g), output: [p.id, internal_last_seen_value(p.v), internal_last_seen_value(p.g), sum(r.x), count(1:Int32)] }
+          │   ├─BatchHashAgg { group_key: [p.id, internal_last_seen_value(p.v), internal_last_seen_value(p.g)], aggs: [sum(r.x)] }
+          │   │ └─BatchHashJoin { type: LeftOuter, predicate: p.id IS NOT DISTINCT FROM p.id AND internal_last_seen_value(p.v) IS NOT DISTINCT FROM internal_last_seen_value(p.v) AND internal_last_seen_value(p.g) IS NOT DISTINCT FROM internal_last_seen_value(p.g), output: [p.id, internal_last_seen_value(p.v), internal_last_seen_value(p.g), r.x] }
+          │   │   ├─BatchExchange { order: [], dist: HashShard(p.id) }
+          │   │   │ └─BatchSortAgg { group_key: [p.id], aggs: [internal_last_seen_value(p.v), internal_last_seen_value(p.g)] }
+          │   │   │   └─BatchScan { table: p, columns: [p.id, p.v, p.g], distribution: UpstreamHashShard(p.id) }
+          │   │   └─BatchHashJoin { type: Inner, predicate: p.id = r.pid, output: [p.id, internal_last_seen_value(p.v), internal_last_seen_value(p.g), r.x] }
+          │   │     ├─BatchExchange { order: [], dist: HashShard(p.id) }
+          │   │     │ └─BatchSortAgg { group_key: [p.id], aggs: [internal_last_seen_value(p.v), internal_last_seen_value(p.g)] }
+          │   │     │   └─BatchScan { table: p, columns: [p.id, p.v, p.g], distribution: UpstreamHashShard(p.id) }
+          │   │     └─BatchExchange { order: [], dist: HashShard(r.pid) }
+          │   │       └─BatchScan { table: r, columns: [r.pid, r.x], distribution: SomeShard }
+          │   └─BatchHashAgg { group_key: [p.id, internal_last_seen_value(p.v), internal_last_seen_value(p.g)], aggs: [count(1:Int32)] }
+          │     └─BatchHashJoin { type: LeftOuter, predicate: p.id IS NOT DISTINCT FROM p.id AND internal_last_seen_value(p.v) IS NOT DISTINCT FROM internal_last_seen_value(p.v) AND internal_last_seen_value(p.g) IS NOT DISTINCT FROM internal_last_seen_value(p.g), output: [p.id, internal_last_seen_value(p.v), internal_last_seen_value(p.g), 1:Int32] }
+          │       ├─BatchExchange { order: [], dist: HashShard(p.id) }
+          │       │ └─BatchSortAgg { group_key: [p.id], aggs: [internal_last_seen_value(p.v), internal_last_seen_value(p.g)] }
+          │       │   └─BatchScan { table: p, columns: [p.id, p.v, p.g], distribution: UpstreamHashShard(p.id) }
+          │       └─BatchProject { exprs: [p.id, internal_last_seen_value(p.v), internal_last_seen_value(p.g), 1:Int32] }
+          │         └─BatchHashJoin { type: Inner, predicate: p.id = r.pid AND (r.x > internal_last_seen_value(p.v)), output: [p.id, internal_last_seen_value(p.v), internal_last_seen_value(p.g)] }
+          │           ├─BatchExchange { order: [], dist: HashShard(p.id) }
+          │           │ └─BatchSortAgg { group_key: [p.id], aggs: [internal_last_seen_value(p.v), internal_last_seen_value(p.g)] }
+          │           │   └─BatchScan { table: p, columns: [p.id, p.v, p.g], distribution: UpstreamHashShard(p.id) }
+          │           └─BatchExchange { order: [], dist: HashShard(r.pid) }
+          │             └─BatchScan { table: r, columns: [r.pid, r.x], distribution: SomeShard }
+          └─BatchHashAgg { group_key: [p.id, internal_last_seen_value(p.v), internal_last_seen_value(p.g)], aggs: [max(r.x)] }
+            └─BatchHashJoin { type: LeftOuter, predicate: p.id IS NOT DISTINCT FROM p.id AND internal_last_seen_value(p.v) IS NOT DISTINCT FROM internal_last_seen_value(p.v) AND internal_last_seen_value(p.g) IS NOT DISTINCT FROM internal_last_seen_value(p.g), output: [p.id, internal_last_seen_value(p.v), internal_last_seen_value(p.g), r.x] }
+              ├─BatchExchange { order: [], dist: HashShard(p.id) }
+              │ └─BatchSortAgg { group_key: [p.id], aggs: [internal_last_seen_value(p.v), internal_last_seen_value(p.g)] }
+              │   └─BatchScan { table: p, columns: [p.id, p.v, p.g], distribution: UpstreamHashShard(p.id) }
+              └─BatchHashJoin { type: Inner, predicate: p.id = r.pid AND (r.x < internal_last_seen_value(p.g)), output: [p.id, internal_last_seen_value(p.v), internal_last_seen_value(p.g), r.x] }
+                ├─BatchExchange { order: [], dist: HashShard(p.id) }
+                │ └─BatchSortAgg { group_key: [p.id], aggs: [internal_last_seen_value(p.v), internal_last_seen_value(p.g)] }
+                │   └─BatchScan { table: p, columns: [p.id, p.v, p.g], distribution: UpstreamHashShard(p.id) }
+                └─BatchExchange { order: [], dist: HashShard(r.pid) }
+                  └─BatchScan { table: r, columns: [r.pid, r.x], distribution: SomeShard }
+- name: unnesting kept - ARRAY subqueries over functions of the outer row, one apply for all
+  before:
+  - tables
+  - setup_unnest
+  sql: |
+    with input as (select 'empty' as test_case, ('{}'::jsonb) as item)
+    select test_case,
+      case when jsonb_path_query_first(item, '$.a') is null then null
+        else array(select v #>> '{}' from jsonb_array_elements(jsonb_path_query_first(item, '$.a')) as x(v) order by 1) end as a,
+      case when jsonb_path_query_first(item, '$.b') is null then null
+        else array(select (v #>> '{}')::bigint from jsonb_array_elements(jsonb_path_query_first(item, '$.b')) as x(v) order by 1) end as b,
+      case when jsonb_path_query_first(item, '$.c') is null then null
+        else array(select (v #>> '{}')::float from jsonb_array_elements(jsonb_path_query_first(item, '$.c')) as x(v) order by 1) end as c
+    from input;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchProject { exprs: ['empty':Varchar, Case(IsNull(JsonbPathQueryFirst('{}':Jsonb, '$.a':Varchar)), null:List(Varchar), $expr2) as $expr7, Case(IsNull(JsonbPathQueryFirst('{}':Jsonb, '$.b':Varchar)), null:List(Int64), $expr4) as $expr8, Case(IsNull(JsonbPathQueryFirst('{}':Jsonb, '$.c':Varchar)), null:List(Float64), $expr6) as $expr9] }
+      └─BatchHashJoin { type: LeftOuter, predicate: '{}':Jsonb IS NOT DISTINCT FROM '{}':Jsonb, output: ['empty':Varchar, '{}':Jsonb, $expr2, $expr4, $expr6] }
+        ├─BatchExchange { order: [], dist: HashShard('{}':Jsonb) }
+        │ └─BatchValues { rows: [['empty':Varchar, '{}':Jsonb]] }
+        └─BatchExchange { order: [], dist: HashShard('{}':Jsonb) }
+          └─BatchHashJoin { type: FullOuter, predicate: '{}':Jsonb IS NOT DISTINCT FROM '{}':Jsonb, output: ['{}':Jsonb, $expr2, $expr4, $expr6] }
+            ├─BatchExchange { order: [], dist: HashShard('{}':Jsonb) }
+            │ └─BatchHashJoin { type: FullOuter, predicate: '{}':Jsonb IS NOT DISTINCT FROM '{}':Jsonb, output: ['{}':Jsonb, $expr2, $expr4] }
+            │   ├─BatchProject { exprs: ['{}':Jsonb, Coalesce(array_agg($expr1 order_by($expr1 ASC)) filter(IsNotNull(1:Int32)), ARRAY[]:List(Varchar)) as $expr2] }
+            │   │ └─BatchHashAgg { group_key: ['{}':Jsonb], aggs: [array_agg($expr1 order_by($expr1 ASC)) filter(IsNotNull(1:Int32))] }
+            │   │   └─BatchHashJoin { type: LeftOuter, predicate: '{}':Jsonb IS NOT DISTINCT FROM '{}':Jsonb, output: ['{}':Jsonb, $expr1, 1:Int32] }
+            │   │     ├─BatchHashAgg { group_key: ['{}':Jsonb], aggs: [] }
+            │   │     │ └─BatchExchange { order: [], dist: HashShard('{}':Jsonb) }
+            │   │     │   └─BatchValues { rows: [['{}':Jsonb]] }
+            │   │     └─BatchProject { exprs: ['{}':Jsonb, JsonbExtractPathTextVariadic(JsonbArrayElements(JsonbPathQueryFirst($0, '$.a':Varchar)), ARRAY[]:List(Varchar)) as $expr1, 1:Int32] }
+            │   │       └─BatchProjectSet { select_list: [$0, JsonbArrayElements(JsonbPathQueryFirst($0, '$.a':Varchar))] }
+            │   │         └─BatchHashAgg { group_key: ['{}':Jsonb], aggs: [] }
+            │   │           └─BatchExchange { order: [], dist: HashShard('{}':Jsonb) }
+            │   │             └─BatchValues { rows: [['{}':Jsonb]] }
+            │   └─BatchProject { exprs: ['{}':Jsonb, Coalesce(array_agg($expr3 order_by($expr3 ASC)) filter(IsNotNull(1:Int32)), ARRAY[]:List(Int64)) as $expr4] }
+            │     └─BatchHashAgg { group_key: ['{}':Jsonb], aggs: [array_agg($expr3 order_by($expr3 ASC)) filter(IsNotNull(1:Int32))] }
+            │       └─BatchHashJoin { type: LeftOuter, predicate: '{}':Jsonb IS NOT DISTINCT FROM '{}':Jsonb, output: ['{}':Jsonb, $expr3, 1:Int32] }
+            │         ├─BatchHashAgg { group_key: ['{}':Jsonb], aggs: [] }
+            │         │ └─BatchExchange { order: [], dist: HashShard('{}':Jsonb) }
+            │         │   └─BatchValues { rows: [['{}':Jsonb]] }
+            │         └─BatchProject { exprs: ['{}':Jsonb, JsonbExtractPathTextVariadic(JsonbArrayElements(JsonbPathQueryFirst($0, '$.b':Varchar)), ARRAY[]:List(Varchar))::Int64 as $expr3, 1:Int32] }
+            │           └─BatchProjectSet { select_list: [$0, JsonbArrayElements(JsonbPathQueryFirst($0, '$.b':Varchar))] }
+            │             └─BatchHashAgg { group_key: ['{}':Jsonb], aggs: [] }
+            │               └─BatchExchange { order: [], dist: HashShard('{}':Jsonb) }
+            │                 └─BatchValues { rows: [['{}':Jsonb]] }
+            └─BatchProject { exprs: ['{}':Jsonb, Coalesce(array_agg($expr5 order_by($expr5 ASC)) filter(IsNotNull(1:Int32)), ARRAY[]:List(Float64)) as $expr6] }
+              └─BatchHashAgg { group_key: ['{}':Jsonb], aggs: [array_agg($expr5 order_by($expr5 ASC)) filter(IsNotNull(1:Int32))] }
+                └─BatchHashJoin { type: LeftOuter, predicate: '{}':Jsonb IS NOT DISTINCT FROM '{}':Jsonb, output: ['{}':Jsonb, $expr5, 1:Int32] }
+                  ├─BatchHashAgg { group_key: ['{}':Jsonb], aggs: [] }
+                  │ └─BatchExchange { order: [], dist: HashShard('{}':Jsonb) }
+                  │   └─BatchValues { rows: [['{}':Jsonb]] }
+                  └─BatchProject { exprs: ['{}':Jsonb, JsonbExtractPathTextVariadic(JsonbArrayElements(JsonbPathQueryFirst($0, '$.c':Varchar)), ARRAY[]:List(Varchar))::Float64 as $expr5, 1:Int32] }
+                    └─BatchProjectSet { select_list: [$0, JsonbArrayElements(JsonbPathQueryFirst($0, '$.c':Varchar))] }
+                      └─BatchHashAgg { group_key: ['{}':Jsonb], aggs: [] }
+                        └─BatchExchange { order: [], dist: HashShard('{}':Jsonb) }
+                          └─BatchValues { rows: [['{}':Jsonb]] }
+- name: lateral - the same ARRAY subqueries, each evaluated on the outer row
+  before:
+  - tables
+  - setup_unnest
+  - setup_lateral
+  sql: |
+    with input as (select 'empty' as test_case, ('{}'::jsonb) as item)
+    select test_case,
+      case when jsonb_path_query_first(item, '$.a') is null then null
+        else array(select v #>> '{}' from jsonb_array_elements(jsonb_path_query_first(item, '$.a')) as x(v) order by 1) end as a,
+      case when jsonb_path_query_first(item, '$.b') is null then null
+        else array(select (v #>> '{}')::bigint from jsonb_array_elements(jsonb_path_query_first(item, '$.b')) as x(v) order by 1) end as b,
+      case when jsonb_path_query_first(item, '$.c') is null then null
+        else array(select (v #>> '{}')::float from jsonb_array_elements(jsonb_path_query_first(item, '$.c')) as x(v) order by 1) end as c
+    from input;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchProject { exprs: ['empty':Varchar, Case(IsNull(JsonbPathQueryFirst('{}':Jsonb, '$.a':Varchar)), null:List(Varchar), $expr2) as $expr7, Case(IsNull(JsonbPathQueryFirst('{}':Jsonb, '$.b':Varchar)), null:List(Int64), $expr4) as $expr8, Case(IsNull(JsonbPathQueryFirst('{}':Jsonb, '$.c':Varchar)), null:List(Float64), $expr6) as $expr9] }
+      └─BatchHashJoin { type: LeftOuter, predicate: '{}':Jsonb IS NOT DISTINCT FROM '{}':Jsonb, output: ['empty':Varchar, '{}':Jsonb, $expr2, $expr4, $expr6] }
+        ├─BatchExchange { order: [], dist: HashShard('{}':Jsonb) }
+        │ └─BatchValues { rows: [['empty':Varchar, '{}':Jsonb]] }
+        └─BatchExchange { order: [], dist: HashShard('{}':Jsonb) }
+          └─BatchHashJoin { type: FullOuter, predicate: '{}':Jsonb IS NOT DISTINCT FROM '{}':Jsonb, output: ['{}':Jsonb, $expr2, $expr4, $expr6] }
+            ├─BatchExchange { order: [], dist: HashShard('{}':Jsonb) }
+            │ └─BatchHashJoin { type: FullOuter, predicate: '{}':Jsonb IS NOT DISTINCT FROM '{}':Jsonb, output: ['{}':Jsonb, $expr2, $expr4] }
+            │   ├─BatchProject { exprs: ['{}':Jsonb, Coalesce(array_agg($expr1 order_by($expr1 ASC)) filter(IsNotNull(1:Int32)), ARRAY[]:List(Varchar)) as $expr2] }
+            │   │ └─BatchHashAgg { group_key: ['{}':Jsonb], aggs: [array_agg($expr1 order_by($expr1 ASC)) filter(IsNotNull(1:Int32))] }
+            │   │   └─BatchHashJoin { type: LeftOuter, predicate: '{}':Jsonb IS NOT DISTINCT FROM '{}':Jsonb, output: ['{}':Jsonb, $expr1, 1:Int32] }
+            │   │     ├─BatchHashAgg { group_key: ['{}':Jsonb], aggs: [] }
+            │   │     │ └─BatchExchange { order: [], dist: HashShard('{}':Jsonb) }
+            │   │     │   └─BatchValues { rows: [['{}':Jsonb]] }
+            │   │     └─BatchProject { exprs: ['{}':Jsonb, JsonbExtractPathTextVariadic(JsonbArrayElements(JsonbPathQueryFirst($0, '$.a':Varchar)), ARRAY[]:List(Varchar)) as $expr1, 1:Int32] }
+            │   │       └─BatchProjectSet { select_list: [$0, JsonbArrayElements(JsonbPathQueryFirst($0, '$.a':Varchar))] }
+            │   │         └─BatchHashAgg { group_key: ['{}':Jsonb], aggs: [] }
+            │   │           └─BatchExchange { order: [], dist: HashShard('{}':Jsonb) }
+            │   │             └─BatchValues { rows: [['{}':Jsonb]] }
+            │   └─BatchProject { exprs: ['{}':Jsonb, Coalesce(array_agg($expr3 order_by($expr3 ASC)) filter(IsNotNull(1:Int32)), ARRAY[]:List(Int64)) as $expr4] }
+            │     └─BatchHashAgg { group_key: ['{}':Jsonb], aggs: [array_agg($expr3 order_by($expr3 ASC)) filter(IsNotNull(1:Int32))] }
+            │       └─BatchHashJoin { type: LeftOuter, predicate: '{}':Jsonb IS NOT DISTINCT FROM '{}':Jsonb, output: ['{}':Jsonb, $expr3, 1:Int32] }
+            │         ├─BatchHashAgg { group_key: ['{}':Jsonb], aggs: [] }
+            │         │ └─BatchExchange { order: [], dist: HashShard('{}':Jsonb) }
+            │         │   └─BatchValues { rows: [['{}':Jsonb]] }
+            │         └─BatchProject { exprs: ['{}':Jsonb, JsonbExtractPathTextVariadic(JsonbArrayElements(JsonbPathQueryFirst($0, '$.b':Varchar)), ARRAY[]:List(Varchar))::Int64 as $expr3, 1:Int32] }
+            │           └─BatchProjectSet { select_list: [$0, JsonbArrayElements(JsonbPathQueryFirst($0, '$.b':Varchar))] }
+            │             └─BatchHashAgg { group_key: ['{}':Jsonb], aggs: [] }
+            │               └─BatchExchange { order: [], dist: HashShard('{}':Jsonb) }
+            │                 └─BatchValues { rows: [['{}':Jsonb]] }
+            └─BatchProject { exprs: ['{}':Jsonb, Coalesce(array_agg($expr5 order_by($expr5 ASC)) filter(IsNotNull(1:Int32)), ARRAY[]:List(Float64)) as $expr6] }
+              └─BatchHashAgg { group_key: ['{}':Jsonb], aggs: [array_agg($expr5 order_by($expr5 ASC)) filter(IsNotNull(1:Int32))] }
+                └─BatchHashJoin { type: LeftOuter, predicate: '{}':Jsonb IS NOT DISTINCT FROM '{}':Jsonb, output: ['{}':Jsonb, $expr5, 1:Int32] }
+                  ├─BatchHashAgg { group_key: ['{}':Jsonb], aggs: [] }
+                  │ └─BatchExchange { order: [], dist: HashShard('{}':Jsonb) }
+                  │   └─BatchValues { rows: [['{}':Jsonb]] }
+                  └─BatchProject { exprs: ['{}':Jsonb, JsonbExtractPathTextVariadic(JsonbArrayElements(JsonbPathQueryFirst($0, '$.c':Varchar)), ARRAY[]:List(Varchar))::Float64 as $expr5, 1:Int32] }
+                    └─BatchProjectSet { select_list: [$0, JsonbArrayElements(JsonbPathQueryFirst($0, '$.c':Varchar))] }
+                      └─BatchHashAgg { group_key: ['{}':Jsonb], aggs: [] }
+                        └─BatchExchange { order: [], dist: HashShard('{}':Jsonb) }
+                          └─BatchValues { rows: [['{}':Jsonb]] }

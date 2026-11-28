@@ -41,6 +41,9 @@
 //! group). With `numeric` (`1.0` and `1.00`), floats (`0.0` and `-0.0`) or intervals, the joins
 //! always output the value of the first input; the aggregation may not.
 //!
+//! Not when every input is made of constant rows only (`SELECT 1 EXCEPT SELECT 2`): constant
+//! folding reduces such a set operation to one `Values`, which the aggregation would prevent.
+//!
 //! In a streaming job, the aggregation keeps each distinct row of the inputs once, with its
 //! counts, instead of the two join states (every row of each input), their degree table and the
 //! state of the `DISTINCT` above the join. On demand, behind `streaming_set_operation_to_count`
@@ -78,6 +81,17 @@ pub(super) fn has_exact_equality(data_type: &DataType) -> bool {
     )
 }
 
+/// Whether a plan reads no relation: every leaf is a `Values` (constant rows), below projections,
+/// filters or other set operations.
+fn is_constant(plan: &PlanRef) -> bool {
+    let inputs = plan.inputs();
+    if inputs.is_empty() {
+        plan.as_logical_values().is_some()
+    } else {
+        inputs.iter().all(is_constant)
+    }
+}
+
 /// See the documentation of the module.
 pub struct SetOperationToCountRule {}
 
@@ -112,6 +126,12 @@ impl Rule<Logical> for SetOperationToCountRule {
                     .zip_eq_fast(&fields)
                     .all(|(field, other)| field.data_type() == other.data_type())
         }) {
+            return None;
+        }
+        // Not over constant rows only: constant folding (`SELECT 1 EXCEPT SELECT 2`, the joins of
+        // constant rows) reduces such a set operation to one `Values`, which the aggregation over
+        // a `UNION ALL` of the rows would prevent.
+        if inputs.iter().all(is_constant) {
             return None;
         }
         let width = fields.len();

@@ -33,6 +33,11 @@ CASES = [
      f"select 'B' as tag, id from {O} where amount > 5) u join {S} s on s.region = u.tag and s.order_id = u.id"),
     ('values', 'x, sid',
      f"select v.x, s.sid from (values (11), (12), (12), (40)) v(x) join {S} s on s.order_id = v.x"),
+    ('values_pk', 'x, amount',
+     f"select v.x, o.amount from (values (11), (12), (12), (40)) v(x) join {O} o on o.id = v.x"),
+    ('union_pk_hop', 'col, id, v, window_start',
+     f"select u.col, h.id, h.v, h.window_start from (select 1 as col union select 2) u, "
+     f"lateral (select * from hop({H}, ts, interval '10' minute, interval '30' minute) where col = id) h"),
     ('agg_key', 'region, n, sid',
      f"select g.region, g.n, s.sid from (select region, count(*) as n from {O} "
      f"where region in ('EU', 'US') group by region) g join {S} s on s.region = g.region"),

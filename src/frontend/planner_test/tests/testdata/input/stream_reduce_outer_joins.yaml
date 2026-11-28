@@ -233,3 +233,28 @@
     select t.id from t left join s on t.k = coalesce(s.k, 0) where s.k is null;
   expected_outputs:
   - stream_plan
+
+# A padded side that is an inner join: reduced after join ordering, so that the inner join keeps
+# its order (and its distribution) instead of being ordered again with the joins above.
+- name: padded side is an inner join - reduced after join ordering
+  before: [setup]
+  sql: |
+    select t.id, s.v from t left join (r join s on s.k = r.c) on t.k = r.id where s.v + 1 > 0;
+  expected_outputs:
+  - stream_plan
+- id: setup_correlated
+  sql: |
+    set streaming_reduce_outer_joins = true;
+    create table t1(a int, b int);
+    create table t2(c int primary key, d int);
+    create table t3(e int, f int);
+    create table t4(g int, h int);
+    create table t5(i int, j int);
+    create table t6(k int, l int);
+  expected_outputs: []
+- name: correlated scalar subqueries - the reduced left join keeps the order of the unnesting
+  before: [setup_correlated]
+  sql: |
+    select coalesce((select sum(d) from t2 left join t3 on e = a and f = c left join t4 on g = a and h = c left join t5 on i = a and j = c where t1.a = t2.c and j in (select k from t6 where b = l)), 0) as col1, coalesce((select sum(d) from t2 left join t3 on e = a and f = c left join t4 on g = a and h = c left join t5 on i = a and j = c where t1.a = t2.c and j in (select k from t6 where b = l)), 0) as col2 from t1;
+  expected_outputs:
+  - stream_plan

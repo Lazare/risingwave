@@ -99,3 +99,31 @@
     select a, b from t union select a, b from u;
   expected_outputs:
   - batch_plan
+# Constant rows only: left to constant folding (the joins of constant rows), not rewritten.
+- name: except of constant rows only
+  before: [setup]
+  sql: |
+    select 1 except (select 2 except select 1);
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: stacked intersect of constant rows only
+  before: [setup]
+  sql: |
+    select 1 intersect select 2 intersect select 3 intersect select 4 intersect select 5 intersect select 5;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: stacked except of constant rows only
+  before: [setup]
+  sql: |
+    select 1 except select 2 except select 3 except select 4 except select 5 except select 5;
+  expected_outputs:
+  - batch_plan
+- name: except of a table and constant rows is rewritten
+  before: [setup]
+  sql: |
+    select a from t except select 1;
+  expected_outputs:
+  - batch_plan
+  - stream_plan

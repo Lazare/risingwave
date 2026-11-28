@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use risingwave_common::types::DataType;
 use risingwave_pb::plan_common::JoinType;
@@ -72,7 +72,16 @@ const MAX_IN_LIST: usize = 64;
 /// adds nothing: it is applied bottom-up, then predicate pushdown moves the new filters into the
 /// scans and derives them further down through the joins below; the caller repeats this a bounded
 /// number of times.
-pub struct TransitivePredicateRule;
+///
+/// In a streaming job, a predicate that may become several ranges of keys (`c IN (...)`, an `OR`)
+/// is not copied onto a column that may reach a key column of a scanned table
+/// ([`may_reach_scan_key`]): the scan would become a `UNION ALL` of one scan per value (see
+/// `StreamingIndexSelectionRule`), each of which subscribes to all the changes of the table and
+/// backfills it. A single value (`c = v`) is still copied: one range scan replaces the full scan.
+/// A batch scan reads several ranges in one scan, so batch copies them all.
+pub struct TransitivePredicateRule {
+    for_stream: bool,
+}
 
 impl Rule<Logical> for TransitivePredicateRule {
     fn apply(&self, plan: PlanRef) -> Option<PlanRef> {
@@ -126,9 +135,6 @@ impl Rule<Logical> for TransitivePredicateRule {
         } else {
             vec![]
         };
-        if new_left.is_empty() && new_right.is_empty() {
-            return None;
-        }
         let with_filter = |input: PlanRef, conjunctions: Vec<ExprImpl>| {
             if conjunctions.is_empty() {
                 input
@@ -136,6 +142,37 @@ impl Rule<Logical> for TransitivePredicateRule {
                 LogicalFilter::create(input, Condition { conjunctions })
             }
         };
+        // A copied equality of two columns that would add a second key on a column that the inner
+        // join below already uses as a key is not copied (see `adds_second_join_key`).
+        let drop_second_keys = |side: &PlanRef, predicates: Vec<ExprImpl>| -> Vec<ExprImpl> {
+            predicates
+                .into_iter()
+                .filter(|predicate| {
+                    !column_equality(predicate)
+                        .is_some_and(|(x, y)| adds_second_join_key(side, x.index(), y.index()))
+                })
+                .collect()
+        };
+        let new_left = drop_second_keys(&left, new_left);
+        let new_right = drop_second_keys(&right, new_right);
+        let (new_left, new_right) = if self.for_stream {
+            let keep = |side: &PlanRef, predicates: Vec<ExprImpl>| -> Vec<ExprImpl> {
+                predicates
+                    .into_iter()
+                    .filter(|predicate| {
+                        !may_become_several_ranges(predicate, side.schema().len()).is_some_and(
+                            |column| may_reach_scan_key(side, column, &mut HashSet::new()),
+                        )
+                    })
+                    .collect()
+            };
+            (keep(&left, new_left), keep(&right, new_right))
+        } else {
+            (new_left, new_right)
+        };
+        if new_left.is_empty() && new_right.is_empty() {
+            return None;
+        }
         let left = with_filter(left, new_left);
         let right = with_filter(right, new_right);
         Some(join.clone_with_left_right(left, right).into())
@@ -143,9 +180,163 @@ impl Rule<Logical> for TransitivePredicateRule {
 }
 
 impl TransitivePredicateRule {
-    pub fn create() -> BoxedRule {
-        Box::new(TransitivePredicateRule)
+    pub fn create_for_stream() -> BoxedRule {
+        Box::new(TransitivePredicateRule { for_stream: true })
     }
+
+    pub fn create_for_batch() -> BoxedRule {
+        Box::new(TransitivePredicateRule { for_stream: false })
+    }
+}
+
+/// Whether `x = y`, pushed into `plan`, would become one more equi-join key of the inner join at the
+/// top of `plan` (below projections and filters) on a column that already is one of its keys:
+/// `x` and `y` come from different inputs of the join, and one of them is already compared with
+/// `=` to the other input. The join would then be keyed on `(x, x) = (z, y)`: its distribution
+/// changes, which costs an exchange, for a filter that only removes the rows of one input where
+/// `z <> y`.
+fn adds_second_join_key(plan: &PlanRef, x: usize, y: usize) -> bool {
+    let mut plan = plan.clone();
+    let (mut x, mut y) = (x, y);
+    loop {
+        if let Some(filter) = plan.as_logical_filter() {
+            plan = filter.input();
+            continue;
+        }
+        if let Some(project) = plan.as_logical_project() {
+            let column = |index: usize| {
+                project.exprs()[index]
+                    .as_input_ref()
+                    .map(|input_ref| input_ref.index())
+            };
+            let (Some(new_x), Some(new_y)) = (column(x), column(y)) else {
+                return false;
+            };
+            (x, y) = (new_x, new_y);
+            plan = project.input();
+            continue;
+        }
+        break;
+    }
+    let Some(join) = plan.as_logical_join() else {
+        return false;
+    };
+    if join.join_type() != JoinType::Inner {
+        return false;
+    }
+    let (Some(&x), Some(&y)) = (join.output_indices().get(x), join.output_indices().get(y)) else {
+        return false;
+    };
+    let left_len = join.left().schema().len();
+    if (x < left_len) == (y < left_len) {
+        return false;
+    }
+    let keys: HashSet<usize> = join
+        .eq_indexes()
+        .into_iter()
+        .flat_map(|(l, r)| [l, r + left_len])
+        .collect();
+    keys.contains(&x) || keys.contains(&y)
+}
+
+/// The column of a predicate on one column that may select several ranges of values of a key:
+/// `c IN (...)` or an `OR`.
+fn may_become_several_ranges(predicate: &ExprImpl, len: usize) -> Option<usize> {
+    let call = predicate.as_function_call()?;
+    if !matches!(call.func_type(), ExprType::In | ExprType::Or) {
+        return None;
+    }
+    let refs = predicate.collect_input_refs(len);
+    let mut columns = refs.ones();
+    let column = columns.next()?;
+    columns.next().is_none().then_some(column)
+}
+
+/// Whether a filter on `column` of `plan`, pushed down, may reach a scan where it is a column of
+/// the primary key or of an index of the table: the column is followed through projections (input
+/// references), filters, joins, unions, the group key of aggregations and the operators that keep
+/// the columns of their input. Shared sub-plans are visited once.
+fn may_reach_scan_key(
+    plan: &PlanRef,
+    column: usize,
+    visited: &mut HashSet<(PlanNodeId, usize)>,
+) -> bool {
+    if !visited.insert((plan.id(), column)) {
+        return false;
+    }
+    if let Some(scan) = plan.as_logical_scan() {
+        let Some(&table_column) = scan.output_col_idx().get(column) else {
+            return false;
+        };
+        let in_pk = scan
+            .table()
+            .pk
+            .iter()
+            .any(|order| order.column_index == table_column);
+        let in_index = scan.table_indexes().iter().any(|index| {
+            index
+                .primary_to_secondary_mapping
+                .get(&table_column)
+                .is_some_and(|&secondary| secondary < index.index_columns_len as usize)
+        });
+        return in_pk || in_index;
+    }
+    if let Some(project) = plan.as_logical_project() {
+        return project.exprs().get(column).is_some_and(|expr| {
+            expr.as_input_ref().is_some_and(|input_ref| {
+                may_reach_scan_key(&project.input(), input_ref.index(), visited)
+            })
+        });
+    }
+    if let Some(join) = plan.as_logical_join() {
+        let Some(&internal) = join.output_indices().get(column) else {
+            return false;
+        };
+        let left_len = join.left().schema().len();
+        return match join.join_type() {
+            JoinType::RightSemi | JoinType::RightAnti => {
+                may_reach_scan_key(&join.right(), internal, visited)
+            }
+            _ if internal < left_len => may_reach_scan_key(&join.left(), internal, visited),
+            _ => may_reach_scan_key(&join.right(), internal - left_len, visited),
+        };
+    }
+    if let Some(hop) = plan.as_logical_hop_window() {
+        let input = hop.input();
+        return hop.output_indices().get(column).is_some_and(|&internal| {
+            internal < input.schema().len() && may_reach_scan_key(&input, internal, visited)
+        });
+    }
+    if let Some(agg) = plan.as_logical_agg() {
+        if !agg.grouping_sets().is_empty() {
+            return false;
+        }
+        let input = agg.input();
+        return agg
+            .group_key()
+            .indices()
+            .nth(column)
+            .is_some_and(|input_column| may_reach_scan_key(&input, input_column, visited));
+    }
+    if plan.as_logical_union().is_some() {
+        return plan
+            .inputs()
+            .iter()
+            .any(|input| may_reach_scan_key(input, column, visited));
+    }
+    if plan.as_logical_filter().is_some()
+        || plan.as_logical_share().is_some()
+        || plan.as_logical_dedup().is_some()
+        || plan.as_logical_top_n().is_some()
+        || plan.as_logical_limit().is_some()
+        || plan.as_logical_over_window().is_some()
+    {
+        let inputs = plan.inputs();
+        if let [input] = &inputs[..] {
+            return column < input.schema().len() && may_reach_scan_key(input, column, visited);
+        }
+    }
+    false
 }
 
 /// A scan `AS OF` (temporal join, time travel): its side of a join is left as it is.
@@ -183,6 +374,17 @@ fn copy_through_keys(
         }
     }
     derived
+}
+
+/// The two columns of `a = b` (input references of the same type).
+fn column_equality(expr: &ExprImpl) -> Option<(&InputRef, &InputRef)> {
+    let call = expr.as_function_call()?;
+    if call.func_type() != ExprType::Equal || call.inputs().len() != 2 {
+        return None;
+    }
+    let a = call.inputs()[0].as_input_ref()?;
+    let b = call.inputs()[1].as_input_ref()?;
+    (a.return_type() == b.return_type()).then_some((&**a, &**b))
 }
 
 /// `c IS NOT NULL` on a column: implied by the `=` of the keys, never worth a filter.
