@@ -41,6 +41,7 @@ use crate::rpc::service::exchange::ExchangeWriter;
 use crate::rpc::service::task_service::TaskInfoResponseResult;
 use crate::task::BatchTaskContext;
 use crate::task::channel::{ChanReceiverImpl, ChanSenderImpl, create_output_channel};
+use crate::task::query_memory::AdmissionGuard;
 
 // Now we will only at most have 2 status for each status channel. Running -> Failed or Finished.
 pub const TASK_STATUS_BUFFER_SIZE: usize = 2;
@@ -325,6 +326,11 @@ pub struct BatchTaskExecution {
     shutdown_rx: ShutdownToken,
     heartbeat_join_handle: Mutex<Option<JoinHandle<()>>>,
 
+    /// The memory reservation of the query of the task on this node. Held while the task runs, and
+    /// given back as soon as the task is cancelled or aborted, even when its execution has not
+    /// ended yet (for example while it waits to send to a consumer that is gone).
+    admission: Mutex<Option<AdmissionGuard>>,
+
     /// Registry for await-tree. The task will be registered as a root when spawned,
     /// so that it shows up in the await-tree dump.
     await_tree_reg: Option<await_tree::Registry>,
@@ -361,6 +367,7 @@ impl BatchTaskExecution {
             shutdown_tx,
             shutdown_rx,
             heartbeat_join_handle: Mutex::new(None),
+            admission: Mutex::new(None),
             await_tree_reg,
         })
     }
@@ -427,8 +434,11 @@ impl BatchTaskExecution {
             .await?;
 
         // Clone `self` to make compiler happy because of the move block.
+        // The reservation now belongs to the task: `cancel` and `abort` give it back.
+        *self.admission.lock() = admission_guard;
         let t_1 = self.clone();
         let this = self.clone();
+        let releaser = self.clone();
         async fn notify_panic(
             this: &BatchTaskExecution,
             state_tx: Option<&mut StateReporter>,
@@ -452,7 +462,9 @@ impl BatchTaskExecution {
         }
         // Spawn task for real execution.
         let fut = async move {
-            let _admission_guard = admission_guard;
+            // At the end of the execution, only the memory reservation is given back: the outputs
+            // stay until their consumers take them, which may be after the task has ended.
+            let _release = scopeguard::guard(releaser, |task| task.release_admission());
             trace!("Executing plan [{:?}]", task_id);
             let sender = sender;
             let mut state_tx_1 = state_tx.clone();
@@ -569,7 +581,24 @@ impl BatchTaskExecution {
                 data_chunk = data_chunk_stream.next()=> {
                     match data_chunk {
                         Some(Ok(data_chunk)) => {
-                            if let Err(e) = sender.send(data_chunk).await {
+                            // A consumer may stop reading without closing the channel: the send
+                            // must not outlive the cancellation of the task.
+                            let sent = select! {
+                                biased;
+                                _ = shutdown_rx.cancelled() => None,
+                                sent = sender.send(data_chunk) => Some(sent),
+                            };
+                            let Some(sent) = sent else {
+                                state = match self.shutdown_rx.message() {
+                                    ShutdownMsg::Abort(e) => {
+                                        error = Some(BatchError::Aborted(e));
+                                        TaskStatus::Aborted
+                                    }
+                                    _ => TaskStatus::Cancelled,
+                                };
+                                break;
+                            };
+                            if let Err(e) = sent {
                                 match e {
                                     BatchError::SenderError => {
                                         // This is possible since when we have limit executor in parent
@@ -620,7 +649,12 @@ impl BatchTaskExecution {
         let error = error.map(Arc::new);
         self.failure.lock().clone_from(&error);
         let err_str = error.as_ref().map(|e| e.to_report_string());
-        if let Err(e) = sender.close(error).await {
+        let closed = select! {
+            biased;
+            _ = shutdown_rx.cancelled() => Ok(()),
+            closed = sender.close(error) => closed,
+        };
+        if let Err(e) = closed {
             match e {
                 SenderError => {
                     // This is possible since when we have limit executor in parent
@@ -656,12 +690,29 @@ impl BatchTaskExecution {
         } else {
             debug!("The task has already died before this request.")
         }
+        self.release_resources();
     }
 
     pub fn cancel(&self) {
         if !self.shutdown_tx.cancel() {
             debug!("The task has already died before this request.");
         }
+        self.release_resources();
+    }
+
+    /// Gives back the memory reservation of the query.
+    fn release_admission(&self) {
+        let admission = self.admission.lock().take();
+        drop(admission);
+    }
+
+    /// On cancellation: gives back the memory reservation of the query, and drops the outputs
+    /// that no consumer took: a send to one of them, which would wait forever, then fails and the
+    /// execution ends. Never at the normal end of a task: a consumer may take its output later.
+    fn release_resources(&self) {
+        self.release_admission();
+        let receivers: Vec<_> = self.receivers.lock().iter_mut().map(Option::take).collect();
+        drop(receivers);
     }
 
     pub fn get_task_output(&self, output_id: &PbTaskOutputId) -> Result<TaskOutput> {

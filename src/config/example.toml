@@ -173,6 +173,7 @@ query_memory_ratio = 0.3
 query_memory_max_ratio = 0.7
 spillable_operator_min_memory_mb = 8
 spillable_operator_avg_memory_mb = 64
+overflow_memory_wait_secs = 300
 
 [batch.developer]
 connector_message_buffer_size = 16

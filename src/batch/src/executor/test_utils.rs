@@ -18,6 +18,7 @@ use futures::StreamExt;
 use futures_async_stream::try_stream;
 use risingwave_common::array::DataChunk;
 use risingwave_common::catalog::Schema;
+use risingwave_pb::batch_plan::plan_node::NodeBody;
 
 use super::{
     BoxedDataChunkStream, BoxedExecutor, BoxedExecutorBuilder, Executor, ExecutorBuilder,
@@ -142,7 +143,11 @@ impl BoxedExecutorBuilder for BlockExecutor {
     }
 }
 
-pub struct BusyLoopExecutor;
+/// Produces chunks forever (`BusyLoopExecutor(true)`), or nothing and ends at once
+/// (`BusyLoopExecutor(false)`).
+pub struct BusyLoopExecutor {
+    forever: bool,
+}
 
 impl Executor for BusyLoopExecutor {
     fn schema(&self) -> &Schema {
@@ -162,17 +167,23 @@ impl BusyLoopExecutor {
     #[try_stream(ok = DataChunk, error = BatchError)]
     async fn do_execute(self) {
         // infinite loop to generate data
-        loop {
-            yield DataChunk::new_dummy(1);
+        if self.forever {
+            loop {
+                yield DataChunk::new_dummy(1);
+            }
         }
     }
 }
 
 impl BoxedExecutorBuilder for BusyLoopExecutor {
     async fn new_boxed_executor(
-        _source: &ExecutorBuilder<'_>,
+        source: &ExecutorBuilder<'_>,
         _inputs: Vec<BoxedExecutor>,
     ) -> Result<BoxedExecutor> {
-        Ok(Box::new(BusyLoopExecutor))
+        let forever = !matches!(
+            source.plan_node().get_node_body(),
+            Ok(NodeBody::BusyLoopExecutor(false))
+        );
+        Ok(Box::new(BusyLoopExecutor { forever }))
     }
 }

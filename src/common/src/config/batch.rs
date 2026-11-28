@@ -93,6 +93,13 @@ pub struct BatchConfig {
     /// reserved memory as long as the pool has room, and spills otherwise.
     #[serde(default = "default::batch::spillable_operator_avg_memory_mb")]
     pub spillable_operator_avg_memory_mb: usize,
+
+    /// How long, in seconds, an operator that needs memory beyond the pool of its query waits for
+    /// other queries to release some, before its query fails with an error saying that the batch
+    /// memory is exhausted. The wait otherwise lasts until another query ends, which may never
+    /// happen while that query waits for something else. 0 waits without limit.
+    #[serde(default = "default::batch::overflow_memory_wait_secs")]
+    pub overflow_memory_wait_secs: u64,
 }
 
 /// The subsections `[batch.developer]`.
@@ -166,6 +173,10 @@ pub mod default {
 
         pub fn spillable_operator_avg_memory_mb() -> usize {
             64
+        }
+
+        pub fn overflow_memory_wait_secs() -> u64 {
+            300
         }
 
         pub fn statement_timeout_in_sec() -> u32 {

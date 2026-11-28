@@ -267,6 +267,8 @@ impl Drop for OperatorCounter {
 struct MemoryBudget {
     usable_mb: u64,
     total_mb: u64,
+    /// How long an operator waits for memory beyond the pool of its query. `None`: no limit.
+    overflow_wait_limit: Option<Duration>,
     state: Mutex<BudgetState>,
     notify: Notify,
 }
@@ -329,10 +331,11 @@ impl Drop for OverflowWaiter<'_> {
 }
 
 impl MemoryBudget {
-    fn new(usable_mb: u64, total_mb: u64) -> Self {
+    fn new(usable_mb: u64, total_mb: u64, overflow_wait_limit: Option<Duration>) -> Self {
         Self {
             usable_mb,
             total_mb: total_mb.max(usable_mb),
+            overflow_wait_limit,
             state: Mutex::new(BudgetState::default()),
             notify: Notify::new(),
         }
@@ -426,7 +429,9 @@ impl MemoryBudget {
     ///
     /// `try_pool` is tried first, each time memory may have been released. Then the memory of
     /// the node that nobody took. When there is none, waits for another query to release some,
-    /// and fails when no other query runs that is not waiting itself. Cancel safe.
+    /// and fails when no other query runs that is not waiting itself, or when the wait lasts
+    /// longer than the limit of the budget: a query that runs may hold its memory for hours, or
+    /// wait for something that never comes. Cancel safe.
     async fn take_overflow(
         self: &Arc<Self>,
         mb: u64,
@@ -474,6 +479,17 @@ impl MemoryBudget {
                 state.active_queries <= state.blocked_queries
             };
             if stuck {
+                return Err(());
+            }
+            if let Some(limit) = self.overflow_wait_limit
+                && start.elapsed() >= limit
+            {
+                tracing::warn!(
+                    waited_secs = start.elapsed().as_secs(),
+                    needed_mb = mb,
+                    budget = self.describe(),
+                    "batch operator gives up waiting for memory beyond the pool of its query"
+                );
                 return Err(());
             }
             // The pool of the query is not watched: check it again from time to time.
@@ -879,9 +895,14 @@ impl QueryMemoryRegistry {
             "batch query memory limits"
         );
         let budget = if limits.is_unlimited() {
-            MemoryBudget::new(0, 0)
+            MemoryBudget::new(0, 0, None)
         } else {
-            MemoryBudget::new(limits.usable >> 20, root.mem_limit() >> 20)
+            MemoryBudget::new(
+                limits.usable >> 20,
+                root.mem_limit() >> 20,
+                (config.overflow_memory_wait_secs > 0)
+                    .then(|| Duration::from_secs(config.overflow_memory_wait_secs)),
+            )
         };
         Self {
             inner: Arc::new(QueryMemoryRegistryInner {
@@ -1266,5 +1287,42 @@ mod tests {
         assert!(matches!(error, BatchError::NoMemoryLeft(_)), "{error:?}");
         drop(m2);
         waiter.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_executor_memory_gives_up_after_the_wait_limit() {
+        let root = MemoryContext::root(TrAdderAtomic::new(0), 4000 * MB);
+        let config = BatchConfig {
+            memory_usable_ratio: 0.9,
+            query_memory_ratio: 0.25,
+            query_memory_max_ratio: 0.5,
+            spillable_operator_min_memory_mb: 16,
+            spillable_operator_avg_memory_mb: 64,
+            overflow_memory_wait_secs: 1,
+            ..Default::default()
+        };
+        let registry = QueryMemoryRegistry::new(root.clone(), &config);
+        let q1 = registry.get_or_create("q1", 4);
+        let q2 = registry.get_or_create("q2", 4);
+        let _g1 = q1.admit().await;
+        let _g2 = q2.admit().await;
+
+        // The first query holds most of the batch memory and keeps running without waiting.
+        let mut m1 = q1.executor_memory(meter());
+        m1.meter().add(3000 * MB as i64);
+        m1.settle().await.unwrap();
+
+        // The second one waits for memory that the first one never releases: it gives up after
+        // the limit instead of waiting as long as the first query runs.
+        let mut m2 = q2.executor_memory(meter());
+        m2.meter().add(1000 * MB as i64);
+        let start = std::time::Instant::now();
+        let error = m2.settle().await.unwrap_err();
+        assert!(matches!(error, BatchError::NoMemoryLeft(_)), "{error:?}");
+        assert!(start.elapsed() >= std::time::Duration::from_secs(1));
+        drop(m2);
+        assert_eq!(registry.inner.budget.state.lock().overflow_waiters, 0);
+        drop(m1);
+        assert_eq!(root.get_bytes_used(), 0);
     }
 }
