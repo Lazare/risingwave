@@ -62,6 +62,9 @@ statement ok
 create materialized view gks_simple_const_off as select max(b) as mb, count(*) as n from gks_t where b = 3;
 
 statement ok
+create materialized view gks_dist_key_off as select o.id, o.cust, o.placed, count(*) as n from gks_o o join gks_i i on i.o_id = o.id and i.iid = o.cust group by o.id, o.cust, o.placed;
+
+statement ok
 create materialized view gks_sub_agg_off as select a, mb, count(*) as n from (select a, max(b) as mb from gks_t group by a) x group by a, mb;
 
 statement ok
@@ -105,6 +108,9 @@ create materialized view gks_first_value_key_on as select a, first_value(a order
 
 statement ok
 create materialized view gks_simple_const_on as select max(b) as mb, count(*) as n from gks_t where b = 3;
+
+statement ok
+create materialized view gks_dist_key_on as select o.id, o.cust, o.placed, count(*) as n from gks_o o join gks_i i on i.o_id = o.id and i.iid = o.cust group by o.id, o.cust, o.placed;
 
 statement ok
 create materialized view gks_sub_agg_on as select a, mb, count(*) as n from (select a, max(b) as mb from gks_t group by a) x group by a, mb;
@@ -280,6 +286,22 @@ select
   (select count(*) from (select mb, n, count(*) as gks_rows from gks_simple_const_on group by mb, n except select mb, n, count(*) as gks_rows from (select max(b) as mb, count(*) as n from gks_t where b = 3) q group by mb, n) x),
   (select count(*) from (select mb, n, count(*) as gks_rows from (select max(b) as mb, count(*) as n from gks_t where b = 3) q group by mb, n except select mb, n, count(*) as gks_rows from gks_simple_const_on group by mb, n) y),
   (select count(*) from gks_simple_const_on) - (select count(*) from (select max(b) as mb, count(*) as n from gks_t where b = 3) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, cust, placed, n, count(*) as gks_rows from gks_dist_key_on group by id, cust, placed, n except select id, cust, placed, n, count(*) as gks_rows from gks_dist_key_off group by id, cust, placed, n) x),
+  (select count(*) from (select id, cust, placed, n, count(*) as gks_rows from gks_dist_key_off group by id, cust, placed, n except select id, cust, placed, n, count(*) as gks_rows from gks_dist_key_on group by id, cust, placed, n) y),
+  (select count(*) from gks_dist_key_on) - (select count(*) from gks_dist_key_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, cust, placed, n, count(*) as gks_rows from gks_dist_key_on group by id, cust, placed, n except select id, cust, placed, n, count(*) as gks_rows from (select o.id, o.cust, o.placed, count(*) as n from gks_o o join gks_i i on i.o_id = o.id and i.iid = o.cust group by o.id, o.cust, o.placed) q group by id, cust, placed, n) x),
+  (select count(*) from (select id, cust, placed, n, count(*) as gks_rows from (select o.id, o.cust, o.placed, count(*) as n from gks_o o join gks_i i on i.o_id = o.id and i.iid = o.cust group by o.id, o.cust, o.placed) q group by id, cust, placed, n except select id, cust, placed, n, count(*) as gks_rows from gks_dist_key_on group by id, cust, placed, n) y),
+  (select count(*) from gks_dist_key_on) - (select count(*) from (select o.id, o.cust, o.placed, count(*) as n from gks_o o join gks_i i on i.o_id = o.id and i.iid = o.cust group by o.id, o.cust, o.placed) q);
 ----
 0 0 0
 
@@ -517,6 +539,22 @@ select
   (select count(*) from (select mb, n, count(*) as gks_rows from gks_simple_const_on group by mb, n except select mb, n, count(*) as gks_rows from (select max(b) as mb, count(*) as n from gks_t where b = 3) q group by mb, n) x),
   (select count(*) from (select mb, n, count(*) as gks_rows from (select max(b) as mb, count(*) as n from gks_t where b = 3) q group by mb, n except select mb, n, count(*) as gks_rows from gks_simple_const_on group by mb, n) y),
   (select count(*) from gks_simple_const_on) - (select count(*) from (select max(b) as mb, count(*) as n from gks_t where b = 3) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, cust, placed, n, count(*) as gks_rows from gks_dist_key_on group by id, cust, placed, n except select id, cust, placed, n, count(*) as gks_rows from gks_dist_key_off group by id, cust, placed, n) x),
+  (select count(*) from (select id, cust, placed, n, count(*) as gks_rows from gks_dist_key_off group by id, cust, placed, n except select id, cust, placed, n, count(*) as gks_rows from gks_dist_key_on group by id, cust, placed, n) y),
+  (select count(*) from gks_dist_key_on) - (select count(*) from gks_dist_key_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, cust, placed, n, count(*) as gks_rows from gks_dist_key_on group by id, cust, placed, n except select id, cust, placed, n, count(*) as gks_rows from (select o.id, o.cust, o.placed, count(*) as n from gks_o o join gks_i i on i.o_id = o.id and i.iid = o.cust group by o.id, o.cust, o.placed) q group by id, cust, placed, n) x),
+  (select count(*) from (select id, cust, placed, n, count(*) as gks_rows from (select o.id, o.cust, o.placed, count(*) as n from gks_o o join gks_i i on i.o_id = o.id and i.iid = o.cust group by o.id, o.cust, o.placed) q group by id, cust, placed, n except select id, cust, placed, n, count(*) as gks_rows from gks_dist_key_on group by id, cust, placed, n) y),
+  (select count(*) from gks_dist_key_on) - (select count(*) from (select o.id, o.cust, o.placed, count(*) as n from gks_o o join gks_i i on i.o_id = o.id and i.iid = o.cust group by o.id, o.cust, o.placed) q);
 ----
 0 0 0
 
@@ -777,6 +815,22 @@ select
 
 query III
 select
+  (select count(*) from (select id, cust, placed, n, count(*) as gks_rows from gks_dist_key_on group by id, cust, placed, n except select id, cust, placed, n, count(*) as gks_rows from gks_dist_key_off group by id, cust, placed, n) x),
+  (select count(*) from (select id, cust, placed, n, count(*) as gks_rows from gks_dist_key_off group by id, cust, placed, n except select id, cust, placed, n, count(*) as gks_rows from gks_dist_key_on group by id, cust, placed, n) y),
+  (select count(*) from gks_dist_key_on) - (select count(*) from gks_dist_key_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, cust, placed, n, count(*) as gks_rows from gks_dist_key_on group by id, cust, placed, n except select id, cust, placed, n, count(*) as gks_rows from (select o.id, o.cust, o.placed, count(*) as n from gks_o o join gks_i i on i.o_id = o.id and i.iid = o.cust group by o.id, o.cust, o.placed) q group by id, cust, placed, n) x),
+  (select count(*) from (select id, cust, placed, n, count(*) as gks_rows from (select o.id, o.cust, o.placed, count(*) as n from gks_o o join gks_i i on i.o_id = o.id and i.iid = o.cust group by o.id, o.cust, o.placed) q group by id, cust, placed, n except select id, cust, placed, n, count(*) as gks_rows from gks_dist_key_on group by id, cust, placed, n) y),
+  (select count(*) from gks_dist_key_on) - (select count(*) from (select o.id, o.cust, o.placed, count(*) as n from gks_o o join gks_i i on i.o_id = o.id and i.iid = o.cust group by o.id, o.cust, o.placed) q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select a, mb, n, count(*) as gks_rows from gks_sub_agg_on group by a, mb, n except select a, mb, n, count(*) as gks_rows from gks_sub_agg_off group by a, mb, n) x),
   (select count(*) from (select a, mb, n, count(*) as gks_rows from gks_sub_agg_off group by a, mb, n except select a, mb, n, count(*) as gks_rows from gks_sub_agg_on group by a, mb, n) y),
   (select count(*) from gks_sub_agg_on) - (select count(*) from gks_sub_agg_off);
@@ -1009,6 +1063,22 @@ select
   (select count(*) from (select mb, n, count(*) as gks_rows from gks_simple_const_on group by mb, n except select mb, n, count(*) as gks_rows from (select max(b) as mb, count(*) as n from gks_t where b = 3) q group by mb, n) x),
   (select count(*) from (select mb, n, count(*) as gks_rows from (select max(b) as mb, count(*) as n from gks_t where b = 3) q group by mb, n except select mb, n, count(*) as gks_rows from gks_simple_const_on group by mb, n) y),
   (select count(*) from gks_simple_const_on) - (select count(*) from (select max(b) as mb, count(*) as n from gks_t where b = 3) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, cust, placed, n, count(*) as gks_rows from gks_dist_key_on group by id, cust, placed, n except select id, cust, placed, n, count(*) as gks_rows from gks_dist_key_off group by id, cust, placed, n) x),
+  (select count(*) from (select id, cust, placed, n, count(*) as gks_rows from gks_dist_key_off group by id, cust, placed, n except select id, cust, placed, n, count(*) as gks_rows from gks_dist_key_on group by id, cust, placed, n) y),
+  (select count(*) from gks_dist_key_on) - (select count(*) from gks_dist_key_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, cust, placed, n, count(*) as gks_rows from gks_dist_key_on group by id, cust, placed, n except select id, cust, placed, n, count(*) as gks_rows from (select o.id, o.cust, o.placed, count(*) as n from gks_o o join gks_i i on i.o_id = o.id and i.iid = o.cust group by o.id, o.cust, o.placed) q group by id, cust, placed, n) x),
+  (select count(*) from (select id, cust, placed, n, count(*) as gks_rows from (select o.id, o.cust, o.placed, count(*) as n from gks_o o join gks_i i on i.o_id = o.id and i.iid = o.cust group by o.id, o.cust, o.placed) q group by id, cust, placed, n except select id, cust, placed, n, count(*) as gks_rows from gks_dist_key_on group by id, cust, placed, n) y),
+  (select count(*) from gks_dist_key_on) - (select count(*) from (select o.id, o.cust, o.placed, count(*) as n from gks_o o join gks_i i on i.o_id = o.id and i.iid = o.cust group by o.id, o.cust, o.placed) q);
 ----
 0 0 0
 
@@ -1251,6 +1321,22 @@ select
 
 query III
 select
+  (select count(*) from (select id, cust, placed, n, count(*) as gks_rows from gks_dist_key_on group by id, cust, placed, n except select id, cust, placed, n, count(*) as gks_rows from gks_dist_key_off group by id, cust, placed, n) x),
+  (select count(*) from (select id, cust, placed, n, count(*) as gks_rows from gks_dist_key_off group by id, cust, placed, n except select id, cust, placed, n, count(*) as gks_rows from gks_dist_key_on group by id, cust, placed, n) y),
+  (select count(*) from gks_dist_key_on) - (select count(*) from gks_dist_key_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, cust, placed, n, count(*) as gks_rows from gks_dist_key_on group by id, cust, placed, n except select id, cust, placed, n, count(*) as gks_rows from (select o.id, o.cust, o.placed, count(*) as n from gks_o o join gks_i i on i.o_id = o.id and i.iid = o.cust group by o.id, o.cust, o.placed) q group by id, cust, placed, n) x),
+  (select count(*) from (select id, cust, placed, n, count(*) as gks_rows from (select o.id, o.cust, o.placed, count(*) as n from gks_o o join gks_i i on i.o_id = o.id and i.iid = o.cust group by o.id, o.cust, o.placed) q group by id, cust, placed, n except select id, cust, placed, n, count(*) as gks_rows from gks_dist_key_on group by id, cust, placed, n) y),
+  (select count(*) from gks_dist_key_on) - (select count(*) from (select o.id, o.cust, o.placed, count(*) as n from gks_o o join gks_i i on i.o_id = o.id and i.iid = o.cust group by o.id, o.cust, o.placed) q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select a, mb, n, count(*) as gks_rows from gks_sub_agg_on group by a, mb, n except select a, mb, n, count(*) as gks_rows from gks_sub_agg_off group by a, mb, n) x),
   (select count(*) from (select a, mb, n, count(*) as gks_rows from gks_sub_agg_off group by a, mb, n except select a, mb, n, count(*) as gks_rows from gks_sub_agg_on group by a, mb, n) y),
   (select count(*) from gks_sub_agg_on) - (select count(*) from gks_sub_agg_off);
@@ -1328,6 +1414,9 @@ statement ok
 drop materialized view gks_sub_agg_on;
 
 statement ok
+drop materialized view gks_dist_key_on;
+
+statement ok
 drop materialized view gks_simple_const_on;
 
 statement ok
@@ -1368,6 +1457,9 @@ drop materialized view gks_kept_left_off;
 
 statement ok
 drop materialized view gks_sub_agg_off;
+
+statement ok
+drop materialized view gks_dist_key_off;
 
 statement ok
 drop materialized view gks_simple_const_off;

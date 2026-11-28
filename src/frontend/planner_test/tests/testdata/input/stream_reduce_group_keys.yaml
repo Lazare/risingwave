@@ -135,3 +135,66 @@
   expected_outputs:
   - batch_plan
   - stream_plan
+
+# A key column that the input is distributed by is kept when removing it would cost an exchange
+# of the input: the join below is distributed by both columns of its key.
+- id: setup_dist
+  sql: |
+    set streaming_reduce_group_keys = true;
+    set batch_reduce_group_keys = true;
+    create table p (x int, k int primary key, v int);
+    create table q (x int, k int, w int);
+    create table s (xs int[], ys int[], k int primary key);
+  expected_outputs: []
+- name: a key of the join distribution is kept
+  before: [setup_dist]
+  sql: |
+    select p.x, p.k, sum(q.w) from p join q on p.x = q.x and p.k = q.k group by p.x, p.k;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: a key outside the join distribution is still removed
+  before: [setup_dist]
+  sql: |
+    select p.x, p.k, p.v, sum(q.w) from p join q on p.x = q.x and p.k = q.k group by p.x, p.k, p.v;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: correlated sum over an unnested array - the join key is kept
+  before: [setup_dist]
+  sql: |
+    select *, (select sum(i) from (select unnest(xs) i, 1 c) Q where k = c) as sum_x from s;
+  expected_outputs:
+  - batch_plan
+- name: a key determined by the distribution key of the table scanned is removed
+  before: [setup_dist]
+  sql: |
+    select k, x, count(*) from p group by k, x;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+# The computations over the aggregations stay below the join of the two sides (no stacked sort
+# on the reduced key above the join).
+- id: setup_sort
+  sql: |
+    set batch_reduce_group_keys = true;
+    create table f (d_id int, i_id int, w_id int, qty int);
+    create table item (i_id int primary key);
+    create table wh (w_id int primary key, w_name varchar);
+    create table dd (d_id int primary key, moy int, yr int);
+  expected_outputs: []
+- name: self join of reduced aggregations with an order by
+  before: [setup_sort]
+  sql: |
+    with g as (
+      select w_name, wh.w_id, item.i_id, moy, stddev_samp(qty) sd, avg(qty) m
+      from f, item, wh, dd
+      where f.i_id = item.i_id and f.w_id = wh.w_id and f.d_id = dd.d_id and yr = 2001
+      group by w_name, wh.w_id, item.i_id, moy),
+    v as (select w_id, i_id, moy, m, case m when 0 then null else sd / m end cov from g
+      where case m when 0 then 0 else sd / m end > 1)
+    select v1.w_id, v1.i_id, v1.moy, v1.m, v1.cov, v2.moy, v2.m, v2.cov
+    from v v1, v v2 where v1.i_id = v2.i_id and v1.w_id = v2.w_id and v1.moy = 1 and v2.moy = 2
+    order by v1.w_id, v1.i_id, v1.moy, v1.m, v1.cov, v2.moy, v2.m, v2.cov;
+  expected_outputs:
+  - batch_plan

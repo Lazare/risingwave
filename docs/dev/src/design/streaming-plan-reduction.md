@@ -2390,6 +2390,17 @@ SELECT k, max(k), min(k) FROM t GROUP BY k                => GROUP BY k, project
   aggregation), where `max` is `NULL` but `internal_last_seen_value` keeps the last value seen.
   The differential tests found this on a first version (`max(b) ... WHERE b = 3` without
   `GROUP BY`, wrong in both batch and streaming).
+- A key column is kept when removing it would lose the distribution of the input: the hash
+  distributions that the input will likely have once physical (a hash join by the key of its side
+  that is not padded, a scan by the distribution key of its table, an aggregation by its group
+  key, through projections and filters) are computed; when one is within the group key and would
+  no longer be after the removal, the column stays (otherwise every input row is exchanged again,
+  as on the upstream case "CorrelatedInputRef in ProjectSet and apply on condition refers to no
+  table function": `GROUP BY x, k` over a join on `(x, k)` with `k -> x`).
+- After the rule only column pruning runs; the projections are merged by the `PROJECT_REMOVE` of
+  the pipeline. A second `PROJECT_REMOVE` pulled the computations of both sides of a join above it
+  (`JoinProjectTransposeRule` once more), and the `ORDER BY` above then got a third stacked sort
+  (TPC-DS q39).
 - Stage: `STREAM_REDUCE_GROUP_KEYS` after the last stages of the prototype (after the final column
   pruning, so that the dependencies are those of the columns read), then column pruning;
   `BATCH_REDUCE_GROUP_KEYS` after the status ladder stage.

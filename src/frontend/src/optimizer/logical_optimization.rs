@@ -1908,7 +1908,9 @@ impl LogicalOptimizer {
         // Rule `AggGroupKeyReduceRule` (`streaming_reduce_group_keys`): after the final column
         // pruning, which leaves in the input of an aggregation only the columns that it reads, so
         // that the functional dependencies of the input are those of the columns read. On demand
-        // only. The columns that a replaced aggregate read may no longer be needed.
+        // only. The columns that a replaced aggregate read may no longer be needed. The projections
+        // are removed by the `PROJECT_REMOVE` below only: one more round would pull the
+        // computations of both sides of a join above it (`JoinProjectTransposeRule`).
         if ctx.session_ctx().config().streaming_reduce_group_keys()
             && !ctx.is_stream_prune_baseline()
         {
@@ -1918,7 +1920,6 @@ impl LogicalOptimizer {
             if applied > 0 {
                 ctx.add_stream_prune_rule_applied(applied);
                 plan = Self::column_pruning(plan, explain_trace, &ctx);
-                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
             }
         }
         crate::optimizer::rule::diagnose_repeated_reads(&plan);
@@ -2454,13 +2455,12 @@ impl LogicalOptimizer {
             }
         }
         // Rule `AggGroupKeyReduceRule` (`batch_reduce_group_keys`): after the final column pruning,
-        // as for streaming. On demand.
+        // as for streaming (the `PROJECT_REMOVE` below only). On demand.
         if ctx.session_ctx().config().batch_reduce_group_keys() {
             let applied_before = ctx.total_rule_applied();
             plan = plan.optimize_by_rules(&BATCH_REDUCE_GROUP_KEYS)?;
             if ctx.total_rule_applied() != applied_before {
                 plan = Self::column_pruning(plan, explain_trace, &ctx);
-                plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
             }
         }
 

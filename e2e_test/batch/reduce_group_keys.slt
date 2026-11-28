@@ -78,6 +78,12 @@ statement ok
 create table gkb_simple_const_on (mb int, n bigint);
 
 statement ok
+create table gkb_dist_key_off (id int, cust int, placed date, n bigint);
+
+statement ok
+create table gkb_dist_key_on (id int, cust int, placed date, n bigint);
+
+statement ok
 create table gkb_sub_agg_off (a int, mb int, n bigint);
 
 statement ok
@@ -290,6 +296,24 @@ statement ok
 set batch_reduce_group_keys = false;
 
 statement ok
+delete from gkb_dist_key_off;
+
+statement ok
+delete from gkb_dist_key_on;
+
+statement ok
+insert into gkb_dist_key_off select o.id, o.cust, o.placed, count(*) as n from gkb_o o join gkb_i i on i.o_id = o.id and i.iid = o.cust group by o.id, o.cust, o.placed;
+
+statement ok
+set batch_reduce_group_keys = true;
+
+statement ok
+insert into gkb_dist_key_on select o.id, o.cust, o.placed, count(*) as n from gkb_o o join gkb_i i on i.o_id = o.id and i.iid = o.cust group by o.id, o.cust, o.placed;
+
+statement ok
+set batch_reduce_group_keys = false;
+
+statement ok
 delete from gkb_sub_agg_off;
 
 statement ok
@@ -458,6 +482,14 @@ select
   (select count(*) from (select mb, n, count(*) as gkb_rows from gkb_simple_const_on group by mb, n except select mb, n, count(*) as gkb_rows from gkb_simple_const_off group by mb, n) x),
   (select count(*) from (select mb, n, count(*) as gkb_rows from gkb_simple_const_off group by mb, n except select mb, n, count(*) as gkb_rows from gkb_simple_const_on group by mb, n) y),
   (select count(*) from gkb_simple_const_on) - (select count(*) from gkb_simple_const_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, cust, placed, n, count(*) as gkb_rows from gkb_dist_key_on group by id, cust, placed, n except select id, cust, placed, n, count(*) as gkb_rows from gkb_dist_key_off group by id, cust, placed, n) x),
+  (select count(*) from (select id, cust, placed, n, count(*) as gkb_rows from gkb_dist_key_off group by id, cust, placed, n except select id, cust, placed, n, count(*) as gkb_rows from gkb_dist_key_on group by id, cust, placed, n) y),
+  (select count(*) from gkb_dist_key_on) - (select count(*) from gkb_dist_key_off);
 ----
 0 0 0
 
@@ -695,6 +727,24 @@ statement ok
 set batch_reduce_group_keys = false;
 
 statement ok
+delete from gkb_dist_key_off;
+
+statement ok
+delete from gkb_dist_key_on;
+
+statement ok
+insert into gkb_dist_key_off select o.id, o.cust, o.placed, count(*) as n from gkb_o o join gkb_i i on i.o_id = o.id and i.iid = o.cust group by o.id, o.cust, o.placed;
+
+statement ok
+set batch_reduce_group_keys = true;
+
+statement ok
+insert into gkb_dist_key_on select o.id, o.cust, o.placed, count(*) as n from gkb_o o join gkb_i i on i.o_id = o.id and i.iid = o.cust group by o.id, o.cust, o.placed;
+
+statement ok
+set batch_reduce_group_keys = false;
+
+statement ok
 delete from gkb_sub_agg_off;
 
 statement ok
@@ -863,6 +913,14 @@ select
   (select count(*) from (select mb, n, count(*) as gkb_rows from gkb_simple_const_on group by mb, n except select mb, n, count(*) as gkb_rows from gkb_simple_const_off group by mb, n) x),
   (select count(*) from (select mb, n, count(*) as gkb_rows from gkb_simple_const_off group by mb, n except select mb, n, count(*) as gkb_rows from gkb_simple_const_on group by mb, n) y),
   (select count(*) from gkb_simple_const_on) - (select count(*) from gkb_simple_const_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, cust, placed, n, count(*) as gkb_rows from gkb_dist_key_on group by id, cust, placed, n except select id, cust, placed, n, count(*) as gkb_rows from gkb_dist_key_off group by id, cust, placed, n) x),
+  (select count(*) from (select id, cust, placed, n, count(*) as gkb_rows from gkb_dist_key_off group by id, cust, placed, n except select id, cust, placed, n, count(*) as gkb_rows from gkb_dist_key_on group by id, cust, placed, n) y),
+  (select count(*) from gkb_dist_key_on) - (select count(*) from gkb_dist_key_off);
 ----
 0 0 0
 
@@ -1100,6 +1158,24 @@ statement ok
 set batch_reduce_group_keys = false;
 
 statement ok
+delete from gkb_dist_key_off;
+
+statement ok
+delete from gkb_dist_key_on;
+
+statement ok
+insert into gkb_dist_key_off select o.id, o.cust, o.placed, count(*) as n from gkb_o o join gkb_i i on i.o_id = o.id and i.iid = o.cust group by o.id, o.cust, o.placed;
+
+statement ok
+set batch_reduce_group_keys = true;
+
+statement ok
+insert into gkb_dist_key_on select o.id, o.cust, o.placed, count(*) as n from gkb_o o join gkb_i i on i.o_id = o.id and i.iid = o.cust group by o.id, o.cust, o.placed;
+
+statement ok
+set batch_reduce_group_keys = false;
+
+statement ok
 delete from gkb_sub_agg_off;
 
 statement ok
@@ -1268,6 +1344,14 @@ select
   (select count(*) from (select mb, n, count(*) as gkb_rows from gkb_simple_const_on group by mb, n except select mb, n, count(*) as gkb_rows from gkb_simple_const_off group by mb, n) x),
   (select count(*) from (select mb, n, count(*) as gkb_rows from gkb_simple_const_off group by mb, n except select mb, n, count(*) as gkb_rows from gkb_simple_const_on group by mb, n) y),
   (select count(*) from gkb_simple_const_on) - (select count(*) from gkb_simple_const_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, cust, placed, n, count(*) as gkb_rows from gkb_dist_key_on group by id, cust, placed, n except select id, cust, placed, n, count(*) as gkb_rows from gkb_dist_key_off group by id, cust, placed, n) x),
+  (select count(*) from (select id, cust, placed, n, count(*) as gkb_rows from gkb_dist_key_off group by id, cust, placed, n except select id, cust, placed, n, count(*) as gkb_rows from gkb_dist_key_on group by id, cust, placed, n) y),
+  (select count(*) from gkb_dist_key_on) - (select count(*) from gkb_dist_key_off);
 ----
 0 0 0
 
@@ -1523,6 +1607,24 @@ statement ok
 set batch_reduce_group_keys = false;
 
 statement ok
+delete from gkb_dist_key_off;
+
+statement ok
+delete from gkb_dist_key_on;
+
+statement ok
+insert into gkb_dist_key_off select o.id, o.cust, o.placed, count(*) as n from gkb_o o join gkb_i i on i.o_id = o.id and i.iid = o.cust group by o.id, o.cust, o.placed;
+
+statement ok
+set batch_reduce_group_keys = true;
+
+statement ok
+insert into gkb_dist_key_on select o.id, o.cust, o.placed, count(*) as n from gkb_o o join gkb_i i on i.o_id = o.id and i.iid = o.cust group by o.id, o.cust, o.placed;
+
+statement ok
+set batch_reduce_group_keys = false;
+
+statement ok
 delete from gkb_sub_agg_off;
 
 statement ok
@@ -1691,6 +1793,14 @@ select
   (select count(*) from (select mb, n, count(*) as gkb_rows from gkb_simple_const_on group by mb, n except select mb, n, count(*) as gkb_rows from gkb_simple_const_off group by mb, n) x),
   (select count(*) from (select mb, n, count(*) as gkb_rows from gkb_simple_const_off group by mb, n except select mb, n, count(*) as gkb_rows from gkb_simple_const_on group by mb, n) y),
   (select count(*) from gkb_simple_const_on) - (select count(*) from gkb_simple_const_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, cust, placed, n, count(*) as gkb_rows from gkb_dist_key_on group by id, cust, placed, n except select id, cust, placed, n, count(*) as gkb_rows from gkb_dist_key_off group by id, cust, placed, n) x),
+  (select count(*) from (select id, cust, placed, n, count(*) as gkb_rows from gkb_dist_key_off group by id, cust, placed, n except select id, cust, placed, n, count(*) as gkb_rows from gkb_dist_key_on group by id, cust, placed, n) y),
+  (select count(*) from gkb_dist_key_on) - (select count(*) from gkb_dist_key_off);
 ----
 0 0 0
 
@@ -1928,6 +2038,24 @@ statement ok
 set batch_reduce_group_keys = false;
 
 statement ok
+delete from gkb_dist_key_off;
+
+statement ok
+delete from gkb_dist_key_on;
+
+statement ok
+insert into gkb_dist_key_off select o.id, o.cust, o.placed, count(*) as n from gkb_o o join gkb_i i on i.o_id = o.id and i.iid = o.cust group by o.id, o.cust, o.placed;
+
+statement ok
+set batch_reduce_group_keys = true;
+
+statement ok
+insert into gkb_dist_key_on select o.id, o.cust, o.placed, count(*) as n from gkb_o o join gkb_i i on i.o_id = o.id and i.iid = o.cust group by o.id, o.cust, o.placed;
+
+statement ok
+set batch_reduce_group_keys = false;
+
+statement ok
 delete from gkb_sub_agg_off;
 
 statement ok
@@ -2096,6 +2224,14 @@ select
   (select count(*) from (select mb, n, count(*) as gkb_rows from gkb_simple_const_on group by mb, n except select mb, n, count(*) as gkb_rows from gkb_simple_const_off group by mb, n) x),
   (select count(*) from (select mb, n, count(*) as gkb_rows from gkb_simple_const_off group by mb, n except select mb, n, count(*) as gkb_rows from gkb_simple_const_on group by mb, n) y),
   (select count(*) from gkb_simple_const_on) - (select count(*) from gkb_simple_const_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, cust, placed, n, count(*) as gkb_rows from gkb_dist_key_on group by id, cust, placed, n except select id, cust, placed, n, count(*) as gkb_rows from gkb_dist_key_off group by id, cust, placed, n) x),
+  (select count(*) from (select id, cust, placed, n, count(*) as gkb_rows from gkb_dist_key_off group by id, cust, placed, n except select id, cust, placed, n, count(*) as gkb_rows from gkb_dist_key_on group by id, cust, placed, n) y),
+  (select count(*) from gkb_dist_key_on) - (select count(*) from gkb_dist_key_off);
 ----
 0 0 0
 
@@ -2333,6 +2469,24 @@ statement ok
 set batch_reduce_group_keys = false;
 
 statement ok
+delete from gkb_dist_key_off;
+
+statement ok
+delete from gkb_dist_key_on;
+
+statement ok
+insert into gkb_dist_key_off select o.id, o.cust, o.placed, count(*) as n from gkb_o o join gkb_i i on i.o_id = o.id and i.iid = o.cust group by o.id, o.cust, o.placed;
+
+statement ok
+set batch_reduce_group_keys = true;
+
+statement ok
+insert into gkb_dist_key_on select o.id, o.cust, o.placed, count(*) as n from gkb_o o join gkb_i i on i.o_id = o.id and i.iid = o.cust group by o.id, o.cust, o.placed;
+
+statement ok
+set batch_reduce_group_keys = false;
+
+statement ok
 delete from gkb_sub_agg_off;
 
 statement ok
@@ -2506,6 +2660,14 @@ select
 
 query III
 select
+  (select count(*) from (select id, cust, placed, n, count(*) as gkb_rows from gkb_dist_key_on group by id, cust, placed, n except select id, cust, placed, n, count(*) as gkb_rows from gkb_dist_key_off group by id, cust, placed, n) x),
+  (select count(*) from (select id, cust, placed, n, count(*) as gkb_rows from gkb_dist_key_off group by id, cust, placed, n except select id, cust, placed, n, count(*) as gkb_rows from gkb_dist_key_on group by id, cust, placed, n) y),
+  (select count(*) from gkb_dist_key_on) - (select count(*) from gkb_dist_key_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select a, mb, n, count(*) as gkb_rows from gkb_sub_agg_on group by a, mb, n except select a, mb, n, count(*) as gkb_rows from gkb_sub_agg_off group by a, mb, n) x),
   (select count(*) from (select a, mb, n, count(*) as gkb_rows from gkb_sub_agg_off group by a, mb, n except select a, mb, n, count(*) as gkb_rows from gkb_sub_agg_on group by a, mb, n) y),
   (select count(*) from gkb_sub_agg_on) - (select count(*) from gkb_sub_agg_off);
@@ -2575,6 +2737,12 @@ drop table gkb_sub_agg_on;
 
 statement ok
 drop table gkb_sub_agg_off;
+
+statement ok
+drop table gkb_dist_key_on;
+
+statement ok
+drop table gkb_dist_key_off;
 
 statement ok
 drop table gkb_simple_const_on;

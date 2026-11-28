@@ -52,6 +52,7 @@ use std::collections::{HashMap, HashSet};
 
 use fixedbitset::FixedBitSet;
 use risingwave_expr::aggregate::{AggType, PbAggKind};
+use risingwave_pb::plan_common::JoinType;
 
 use super::column_facts_simplify_rule::column_facts;
 use super::prelude::{PlanRef, *};
@@ -92,6 +93,73 @@ fn may_carry_watermark(plan: &PlanRef, visited: &mut HashSet<PlanNodeId>) -> boo
     plan.inputs()
         .iter()
         .any(|input| may_carry_watermark(input, visited))
+}
+
+/// The hash distributions (sets of columns) that a logical plan will likely have once physical,
+/// as far as it can be told before the physical planning: a hash join is distributed by the join
+/// key of its side that is not padded with `NULL`s, a scan by the distribution key of its table, a
+/// grouped aggregation by its group key; projections and filters keep the distribution of their
+/// input. Each distribution is non-empty. Only used to avoid a rewrite that costs an exchange.
+fn likely_hash_distributions(plan: &PlanRef) -> Vec<Vec<usize>> {
+    if let Some(project) = plan.as_logical_project() {
+        let exprs = project.exprs();
+        let position = |column: usize| {
+            exprs.iter().position(|expr| {
+                expr.as_input_ref()
+                    .is_some_and(|input_ref| input_ref.index() == column)
+            })
+        };
+        return likely_hash_distributions(&project.input())
+            .into_iter()
+            .filter_map(|dist| dist.into_iter().map(position).collect())
+            .collect();
+    }
+    if let Some(filter) = plan.as_logical_filter() {
+        return likely_hash_distributions(&filter.input());
+    }
+    if let Some(agg) = plan.as_logical_agg() {
+        if agg.grouping_sets().is_empty() && !agg.group_key().is_empty() {
+            return vec![(0..agg.group_key().len()).collect()];
+        }
+        return vec![];
+    }
+    if let Some(join) = plan.as_logical_join() {
+        let eq_indexes = join.eq_indexes();
+        if eq_indexes.is_empty() {
+            return vec![];
+        }
+        let core = join.core();
+        let (to_output, keys): (_, Vec<usize>) = match join.join_type() {
+            JoinType::Inner
+            | JoinType::LeftOuter
+            | JoinType::LeftSemi
+            | JoinType::LeftAnti
+            | JoinType::AsofInner
+            | JoinType::AsofLeftOuter => (
+                core.l2i_col_mapping().composite(&core.i2o_col_mapping()),
+                eq_indexes.iter().map(|(left, _)| *left).collect(),
+            ),
+            JoinType::RightOuter | JoinType::RightSemi | JoinType::RightAnti => (
+                core.r2i_col_mapping().composite(&core.i2o_col_mapping()),
+                eq_indexes.iter().map(|(_, right)| *right).collect(),
+            ),
+            JoinType::FullOuter | JoinType::Unspecified => return vec![],
+        };
+        return keys
+            .into_iter()
+            .map(|key| to_output.try_map(key))
+            .collect::<Option<Vec<usize>>>()
+            .into_iter()
+            .collect();
+    }
+    if let Some(scan) = plan.as_logical_scan() {
+        return scan
+            .distribution_key()
+            .filter(|key| !key.is_empty())
+            .into_iter()
+            .collect();
+    }
+    vec![]
 }
 
 /// What an output column of the aggregation becomes.
@@ -144,15 +212,27 @@ impl Rule<Logical> for AggGroupKeyReduceRule {
             set
         };
 
+        // The hash distributions that the input will likely have once physical: when one of them
+        // is within the group key, the aggregation reuses it without an exchange.
+        let input_dists = likely_hash_distributions(&input);
+        let reuses_input_dist = |columns: &[usize]| {
+            input_dists
+                .iter()
+                .any(|dist| dist.iter().all(|column| columns.contains(column)))
+        };
+
         // The group key columns that the others determine are removed, from the last one: at
-        // least one column is kept.
+        // least one column is kept. A column is kept when removing it would make the aggregation
+        // lose the distribution of its input, which would cost an exchange of every input row.
         let mut kept = group_key.clone();
         for &column in group_key.iter().rev() {
             if kept.len() == 1 {
                 break;
             }
             let rest: Vec<usize> = kept.iter().copied().filter(|&c| c != column).collect();
-            if fd.is_determined_by(&bits(&rest), &bits(&[column])) {
+            if fd.is_determined_by(&bits(&rest), &bits(&[column]))
+                && (reuses_input_dist(&rest) || !reuses_input_dist(&kept))
+            {
                 kept = rest;
             }
         }
