@@ -27,6 +27,9 @@ statement ok
 create view nk_v as select a.id, a.x, b.k as b_k, b.label from nk_a a join nk_b b on a.bk = b.k;
 
 statement ok
+create view nk_ej as select p, u, w, jsonb_build_object('w', w) as doc from nk_e;
+
+statement ok
 create table nk_inner_right_off (id int, label varchar);
 
 statement ok
@@ -217,6 +220,36 @@ create table nk_kept_coalesce_off (id int, label varchar);
 
 statement ok
 create table nk_kept_coalesce_on (id int, label varchar);
+
+statement ok
+create table nk_expr_jsonb_padded_off (id int, bk int, label varchar);
+
+statement ok
+create table nk_expr_jsonb_padded_on (id int, bk int, label varchar);
+
+statement ok
+create table nk_expr_strict_padded_off (id int, label varchar);
+
+statement ok
+create table nk_expr_strict_padded_on (id int, label varchar);
+
+statement ok
+create table nk_expr_non_equi_off (id int, label varchar);
+
+statement ok
+create table nk_expr_non_equi_on (id int, label varchar);
+
+statement ok
+create table nk_kept_expr_coalesce_off (id int, label varchar);
+
+statement ok
+create table nk_kept_expr_coalesce_on (id int, label varchar);
+
+statement ok
+create table nk_kept_expr_not_null_off (id int, label varchar);
+
+statement ok
+create table nk_kept_expr_not_null_on (id int, label varchar);
 
 # Empty tables: every query runs without, then with the variable.
 
@@ -796,6 +829,96 @@ insert into nk_kept_coalesce_on select a.id, b.label from nk_a a join nk_b b on 
 statement ok
 set batch_simplify_null_join_keys = false;
 
+statement ok
+delete from nk_expr_jsonb_padded_off;
+
+statement ok
+delete from nk_expr_jsonb_padded_on;
+
+statement ok
+insert into nk_expr_jsonb_padded_off select a.id, a.bk, b.label from nk_a a left join nk_ej ej on a.bk = ej.p left join nk_b b on (ej.doc->>'w')::int = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_expr_jsonb_padded_on select a.id, a.bk, b.label from nk_a a left join nk_ej ej on a.bk = ej.p left join nk_b b on (ej.doc->>'w')::int = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_expr_strict_padded_off;
+
+statement ok
+delete from nk_expr_strict_padded_on;
+
+statement ok
+insert into nk_expr_strict_padded_off select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on e.w + a.x = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_expr_strict_padded_on select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on e.w + a.x = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_expr_non_equi_off;
+
+statement ok
+delete from nk_expr_non_equi_on;
+
+statement ok
+insert into nk_expr_non_equi_off select a.id, b.label from (select * from nk_a where x is null) a join nk_b b on a.bk = b.k and b.id > a.x;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_expr_non_equi_on select a.id, b.label from (select * from nk_a where x is null) a join nk_b b on a.bk = b.k and b.id > a.x;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_kept_expr_coalesce_off;
+
+statement ok
+delete from nk_kept_expr_coalesce_on;
+
+statement ok
+insert into nk_kept_expr_coalesce_off select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on coalesce(e.w, 0) = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_kept_expr_coalesce_on select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on coalesce(e.w, 0) = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_kept_expr_not_null_off;
+
+statement ok
+delete from nk_kept_expr_not_null_on;
+
+statement ok
+insert into nk_kept_expr_not_null_off select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_kept_expr_not_null_on select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
 # Empty tables: both results hold the same rows, each the same number of times.
 
 query III
@@ -1051,6 +1174,46 @@ select
   (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_coalesce_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_coalesce_off group by id, label) x),
   (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_coalesce_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_coalesce_on group by id, label) y),
   (select count(*) from nk_kept_coalesce_on) - (select count(*) from nk_kept_coalesce_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bk, label, count(*) as nk_rows from nk_expr_jsonb_padded_on group by id, bk, label except select id, bk, label, count(*) as nk_rows from nk_expr_jsonb_padded_off group by id, bk, label) x),
+  (select count(*) from (select id, bk, label, count(*) as nk_rows from nk_expr_jsonb_padded_off group by id, bk, label except select id, bk, label, count(*) as nk_rows from nk_expr_jsonb_padded_on group by id, bk, label) y),
+  (select count(*) from nk_expr_jsonb_padded_on) - (select count(*) from nk_expr_jsonb_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_expr_strict_padded_on group by id, label except select id, label, count(*) as nk_rows from nk_expr_strict_padded_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_expr_strict_padded_off group by id, label except select id, label, count(*) as nk_rows from nk_expr_strict_padded_on group by id, label) y),
+  (select count(*) from nk_expr_strict_padded_on) - (select count(*) from nk_expr_strict_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_expr_non_equi_on group by id, label except select id, label, count(*) as nk_rows from nk_expr_non_equi_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_expr_non_equi_off group by id, label except select id, label, count(*) as nk_rows from nk_expr_non_equi_on group by id, label) y),
+  (select count(*) from nk_expr_non_equi_on) - (select count(*) from nk_expr_non_equi_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_expr_coalesce_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_expr_coalesce_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_expr_coalesce_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_expr_coalesce_on group by id, label) y),
+  (select count(*) from nk_kept_expr_coalesce_on) - (select count(*) from nk_kept_expr_coalesce_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_expr_not_null_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_expr_not_null_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_expr_not_null_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_expr_not_null_on group by id, label) y),
+  (select count(*) from nk_kept_expr_not_null_on) - (select count(*) from nk_kept_expr_not_null_off);
 ----
 0 0 0
 
@@ -1649,6 +1812,96 @@ insert into nk_kept_coalesce_on select a.id, b.label from nk_a a join nk_b b on 
 statement ok
 set batch_simplify_null_join_keys = false;
 
+statement ok
+delete from nk_expr_jsonb_padded_off;
+
+statement ok
+delete from nk_expr_jsonb_padded_on;
+
+statement ok
+insert into nk_expr_jsonb_padded_off select a.id, a.bk, b.label from nk_a a left join nk_ej ej on a.bk = ej.p left join nk_b b on (ej.doc->>'w')::int = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_expr_jsonb_padded_on select a.id, a.bk, b.label from nk_a a left join nk_ej ej on a.bk = ej.p left join nk_b b on (ej.doc->>'w')::int = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_expr_strict_padded_off;
+
+statement ok
+delete from nk_expr_strict_padded_on;
+
+statement ok
+insert into nk_expr_strict_padded_off select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on e.w + a.x = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_expr_strict_padded_on select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on e.w + a.x = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_expr_non_equi_off;
+
+statement ok
+delete from nk_expr_non_equi_on;
+
+statement ok
+insert into nk_expr_non_equi_off select a.id, b.label from (select * from nk_a where x is null) a join nk_b b on a.bk = b.k and b.id > a.x;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_expr_non_equi_on select a.id, b.label from (select * from nk_a where x is null) a join nk_b b on a.bk = b.k and b.id > a.x;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_kept_expr_coalesce_off;
+
+statement ok
+delete from nk_kept_expr_coalesce_on;
+
+statement ok
+insert into nk_kept_expr_coalesce_off select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on coalesce(e.w, 0) = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_kept_expr_coalesce_on select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on coalesce(e.w, 0) = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_kept_expr_not_null_off;
+
+statement ok
+delete from nk_kept_expr_not_null_on;
+
+statement ok
+insert into nk_kept_expr_not_null_off select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_kept_expr_not_null_on select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
 # First data: both results hold the same rows, each the same number of times.
 
 query III
@@ -1904,6 +2157,46 @@ select
   (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_coalesce_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_coalesce_off group by id, label) x),
   (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_coalesce_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_coalesce_on group by id, label) y),
   (select count(*) from nk_kept_coalesce_on) - (select count(*) from nk_kept_coalesce_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bk, label, count(*) as nk_rows from nk_expr_jsonb_padded_on group by id, bk, label except select id, bk, label, count(*) as nk_rows from nk_expr_jsonb_padded_off group by id, bk, label) x),
+  (select count(*) from (select id, bk, label, count(*) as nk_rows from nk_expr_jsonb_padded_off group by id, bk, label except select id, bk, label, count(*) as nk_rows from nk_expr_jsonb_padded_on group by id, bk, label) y),
+  (select count(*) from nk_expr_jsonb_padded_on) - (select count(*) from nk_expr_jsonb_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_expr_strict_padded_on group by id, label except select id, label, count(*) as nk_rows from nk_expr_strict_padded_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_expr_strict_padded_off group by id, label except select id, label, count(*) as nk_rows from nk_expr_strict_padded_on group by id, label) y),
+  (select count(*) from nk_expr_strict_padded_on) - (select count(*) from nk_expr_strict_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_expr_non_equi_on group by id, label except select id, label, count(*) as nk_rows from nk_expr_non_equi_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_expr_non_equi_off group by id, label except select id, label, count(*) as nk_rows from nk_expr_non_equi_on group by id, label) y),
+  (select count(*) from nk_expr_non_equi_on) - (select count(*) from nk_expr_non_equi_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_expr_coalesce_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_expr_coalesce_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_expr_coalesce_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_expr_coalesce_on group by id, label) y),
+  (select count(*) from nk_kept_expr_coalesce_on) - (select count(*) from nk_kept_expr_coalesce_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_expr_not_null_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_expr_not_null_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_expr_not_null_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_expr_not_null_on group by id, label) y),
+  (select count(*) from nk_kept_expr_not_null_on) - (select count(*) from nk_kept_expr_not_null_off);
 ----
 0 0 0
 
@@ -2517,6 +2810,96 @@ insert into nk_kept_coalesce_on select a.id, b.label from nk_a a join nk_b b on 
 statement ok
 set batch_simplify_null_join_keys = false;
 
+statement ok
+delete from nk_expr_jsonb_padded_off;
+
+statement ok
+delete from nk_expr_jsonb_padded_on;
+
+statement ok
+insert into nk_expr_jsonb_padded_off select a.id, a.bk, b.label from nk_a a left join nk_ej ej on a.bk = ej.p left join nk_b b on (ej.doc->>'w')::int = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_expr_jsonb_padded_on select a.id, a.bk, b.label from nk_a a left join nk_ej ej on a.bk = ej.p left join nk_b b on (ej.doc->>'w')::int = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_expr_strict_padded_off;
+
+statement ok
+delete from nk_expr_strict_padded_on;
+
+statement ok
+insert into nk_expr_strict_padded_off select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on e.w + a.x = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_expr_strict_padded_on select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on e.w + a.x = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_expr_non_equi_off;
+
+statement ok
+delete from nk_expr_non_equi_on;
+
+statement ok
+insert into nk_expr_non_equi_off select a.id, b.label from (select * from nk_a where x is null) a join nk_b b on a.bk = b.k and b.id > a.x;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_expr_non_equi_on select a.id, b.label from (select * from nk_a where x is null) a join nk_b b on a.bk = b.k and b.id > a.x;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_kept_expr_coalesce_off;
+
+statement ok
+delete from nk_kept_expr_coalesce_on;
+
+statement ok
+insert into nk_kept_expr_coalesce_off select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on coalesce(e.w, 0) = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_kept_expr_coalesce_on select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on coalesce(e.w, 0) = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_kept_expr_not_null_off;
+
+statement ok
+delete from nk_kept_expr_not_null_on;
+
+statement ok
+insert into nk_kept_expr_not_null_off select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_kept_expr_not_null_on select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
 # Second data: both results hold the same rows, each the same number of times.
 
 query III
@@ -2772,6 +3155,46 @@ select
   (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_coalesce_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_coalesce_off group by id, label) x),
   (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_coalesce_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_coalesce_on group by id, label) y),
   (select count(*) from nk_kept_coalesce_on) - (select count(*) from nk_kept_coalesce_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bk, label, count(*) as nk_rows from nk_expr_jsonb_padded_on group by id, bk, label except select id, bk, label, count(*) as nk_rows from nk_expr_jsonb_padded_off group by id, bk, label) x),
+  (select count(*) from (select id, bk, label, count(*) as nk_rows from nk_expr_jsonb_padded_off group by id, bk, label except select id, bk, label, count(*) as nk_rows from nk_expr_jsonb_padded_on group by id, bk, label) y),
+  (select count(*) from nk_expr_jsonb_padded_on) - (select count(*) from nk_expr_jsonb_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_expr_strict_padded_on group by id, label except select id, label, count(*) as nk_rows from nk_expr_strict_padded_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_expr_strict_padded_off group by id, label except select id, label, count(*) as nk_rows from nk_expr_strict_padded_on group by id, label) y),
+  (select count(*) from nk_expr_strict_padded_on) - (select count(*) from nk_expr_strict_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_expr_non_equi_on group by id, label except select id, label, count(*) as nk_rows from nk_expr_non_equi_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_expr_non_equi_off group by id, label except select id, label, count(*) as nk_rows from nk_expr_non_equi_on group by id, label) y),
+  (select count(*) from nk_expr_non_equi_on) - (select count(*) from nk_expr_non_equi_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_expr_coalesce_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_expr_coalesce_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_expr_coalesce_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_expr_coalesce_on group by id, label) y),
+  (select count(*) from nk_kept_expr_coalesce_on) - (select count(*) from nk_kept_expr_coalesce_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_expr_not_null_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_expr_not_null_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_expr_not_null_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_expr_not_null_on group by id, label) y),
+  (select count(*) from nk_kept_expr_not_null_on) - (select count(*) from nk_kept_expr_not_null_off);
 ----
 0 0 0
 
@@ -3379,6 +3802,96 @@ insert into nk_kept_coalesce_on select a.id, b.label from nk_a a join nk_b b on 
 statement ok
 set batch_simplify_null_join_keys = false;
 
+statement ok
+delete from nk_expr_jsonb_padded_off;
+
+statement ok
+delete from nk_expr_jsonb_padded_on;
+
+statement ok
+insert into nk_expr_jsonb_padded_off select a.id, a.bk, b.label from nk_a a left join nk_ej ej on a.bk = ej.p left join nk_b b on (ej.doc->>'w')::int = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_expr_jsonb_padded_on select a.id, a.bk, b.label from nk_a a left join nk_ej ej on a.bk = ej.p left join nk_b b on (ej.doc->>'w')::int = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_expr_strict_padded_off;
+
+statement ok
+delete from nk_expr_strict_padded_on;
+
+statement ok
+insert into nk_expr_strict_padded_off select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on e.w + a.x = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_expr_strict_padded_on select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on e.w + a.x = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_expr_non_equi_off;
+
+statement ok
+delete from nk_expr_non_equi_on;
+
+statement ok
+insert into nk_expr_non_equi_off select a.id, b.label from (select * from nk_a where x is null) a join nk_b b on a.bk = b.k and b.id > a.x;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_expr_non_equi_on select a.id, b.label from (select * from nk_a where x is null) a join nk_b b on a.bk = b.k and b.id > a.x;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_kept_expr_coalesce_off;
+
+statement ok
+delete from nk_kept_expr_coalesce_on;
+
+statement ok
+insert into nk_kept_expr_coalesce_off select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on coalesce(e.w, 0) = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_kept_expr_coalesce_on select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on coalesce(e.w, 0) = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_kept_expr_not_null_off;
+
+statement ok
+delete from nk_kept_expr_not_null_on;
+
+statement ok
+insert into nk_kept_expr_not_null_off select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_kept_expr_not_null_on select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
 # Third data: both results hold the same rows, each the same number of times.
 
 query III
@@ -3634,6 +4147,46 @@ select
   (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_coalesce_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_coalesce_off group by id, label) x),
   (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_coalesce_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_coalesce_on group by id, label) y),
   (select count(*) from nk_kept_coalesce_on) - (select count(*) from nk_kept_coalesce_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bk, label, count(*) as nk_rows from nk_expr_jsonb_padded_on group by id, bk, label except select id, bk, label, count(*) as nk_rows from nk_expr_jsonb_padded_off group by id, bk, label) x),
+  (select count(*) from (select id, bk, label, count(*) as nk_rows from nk_expr_jsonb_padded_off group by id, bk, label except select id, bk, label, count(*) as nk_rows from nk_expr_jsonb_padded_on group by id, bk, label) y),
+  (select count(*) from nk_expr_jsonb_padded_on) - (select count(*) from nk_expr_jsonb_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_expr_strict_padded_on group by id, label except select id, label, count(*) as nk_rows from nk_expr_strict_padded_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_expr_strict_padded_off group by id, label except select id, label, count(*) as nk_rows from nk_expr_strict_padded_on group by id, label) y),
+  (select count(*) from nk_expr_strict_padded_on) - (select count(*) from nk_expr_strict_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_expr_non_equi_on group by id, label except select id, label, count(*) as nk_rows from nk_expr_non_equi_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_expr_non_equi_off group by id, label except select id, label, count(*) as nk_rows from nk_expr_non_equi_on group by id, label) y),
+  (select count(*) from nk_expr_non_equi_on) - (select count(*) from nk_expr_non_equi_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_expr_coalesce_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_expr_coalesce_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_expr_coalesce_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_expr_coalesce_on group by id, label) y),
+  (select count(*) from nk_kept_expr_coalesce_on) - (select count(*) from nk_kept_expr_coalesce_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_expr_not_null_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_expr_not_null_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_expr_not_null_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_expr_not_null_on group by id, label) y),
+  (select count(*) from nk_kept_expr_not_null_on) - (select count(*) from nk_kept_expr_not_null_off);
 ----
 0 0 0
 
@@ -4220,6 +4773,96 @@ insert into nk_kept_coalesce_on select a.id, b.label from nk_a a join nk_b b on 
 statement ok
 set batch_simplify_null_join_keys = false;
 
+statement ok
+delete from nk_expr_jsonb_padded_off;
+
+statement ok
+delete from nk_expr_jsonb_padded_on;
+
+statement ok
+insert into nk_expr_jsonb_padded_off select a.id, a.bk, b.label from nk_a a left join nk_ej ej on a.bk = ej.p left join nk_b b on (ej.doc->>'w')::int = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_expr_jsonb_padded_on select a.id, a.bk, b.label from nk_a a left join nk_ej ej on a.bk = ej.p left join nk_b b on (ej.doc->>'w')::int = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_expr_strict_padded_off;
+
+statement ok
+delete from nk_expr_strict_padded_on;
+
+statement ok
+insert into nk_expr_strict_padded_off select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on e.w + a.x = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_expr_strict_padded_on select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on e.w + a.x = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_expr_non_equi_off;
+
+statement ok
+delete from nk_expr_non_equi_on;
+
+statement ok
+insert into nk_expr_non_equi_off select a.id, b.label from (select * from nk_a where x is null) a join nk_b b on a.bk = b.k and b.id > a.x;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_expr_non_equi_on select a.id, b.label from (select * from nk_a where x is null) a join nk_b b on a.bk = b.k and b.id > a.x;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_kept_expr_coalesce_off;
+
+statement ok
+delete from nk_kept_expr_coalesce_on;
+
+statement ok
+insert into nk_kept_expr_coalesce_off select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on coalesce(e.w, 0) = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_kept_expr_coalesce_on select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on coalesce(e.w, 0) = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_kept_expr_not_null_off;
+
+statement ok
+delete from nk_kept_expr_not_null_on;
+
+statement ok
+insert into nk_kept_expr_not_null_off select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_kept_expr_not_null_on select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
 # Only NULL keys on the right side: both results hold the same rows, each the same number of times.
 
 query III
@@ -4475,6 +5118,46 @@ select
   (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_coalesce_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_coalesce_off group by id, label) x),
   (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_coalesce_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_coalesce_on group by id, label) y),
   (select count(*) from nk_kept_coalesce_on) - (select count(*) from nk_kept_coalesce_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bk, label, count(*) as nk_rows from nk_expr_jsonb_padded_on group by id, bk, label except select id, bk, label, count(*) as nk_rows from nk_expr_jsonb_padded_off group by id, bk, label) x),
+  (select count(*) from (select id, bk, label, count(*) as nk_rows from nk_expr_jsonb_padded_off group by id, bk, label except select id, bk, label, count(*) as nk_rows from nk_expr_jsonb_padded_on group by id, bk, label) y),
+  (select count(*) from nk_expr_jsonb_padded_on) - (select count(*) from nk_expr_jsonb_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_expr_strict_padded_on group by id, label except select id, label, count(*) as nk_rows from nk_expr_strict_padded_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_expr_strict_padded_off group by id, label except select id, label, count(*) as nk_rows from nk_expr_strict_padded_on group by id, label) y),
+  (select count(*) from nk_expr_strict_padded_on) - (select count(*) from nk_expr_strict_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_expr_non_equi_on group by id, label except select id, label, count(*) as nk_rows from nk_expr_non_equi_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_expr_non_equi_off group by id, label except select id, label, count(*) as nk_rows from nk_expr_non_equi_on group by id, label) y),
+  (select count(*) from nk_expr_non_equi_on) - (select count(*) from nk_expr_non_equi_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_expr_coalesce_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_expr_coalesce_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_expr_coalesce_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_expr_coalesce_on group by id, label) y),
+  (select count(*) from nk_kept_expr_coalesce_on) - (select count(*) from nk_kept_expr_coalesce_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_expr_not_null_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_expr_not_null_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_expr_not_null_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_expr_not_null_on group by id, label) y),
+  (select count(*) from nk_kept_expr_not_null_on) - (select count(*) from nk_kept_expr_not_null_off);
 ----
 0 0 0
 
@@ -5059,6 +5742,96 @@ insert into nk_kept_coalesce_on select a.id, b.label from nk_a a join nk_b b on 
 statement ok
 set batch_simplify_null_join_keys = false;
 
+statement ok
+delete from nk_expr_jsonb_padded_off;
+
+statement ok
+delete from nk_expr_jsonb_padded_on;
+
+statement ok
+insert into nk_expr_jsonb_padded_off select a.id, a.bk, b.label from nk_a a left join nk_ej ej on a.bk = ej.p left join nk_b b on (ej.doc->>'w')::int = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_expr_jsonb_padded_on select a.id, a.bk, b.label from nk_a a left join nk_ej ej on a.bk = ej.p left join nk_b b on (ej.doc->>'w')::int = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_expr_strict_padded_off;
+
+statement ok
+delete from nk_expr_strict_padded_on;
+
+statement ok
+insert into nk_expr_strict_padded_off select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on e.w + a.x = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_expr_strict_padded_on select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on e.w + a.x = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_expr_non_equi_off;
+
+statement ok
+delete from nk_expr_non_equi_on;
+
+statement ok
+insert into nk_expr_non_equi_off select a.id, b.label from (select * from nk_a where x is null) a join nk_b b on a.bk = b.k and b.id > a.x;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_expr_non_equi_on select a.id, b.label from (select * from nk_a where x is null) a join nk_b b on a.bk = b.k and b.id > a.x;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_kept_expr_coalesce_off;
+
+statement ok
+delete from nk_kept_expr_coalesce_on;
+
+statement ok
+insert into nk_kept_expr_coalesce_off select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on coalesce(e.w, 0) = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_kept_expr_coalesce_on select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on coalesce(e.w, 0) = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_kept_expr_not_null_off;
+
+statement ok
+delete from nk_kept_expr_not_null_on;
+
+statement ok
+insert into nk_kept_expr_not_null_off select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_kept_expr_not_null_on select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
 # Empty right side: both results hold the same rows, each the same number of times.
 
 query III
@@ -5314,6 +6087,46 @@ select
   (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_coalesce_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_coalesce_off group by id, label) x),
   (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_coalesce_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_coalesce_on group by id, label) y),
   (select count(*) from nk_kept_coalesce_on) - (select count(*) from nk_kept_coalesce_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bk, label, count(*) as nk_rows from nk_expr_jsonb_padded_on group by id, bk, label except select id, bk, label, count(*) as nk_rows from nk_expr_jsonb_padded_off group by id, bk, label) x),
+  (select count(*) from (select id, bk, label, count(*) as nk_rows from nk_expr_jsonb_padded_off group by id, bk, label except select id, bk, label, count(*) as nk_rows from nk_expr_jsonb_padded_on group by id, bk, label) y),
+  (select count(*) from nk_expr_jsonb_padded_on) - (select count(*) from nk_expr_jsonb_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_expr_strict_padded_on group by id, label except select id, label, count(*) as nk_rows from nk_expr_strict_padded_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_expr_strict_padded_off group by id, label except select id, label, count(*) as nk_rows from nk_expr_strict_padded_on group by id, label) y),
+  (select count(*) from nk_expr_strict_padded_on) - (select count(*) from nk_expr_strict_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_expr_non_equi_on group by id, label except select id, label, count(*) as nk_rows from nk_expr_non_equi_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_expr_non_equi_off group by id, label except select id, label, count(*) as nk_rows from nk_expr_non_equi_on group by id, label) y),
+  (select count(*) from nk_expr_non_equi_on) - (select count(*) from nk_expr_non_equi_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_expr_coalesce_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_expr_coalesce_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_expr_coalesce_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_expr_coalesce_on group by id, label) y),
+  (select count(*) from nk_kept_expr_coalesce_on) - (select count(*) from nk_kept_expr_coalesce_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_expr_not_null_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_expr_not_null_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_expr_not_null_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_expr_not_null_on group by id, label) y),
+  (select count(*) from nk_kept_expr_not_null_on) - (select count(*) from nk_kept_expr_not_null_off);
 ----
 0 0 0
 
@@ -5906,6 +6719,96 @@ insert into nk_kept_coalesce_on select a.id, b.label from nk_a a join nk_b b on 
 statement ok
 set batch_simplify_null_join_keys = false;
 
+statement ok
+delete from nk_expr_jsonb_padded_off;
+
+statement ok
+delete from nk_expr_jsonb_padded_on;
+
+statement ok
+insert into nk_expr_jsonb_padded_off select a.id, a.bk, b.label from nk_a a left join nk_ej ej on a.bk = ej.p left join nk_b b on (ej.doc->>'w')::int = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_expr_jsonb_padded_on select a.id, a.bk, b.label from nk_a a left join nk_ej ej on a.bk = ej.p left join nk_b b on (ej.doc->>'w')::int = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_expr_strict_padded_off;
+
+statement ok
+delete from nk_expr_strict_padded_on;
+
+statement ok
+insert into nk_expr_strict_padded_off select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on e.w + a.x = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_expr_strict_padded_on select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on e.w + a.x = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_expr_non_equi_off;
+
+statement ok
+delete from nk_expr_non_equi_on;
+
+statement ok
+insert into nk_expr_non_equi_off select a.id, b.label from (select * from nk_a where x is null) a join nk_b b on a.bk = b.k and b.id > a.x;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_expr_non_equi_on select a.id, b.label from (select * from nk_a where x is null) a join nk_b b on a.bk = b.k and b.id > a.x;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_kept_expr_coalesce_off;
+
+statement ok
+delete from nk_kept_expr_coalesce_on;
+
+statement ok
+insert into nk_kept_expr_coalesce_off select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on coalesce(e.w, 0) = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_kept_expr_coalesce_on select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on coalesce(e.w, 0) = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
+statement ok
+delete from nk_kept_expr_not_null_off;
+
+statement ok
+delete from nk_kept_expr_not_null_on;
+
+statement ok
+insert into nk_kept_expr_not_null_off select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = true;
+
+statement ok
+insert into nk_kept_expr_not_null_on select a.id, b.label from nk_a a left join nk_e e on a.bk = e.p left join nk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null;
+
+statement ok
+set batch_simplify_null_join_keys = false;
+
 # Empty left side: both results hold the same rows, each the same number of times.
 
 query III
@@ -6164,7 +7067,77 @@ select
 ----
 0 0 0
 
+query III
+select
+  (select count(*) from (select id, bk, label, count(*) as nk_rows from nk_expr_jsonb_padded_on group by id, bk, label except select id, bk, label, count(*) as nk_rows from nk_expr_jsonb_padded_off group by id, bk, label) x),
+  (select count(*) from (select id, bk, label, count(*) as nk_rows from nk_expr_jsonb_padded_off group by id, bk, label except select id, bk, label, count(*) as nk_rows from nk_expr_jsonb_padded_on group by id, bk, label) y),
+  (select count(*) from nk_expr_jsonb_padded_on) - (select count(*) from nk_expr_jsonb_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_expr_strict_padded_on group by id, label except select id, label, count(*) as nk_rows from nk_expr_strict_padded_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_expr_strict_padded_off group by id, label except select id, label, count(*) as nk_rows from nk_expr_strict_padded_on group by id, label) y),
+  (select count(*) from nk_expr_strict_padded_on) - (select count(*) from nk_expr_strict_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_expr_non_equi_on group by id, label except select id, label, count(*) as nk_rows from nk_expr_non_equi_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_expr_non_equi_off group by id, label except select id, label, count(*) as nk_rows from nk_expr_non_equi_on group by id, label) y),
+  (select count(*) from nk_expr_non_equi_on) - (select count(*) from nk_expr_non_equi_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_expr_coalesce_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_expr_coalesce_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_expr_coalesce_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_expr_coalesce_on group by id, label) y),
+  (select count(*) from nk_kept_expr_coalesce_on) - (select count(*) from nk_kept_expr_coalesce_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_expr_not_null_on group by id, label except select id, label, count(*) as nk_rows from nk_kept_expr_not_null_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as nk_rows from nk_kept_expr_not_null_off group by id, label except select id, label, count(*) as nk_rows from nk_kept_expr_not_null_on group by id, label) y),
+  (select count(*) from nk_kept_expr_not_null_on) - (select count(*) from nk_kept_expr_not_null_off);
+----
+0 0 0
+
 # Cleanup.
+
+statement ok
+drop table nk_kept_expr_not_null_on;
+
+statement ok
+drop table nk_kept_expr_not_null_off;
+
+statement ok
+drop table nk_kept_expr_coalesce_on;
+
+statement ok
+drop table nk_kept_expr_coalesce_off;
+
+statement ok
+drop table nk_expr_non_equi_on;
+
+statement ok
+drop table nk_expr_non_equi_off;
+
+statement ok
+drop table nk_expr_strict_padded_on;
+
+statement ok
+drop table nk_expr_strict_padded_off;
+
+statement ok
+drop table nk_expr_jsonb_padded_on;
+
+statement ok
+drop table nk_expr_jsonb_padded_off;
 
 statement ok
 drop table nk_kept_coalesce_on;
@@ -6357,6 +7330,9 @@ drop table nk_inner_right_on;
 
 statement ok
 drop table nk_inner_right_off;
+
+statement ok
+drop view nk_ej;
 
 statement ok
 drop view nk_v;

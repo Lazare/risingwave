@@ -749,9 +749,16 @@ Join(Inner, a.b_ref = b.id)              Values([])
   unions (a column `NULL` in every input), joins (a column of a side keeps the facts of that side:
   a padded column is `NULL` too), and the operators that output the columns of their input as
   they are (limit, top-n, dedup, over window); a `NULL` literal of a projection. Nothing is
-  derived through aggregations.
+  derived through aggregations. Since 2026-11-28 (branch `proto/plan-reduction-nullkey-left`), a
+  projection also outputs such a column for an expression that is `NULL` whenever the known
+  `NULL` columns of its input are: a function that is `NULL` when an argument is (`Strong`:
+  comparisons, arithmetic, casts...), or an expression of those columns and constants that
+  evaluates to `NULL` once they are replaced with `NULL` (pure functions only, an error of the
+  evaluation proves nothing), such as `(j ->> 'f')::int`.
 - A conjunct `l = r` of the join condition whose operand is such a column, or a cast of it, on
-  either side, whatever the type of the join: no pair of rows matches. An inner or semi join
+  either side, whatever the type of the join: no pair of rows matches. Since 2026-11-28, any
+  conjunct that is `NULL` whenever those columns are, as above (`l = r` with an operand computed
+  from such a column, `b.id > a.x` with `a.x` known `NULL`). An inner or semi join
   becomes empty; a left outer or left anti join keeps its left side, padded with `NULL`s or as it
   is, and its right side becomes empty, also when the `NULL` column is on the left (preserved)
   side, whose rows can then match nothing; symmetrically for the right joins. A full join
@@ -765,8 +772,14 @@ Join(Inner, a.b_ref = b.id)              Values([])
   condition, whatever its other conjuncts, duplicates or empty inputs. The facts are properties
   of the rows a filter or a scan can output: they hold for every row ever produced, under
   retractions, so they are valid for a plan frozen when a streaming job is created.
+- Chained left joins (a `not_null` test over a view `l LEFT JOIN m ON l.k = m.id LEFT JOIN r
+  ON (m.doc ->> 'f') = r.k` filtered on `l.k IS NULL`): the first join's optional side becomes
+  empty and its columns are padded with `NULL`, so the key of the second join, computed from
+  `m.doc`, is `NULL` too. Before 2026-11-28 only the first join was rewritten: the projection
+  computing `m.doc ->> 'f'` over the padded column hid the fact, and the second join still read
+  and shuffled its whole right side, its key folded to a `NULL` constant only later.
 - Not rewritten: `IS NOT DISTINCT FROM` (matches `NULL`s), as-of joins, an operand that is
-  another expression (`coalesce(c, 0) = x` can match), a union where only some branches have the
+  not `NULL` when its column is (`coalesce(c, 0) = x` can match), a union where only some branches have the
   `NULL` fact, and a filter `s.k IS NULL` above a left join on its optional side (the anti-join
   pattern: the filter stays above the join and is not read).
 - Streaming and watermarks: the rule leaves the join untouched if a sub-plan it would remove holds
@@ -783,7 +796,9 @@ Join(Inner, a.b_ref = b.id)              Values([])
 - Tests: planner tests `batch_simplify_null_join_keys.yaml`, `stream_simplify_null_join_keys.yaml`;
   differential tests `e2e_test/batch/simplify_null_join_keys` and
   `e2e_test/streaming/simplify_null_join_keys` (NULL keys on both sides, duplicates, empty tables,
-  updates of keys to and from `NULL`, deletes).
+  updates of keys to and from `NULL`, deletes; chained left joins on a JSONB field or a strict
+  expression of a padded column, a non-equality conjunct, and the kept `coalesce` / `IS NULL`
+  expressions).
 
 ### NV. Narrow values of `first_value` / `last_value` (added on 2026-11-26, done on the branch)
 

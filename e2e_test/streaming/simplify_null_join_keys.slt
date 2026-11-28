@@ -26,6 +26,9 @@ create table snk_n (k int, v int);
 statement ok
 create view snk_v as select a.id, a.x, b.k as b_k, b.label from snk_a a join snk_b b on a.bk = b.k;
 
+statement ok
+create view snk_ej as select p, u, w, jsonb_build_object('w', w) as doc from snk_e;
+
 # Rows present before the materialized views are created: they go through the backfill.
 
 statement ok
@@ -128,6 +131,21 @@ statement ok
 create materialized view snk_kept_coalesce_off as select a.id, b.label from snk_a a join snk_b b on coalesce(a.bk, 0) = b.k where a.bk is null;
 
 statement ok
+create materialized view snk_expr_jsonb_padded_off as select a.id, a.bk, b.label from snk_a a left join snk_ej ej on a.bk = ej.p left join snk_b b on (ej.doc->>'w')::int = b.k where a.bk is null;
+
+statement ok
+create materialized view snk_expr_strict_padded_off as select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on e.w + a.x = b.k where a.bk is null;
+
+statement ok
+create materialized view snk_expr_non_equi_off as select a.id, b.label from (select * from snk_a where x is null) a join snk_b b on a.bk = b.k and b.id > a.x;
+
+statement ok
+create materialized view snk_kept_expr_coalesce_off as select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on coalesce(e.w, 0) = b.k where a.bk is null;
+
+statement ok
+create materialized view snk_kept_expr_not_null_off as select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null;
+
+statement ok
 set streaming_simplify_null_join_keys = true;
 
 statement ok
@@ -210,6 +228,21 @@ create materialized view snk_preserved_left_on as select a.id, b.label from (sel
 
 statement ok
 create materialized view snk_kept_coalesce_on as select a.id, b.label from snk_a a join snk_b b on coalesce(a.bk, 0) = b.k where a.bk is null;
+
+statement ok
+create materialized view snk_expr_jsonb_padded_on as select a.id, a.bk, b.label from snk_a a left join snk_ej ej on a.bk = ej.p left join snk_b b on (ej.doc->>'w')::int = b.k where a.bk is null;
+
+statement ok
+create materialized view snk_expr_strict_padded_on as select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on e.w + a.x = b.k where a.bk is null;
+
+statement ok
+create materialized view snk_expr_non_equi_on as select a.id, b.label from (select * from snk_a where x is null) a join snk_b b on a.bk = b.k and b.id > a.x;
+
+statement ok
+create materialized view snk_kept_expr_coalesce_on as select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on coalesce(e.w, 0) = b.k where a.bk is null;
+
+statement ok
+create materialized view snk_kept_expr_not_null_on as select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null;
 
 statement ok
 set streaming_simplify_null_join_keys = false;
@@ -645,6 +678,86 @@ select
   (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_coalesce_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a join snk_b b on coalesce(a.bk, 0) = b.k where a.bk is null) q group by id, label) x),
   (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a join snk_b b on coalesce(a.bk, 0) = b.k where a.bk is null) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_coalesce_on group by id, label) y),
   (select count(*) from snk_kept_coalesce_on) - (select count(*) from (select a.id, b.label from snk_a a join snk_b b on coalesce(a.bk, 0) = b.k where a.bk is null) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_on group by id, bk, label except select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_off group by id, bk, label) x),
+  (select count(*) from (select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_off group by id, bk, label except select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_on group by id, bk, label) y),
+  (select count(*) from snk_expr_jsonb_padded_on) - (select count(*) from snk_expr_jsonb_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_on group by id, bk, label except select id, bk, label, count(*) as snk_rows from (select a.id, a.bk, b.label from snk_a a left join snk_ej ej on a.bk = ej.p left join snk_b b on (ej.doc->>'w')::int = b.k where a.bk is null) q group by id, bk, label) x),
+  (select count(*) from (select id, bk, label, count(*) as snk_rows from (select a.id, a.bk, b.label from snk_a a left join snk_ej ej on a.bk = ej.p left join snk_b b on (ej.doc->>'w')::int = b.k where a.bk is null) q group by id, bk, label except select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_on group by id, bk, label) y),
+  (select count(*) from snk_expr_jsonb_padded_on) - (select count(*) from (select a.id, a.bk, b.label from snk_a a left join snk_ej ej on a.bk = ej.p left join snk_b b on (ej.doc->>'w')::int = b.k where a.bk is null) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_strict_padded_on group by id, label except select id, label, count(*) as snk_rows from snk_expr_strict_padded_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_strict_padded_off group by id, label except select id, label, count(*) as snk_rows from snk_expr_strict_padded_on group by id, label) y),
+  (select count(*) from snk_expr_strict_padded_on) - (select count(*) from snk_expr_strict_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_strict_padded_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on e.w + a.x = b.k where a.bk is null) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on e.w + a.x = b.k where a.bk is null) q group by id, label except select id, label, count(*) as snk_rows from snk_expr_strict_padded_on group by id, label) y),
+  (select count(*) from snk_expr_strict_padded_on) - (select count(*) from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on e.w + a.x = b.k where a.bk is null) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_non_equi_on group by id, label except select id, label, count(*) as snk_rows from snk_expr_non_equi_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_non_equi_off group by id, label except select id, label, count(*) as snk_rows from snk_expr_non_equi_on group by id, label) y),
+  (select count(*) from snk_expr_non_equi_on) - (select count(*) from snk_expr_non_equi_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_non_equi_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where x is null) a join snk_b b on a.bk = b.k and b.id > a.x) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where x is null) a join snk_b b on a.bk = b.k and b.id > a.x) q group by id, label except select id, label, count(*) as snk_rows from snk_expr_non_equi_on group by id, label) y),
+  (select count(*) from snk_expr_non_equi_on) - (select count(*) from (select a.id, b.label from (select * from snk_a where x is null) a join snk_b b on a.bk = b.k and b.id > a.x) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_on group by id, label) y),
+  (select count(*) from snk_kept_expr_coalesce_on) - (select count(*) from snk_kept_expr_coalesce_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on coalesce(e.w, 0) = b.k where a.bk is null) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on coalesce(e.w, 0) = b.k where a.bk is null) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_on group by id, label) y),
+  (select count(*) from snk_kept_expr_coalesce_on) - (select count(*) from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on coalesce(e.w, 0) = b.k where a.bk is null) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_not_null_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_not_null_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_not_null_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_not_null_on group by id, label) y),
+  (select count(*) from snk_kept_expr_not_null_on) - (select count(*) from snk_kept_expr_not_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_not_null_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_not_null_on group by id, label) y),
+  (select count(*) from snk_kept_expr_not_null_on) - (select count(*) from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null) q);
 ----
 0 0 0
 
@@ -1129,6 +1242,86 @@ select
 ----
 0 0 0
 
+query III
+select
+  (select count(*) from (select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_on group by id, bk, label except select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_off group by id, bk, label) x),
+  (select count(*) from (select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_off group by id, bk, label except select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_on group by id, bk, label) y),
+  (select count(*) from snk_expr_jsonb_padded_on) - (select count(*) from snk_expr_jsonb_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_on group by id, bk, label except select id, bk, label, count(*) as snk_rows from (select a.id, a.bk, b.label from snk_a a left join snk_ej ej on a.bk = ej.p left join snk_b b on (ej.doc->>'w')::int = b.k where a.bk is null) q group by id, bk, label) x),
+  (select count(*) from (select id, bk, label, count(*) as snk_rows from (select a.id, a.bk, b.label from snk_a a left join snk_ej ej on a.bk = ej.p left join snk_b b on (ej.doc->>'w')::int = b.k where a.bk is null) q group by id, bk, label except select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_on group by id, bk, label) y),
+  (select count(*) from snk_expr_jsonb_padded_on) - (select count(*) from (select a.id, a.bk, b.label from snk_a a left join snk_ej ej on a.bk = ej.p left join snk_b b on (ej.doc->>'w')::int = b.k where a.bk is null) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_strict_padded_on group by id, label except select id, label, count(*) as snk_rows from snk_expr_strict_padded_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_strict_padded_off group by id, label except select id, label, count(*) as snk_rows from snk_expr_strict_padded_on group by id, label) y),
+  (select count(*) from snk_expr_strict_padded_on) - (select count(*) from snk_expr_strict_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_strict_padded_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on e.w + a.x = b.k where a.bk is null) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on e.w + a.x = b.k where a.bk is null) q group by id, label except select id, label, count(*) as snk_rows from snk_expr_strict_padded_on group by id, label) y),
+  (select count(*) from snk_expr_strict_padded_on) - (select count(*) from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on e.w + a.x = b.k where a.bk is null) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_non_equi_on group by id, label except select id, label, count(*) as snk_rows from snk_expr_non_equi_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_non_equi_off group by id, label except select id, label, count(*) as snk_rows from snk_expr_non_equi_on group by id, label) y),
+  (select count(*) from snk_expr_non_equi_on) - (select count(*) from snk_expr_non_equi_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_non_equi_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where x is null) a join snk_b b on a.bk = b.k and b.id > a.x) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where x is null) a join snk_b b on a.bk = b.k and b.id > a.x) q group by id, label except select id, label, count(*) as snk_rows from snk_expr_non_equi_on group by id, label) y),
+  (select count(*) from snk_expr_non_equi_on) - (select count(*) from (select a.id, b.label from (select * from snk_a where x is null) a join snk_b b on a.bk = b.k and b.id > a.x) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_on group by id, label) y),
+  (select count(*) from snk_kept_expr_coalesce_on) - (select count(*) from snk_kept_expr_coalesce_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on coalesce(e.w, 0) = b.k where a.bk is null) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on coalesce(e.w, 0) = b.k where a.bk is null) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_on group by id, label) y),
+  (select count(*) from snk_kept_expr_coalesce_on) - (select count(*) from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on coalesce(e.w, 0) = b.k where a.bk is null) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_not_null_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_not_null_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_not_null_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_not_null_on group by id, label) y),
+  (select count(*) from snk_kept_expr_not_null_on) - (select count(*) from snk_kept_expr_not_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_not_null_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_not_null_on group by id, label) y),
+  (select count(*) from snk_kept_expr_not_null_on) - (select count(*) from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null) q);
+----
+0 0 0
+
 # Second round of changes: keys set to NULL and back, deletes (retractions).
 
 statement ok
@@ -1592,6 +1785,86 @@ select
 ----
 0 0 0
 
+query III
+select
+  (select count(*) from (select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_on group by id, bk, label except select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_off group by id, bk, label) x),
+  (select count(*) from (select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_off group by id, bk, label except select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_on group by id, bk, label) y),
+  (select count(*) from snk_expr_jsonb_padded_on) - (select count(*) from snk_expr_jsonb_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_on group by id, bk, label except select id, bk, label, count(*) as snk_rows from (select a.id, a.bk, b.label from snk_a a left join snk_ej ej on a.bk = ej.p left join snk_b b on (ej.doc->>'w')::int = b.k where a.bk is null) q group by id, bk, label) x),
+  (select count(*) from (select id, bk, label, count(*) as snk_rows from (select a.id, a.bk, b.label from snk_a a left join snk_ej ej on a.bk = ej.p left join snk_b b on (ej.doc->>'w')::int = b.k where a.bk is null) q group by id, bk, label except select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_on group by id, bk, label) y),
+  (select count(*) from snk_expr_jsonb_padded_on) - (select count(*) from (select a.id, a.bk, b.label from snk_a a left join snk_ej ej on a.bk = ej.p left join snk_b b on (ej.doc->>'w')::int = b.k where a.bk is null) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_strict_padded_on group by id, label except select id, label, count(*) as snk_rows from snk_expr_strict_padded_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_strict_padded_off group by id, label except select id, label, count(*) as snk_rows from snk_expr_strict_padded_on group by id, label) y),
+  (select count(*) from snk_expr_strict_padded_on) - (select count(*) from snk_expr_strict_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_strict_padded_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on e.w + a.x = b.k where a.bk is null) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on e.w + a.x = b.k where a.bk is null) q group by id, label except select id, label, count(*) as snk_rows from snk_expr_strict_padded_on group by id, label) y),
+  (select count(*) from snk_expr_strict_padded_on) - (select count(*) from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on e.w + a.x = b.k where a.bk is null) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_non_equi_on group by id, label except select id, label, count(*) as snk_rows from snk_expr_non_equi_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_non_equi_off group by id, label except select id, label, count(*) as snk_rows from snk_expr_non_equi_on group by id, label) y),
+  (select count(*) from snk_expr_non_equi_on) - (select count(*) from snk_expr_non_equi_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_non_equi_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where x is null) a join snk_b b on a.bk = b.k and b.id > a.x) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where x is null) a join snk_b b on a.bk = b.k and b.id > a.x) q group by id, label except select id, label, count(*) as snk_rows from snk_expr_non_equi_on group by id, label) y),
+  (select count(*) from snk_expr_non_equi_on) - (select count(*) from (select a.id, b.label from (select * from snk_a where x is null) a join snk_b b on a.bk = b.k and b.id > a.x) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_on group by id, label) y),
+  (select count(*) from snk_kept_expr_coalesce_on) - (select count(*) from snk_kept_expr_coalesce_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on coalesce(e.w, 0) = b.k where a.bk is null) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on coalesce(e.w, 0) = b.k where a.bk is null) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_on group by id, label) y),
+  (select count(*) from snk_kept_expr_coalesce_on) - (select count(*) from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on coalesce(e.w, 0) = b.k where a.bk is null) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_not_null_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_not_null_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_not_null_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_not_null_on group by id, label) y),
+  (select count(*) from snk_kept_expr_not_null_on) - (select count(*) from snk_kept_expr_not_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_not_null_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_not_null_on group by id, label) y),
+  (select count(*) from snk_kept_expr_not_null_on) - (select count(*) from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null) q);
+----
+0 0 0
+
 # Third round of changes: the right side emptied, then filled again; the left side emptied.
 
 statement ok
@@ -2031,6 +2304,86 @@ select
 ----
 0 0 0
 
+query III
+select
+  (select count(*) from (select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_on group by id, bk, label except select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_off group by id, bk, label) x),
+  (select count(*) from (select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_off group by id, bk, label except select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_on group by id, bk, label) y),
+  (select count(*) from snk_expr_jsonb_padded_on) - (select count(*) from snk_expr_jsonb_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_on group by id, bk, label except select id, bk, label, count(*) as snk_rows from (select a.id, a.bk, b.label from snk_a a left join snk_ej ej on a.bk = ej.p left join snk_b b on (ej.doc->>'w')::int = b.k where a.bk is null) q group by id, bk, label) x),
+  (select count(*) from (select id, bk, label, count(*) as snk_rows from (select a.id, a.bk, b.label from snk_a a left join snk_ej ej on a.bk = ej.p left join snk_b b on (ej.doc->>'w')::int = b.k where a.bk is null) q group by id, bk, label except select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_on group by id, bk, label) y),
+  (select count(*) from snk_expr_jsonb_padded_on) - (select count(*) from (select a.id, a.bk, b.label from snk_a a left join snk_ej ej on a.bk = ej.p left join snk_b b on (ej.doc->>'w')::int = b.k where a.bk is null) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_strict_padded_on group by id, label except select id, label, count(*) as snk_rows from snk_expr_strict_padded_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_strict_padded_off group by id, label except select id, label, count(*) as snk_rows from snk_expr_strict_padded_on group by id, label) y),
+  (select count(*) from snk_expr_strict_padded_on) - (select count(*) from snk_expr_strict_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_strict_padded_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on e.w + a.x = b.k where a.bk is null) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on e.w + a.x = b.k where a.bk is null) q group by id, label except select id, label, count(*) as snk_rows from snk_expr_strict_padded_on group by id, label) y),
+  (select count(*) from snk_expr_strict_padded_on) - (select count(*) from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on e.w + a.x = b.k where a.bk is null) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_non_equi_on group by id, label except select id, label, count(*) as snk_rows from snk_expr_non_equi_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_non_equi_off group by id, label except select id, label, count(*) as snk_rows from snk_expr_non_equi_on group by id, label) y),
+  (select count(*) from snk_expr_non_equi_on) - (select count(*) from snk_expr_non_equi_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_non_equi_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where x is null) a join snk_b b on a.bk = b.k and b.id > a.x) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where x is null) a join snk_b b on a.bk = b.k and b.id > a.x) q group by id, label except select id, label, count(*) as snk_rows from snk_expr_non_equi_on group by id, label) y),
+  (select count(*) from snk_expr_non_equi_on) - (select count(*) from (select a.id, b.label from (select * from snk_a where x is null) a join snk_b b on a.bk = b.k and b.id > a.x) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_on group by id, label) y),
+  (select count(*) from snk_kept_expr_coalesce_on) - (select count(*) from snk_kept_expr_coalesce_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on coalesce(e.w, 0) = b.k where a.bk is null) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on coalesce(e.w, 0) = b.k where a.bk is null) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_on group by id, label) y),
+  (select count(*) from snk_kept_expr_coalesce_on) - (select count(*) from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on coalesce(e.w, 0) = b.k where a.bk is null) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_not_null_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_not_null_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_not_null_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_not_null_on group by id, label) y),
+  (select count(*) from snk_kept_expr_not_null_on) - (select count(*) from snk_kept_expr_not_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_not_null_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_not_null_on group by id, label) y),
+  (select count(*) from snk_kept_expr_not_null_on) - (select count(*) from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null) q);
+----
+0 0 0
+
 statement ok
 insert into snk_b values (1, 1, 'one'), (2, null, 'nk'), (3, 0, 'zero'), (4, null, 'nk4');
 
@@ -2465,6 +2818,86 @@ select
   (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_coalesce_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a join snk_b b on coalesce(a.bk, 0) = b.k where a.bk is null) q group by id, label) x),
   (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a join snk_b b on coalesce(a.bk, 0) = b.k where a.bk is null) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_coalesce_on group by id, label) y),
   (select count(*) from snk_kept_coalesce_on) - (select count(*) from (select a.id, b.label from snk_a a join snk_b b on coalesce(a.bk, 0) = b.k where a.bk is null) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_on group by id, bk, label except select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_off group by id, bk, label) x),
+  (select count(*) from (select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_off group by id, bk, label except select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_on group by id, bk, label) y),
+  (select count(*) from snk_expr_jsonb_padded_on) - (select count(*) from snk_expr_jsonb_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_on group by id, bk, label except select id, bk, label, count(*) as snk_rows from (select a.id, a.bk, b.label from snk_a a left join snk_ej ej on a.bk = ej.p left join snk_b b on (ej.doc->>'w')::int = b.k where a.bk is null) q group by id, bk, label) x),
+  (select count(*) from (select id, bk, label, count(*) as snk_rows from (select a.id, a.bk, b.label from snk_a a left join snk_ej ej on a.bk = ej.p left join snk_b b on (ej.doc->>'w')::int = b.k where a.bk is null) q group by id, bk, label except select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_on group by id, bk, label) y),
+  (select count(*) from snk_expr_jsonb_padded_on) - (select count(*) from (select a.id, a.bk, b.label from snk_a a left join snk_ej ej on a.bk = ej.p left join snk_b b on (ej.doc->>'w')::int = b.k where a.bk is null) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_strict_padded_on group by id, label except select id, label, count(*) as snk_rows from snk_expr_strict_padded_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_strict_padded_off group by id, label except select id, label, count(*) as snk_rows from snk_expr_strict_padded_on group by id, label) y),
+  (select count(*) from snk_expr_strict_padded_on) - (select count(*) from snk_expr_strict_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_strict_padded_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on e.w + a.x = b.k where a.bk is null) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on e.w + a.x = b.k where a.bk is null) q group by id, label except select id, label, count(*) as snk_rows from snk_expr_strict_padded_on group by id, label) y),
+  (select count(*) from snk_expr_strict_padded_on) - (select count(*) from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on e.w + a.x = b.k where a.bk is null) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_non_equi_on group by id, label except select id, label, count(*) as snk_rows from snk_expr_non_equi_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_non_equi_off group by id, label except select id, label, count(*) as snk_rows from snk_expr_non_equi_on group by id, label) y),
+  (select count(*) from snk_expr_non_equi_on) - (select count(*) from snk_expr_non_equi_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_non_equi_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where x is null) a join snk_b b on a.bk = b.k and b.id > a.x) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where x is null) a join snk_b b on a.bk = b.k and b.id > a.x) q group by id, label except select id, label, count(*) as snk_rows from snk_expr_non_equi_on group by id, label) y),
+  (select count(*) from snk_expr_non_equi_on) - (select count(*) from (select a.id, b.label from (select * from snk_a where x is null) a join snk_b b on a.bk = b.k and b.id > a.x) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_on group by id, label) y),
+  (select count(*) from snk_kept_expr_coalesce_on) - (select count(*) from snk_kept_expr_coalesce_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on coalesce(e.w, 0) = b.k where a.bk is null) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on coalesce(e.w, 0) = b.k where a.bk is null) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_on group by id, label) y),
+  (select count(*) from snk_kept_expr_coalesce_on) - (select count(*) from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on coalesce(e.w, 0) = b.k where a.bk is null) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_not_null_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_not_null_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_not_null_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_not_null_on group by id, label) y),
+  (select count(*) from snk_kept_expr_not_null_on) - (select count(*) from snk_kept_expr_not_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_not_null_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_not_null_on group by id, label) y),
+  (select count(*) from snk_kept_expr_not_null_on) - (select count(*) from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null) q);
 ----
 0 0 0
 
@@ -2908,6 +3341,86 @@ select
 ----
 0 0 0
 
+query III
+select
+  (select count(*) from (select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_on group by id, bk, label except select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_off group by id, bk, label) x),
+  (select count(*) from (select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_off group by id, bk, label except select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_on group by id, bk, label) y),
+  (select count(*) from snk_expr_jsonb_padded_on) - (select count(*) from snk_expr_jsonb_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_on group by id, bk, label except select id, bk, label, count(*) as snk_rows from (select a.id, a.bk, b.label from snk_a a left join snk_ej ej on a.bk = ej.p left join snk_b b on (ej.doc->>'w')::int = b.k where a.bk is null) q group by id, bk, label) x),
+  (select count(*) from (select id, bk, label, count(*) as snk_rows from (select a.id, a.bk, b.label from snk_a a left join snk_ej ej on a.bk = ej.p left join snk_b b on (ej.doc->>'w')::int = b.k where a.bk is null) q group by id, bk, label except select id, bk, label, count(*) as snk_rows from snk_expr_jsonb_padded_on group by id, bk, label) y),
+  (select count(*) from snk_expr_jsonb_padded_on) - (select count(*) from (select a.id, a.bk, b.label from snk_a a left join snk_ej ej on a.bk = ej.p left join snk_b b on (ej.doc->>'w')::int = b.k where a.bk is null) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_strict_padded_on group by id, label except select id, label, count(*) as snk_rows from snk_expr_strict_padded_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_strict_padded_off group by id, label except select id, label, count(*) as snk_rows from snk_expr_strict_padded_on group by id, label) y),
+  (select count(*) from snk_expr_strict_padded_on) - (select count(*) from snk_expr_strict_padded_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_strict_padded_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on e.w + a.x = b.k where a.bk is null) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on e.w + a.x = b.k where a.bk is null) q group by id, label except select id, label, count(*) as snk_rows from snk_expr_strict_padded_on group by id, label) y),
+  (select count(*) from snk_expr_strict_padded_on) - (select count(*) from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on e.w + a.x = b.k where a.bk is null) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_non_equi_on group by id, label except select id, label, count(*) as snk_rows from snk_expr_non_equi_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_non_equi_off group by id, label except select id, label, count(*) as snk_rows from snk_expr_non_equi_on group by id, label) y),
+  (select count(*) from snk_expr_non_equi_on) - (select count(*) from snk_expr_non_equi_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_expr_non_equi_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where x is null) a join snk_b b on a.bk = b.k and b.id > a.x) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from (select * from snk_a where x is null) a join snk_b b on a.bk = b.k and b.id > a.x) q group by id, label except select id, label, count(*) as snk_rows from snk_expr_non_equi_on group by id, label) y),
+  (select count(*) from snk_expr_non_equi_on) - (select count(*) from (select a.id, b.label from (select * from snk_a where x is null) a join snk_b b on a.bk = b.k and b.id > a.x) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_on group by id, label) y),
+  (select count(*) from snk_kept_expr_coalesce_on) - (select count(*) from snk_kept_expr_coalesce_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on coalesce(e.w, 0) = b.k where a.bk is null) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on coalesce(e.w, 0) = b.k where a.bk is null) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_coalesce_on group by id, label) y),
+  (select count(*) from snk_kept_expr_coalesce_on) - (select count(*) from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on coalesce(e.w, 0) = b.k where a.bk is null) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_not_null_on group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_not_null_off group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_not_null_off group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_not_null_on group by id, label) y),
+  (select count(*) from snk_kept_expr_not_null_on) - (select count(*) from snk_kept_expr_not_null_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, label, count(*) as snk_rows from snk_kept_expr_not_null_on group by id, label except select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null) q group by id, label) x),
+  (select count(*) from (select id, label, count(*) as snk_rows from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null) q group by id, label except select id, label, count(*) as snk_rows from snk_kept_expr_not_null_on group by id, label) y),
+  (select count(*) from snk_kept_expr_not_null_on) - (select count(*) from (select a.id, b.label from snk_a a left join snk_e e on a.bk = e.p left join snk_b b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k where a.bk is null) q);
+----
+0 0 0
+
 # Watermarks: an `EMIT ON WINDOW CLOSE` job over a temporal join whose looked up side can not
 # match must still be planned, with the variable of this test and with the pruning of empty
 # relations: the left side, which carries the watermark, is never replaced with an empty relation.
@@ -2973,6 +3486,21 @@ statement ok
 drop table snk_w;
 
 # Cleanup.
+
+statement ok
+drop materialized view snk_kept_expr_not_null_on;
+
+statement ok
+drop materialized view snk_kept_expr_coalesce_on;
+
+statement ok
+drop materialized view snk_expr_non_equi_on;
+
+statement ok
+drop materialized view snk_expr_strict_padded_on;
+
+statement ok
+drop materialized view snk_expr_jsonb_padded_on;
 
 statement ok
 drop materialized view snk_kept_coalesce_on;
@@ -3056,6 +3584,21 @@ statement ok
 drop materialized view snk_inner_right_on;
 
 statement ok
+drop materialized view snk_kept_expr_not_null_off;
+
+statement ok
+drop materialized view snk_kept_expr_coalesce_off;
+
+statement ok
+drop materialized view snk_expr_non_equi_off;
+
+statement ok
+drop materialized view snk_expr_strict_padded_off;
+
+statement ok
+drop materialized view snk_expr_jsonb_padded_off;
+
+statement ok
 drop materialized view snk_kept_coalesce_off;
 
 statement ok
@@ -3135,6 +3678,9 @@ drop materialized view snk_inner_left_off;
 
 statement ok
 drop materialized view snk_inner_right_off;
+
+statement ok
+drop view snk_ej;
 
 statement ok
 drop view snk_v;

@@ -9,6 +9,7 @@ Usage: python3 e2e_test/streaming/simplify_null_join_keys.gen.py e2e_test/stream
 import sys
 
 A, B, C, E, N, V = 'snk_a', 'snk_b', 'snk_c', 'snk_e', 'snk_n', 'snk_v'
+EJ = 'snk_ej'  # view of E with a JSONB document
 W = 'snk_w'  # append-only table with a watermark
 VAR = 'streaming_simplify_null_join_keys'
 
@@ -81,6 +82,24 @@ CASES = [
      f"select a.id, b.label from (select * from {A} where bk is null) a left join {B} b on a.bk = b.k"),
     ('kept_coalesce', 'id, label',
      f"select a.id, b.label from {A} a join {B} b on coalesce(a.bk, 0) = b.k where a.bk is null"),
+    # Expressions of columns known to be NULL: chained left joins, the second one on an expression
+    # of a column that the first one pads with NULLs.
+    ('expr_jsonb_padded', 'id, bk, label',
+     f"select a.id, a.bk, b.label from {A} a left join {EJ} ej on a.bk = ej.p "
+     f"left join {B} b on (ej.doc->>'w')::int = b.k where a.bk is null"),
+    ('expr_strict_padded', 'id, label',
+     f"select a.id, b.label from {A} a left join {E} e on a.bk = e.p "
+     f"left join {B} b on e.w + a.x = b.k where a.bk is null"),
+    ('expr_non_equi', 'id, label',
+     f"select a.id, b.label from (select * from {A} where x is null) a join {B} b "
+     f"on a.bk = b.k and b.id > a.x"),
+    ('kept_expr_coalesce', 'id, label',
+     f"select a.id, b.label from {A} a left join {E} e on a.bk = e.p "
+     f"left join {B} b on coalesce(e.w, 0) = b.k where a.bk is null"),
+    ('kept_expr_not_null', 'id, label',
+     f"select a.id, b.label from {A} a left join {E} e on a.bk = e.p left join {B} b "
+     f"on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k "
+     f"where a.bk is null"),
 ]
 
 out = []
@@ -126,6 +145,7 @@ stmt(f"create table {C} (id int primary key, kb bigint, v int)")
 stmt(f"create table {E} (p int primary key, u int, w int)")
 stmt(f"create table {N} (k int, v int)")
 stmt(f"create view {V} as select a.id, a.x, b.k as b_k, b.label from {A} a join {B} b on a.bk = b.k")
+stmt(f"create view {EJ} as select p, u, w, jsonb_build_object('w', w) as doc from {E}")
 out.append("# Rows present before the materialized views are created: they go through the backfill.\n")
 stmt(f"insert into {A} values (1, 1, 5), (2, 1, 0), (3, null, 2), (4, null, null), (5, 2, 7), "
      f"(6, 0, 3), (7, 9, 1), (8, null, 9)")
@@ -216,6 +236,7 @@ out.append("# Cleanup.\n")
 for sfx in ('on', 'off'):
     for name, _, _ in reversed(CASES):
         stmt(f"drop materialized view snk_{name}_{sfx}")
+stmt(f"drop view {EJ}")
 stmt(f"drop view {V}")
 for table in (N, E, C, B, A):
     stmt(f"drop table {table}")

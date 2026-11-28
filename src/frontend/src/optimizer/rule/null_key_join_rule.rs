@@ -14,12 +14,14 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+use fixedbitset::FixedBitSet;
 use risingwave_pb::plan_common::JoinType;
 
 use super::never_true_predicate_rule::{fold_join_without_match, may_carry_watermark};
 use super::prelude::{PlanRef, *};
-use crate::expr::{ExprImpl, ExprType, InputRef};
+use crate::expr::{Expr, ExprImpl, ExprRewriter, ExprType, InputRef};
 use crate::optimizer::PlanTreeNode;
+use crate::optimizer::plan_expr_visitor::Strong;
 use crate::optimizer::plan_node::generic::GenericPlanRef;
 use crate::optimizer::plan_node::{
     LogicalJoin, LogicalProject, LogicalUnion, PlanNodeId, PlanTreeNodeBinary, PlanTreeNodeUnary,
@@ -28,7 +30,8 @@ use crate::utils::Condition;
 
 /// Removes the work of a join whose condition compares with `=` a column that is `NULL` in every
 /// row of one of its inputs: `NULL = x` is `NULL` for every `x` and every type, so no pair of rows
-/// satisfies the condition, whatever its other conjuncts.
+/// satisfies the condition, whatever its other conjuncts. More generally, a conjunct of the
+/// condition that is `NULL` whenever such columns are (see [`is_always_null`]) is never true.
 ///
 /// ```text
 /// Join(Inner, a.b_id = b.id)                 Values([])
@@ -57,12 +60,14 @@ use crate::utils::Condition;
 ///
 /// A column is known to be `NULL` in every row of a plan node (see [`always_null_columns`]) only
 /// from a `c IS NULL` conjunct of a filter or of a scan predicate, followed up through filters,
-/// shares, projections of input references (or casts of them), joins, unions (a column `NULL` in
-/// every input), and the operators that output the columns of their input as they are; or from a
-/// `NULL` literal of a projection. These are properties of the rows that a node can output, so
-/// they hold for every row ever produced, under retractions too. Only `=` is recognized, not `IS NOT DISTINCT FROM`,
-/// which matches `NULL`s. An operand of `=` is the column itself or a cast of it (a cast of `NULL`
-/// is `NULL`).
+/// shares, projections, joins, unions (a column `NULL` in every input), and the operators that
+/// output the columns of their input as they are. A projection outputs such a column for an
+/// expression that is `NULL` whenever the columns of its input known to be `NULL` are: a `NULL`
+/// literal, one of those columns or a cast of it, a function that is `NULL` when an argument is
+/// (`c + 1`), or an expression of those columns and constants that evaluates to `NULL` (`j ->> 'f'`
+/// with `j` padded by an outer join below). These are properties of the rows that a node can
+/// output, so they hold for every row ever produced, under retractions too. `IS NOT DISTINCT
+/// FROM`, which matches `NULL`s, and `coalesce` are not `NULL` when a column is.
 ///
 /// For a streaming job (`create_for_stream`), the rule leaves the join untouched if a sub-plan
 /// that it would remove may carry a watermark (a scan of a table with a watermark, a source with
@@ -111,23 +116,17 @@ impl Rule<Logical> for NullKeyJoinRule {
             return None;
         }
         let left_len = left.schema().len();
-        let is_null_column = |index: usize| {
-            if index < left_len {
-                left_null.contains(&index)
-            } else {
-                right_null.contains(&(index - left_len))
-            }
-        };
-        let never_matches = join.on().conjunctions.iter().any(|conjunct| {
-            conjunct.as_function_call().is_some_and(|call| {
-                call.func_type() == ExprType::Equal
-                    && call.inputs().len() == 2
-                    && call
-                        .inputs()
-                        .iter()
-                        .any(|operand| column_of(operand).is_some_and(is_null_column))
-            })
-        });
+        // The condition refers to the columns of the left side followed by those of the right.
+        let null_columns: BTreeSet<usize> = left_null
+            .iter()
+            .copied()
+            .chain(right_null.iter().map(|index| index + left_len))
+            .collect();
+        let never_matches = join
+            .on()
+            .conjunctions
+            .iter()
+            .any(|conjunct| is_always_null(conjunct, &null_columns));
         if !never_matches {
             return None;
         }
@@ -175,17 +174,69 @@ fn full_join_without_match(join: &LogicalJoin) -> PlanRef {
     LogicalUnion::create(true, vec![padded(&left, true), padded(&right, false)])
 }
 
-/// The column that an operand of `=` reads, if it is a column or a cast of a column: `NULL` in
-/// that column makes the operand `NULL`.
-fn column_of(expr: &ExprImpl) -> Option<usize> {
-    match expr {
-        ExprImpl::InputRef(input_ref) => Some(input_ref.index()),
-        ExprImpl::FunctionCall(call)
-            if call.func_type() == ExprType::Cast && call.inputs().len() == 1 =>
-        {
-            column_of(&call.inputs()[0])
+/// Whether an expression is `NULL` whenever the columns `null_columns` are `NULL`, whatever the
+/// other columns. Conservative: `false` when not proven.
+///
+/// - [`Strong`]: a column of the set, a `NULL` literal, a function that is `NULL` when one of its
+///   arguments is (comparisons, arithmetic, casts...) with such an argument, ...;
+/// - a comparison (`=`, `<>`, `<`, `<=`, `>`, `>=`) or a cast with an operand proven `NULL` here:
+///   these functions are `NULL` when an operand is, and the operand may be one that [`Strong`]
+///   does not know (`j ->> 'f'` below);
+/// - an expression that only reads columns of the set and constants, and evaluates to `NULL` once
+///   those columns are replaced with `NULL` (`j ->> 'f'` with `j` in the set). Only pure
+///   expressions without user-defined functions are evaluated (see [`ExprImpl::is_const`]); an
+///   error of the evaluation proves nothing.
+fn is_always_null(expr: &ExprImpl, null_columns: &BTreeSet<usize>) -> bool {
+    let mut bits = FixedBitSet::with_capacity(null_columns.last().map_or(0, |max| max + 1));
+    null_columns.iter().for_each(|&index| bits.insert(index));
+    is_null_with(expr, null_columns, &bits)
+}
+
+fn is_null_with(expr: &ExprImpl, null_columns: &BTreeSet<usize>, bits: &FixedBitSet) -> bool {
+    if Strong::is_null(expr, bits.clone()) {
+        return true;
+    }
+    if let ExprImpl::FunctionCall(call) = expr
+        && matches!(
+            call.func_type(),
+            ExprType::Equal
+                | ExprType::NotEqual
+                | ExprType::LessThan
+                | ExprType::LessThanOrEqual
+                | ExprType::GreaterThan
+                | ExprType::GreaterThanOrEqual
+                | ExprType::Cast
+        )
+        && call
+            .inputs()
+            .iter()
+            .any(|operand| is_null_with(operand, null_columns, bits))
+    {
+        return true;
+    }
+    let mut substitute = NullColumns {
+        null_columns,
+        replaced: false,
+    };
+    let substituted = substitute.rewrite_expr(expr.clone());
+    substitute.replaced && matches!(substituted.try_fold_const(), Some(Ok(None)))
+}
+
+/// Replaces the columns of the set with `NULL` literals of their type.
+struct NullColumns<'a> {
+    null_columns: &'a BTreeSet<usize>,
+    /// Whether a column was replaced.
+    replaced: bool,
+}
+
+impl ExprRewriter for NullColumns<'_> {
+    fn rewrite_input_ref(&mut self, input_ref: InputRef) -> ExprImpl {
+        if self.null_columns.contains(&input_ref.index()) {
+            self.replaced = true;
+            ExprImpl::literal_null(input_ref.return_type())
+        } else {
+            input_ref.into()
         }
-        _ => None,
     }
 }
 
@@ -210,8 +261,8 @@ fn is_null_conjuncts(condition: &Condition) -> impl Iterator<Item = usize> + '_ 
 /// - `Filter`: the columns of its input, and those of its `c IS NULL` conjuncts.
 /// - `Scan`: the columns of the `c IS NULL` conjuncts of its predicate. The predicate refers to
 ///   the columns of the table, which are mapped to the output columns of the scan.
-/// - `Project`: the input references to such columns of its input or casts of them, and the
-///   `NULL` literals.
+/// - `Project`: the expressions that are `NULL` whenever those columns of its input are (see
+///   [`is_always_null`]).
 /// - `Share`, `Limit`, `TopN`, `Dedup`, `OverWindow`: the columns of their input (an over window
 ///   outputs the columns of its input first).
 /// - `Union`: the columns that are `NULL` in every input.
@@ -260,10 +311,7 @@ fn null_columns_of_node(
             .exprs()
             .iter()
             .enumerate()
-            .filter(|(_, expr)| match expr {
-                ExprImpl::Literal(literal) => literal.get_data().is_none(),
-                _ => column_of(expr).is_some_and(|index| input.contains(&index)),
-            })
+            .filter(|(_, expr)| is_always_null(expr, &input))
             .map(|(index, _)| index)
             .collect();
     }

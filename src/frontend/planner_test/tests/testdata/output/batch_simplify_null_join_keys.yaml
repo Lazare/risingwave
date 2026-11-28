@@ -351,16 +351,12 @@
       │     └─BatchScan { table: a, columns: [a.id, a.bk], distribution: UpstreamHashShard(a.id) }
       └─BatchExchange { order: [], dist: HashShard(b.k) }
         └─BatchScan { table: b, columns: [b.k, b.label], distribution: SomeShard }
-- name: kept - comparison other than equality
+- name: rewritten - comparison other than equality with a column known to be null (`<` is null too)
   before:
   - setup
   sql: |
     select a.id, b.label from a join b on a.id = b.id and a.bk < b.k where b.k is null;
-  batch_plan: |-
-    BatchExchange { order: [], dist: Single }
-    └─BatchLookupJoin { type: Inner, predicate: a.id = b.id AND (a.bk < b.k) AND IsNull(b.k), output: [a.id, b.label], lookup table: b }
-      └─BatchExchange { order: [], dist: UpstreamHashShard(a.id) }
-        └─BatchScan { table: a, columns: [a.id, a.bk], distribution: UpstreamHashShard(a.id) }
+  batch_plan: 'BatchValues { rows: [] }'
 - name: not in over a subquery of null keys - planned as an anti join on `=`, rewritten like one
   before:
   - setup
@@ -422,3 +418,97 @@
           └─BatchSimpleAgg { aggs: [count, count filter(IsNull(b.k))] }
             └─BatchFilter { predicate: IsNull(b.k) }
               └─BatchScan { table: b, columns: [b.k], distribution: SomeShard }
+- id: setup_expr
+  sql: |
+    set batch_simplify_null_join_keys = true;
+    create table a (id int primary key, bk int, x int);
+    create table b (id int primary key, k int, label varchar);
+    create table e (p int primary key, u int, w int);
+    create view ej as select p, u, w, jsonb_build_object('w', w) as doc from e;
+    create view chain as select a.id, a.bk, b.label from a
+      left join ej on a.bk = ej.p left join b on (ej.doc->>'w')::int = b.k;
+- id: setup_expr_off
+  sql: |
+    create table a (id int primary key, bk int, x int);
+    create table b (id int primary key, k int, label varchar);
+    create table e (p int primary key, u int, w int);
+    create view ej as select p, u, w, jsonb_build_object('w', w) as doc from e;
+    create view chain as select a.id, a.bk, b.label from a
+      left join ej on a.bk = ej.p left join b on (ej.doc->>'w')::int = b.k;
+- name: off by default - left join on an expression of a padded column
+  before:
+  - setup_expr_off
+  sql: |
+    select * from chain where bk is null;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: LeftOuter, predicate: $expr2 = b.k, output: [a.id, a.bk, b.label] }
+      ├─BatchExchange { order: [], dist: HashShard($expr2) }
+      │ └─BatchProject { exprs: [a.id, a.bk, JsonbAccessStr($expr1, 'w':Varchar)::Int32 as $expr2] }
+      │   └─BatchHashJoin { type: LeftOuter, predicate: a.bk = e.p, output: [a.id, a.bk, $expr1] }
+      │     ├─BatchExchange { order: [], dist: HashShard(a.bk) }
+      │     │ └─BatchFilter { predicate: IsNull(a.bk) }
+      │     │   └─BatchScan { table: a, columns: [a.id, a.bk], distribution: UpstreamHashShard(a.id) }
+      │     └─BatchExchange { order: [], dist: HashShard(e.p) }
+      │       └─BatchProject { exprs: [e.p, JsonbBuildObject('w':Varchar, e.w) as $expr1] }
+      │         └─BatchScan { table: e, columns: [e.p, e.w], scan_ranges: [e.p IS NULL], distribution: UpstreamHashShard(e.p) }
+      └─BatchExchange { order: [], dist: HashShard(b.k) }
+        └─BatchScan { table: b, columns: [b.k, b.label], distribution: SomeShard }
+- name: left join on a jsonb field of a padded column, through a view
+  before:
+  - setup_expr
+  sql: |
+    select * from chain where bk is null;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchProject { exprs: [a.id, a.bk, null:Varchar] }
+      └─BatchFilter { predicate: IsNull(a.bk) }
+        └─BatchScan { table: a, columns: [a.id, a.bk], distribution: UpstreamHashShard(a.id) }
+- name: left join on a strict expression of a padded column and another column
+  before:
+  - setup_expr
+  sql: |
+    select a.id, b.label from a left join e on a.bk = e.p left join b on e.w + a.x = b.k
+    where a.bk is null;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchProject { exprs: [a.id, null:Varchar] }
+      └─BatchFilter { predicate: IsNull(a.bk) }
+        └─BatchScan { table: a, columns: [a.id, a.bk], distribution: UpstreamHashShard(a.id) }
+- name: inner join with a comparison other than equality on a column known to be null
+  before:
+  - setup_expr
+  sql: |
+    select a.id, b.label from (select * from a where x is null) a join b on a.bk = b.k and b.id > a.x;
+  batch_plan: 'BatchValues { rows: [] }'
+- name: kept - coalesce of a padded column can match
+  before:
+  - setup_expr
+  sql: |
+    select a.id, b.label from a left join e on a.bk = e.p left join b on coalesce(e.w, 0) = b.k
+    where a.bk is null;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: LeftOuter, predicate: 0:Int32 = b.k, output: [a.id, b.label] }
+      ├─BatchExchange { order: [], dist: HashShard(0:Int32) }
+      │ └─BatchProject { exprs: [a.id, 0:Int32] }
+      │   └─BatchFilter { predicate: IsNull(a.bk) }
+      │     └─BatchScan { table: a, columns: [a.id, a.bk], distribution: UpstreamHashShard(a.id) }
+      └─BatchExchange { order: [], dist: HashShard(b.k) }
+        └─BatchScan { table: b, columns: [b.k, b.label], distribution: SomeShard }
+- name: kept - an expression that is not null when its column is null
+  before:
+  - setup_expr
+  sql: |
+    select a.id, b.label from a left join e on a.bk = e.p
+    left join b on case when jsonb_build_object('w', e.w)->>'w' is null then 1 else 0 end = b.k
+    where a.bk is null;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: LeftOuter, predicate: 1:Int32 = b.k, output: [a.id, b.label] }
+      ├─BatchExchange { order: [], dist: HashShard(1:Int32) }
+      │ └─BatchProject { exprs: [a.id, 1:Int32] }
+      │   └─BatchFilter { predicate: IsNull(a.bk) }
+      │     └─BatchScan { table: a, columns: [a.id, a.bk], distribution: UpstreamHashShard(a.id) }
+      └─BatchExchange { order: [], dist: HashShard(b.k) }
+        └─BatchScan { table: b, columns: [b.k, b.label], distribution: SomeShard }
