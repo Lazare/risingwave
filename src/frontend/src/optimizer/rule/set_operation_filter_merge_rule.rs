@@ -224,13 +224,12 @@ impl Rule<Logical> for SetOperationFilterMergeRule {
                 return None;
             }
             SetOp::Intersect
-        } else if let Some(except) = plan.as_logical_except() {
+        } else {
+            let except = plan.as_logical_except()?;
             if except.all() {
                 return None;
             }
             SetOp::Except
-        } else {
-            return None;
         };
         let fields = plan.schema().fields().to_vec();
         let inputs = plan.inputs();
