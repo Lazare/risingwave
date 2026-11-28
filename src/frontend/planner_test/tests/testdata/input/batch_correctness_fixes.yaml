@@ -143,6 +143,13 @@
   expected_outputs:
   - batch_plan
   - stream_plan
+- name: not in - inside a correlated not exists, correlated with the outermost query only
+  before: [not_in_setup]
+  sql: |
+    select id from na where not exists (select 1 from nb where nb.k = na.k and nb.y not in (select y from nm where nm.k = na.id));
+  expected_outputs:
+  - batch_plan
+  - stream_plan
 - name: not in - columns declared not null, plain anti join
   before: [not_in_setup]
   sql: |
