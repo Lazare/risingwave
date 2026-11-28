@@ -28,7 +28,7 @@ use crate::error::Result;
 use crate::expr::{Expr, ExprImpl, ExprRewriter, ExprVisitor, InputRef, collect_input_refs};
 use crate::optimizer::plan_node::expr_visitable::ExprVisitable;
 use crate::optimizer::plan_node::generic::GenericPlanRef;
-use crate::optimizer::plan_node::logical_union::union_takes_required_dist;
+use crate::optimizer::plan_node::logical_union::{required_hash_key, union_takes_required_dist};
 use crate::optimizer::plan_node::stream::StreamPlanNodeMetadata;
 use crate::optimizer::plan_node::{
     ColumnPruningContext, PredicatePushdownContext, RewriteStreamContext, ToStreamContext,
@@ -239,19 +239,28 @@ impl ToBatch for LogicalProject {
 impl LogicalProject {
     /// `streaming_distributed_union`: the distribution required from the input of this projection
     /// for the projection to be distributed as `required`, through its column mapping. Only when
-    /// every required column is a distinct column of the input (otherwise `Any`), so that the
-    /// union below is shuffled by the same columns as the parent would shuffle the projection.
+    /// every required column is a distinct column of the input, and the projection of the input
+    /// distributed as required (`HashShard`) satisfies `required` itself, so that no exchange is
+    /// added above the projection; otherwise `Any`.
     pub(crate) fn input_required_dist_for_union(&self, required: &RequiredDist) -> RequiredDist {
         let input_required = self
             .o2i_col_mapping()
             .rewrite_required_distribution(required);
-        match (required, &input_required) {
-            (RequiredDist::ShardByKey(cols), RequiredDist::ShardByKey(input_cols))
-                if input_cols.count_ones(..) != cols.count_ones(..) =>
-            {
-                RequiredDist::Any
-            }
-            _ => input_required,
+        if let (RequiredDist::ShardByKey(cols), RequiredDist::ShardByKey(input_cols)) =
+            (required, &input_required)
+            && input_cols.count_ones(..) != cols.count_ones(..)
+        {
+            return RequiredDist::Any;
+        }
+        let provides_required = required_hash_key(&input_required).is_some_and(|key| {
+            self.i2o_col_mapping()
+                .rewrite_provided_distribution(&Distribution::HashShard(key))
+                .satisfies(required)
+        });
+        if provides_required {
+            input_required
+        } else {
+            RequiredDist::Any
         }
     }
 }

@@ -1419,8 +1419,11 @@ select id, count(*) from (select id, v from a union all select id, v from b) u g
 `to_stream_with_dist_required`. When the requirement is `HashShard(k)` (second side of a hash
 join), `ShardByKey(k)` or `ShardByExactKey(k)` (hash aggregation, group top-n, window, first side
 of a hash join), the stream key of the union does not already satisfy it, and `k` (the columns the
-parent would hash the union by, `RequiredDist::to_dist`) is a subset of the stream key of the
-union, each input is converted with the requirement `HashShard(k)` (an exchange, or nothing if it
+parent would hash the union by, `RequiredDist::to_dist`) is made of columns of the stream key of
+the union, or of columns that every branch fills with the very column it puts in a column of the
+stream key (both outputs of the branch projection reference the same input column: the join key
+that the union-join factoring outputs twice, once in the stream key and once for the join above),
+each input is converted with the requirement `HashShard(k)` (an exchange, or nothing if it
 is already distributed exactly so) and the union is distributed as `HashShard(k)`, which the
 parent sees satisfied. Otherwise the plan is the default one. Only for a union with a branch tag
 (every union planned from a query; the unions of table plans have none).
@@ -1443,9 +1446,12 @@ the variable off, or without such a union, every node converts its input exactly
   so they go through one exchange channel to one actor of the union, in order. The default plan is
   the case `k = stream key`; the same argument holds for any subset. The union's output therefore
   keeps "a stream key value lives in one actor" and its distribution key is inside its stream key,
-  which `StreamExchange::new` asserts of the input of a hash exchange over a retractable stream (an
-  exchange may still be put above the union, e.g. by a projection whose output column mapping
-  differs).
+  which `StreamExchange::new` asserts of the input of a hash exchange over a retractable stream. A
+  key column equal to a stream key column in every row (the factored join key) is the same value,
+  so the argument holds; the assertion compares positions, so no exchange is ever put over such a
+  union: the parent gets the distribution it required, a projection between passes the requirement
+  down only if it then provides exactly the required distribution, and the union falls back to the
+  default plan if its distribution did not satisfy the requirement.
 - Properties: the stream key, append-only kind, `EMIT ON WINDOW CLOSE` flag and watermark columns of
   `StreamUnion` are derived from its inputs as before and do not depend on the distribution; the
   watermark of a column is still the minimum over all inputs and actors. A union is the parent's
@@ -1488,10 +1494,11 @@ key changes is split into a delete and an insert by the one hash exchange in bot
 `StreamUnion` would have the distribution and stream key the exchange had, an exchange whose
 distribution key is outside the stream key, as every aggregation on a non-key column has today.
 Not done: the union's output would no longer satisfy the invariant asserted by `StreamExchange::new`
-(a later exchange over it would fail in debug builds), and a frozen plan is not the place to
+(a later hash exchange over it would panic), and a frozen plan is not the place to
 extend a shape that upstream asserts against. A narrower variant, the parent's key mapped to the
 union's key slot when every branch fills the slot with the very column, does not help the
-frequent case (the other branches fill the slot with `null`) and is not done either.
+frequent case (the other branches fill the slot with `null`); it is done for the columns that
+every branch fills with the same column (the factored join key), see above.
 
 ## Not for now: sharing between materialized views
 
