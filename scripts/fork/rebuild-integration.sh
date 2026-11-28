@@ -13,13 +13,16 @@
 # With a remote, the branches are read from it (`<remote>/fork/<name>`), otherwise locally.
 # Between two upstream versions there is no need to rebuild: commit on the `fork/*` branch
 # concerned and merge it again into the integration branch with `--no-ff`.
-# The fixes of upstream code come first, then the features, then the tooling.
+# The fixes of upstream code come first, then the features, then the tooling, then the
+# documentation of the fork (`fork/docs`, `docs/fork/`).
 # `fork/ci-validation` tests every feature and is only meaningful once merged with them.
 set -euo pipefail
 
 BRANCHES=(
   fix-snapshot-backfill
   fix-batch-hash-agg-spill
+  fix-last-seen-value-null
+  fix-webhook-unready-worker
   optimizer
   selective-barriers
   pg-cdc-native-engine
@@ -31,6 +34,7 @@ BRANCHES=(
   license
   ci-multiarch-image
   ci-validation
+  docs
 )
 
 # In a function, so that the script is read entirely before it checks out another tree.
