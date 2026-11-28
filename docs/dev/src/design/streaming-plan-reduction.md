@@ -2777,9 +2777,10 @@ between them, and through the branches of a `UNION ALL` into the per-group opera
   operator sees the same rows, in the same order, in each kept group: a top-n and a deduplication
   pick the same rows, a window computes the same values, an aggregation the same aggregates.
   Filters and projections commute with an inner or semi join; a `UNION ALL` distributes over it.
-  An aggregation outputs only its group columns and aggregates: the columns of `T` read above it
-  become group columns (functionally determined by `G` within the kept groups), except those the
-  condition equates with a group column, copied from it; the others are pruned. Not with an
+  An aggregation outputs only its group columns and aggregates: each column of `T` is carried by
+  an `internal_last_seen_value` (all the rows of a kept group hold the same `r`; the calls that
+  nothing reads are pruned), except those the condition equates with a group column, copied from
+  it. Not with an
   impure condition (evaluated on every row of the groups instead of once per group), nor without
   an equality between `G` and `T`.
 - When. The rewrite trades the operator's input for a join of every input row: worth it when the
@@ -2824,9 +2825,10 @@ aggregations, and the union, the top-n state and the join carry the text only.
   semi join on a side that is not unique, the operator on the right side, a join unique on the key
   of its first table, a window filtered on its row number, a deduplication, an aggregation with a
   column of `T` read above, a condition comparing a group column with `T`; with statistics: a small
-  selection of a large input, part of the group key; kept: left join, `T` not unique, a column
-  that is not a group column, `T` not filtered without estimates, part of the group key without
-  estimates, a larger `T` with statistics, a volatile condition, a `numeric` group column),
+  selection of a large input, a filtered `T` larger than the input, part of the group key; a
+  volatile filter left above the operator; kept: left join, `T` not unique, a column that is not
+  a group column, `T` not filtered without estimates, part of the group key without estimates, a
+  join that keeps every row with statistics, a `numeric` group column),
   `batch_narrow_value_group_ops.yaml` and `stream_narrow_value_group_ops.yaml` (through a join and
   a top-n per group into a union of aggregations, several fields with a fallible cast left above,
   a top-n ordered by a field of the value, a top-n without group, a deduplication, windows; kept:

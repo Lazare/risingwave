@@ -755,7 +755,30 @@ impl NarrowValuePushRule {
             Self::push_into_join(project, join, eligible)
         } else {
             Self::push_below_row_operator(project, eligible)
+                .or_else(|| Self::push_through_selection(project))
         }
+    }
+
+    /// The same as [`Self::push_below_row_operator`] through projections that only select columns
+    /// of the operator (the column pruning of a top-n leaves one above it when the order key is
+    /// not read above): the projections are merged.
+    fn push_through_selection(project: &LogicalProject) -> Option<PlanRef> {
+        let mut exprs = project.exprs().clone();
+        let mut node = project.input();
+        let mut merged_any = false;
+        while let Some(inner) = node.as_logical_project()
+            && inner.is_all_inputref()
+        {
+            exprs = ProjectMergeRule::merge_project_exprs(&exprs, inner.exprs(), false)?;
+            node = inner.input();
+            merged_any = true;
+        }
+        if !merged_any {
+            return None;
+        }
+        row_operator_reads(&node)?;
+        let merged = LogicalProject::new(node.clone(), exprs);
+        Self::push_below_row_operator(&merged, &|col| from_value_agg(&node, col))
     }
 
     /// Moves the narrowing functions below a top-n, a deduplication, a window, or a filter right
@@ -1044,7 +1067,8 @@ fn row_operator_reads(plan: &PlanRef) -> Option<(usize, FixedBitSet)> {
             read.extend(function.partition_by.iter().map(|i| i.index()));
             read.extend(function.order_by.iter().map(|o| o.column_index));
         }
-    } else if let Some(filter) = plan.as_logical_filter() {
+    } else {
+        let filter = plan.as_logical_filter()?;
         // Only right above one of the operators above: a filter above an aggregation is crossed
         // by `NarrowValueAggRule`.
         if input.as_logical_top_n().is_none()
@@ -1054,8 +1078,6 @@ fn row_operator_reads(plan: &PlanRef) -> Option<(usize, FixedBitSet)> {
             return None;
         }
         read = filter.predicate().collect_input_refs(input_len);
-    } else {
-        return None;
     }
     Some((input_len, read))
 }

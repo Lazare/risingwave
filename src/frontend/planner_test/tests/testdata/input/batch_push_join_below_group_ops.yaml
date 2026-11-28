@@ -144,7 +144,7 @@
     select d.u, vg.g from vg join d on vg.k = d.u where d.state = 'open';
   expected_outputs:
   - batch_plan
-- name: kept - with statistics, the other side is larger than the input of the operator
+- name: with statistics, a filtered other side larger than the input of the operator
   before: [tables, setup]
   sql: |
     select d.u, vu.doc->'a'->>'b' as x from vu join d on vu.k = d.u where d.state = 'open';
@@ -154,10 +154,20 @@
     d: 1000000
   expected_outputs:
   - batch_plan
-- name: kept - volatile condition
+- name: a volatile condition stays above the operator, as a filter
   before: [tables, setup]
   sql: |
     select d.u, vu.ts from vu join d on vu.k = d.u and random() < 0.5 where d.state = 'open';
+  expected_outputs:
+  - batch_plan
+- name: kept - with statistics, a join that keeps every row
+  before: [tables, setup]
+  sql: |
+    select d.u, vu.ts from vu join d on vu.k = d.u;
+  table_row_counts:
+    ea: 1000000
+    eb: 1000000
+    d: 1000000
   expected_outputs:
   - batch_plan
 - name: kept - group column of a type whose equal values may differ (numeric)

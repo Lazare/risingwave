@@ -48,8 +48,9 @@
 //! Per operator: a top-n per group and a deduplication keep the same rows of a kept group; a
 //! window function partitioned by `G` (every window function of the operator) sees the same rows
 //! of its partition in the same order; an aggregation computes the same aggregates on the same
-//! rows, and the columns of `T` that are read above it become group keys (they hold one value per
-//! group), except those that the condition equates with a group key, which are copied from it.
+//! rows, and the columns of `T` are carried by an `internal_last_seen_value` each (they hold one
+//! value per group; the calls that nothing reads are pruned), except those that the condition
+//! equates with a group key, which are copied from it.
 //! A filter or a projection between the join and the operator commutes with an inner or semi
 //! join; a `UNION ALL` distributes over it.
 //!
@@ -73,19 +74,20 @@
 use std::collections::BTreeSet;
 
 use risingwave_common::types::DataType;
+use risingwave_expr::aggregate::PbAggKind;
 use risingwave_pb::plan_common::JoinType;
 
 use super::cost_based_join_ordering_rule::estimated_rows;
 use super::never_true_predicate_rule::is_simple_type;
 use super::prelude::{PlanRef, *};
 use super::unique_key_simplify_rule::is_unique_on_compared_columns;
-use crate::expr::{Expr, ExprImpl, ExprRewriter, InputRef, Literal};
-use crate::optimizer::plan_node::generic::GenericPlanRef;
+use crate::expr::{Expr, ExprImpl, ExprRewriter, InputRef};
+use crate::optimizer::plan_node::generic::{GenericPlanRef, PlanAggCall};
 use crate::optimizer::plan_node::{
     LogicalAgg, LogicalFilter, LogicalJoin, LogicalProject, LogicalUnion, PlanTreeNode,
     PlanTreeNodeBinary, PlanTreeNodeUnary,
 };
-use crate::utils::{Condition, IndexSet};
+use crate::utils::Condition;
 
 /// The largest ratio of the estimated output rows of the join to the input rows of the per-group
 /// operator for which the join is pushed below the operator.
@@ -148,18 +150,9 @@ fn push_left(join: &LogicalJoin) -> Option<PlanRef> {
     let left_len = left.schema().len();
     let right_len = right.schema().len();
     let inner = join.join_type() == JoinType::Inner;
-    let mut right_required = vec![false; right_len];
-    if inner {
-        for &i in join.output_indices() {
-            if i >= left_len {
-                right_required[i - left_len] = true;
-            }
-        }
-    }
     let push = Push {
         join_type: join.join_type(),
         right_types: right.schema().data_types(),
-        right_required,
         right_restricted: is_restricted(&right),
         right_whole_table: reads_whole_table(&right),
         right,
@@ -185,9 +178,6 @@ struct Push {
     /// The right side.
     right: PlanRef,
     right_types: Vec<DataType>,
-    /// The columns of the right side that are read above the join (inner join only): the others
-    /// may be replaced by `NULL`.
-    right_required: Vec<bool>,
     /// Whether the right side is restricted (see [`is_restricted`]).
     right_restricted: bool,
     /// Whether the right side reads a whole table without filter.
@@ -229,13 +219,12 @@ impl GroupOp {
                     over_window.input(),
                     common?.into_iter().map(|c| (c, c)).collect(),
                 )
-            } else if let Some(agg) = plan.as_logical_agg() {
+            } else {
+                let agg = plan.as_logical_agg()?;
                 if !agg.grouping_sets().is_empty() {
                     return None;
                 }
                 (agg.input(), agg.group_key().indices().enumerate().collect())
-            } else {
-                return None;
             };
         (!group.is_empty()).then_some(GroupOp { input, group })
     }
@@ -382,37 +371,43 @@ impl Push {
 
         if let Some(agg) = left.as_logical_agg() {
             let group_len = agg.group_key().len();
-            // The required columns of the right side that no group column equals become group
-            // columns.
-            let added: Vec<usize> = (0..right_len)
-                .filter(|&j| self.inner() && self.right_required[j] && right_equal[j].is_none())
+            let call_len = agg.agg_calls().len();
+            // The columns of the right side that no group column equals: one value per group,
+            // kept by an `internal_last_seen_value` (pruned when it is not read above).
+            let carried: Vec<usize> = (0..right_len)
+                .filter(|&j| self.inner() && right_equal[j].is_none())
                 .collect();
             let mut core = agg.core().clone();
-            core.group_key = IndexSet::from_iter(
-                agg.group_key()
-                    .indices()
-                    .chain(added.iter().map(|&j| input_len + j)),
-            );
+            for &j in &carried {
+                let data_type = self.right_types[j].clone();
+                core.agg_calls.push(PlanAggCall {
+                    agg_type: PbAggKind::InternalLastSeenValue.into(),
+                    return_type: data_type.clone(),
+                    inputs: vec![InputRef::new(input_len + j, data_type)],
+                    distinct: false,
+                    order_by: vec![],
+                    filter: Condition::true_cond(),
+                    direct_args: vec![],
+                });
+            }
             core.input = below;
             let new_agg: PlanRef = LogicalAgg::from(core).into();
             let types = new_agg.schema().data_types();
-            // The new output: the group columns, the added ones, the aggregates.
-            let mut exprs: Vec<ExprImpl> = (0..group_len)
-                .chain(group_len + added.len()..types.len())
+            // The output of the aggregation, then the columns of the right side.
+            let mut exprs: Vec<ExprImpl> = (0..group_len + call_len)
                 .map(|i| InputRef::new(i, types[i].clone()).into())
                 .collect();
             if self.inner() {
-                for (j, right_type) in self.right_types.iter().enumerate() {
-                    let expr: ExprImpl = if let Some(p) = added.iter().position(|&a| a == j) {
-                        InputRef::new(group_len + p, types[group_len + p].clone()).into()
-                    } else if let (true, Some(c)) = (self.right_required[j], right_equal[j]) {
+                for (j, equal) in right_equal.iter().enumerate() {
+                    let index = match *equal {
                         // Equal to the group column `c` (an output column of the aggregation
                         // below `group_len`), of a type whose equal values are identical.
-                        InputRef::new(c, types[c].clone()).into()
-                    } else {
-                        Literal::new(None, right_type.clone()).into()
+                        Some(c) => c,
+                        None => {
+                            group_len + call_len + carried.iter().position(|&a| a == j).unwrap()
+                        }
                     };
-                    exprs.push(expr);
+                    exprs.push(InputRef::new(index, types[index].clone()).into());
                 }
             }
             return Some(LogicalProject::new(new_agg, exprs).into());

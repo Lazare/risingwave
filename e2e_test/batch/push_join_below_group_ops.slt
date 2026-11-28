@@ -1896,7 +1896,10 @@ statement ok
 update pjg_tk set kind = 'a' where tid = 2;
 
 statement ok
-update pjg_att set aid = 6 where aid = 4;
+delete from pjg_att where aid = 4;
+
+statement ok
+insert into pjg_att values (6, 1, 400);
 
 # After the inserts and updates: every query runs with every variable off, then in each mode.
 

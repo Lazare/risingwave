@@ -211,7 +211,8 @@ stmt(f"update {P}_d set state = 'open' where u = 3")
 stmt(f"update {P}_d set state = 'closed' where u = 1")
 stmt(f"update {P}_dn set state = 'open' where u = 2")
 stmt(f"update {P}_tk set kind = 'a' where tid = 2")
-stmt(f"update {P}_att set aid = 6 where aid = 4")
+stmt(f"delete from {P}_att where aid = 4")
+stmt(f"insert into {P}_att values (6, 1, 400)")
 run_all("After the inserts and updates")
 
 comment("""# Second round of changes: last rows deleted (the previous row becomes the result again), a
