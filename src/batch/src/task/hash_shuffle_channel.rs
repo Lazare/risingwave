@@ -153,17 +153,17 @@ impl HashShuffleSender {
                     .collect();
             }
             for (sink_id, new_data_chunk) in new_data_chunks.into_iter().enumerate() {
-                if new_data_chunk.cardinality() == 0 {
+                if new_data_chunk.cardinality() == 0 || self.senders[sink_id].is_closed() {
                     continue;
                 }
                 let full_chunks = compact.builders[sink_id]
                     .append_chunk(new_data_chunk)
                     .collect::<Vec<_>>();
                 for full_chunk in full_chunks {
-                    send_one(&self.senders[sink_id], &self.buffer, full_chunk).await?;
+                    send_one(&self.senders[sink_id], &self.buffer, full_chunk).await;
                 }
             }
-            return Ok(());
+            return all_outputs_closed(&self.senders);
         }
 
         // Counted once: the slices share the columns of the chunk, and its count.
@@ -178,17 +178,17 @@ impl HashShuffleSender {
             );
             // The reason we need to add this filter only in HashShuffleSender is that
             // `generate_new_data_chunks` may generate an empty chunk.
-            if new_data_chunk.cardinality() > 0 {
-                self.senders[sink_id]
+            // An output whose consumer stopped reading is skipped (see `all_outputs_closed`).
+            if new_data_chunk.cardinality() > 0 && !self.senders[sink_id].is_closed() {
+                let _ = self.senders[sink_id]
                     .send(Ok(Some(DataChunkInChannel::new(
                         new_data_chunk,
                         held.clone(),
                     ))))
-                    .await
-                    .map_err(|_| SenderError)?
+                    .await;
             }
         }
-        Ok(())
+        all_outputs_closed(&self.senders)
     }
 
     async fn send_done(mut self, error: Option<Arc<BatchError>>) -> BatchResult<()> {
@@ -197,33 +197,60 @@ impl HashShuffleSender {
             && let Some(compact) = &mut self.compact
         {
             for (sink_id, builder) in compact.builders.iter_mut().enumerate() {
-                if let Some(chunk) = builder.consume_all() {
-                    send_one(&self.senders[sink_id], &self.buffer, chunk).await?;
+                if let Some(chunk) = builder.consume_all()
+                    && !self.senders[sink_id].is_closed()
+                {
+                    send_one(&self.senders[sink_id], &self.buffer, chunk).await;
                 }
             }
         }
-        for sender in self.senders {
-            sender
-                .send(error.clone().map(Err).unwrap_or(Ok(None)))
-                .await
-                .map_err(|_| SenderError)?
-        }
-
-        Ok(())
+        send_end(self.senders, error).await
     }
 }
 
-/// Sends a chunk of its own to one output, counted in the buffer.
+/// Sends a chunk of its own to one output, counted in the buffer. Nothing happens when the
+/// consumer of the output stopped reading.
 async fn send_one(
     sender: &mpsc::Sender<SharedResult<Option<DataChunkInChannel>>>,
     buffer: &OutputBuffer,
     chunk: DataChunk,
-) -> BatchResult<()> {
+) {
     let (chunk, held) = buffer.hold(chunk).await;
-    sender
+    let _ = sender
         .send(Ok(Some(DataChunkInChannel::new(chunk, held))))
-        .await
-        .map_err(|_| SenderError)
+        .await;
+}
+
+/// A task with several outputs (hash, consistent hash, broadcast) keeps sending to the outputs
+/// whose consumer still reads when another consumer stopped reading early (a limit above it in its
+/// own task, a top-n per group without order under a limit): the other consumers read the same
+/// producers and need the rest of their rows and the end of their input, or they would wait for
+/// them forever. The task stops, with [`SenderError`], only when every consumer stopped.
+pub(super) fn all_outputs_closed(
+    senders: &[mpsc::Sender<SharedResult<Option<DataChunkInChannel>>>],
+) -> BatchResult<()> {
+    if !senders.is_empty() && senders.iter().all(|sender| sender.is_closed()) {
+        Err(SenderError)
+    } else {
+        Ok(())
+    }
+}
+
+/// Sends the end of the input (or the error of the task) to every output still read. See
+/// [`all_outputs_closed`].
+pub(super) async fn send_end(
+    senders: Vec<mpsc::Sender<SharedResult<Option<DataChunkInChannel>>>>,
+    error: Option<Arc<BatchError>>,
+) -> BatchResult<()> {
+    let closed = all_outputs_closed(&senders);
+    for sender in senders {
+        if !sender.is_closed() {
+            let _ = sender
+                .send(error.clone().map(Err).unwrap_or(Ok(None)))
+                .await;
+        }
+    }
+    closed
 }
 
 impl ChanReceiver for HashShuffleReceiver {
@@ -429,6 +456,35 @@ mod tests {
             plain.sort_unstable();
             assert_eq!(compact, plain);
         }
+    }
+
+    /// A consumer that stops reading early does not deprive the others: they still receive all
+    /// their rows and the end of their input. The sender only fails once every consumer stopped.
+    #[tokio::test]
+    async fn test_outputs_still_read_when_one_consumer_stops() {
+        for compact in [None, Some(100)] {
+            let (mut reference, reference_receivers) =
+                new_hash_shuffle_channel(&hash_exchange(), 64, OutputBuffer::unbounded(), compact);
+            let (mut sender, mut receivers) =
+                new_hash_shuffle_channel(&hash_exchange(), 64, OutputBuffer::unbounded(), compact);
+            drop(receivers.remove(0));
+            for i in 0..10 {
+                reference.send(chunk(i * 100, 100)).await.unwrap();
+                sender.send(chunk(i * 100, 100)).await.unwrap();
+            }
+            reference.close(None).await.unwrap();
+            sender.close(None).await.unwrap();
+            let (expected, _) = receive_all(reference_receivers).await;
+            let (rows, _) = receive_all(receivers).await;
+            assert_eq!(rows, expected[1..].to_vec(), "compact {compact:?}");
+            assert!(rows.iter().all(|output| !output.is_empty()));
+        }
+
+        let (mut sender, receivers) =
+            new_hash_shuffle_channel(&hash_exchange(), 64, OutputBuffer::unbounded(), None);
+        drop(receivers);
+        assert!(matches!(sender.send(chunk(0, 100)).await, Err(SenderError)));
+        assert!(matches!(sender.close(None).await, Err(SenderError)));
     }
 
     /// A bounded buffer makes the sender wait for its consumers.

@@ -23,10 +23,11 @@ use risingwave_pb::batch_plan::exchange_info::ConsistentHashInfo;
 use risingwave_pb::batch_plan::*;
 use tokio::sync::mpsc;
 
-use crate::error::BatchError::{Internal, SenderError};
+use crate::error::BatchError::Internal;
 use crate::error::{BatchError, Result as BatchResult, SharedResult};
 use crate::task::channel::{ChanReceiver, ChanReceiverImpl, ChanSender, ChanSenderImpl};
 use crate::task::data_chunk_in_channel::DataChunkInChannel;
+use crate::task::hash_shuffle_channel::{all_outputs_closed, send_end};
 use crate::task::output_buffer::OutputBuffer;
 
 #[derive(Clone)]
@@ -119,28 +120,21 @@ impl ConsistentHashShuffleSender {
             );
             // The reason we need to add this filter only in HashShuffleSender is that
             // `generate_new_data_chunks` may generate an empty chunk.
-            if new_data_chunk.cardinality() > 0 {
-                self.senders[sink_id]
+            // An output whose consumer stopped reading is skipped (see `all_outputs_closed`).
+            if new_data_chunk.cardinality() > 0 && !self.senders[sink_id].is_closed() {
+                let _ = self.senders[sink_id]
                     .send(Ok(Some(DataChunkInChannel::new(
                         new_data_chunk,
                         held.clone(),
                     ))))
-                    .await
-                    .map_err(|_| SenderError)?
+                    .await;
             }
         }
-        Ok(())
+        all_outputs_closed(&self.senders)
     }
 
     async fn send_done(self, error: Option<Arc<BatchError>>) -> BatchResult<()> {
-        for sender in self.senders {
-            sender
-                .send(error.clone().map(Err).unwrap_or(Ok(None)))
-                .await
-                .map_err(|_| SenderError)?
-        }
-
-        Ok(())
+        send_end(self.senders, error).await
     }
 }
 

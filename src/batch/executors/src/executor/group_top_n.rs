@@ -1033,15 +1033,14 @@ mod tests {
         .dispatch();
         let mut output = executor.execute();
         let mut rows = 0;
+        let mut peak = 0;
         while let Some(chunk) = output.next().await {
             rows += chunk.unwrap().cardinality();
+            peak = peak.max(mem_ctx.get_bytes_used());
         }
         assert_eq!(rows, 3000);
-        assert!(
-            mem_ctx.get_bytes_used() >= 3000 * 64,
-            "{} bytes used",
-            mem_ctx.get_bytes_used()
-        );
+        // After the last chunk, its 3000 keys are held (released when the input ends).
+        assert!(peak >= 3000 * 64, "{peak} bytes used");
         drop(output);
         assert_eq!(mem_ctx.get_bytes_used(), 0);
     }

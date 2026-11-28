@@ -250,6 +250,17 @@ its memory (the table and the bytes of keys of variable size), and takes that me
 query after each chunk as before. Same rows as the heaps, in a different output order, which a top-n per group
 does not guarantee anyway. A `LIMIT` above it stops it after its first rows.
 
+**Exchanges with several consumers.** A top-n per group that emits early lets the per-task
+`LIMIT` that the planner puts above it end its task before its input ends. That task drops its
+end of the hash exchange that feeds it, while the other tasks of its stage still read the same
+producers. A producer used to stop as soon as one of its outputs was closed (`SenderError`): the
+other consumers then never got the rest of their rows nor the end of their input, and the query
+hung (seen in the differential test). The hash, consistent hash and broadcast senders now skip
+the outputs whose consumer stopped and keep feeding the others; a producer stops only when every
+consumer stopped (`all_outputs_closed` in `hash_shuffle_channel.rs`). The same hang could happen
+before with any operator that streams under a per-task limit (a projection or a hash join probe
+above an exchange), when the sequential exchange of the limit read a starved task first.
+
 **Planner (`batch_streaming_unordered_group_topn`, default off).** In `LogicalTopN::to_batch`,
 the order columns that belong to the group key are dropped from the order of a top-n per group:
 they are equal within a group, so ordering by them only orders peers. `DISTINCT ON (k) ... ORDER

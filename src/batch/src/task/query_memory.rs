@@ -1599,7 +1599,7 @@ mod tests {
         // all three operators would fail. The youngest query is chosen, although it was not the
         // last one to wait, and only its operator fails.
         let old_a = grow_in_background(q1.executor_memory(meter()), 1000 * MB);
-        let old_b = grow_in_background(q1.executor_memory(meter()), 300 * MB);
+        let old_b = grow_in_background(q1.executor_memory(meter()), 600 * MB);
         let (result, young_memory) = tokio::time::timeout(Duration::from_secs(5), young)
             .await
             .unwrap()

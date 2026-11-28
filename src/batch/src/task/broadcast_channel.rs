@@ -21,10 +21,11 @@ use risingwave_pb::batch_plan::exchange_info::BroadcastInfo;
 use risingwave_pb::batch_plan::*;
 use tokio::sync::mpsc;
 
-use crate::error::BatchError::{Internal, SenderError};
+use crate::error::BatchError::Internal;
 use crate::error::{BatchError, Result as BatchResult, SharedResult};
 use crate::task::channel::{ChanReceiver, ChanReceiverImpl, ChanSender, ChanSenderImpl};
 use crate::task::data_chunk_in_channel::DataChunkInChannel;
+use crate::task::hash_shuffle_channel::{all_outputs_closed, send_end};
 use crate::task::output_buffer::OutputBuffer;
 
 /// `BroadcastSender` sends the same chunk to a number of `BroadcastReceiver`s.
@@ -48,25 +49,17 @@ impl ChanSender for BroadcastSender {
         // Counted once: the copies share the columns of the chunk.
         let (chunk, held) = self.buffer.hold(chunk).await;
         let broadcast_data_chunk = DataChunkInChannel::new(chunk, held);
+        // An output whose consumer stopped reading is skipped (see `all_outputs_closed`).
         for sender in &self.senders {
-            sender
-                .send(Ok(Some(broadcast_data_chunk.clone())))
-                .await
-                .map_err(|_| SenderError)?
+            if !sender.is_closed() {
+                let _ = sender.send(Ok(Some(broadcast_data_chunk.clone()))).await;
+            }
         }
-
-        Ok(())
+        all_outputs_closed(&self.senders)
     }
 
     async fn close(self, error: Option<Arc<BatchError>>) -> BatchResult<()> {
-        for sender in self.senders {
-            sender
-                .send(error.clone().map(Err).unwrap_or(Ok(None)))
-                .await
-                .map_err(|_| SenderError)?
-        }
-
-        Ok(())
+        send_end(self.senders, error).await
     }
 }
 
