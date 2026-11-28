@@ -55,9 +55,7 @@ use risingwave_expr::aggregate::{AggType, PbAggKind};
 use super::null_key_join_rule::always_null_columns;
 use super::prelude::{PlanRef, *};
 use crate::optimizer::plan_node::generic::{GenericPlanRef, PlanAggCall};
-use crate::optimizer::plan_node::{
-    LogicalProject, LogicalUnion, LogicalValues, PlanTreeNode, PlanTreeNodeUnary,
-};
+use crate::optimizer::plan_node::{LogicalProject, LogicalUnion, LogicalValues, PlanTreeNodeUnary};
 
 /// See the documentation of the module.
 pub struct AggUnionNullBranchRule {}
