@@ -79,11 +79,11 @@ use super::cost_based_join_ordering_rule::estimated_rows;
 use super::never_true_predicate_rule::is_simple_type;
 use super::prelude::{PlanRef, *};
 use super::unique_key_simplify_rule::is_unique_on_compared_columns;
-use crate::expr::{ExprImpl, ExprRewriter, InputRef, Literal};
+use crate::expr::{Expr, ExprImpl, ExprRewriter, InputRef, Literal};
 use crate::optimizer::plan_node::generic::GenericPlanRef;
 use crate::optimizer::plan_node::{
-    LogicalAgg, LogicalFilter, LogicalJoin, LogicalProject, LogicalUnion, PlanTreeNodeBinary,
-    PlanTreeNodeUnary,
+    LogicalAgg, LogicalFilter, LogicalJoin, LogicalProject, LogicalUnion, PlanTreeNode,
+    PlanTreeNodeBinary, PlanTreeNodeUnary,
 };
 use crate::utils::{Condition, IndexSet};
 
@@ -402,7 +402,7 @@ impl Push {
                 .map(|i| InputRef::new(i, types[i].clone()).into())
                 .collect();
             if self.inner() {
-                for j in 0..right_len {
+                for (j, right_type) in self.right_types.iter().enumerate() {
                     let expr: ExprImpl = if let Some(p) = added.iter().position(|&a| a == j) {
                         InputRef::new(group_len + p, types[group_len + p].clone()).into()
                     } else if let (true, Some(c)) = (self.right_required[j], right_equal[j]) {
@@ -410,7 +410,7 @@ impl Push {
                         // below `group_len`), of a type whose equal values are identical.
                         InputRef::new(c, types[c].clone()).into()
                     } else {
-                        Literal::new(None, self.right_types[j].clone()).into()
+                        Literal::new(None, right_type.clone()).into()
                     };
                     exprs.push(expr);
                 }
