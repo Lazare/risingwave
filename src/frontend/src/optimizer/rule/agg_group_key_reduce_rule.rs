@@ -53,7 +53,7 @@ use risingwave_expr::aggregate::{AggType, PbAggKind};
 use super::prelude::{PlanRef, *};
 use crate::expr::{ExprImpl, InputRef};
 use crate::optimizer::plan_node::generic::{Agg, GenericPlanRef, PlanAggCall};
-use crate::optimizer::plan_node::{LogicalProject, PlanNodeId, PlanTreeNode};
+use crate::optimizer::plan_node::{LogicalProject, PlanNodeId, PlanTreeNodeUnary};
 use crate::utils::{Condition, IndexSet};
 
 /// See the documentation of the module.
