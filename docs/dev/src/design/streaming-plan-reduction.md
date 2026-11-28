@@ -2301,6 +2301,10 @@ Project(a, b)
   join and a hash aggregation. Without `batch_distributed_union` the `UNION ALL` gathers both
   inputs on one node before the exchange to the aggregation, which is worse than the distributed
   hash join: use the batch variable only together with `batch_distributed_union`.
+- Not over constant rows only (every leaf of every input is a `VALUES`): constant folding reduces
+  `SELECT 1 EXCEPT (SELECT 2 EXCEPT SELECT 1)` and the stacked set operations of constants of the
+  upstream tests to one `Values`, which the aggregation over a `UNION ALL` of the rows prevented
+  (found by the public benchmark measurement of 2026-11-28).
 - Stage: `SET_OPERATION_TO_COUNT`, right after `SET_OPERATION_MERGE` and before
   `SET_OPERATION_TO_JOIN`, in both pipelines.
 - `INTERSECT ALL` and `EXCEPT ALL` are rejected by the binder ("not implemented"); their rewrite
