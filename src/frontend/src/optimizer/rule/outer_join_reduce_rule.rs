@@ -18,13 +18,13 @@ use risingwave_pb::plan_common::JoinType;
 
 use super::column_facts_simplify_rule::column_facts;
 use super::prelude::{PlanRef, *};
-use crate::expr::{ExprImpl, ExprType, InputRef};
+use crate::expr::{ExprImpl, ExprRewriter, ExprType, InputRef};
 use crate::optimizer::plan_expr_visitor::Strong;
 use crate::optimizer::plan_node::generic::GenericPlanRef;
 use crate::optimizer::plan_node::{
     LogicalFilter, LogicalJoin, LogicalProject, PlanTreeNodeBinary, PlanTreeNodeUnary,
 };
-use crate::utils::Condition;
+use crate::utils::{Condition, Substitute};
 
 /// Reduces an outer join whose padded rows a predicate above rejects, as PostgreSQL does in
 /// `reduce_outer_joins`:
@@ -37,13 +37,14 @@ use crate::utils::Condition;
 ///    the join does not need to produce them.
 ///
 ///    ```text
-///    Filter(lower(r.name) LIKE 'a%')            Filter(lower(r.name) LIKE 'a%')
+///    Filter(r.c + 1 > t.x)                      Filter(r.c + 1 > t.x)
 ///    └─Join(LeftOuter, t.k = r.id)        =>    └─Join(Inner, t.k = r.id)
 ///    ```
 ///
 ///    This is what `LogicalJoin::simplify_outer` does during predicate pushdown, with a real
-///    null-rejection test instead of a comparison of a column: functions of the column,
-///    `IS NOT NULL`, `IN`, `LIKE`, `OR` of such conjuncts, and the conditions of a join above.
+///    null-rejection test instead of a comparison of a column: the strict functions that
+///    [`Strong`] lists (arithmetic, casts, `LIKE`...; not `lower` or `upper`), `IS NOT NULL`,
+///    `IN`, `OR` of such conjuncts, and the conditions of a join above.
 ///
 /// 2. Outer to anti: a top-level conjunct `r.c IS NULL` of a filter right above a left join,
 ///    where `r.c` is a column of the right side that is never `NULL` in a matched row: the
@@ -60,7 +61,8 @@ use crate::utils::Condition;
 ///    anti join). For a full join only the column facts count, since the unmatched rows of the
 ///    right side keep their own `r.c`: `r.c IS NULL` then keeps the unmatched rows of the left
 ///    side (a left anti join). The other conjuncts of the filter stay above, evaluated on the
-///    `NULL`s of the padded side; the `IS NULL` conjuncts on that side, now `TRUE`, are removed.
+///    `NULL`s of the padded side, except those that only read that side and are now `TRUE` (its
+///    `IS NULL` conjuncts, among others), which are removed.
 ///
 /// # Correctness
 ///
@@ -292,18 +294,24 @@ fn anti_join_below_filter(predicate: &Condition, join: &LogicalJoin) -> Option<P
                 _ => ExprImpl::literal_null(data_type),
             }
         })
-        .collect();
-    let project = LogicalProject::create(anti.into(), exprs);
-    // The `IS NULL` conjuncts on the padded side are now `TRUE`.
+        .collect::<Vec<ExprImpl>>();
+    // The conjuncts that only read the padded side, now `NULL`, and are `TRUE` on it (the `IS
+    // NULL` conjuncts, among others) are removed.
+    let mut substitute = Substitute {
+        mapping: exprs.clone(),
+    };
     let conjunctions = predicate
         .conjunctions
         .iter()
         .filter(|expr| {
-            is_null_column(expr)
-                .is_none_or(|output| (output_indices[output] < left_len) == keep_left)
+            !matches!(
+                substitute.rewrite_expr((*expr).clone()).try_fold_const(),
+                Some(Ok(Some(ScalarImpl::Bool(true))))
+            )
         })
         .cloned()
         .collect();
+    let project = LogicalProject::create(anti.into(), exprs);
     Some(LogicalFilter::create(project, Condition { conjunctions }))
 }
 

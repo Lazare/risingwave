@@ -854,8 +854,8 @@ join into an inner one with `LogicalJoin::simplify_outer`, which only recognizes
 Two reductions are missing:
 
 ```text
-SELECT t.*, r.name FROM t LEFT JOIN r ON t.k = r.id WHERE lower(r.name) LIKE 'a%'
-Filter(Lower(r.name) LIKE 'a%')               Filter(Lower(r.name) LIKE 'a%')
+SELECT t.*, r.name FROM t LEFT JOIN r ON t.k = r.id WHERE r.c + 1 > t.x
+Filter(r.c + 1 > t.x)                         Filter(r.c + 1 > t.x)
 └─Join(LeftOuter, t.k = r.id)           =>    └─Join(Inner, t.k = r.id)
 
 SELECT t.* FROM t LEFT JOIN r ON t.k = r.k WHERE r.k IS NULL
@@ -870,8 +870,9 @@ Filter(IsNull(r.k))                           Project(t.*, NULL)
   The test: `Strong` (the expression is `NULL`; except over `greatest` / `least`, which skip
   `NULL`s in RisingWave although `Strong` lists them as strict), `FALSE`, `AND` with one such
   conjunct, `OR` with all, `IS TRUE`, `IS NOT NULL`, `NOT (e IS NULL)`, `IN`, `IS NOT DISTINCT
-  FROM` a non-`NULL` constant. Functions of the column, `LIKE`, `IN`, `OR` and the conditions of
-  a join above are now recognized. Valid: every padded row is rejected, so the join need not
+  FROM` a non-`NULL` constant. The strict functions that `Strong` lists (arithmetic, casts,
+  `LIKE`, `trim`, `extract`...; not `lower` / `upper`, which it does not list), `IS NOT NULL`,
+  `IN`, `OR` and the conditions of a join above are now recognized. Valid: every padded row is rejected, so the join need not
   produce it; an identity for every content of the inputs, hence for a frozen streaming plan.
 - Outer to anti: a top-level conjunct `r.c IS NULL` above a left join where `r.c` is never `NULL`
   in a matched row: the column facts of the right input say so (a `NOT NULL` column, a count, a

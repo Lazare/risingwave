@@ -39,7 +39,7 @@ statement ok
 set streaming_reduce_outer_joins = false;
 
 statement ok
-create materialized view sro_left_like_off as select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%';
+create materialized view sro_left_like_off as select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where r.name like 'a%';
 
 statement ok
 create materialized view sro_left_is_not_null_off as select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where r.name is not null;
@@ -63,7 +63,7 @@ statement ok
 create materialized view sro_left_is_true_off as select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where (r.c > 5) is true;
 
 statement ok
-create materialized view sro_right_abs_off as select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where abs(t.y) > 1;
+create materialized view sro_right_arithmetic_off as select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.y + 1 > 2;
 
 statement ok
 create materialized view sro_full_one_side_off as select t.id, r.id as rid from sro_t t full join sro_r r on t.k = r.id where t.y is not null;
@@ -93,7 +93,7 @@ statement ok
 create materialized view sro_anti_other_off as select t.id, s.v from sro_t t left join sro_s s on t.k = s.k where s.k is null and coalesce(s.v, 0) = 0;
 
 statement ok
-create materialized view sro_anti_right_off as select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null;
+create materialized view sro_anti_right_off as select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.k is null;
 
 statement ok
 create materialized view sro_anti_full_off as select t.id, r.id as rid from sro_t t full join sro_r r on t.k = r.c where r.k is null;
@@ -103,6 +103,12 @@ create materialized view sro_anti_count_off as select count(*) as n from sro_t t
 
 statement ok
 create materialized view sro_anti_duplicates_off as select n.k, n.v from sro_n n left join sro_s s on n.k = s.k where s.k is null;
+
+statement ok
+create materialized view sro_kept_lower_off as select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%';
+
+statement ok
+create materialized view sro_kept_right_pk_off as select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null;
 
 statement ok
 create materialized view sro_kept_or_null_off as select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where r.c is null or r.c > 5;
@@ -141,7 +147,7 @@ statement ok
 set streaming_reduce_outer_joins = true;
 
 statement ok
-create materialized view sro_left_like_on as select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%';
+create materialized view sro_left_like_on as select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where r.name like 'a%';
 
 statement ok
 create materialized view sro_left_is_not_null_on as select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where r.name is not null;
@@ -165,7 +171,7 @@ statement ok
 create materialized view sro_left_is_true_on as select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where (r.c > 5) is true;
 
 statement ok
-create materialized view sro_right_abs_on as select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where abs(t.y) > 1;
+create materialized view sro_right_arithmetic_on as select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.y + 1 > 2;
 
 statement ok
 create materialized view sro_full_one_side_on as select t.id, r.id as rid from sro_t t full join sro_r r on t.k = r.id where t.y is not null;
@@ -195,7 +201,7 @@ statement ok
 create materialized view sro_anti_other_on as select t.id, s.v from sro_t t left join sro_s s on t.k = s.k where s.k is null and coalesce(s.v, 0) = 0;
 
 statement ok
-create materialized view sro_anti_right_on as select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null;
+create materialized view sro_anti_right_on as select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.k is null;
 
 statement ok
 create materialized view sro_anti_full_on as select t.id, r.id as rid from sro_t t full join sro_r r on t.k = r.c where r.k is null;
@@ -205,6 +211,12 @@ create materialized view sro_anti_count_on as select count(*) as n from sro_t t 
 
 statement ok
 create materialized view sro_anti_duplicates_on as select n.k, n.v from sro_n n left join sro_s s on n.k = s.k where s.k is null;
+
+statement ok
+create materialized view sro_kept_lower_on as select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%';
+
+statement ok
+create materialized view sro_kept_right_pk_on as select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null;
 
 statement ok
 create materialized view sro_kept_or_null_on as select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where r.c is null or r.c > 5;
@@ -254,9 +266,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, name, count(*) as sro_rows from sro_left_like_on group by id, name except select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%') q group by id, name) x),
-  (select count(*) from (select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%') q group by id, name except select id, name, count(*) as sro_rows from sro_left_like_on group by id, name) y),
-  (select count(*) from sro_left_like_on) - (select count(*) from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%') q);
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_left_like_on group by id, name except select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where r.name like 'a%') q group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where r.name like 'a%') q group by id, name except select id, name, count(*) as sro_rows from sro_left_like_on group by id, name) y),
+  (select count(*) from sro_left_like_on) - (select count(*) from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where r.name like 'a%') q);
 ----
 0 0 0
 
@@ -374,17 +386,17 @@ select
 
 query III
 select
-  (select count(*) from (select id, name, count(*) as sro_rows from sro_right_abs_on group by id, name except select id, name, count(*) as sro_rows from sro_right_abs_off group by id, name) x),
-  (select count(*) from (select id, name, count(*) as sro_rows from sro_right_abs_off group by id, name except select id, name, count(*) as sro_rows from sro_right_abs_on group by id, name) y),
-  (select count(*) from sro_right_abs_on) - (select count(*) from sro_right_abs_off);
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_right_arithmetic_on group by id, name except select id, name, count(*) as sro_rows from sro_right_arithmetic_off group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_right_arithmetic_off group by id, name except select id, name, count(*) as sro_rows from sro_right_arithmetic_on group by id, name) y),
+  (select count(*) from sro_right_arithmetic_on) - (select count(*) from sro_right_arithmetic_off);
 ----
 0 0 0
 
 query III
 select
-  (select count(*) from (select id, name, count(*) as sro_rows from sro_right_abs_on group by id, name except select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where abs(t.y) > 1) q group by id, name) x),
-  (select count(*) from (select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where abs(t.y) > 1) q group by id, name except select id, name, count(*) as sro_rows from sro_right_abs_on group by id, name) y),
-  (select count(*) from sro_right_abs_on) - (select count(*) from (select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where abs(t.y) > 1) q);
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_right_arithmetic_on group by id, name except select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.y + 1 > 2) q group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.y + 1 > 2) q group by id, name except select id, name, count(*) as sro_rows from sro_right_arithmetic_on group by id, name) y),
+  (select count(*) from sro_right_arithmetic_on) - (select count(*) from (select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.y + 1 > 2) q);
 ----
 0 0 0
 
@@ -542,9 +554,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, name, count(*) as sro_rows from sro_anti_right_on group by id, name except select id, name, count(*) as sro_rows from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null) q group by id, name) x),
-  (select count(*) from (select id, name, count(*) as sro_rows from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null) q group by id, name except select id, name, count(*) as sro_rows from sro_anti_right_on group by id, name) y),
-  (select count(*) from sro_anti_right_on) - (select count(*) from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null) q);
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_anti_right_on group by id, name except select id, name, count(*) as sro_rows from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.k is null) q group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.k is null) q group by id, name except select id, name, count(*) as sro_rows from sro_anti_right_on group by id, name) y),
+  (select count(*) from sro_anti_right_on) - (select count(*) from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.k is null) q);
 ----
 0 0 0
 
@@ -593,6 +605,38 @@ select
   (select count(*) from (select k, v, count(*) as sro_rows from sro_anti_duplicates_on group by k, v except select k, v, count(*) as sro_rows from (select n.k, n.v from sro_n n left join sro_s s on n.k = s.k where s.k is null) q group by k, v) x),
   (select count(*) from (select k, v, count(*) as sro_rows from (select n.k, n.v from sro_n n left join sro_s s on n.k = s.k where s.k is null) q group by k, v except select k, v, count(*) as sro_rows from sro_anti_duplicates_on group by k, v) y),
   (select count(*) from sro_anti_duplicates_on) - (select count(*) from (select n.k, n.v from sro_n n left join sro_s s on n.k = s.k where s.k is null) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_kept_lower_on group by id, name except select id, name, count(*) as sro_rows from sro_kept_lower_off group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_kept_lower_off group by id, name except select id, name, count(*) as sro_rows from sro_kept_lower_on group by id, name) y),
+  (select count(*) from sro_kept_lower_on) - (select count(*) from sro_kept_lower_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_kept_lower_on group by id, name except select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%') q group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%') q group by id, name except select id, name, count(*) as sro_rows from sro_kept_lower_on group by id, name) y),
+  (select count(*) from sro_kept_lower_on) - (select count(*) from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%') q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_kept_right_pk_on group by id, name except select id, name, count(*) as sro_rows from sro_kept_right_pk_off group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_kept_right_pk_off group by id, name except select id, name, count(*) as sro_rows from sro_kept_right_pk_on group by id, name) y),
+  (select count(*) from sro_kept_right_pk_on) - (select count(*) from sro_kept_right_pk_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_kept_right_pk_on group by id, name except select id, name, count(*) as sro_rows from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null) q group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null) q group by id, name except select id, name, count(*) as sro_rows from sro_kept_right_pk_on group by id, name) y),
+  (select count(*) from sro_kept_right_pk_on) - (select count(*) from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null) q);
 ----
 0 0 0
 
@@ -810,9 +854,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, name, count(*) as sro_rows from sro_left_like_on group by id, name except select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%') q group by id, name) x),
-  (select count(*) from (select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%') q group by id, name except select id, name, count(*) as sro_rows from sro_left_like_on group by id, name) y),
-  (select count(*) from sro_left_like_on) - (select count(*) from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%') q);
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_left_like_on group by id, name except select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where r.name like 'a%') q group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where r.name like 'a%') q group by id, name except select id, name, count(*) as sro_rows from sro_left_like_on group by id, name) y),
+  (select count(*) from sro_left_like_on) - (select count(*) from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where r.name like 'a%') q);
 ----
 0 0 0
 
@@ -930,17 +974,17 @@ select
 
 query III
 select
-  (select count(*) from (select id, name, count(*) as sro_rows from sro_right_abs_on group by id, name except select id, name, count(*) as sro_rows from sro_right_abs_off group by id, name) x),
-  (select count(*) from (select id, name, count(*) as sro_rows from sro_right_abs_off group by id, name except select id, name, count(*) as sro_rows from sro_right_abs_on group by id, name) y),
-  (select count(*) from sro_right_abs_on) - (select count(*) from sro_right_abs_off);
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_right_arithmetic_on group by id, name except select id, name, count(*) as sro_rows from sro_right_arithmetic_off group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_right_arithmetic_off group by id, name except select id, name, count(*) as sro_rows from sro_right_arithmetic_on group by id, name) y),
+  (select count(*) from sro_right_arithmetic_on) - (select count(*) from sro_right_arithmetic_off);
 ----
 0 0 0
 
 query III
 select
-  (select count(*) from (select id, name, count(*) as sro_rows from sro_right_abs_on group by id, name except select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where abs(t.y) > 1) q group by id, name) x),
-  (select count(*) from (select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where abs(t.y) > 1) q group by id, name except select id, name, count(*) as sro_rows from sro_right_abs_on group by id, name) y),
-  (select count(*) from sro_right_abs_on) - (select count(*) from (select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where abs(t.y) > 1) q);
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_right_arithmetic_on group by id, name except select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.y + 1 > 2) q group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.y + 1 > 2) q group by id, name except select id, name, count(*) as sro_rows from sro_right_arithmetic_on group by id, name) y),
+  (select count(*) from sro_right_arithmetic_on) - (select count(*) from (select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.y + 1 > 2) q);
 ----
 0 0 0
 
@@ -1098,9 +1142,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, name, count(*) as sro_rows from sro_anti_right_on group by id, name except select id, name, count(*) as sro_rows from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null) q group by id, name) x),
-  (select count(*) from (select id, name, count(*) as sro_rows from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null) q group by id, name except select id, name, count(*) as sro_rows from sro_anti_right_on group by id, name) y),
-  (select count(*) from sro_anti_right_on) - (select count(*) from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null) q);
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_anti_right_on group by id, name except select id, name, count(*) as sro_rows from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.k is null) q group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.k is null) q group by id, name except select id, name, count(*) as sro_rows from sro_anti_right_on group by id, name) y),
+  (select count(*) from sro_anti_right_on) - (select count(*) from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.k is null) q);
 ----
 0 0 0
 
@@ -1149,6 +1193,38 @@ select
   (select count(*) from (select k, v, count(*) as sro_rows from sro_anti_duplicates_on group by k, v except select k, v, count(*) as sro_rows from (select n.k, n.v from sro_n n left join sro_s s on n.k = s.k where s.k is null) q group by k, v) x),
   (select count(*) from (select k, v, count(*) as sro_rows from (select n.k, n.v from sro_n n left join sro_s s on n.k = s.k where s.k is null) q group by k, v except select k, v, count(*) as sro_rows from sro_anti_duplicates_on group by k, v) y),
   (select count(*) from sro_anti_duplicates_on) - (select count(*) from (select n.k, n.v from sro_n n left join sro_s s on n.k = s.k where s.k is null) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_kept_lower_on group by id, name except select id, name, count(*) as sro_rows from sro_kept_lower_off group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_kept_lower_off group by id, name except select id, name, count(*) as sro_rows from sro_kept_lower_on group by id, name) y),
+  (select count(*) from sro_kept_lower_on) - (select count(*) from sro_kept_lower_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_kept_lower_on group by id, name except select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%') q group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%') q group by id, name except select id, name, count(*) as sro_rows from sro_kept_lower_on group by id, name) y),
+  (select count(*) from sro_kept_lower_on) - (select count(*) from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%') q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_kept_right_pk_on group by id, name except select id, name, count(*) as sro_rows from sro_kept_right_pk_off group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_kept_right_pk_off group by id, name except select id, name, count(*) as sro_rows from sro_kept_right_pk_on group by id, name) y),
+  (select count(*) from sro_kept_right_pk_on) - (select count(*) from sro_kept_right_pk_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_kept_right_pk_on group by id, name except select id, name, count(*) as sro_rows from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null) q group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null) q group by id, name except select id, name, count(*) as sro_rows from sro_kept_right_pk_on group by id, name) y),
+  (select count(*) from sro_kept_right_pk_on) - (select count(*) from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null) q);
 ----
 0 0 0
 
@@ -1372,9 +1448,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, name, count(*) as sro_rows from sro_left_like_on group by id, name except select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%') q group by id, name) x),
-  (select count(*) from (select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%') q group by id, name except select id, name, count(*) as sro_rows from sro_left_like_on group by id, name) y),
-  (select count(*) from sro_left_like_on) - (select count(*) from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%') q);
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_left_like_on group by id, name except select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where r.name like 'a%') q group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where r.name like 'a%') q group by id, name except select id, name, count(*) as sro_rows from sro_left_like_on group by id, name) y),
+  (select count(*) from sro_left_like_on) - (select count(*) from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where r.name like 'a%') q);
 ----
 0 0 0
 
@@ -1492,17 +1568,17 @@ select
 
 query III
 select
-  (select count(*) from (select id, name, count(*) as sro_rows from sro_right_abs_on group by id, name except select id, name, count(*) as sro_rows from sro_right_abs_off group by id, name) x),
-  (select count(*) from (select id, name, count(*) as sro_rows from sro_right_abs_off group by id, name except select id, name, count(*) as sro_rows from sro_right_abs_on group by id, name) y),
-  (select count(*) from sro_right_abs_on) - (select count(*) from sro_right_abs_off);
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_right_arithmetic_on group by id, name except select id, name, count(*) as sro_rows from sro_right_arithmetic_off group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_right_arithmetic_off group by id, name except select id, name, count(*) as sro_rows from sro_right_arithmetic_on group by id, name) y),
+  (select count(*) from sro_right_arithmetic_on) - (select count(*) from sro_right_arithmetic_off);
 ----
 0 0 0
 
 query III
 select
-  (select count(*) from (select id, name, count(*) as sro_rows from sro_right_abs_on group by id, name except select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where abs(t.y) > 1) q group by id, name) x),
-  (select count(*) from (select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where abs(t.y) > 1) q group by id, name except select id, name, count(*) as sro_rows from sro_right_abs_on group by id, name) y),
-  (select count(*) from sro_right_abs_on) - (select count(*) from (select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where abs(t.y) > 1) q);
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_right_arithmetic_on group by id, name except select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.y + 1 > 2) q group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.y + 1 > 2) q group by id, name except select id, name, count(*) as sro_rows from sro_right_arithmetic_on group by id, name) y),
+  (select count(*) from sro_right_arithmetic_on) - (select count(*) from (select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.y + 1 > 2) q);
 ----
 0 0 0
 
@@ -1660,9 +1736,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, name, count(*) as sro_rows from sro_anti_right_on group by id, name except select id, name, count(*) as sro_rows from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null) q group by id, name) x),
-  (select count(*) from (select id, name, count(*) as sro_rows from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null) q group by id, name except select id, name, count(*) as sro_rows from sro_anti_right_on group by id, name) y),
-  (select count(*) from sro_anti_right_on) - (select count(*) from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null) q);
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_anti_right_on group by id, name except select id, name, count(*) as sro_rows from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.k is null) q group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.k is null) q group by id, name except select id, name, count(*) as sro_rows from sro_anti_right_on group by id, name) y),
+  (select count(*) from sro_anti_right_on) - (select count(*) from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.k is null) q);
 ----
 0 0 0
 
@@ -1711,6 +1787,38 @@ select
   (select count(*) from (select k, v, count(*) as sro_rows from sro_anti_duplicates_on group by k, v except select k, v, count(*) as sro_rows from (select n.k, n.v from sro_n n left join sro_s s on n.k = s.k where s.k is null) q group by k, v) x),
   (select count(*) from (select k, v, count(*) as sro_rows from (select n.k, n.v from sro_n n left join sro_s s on n.k = s.k where s.k is null) q group by k, v except select k, v, count(*) as sro_rows from sro_anti_duplicates_on group by k, v) y),
   (select count(*) from sro_anti_duplicates_on) - (select count(*) from (select n.k, n.v from sro_n n left join sro_s s on n.k = s.k where s.k is null) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_kept_lower_on group by id, name except select id, name, count(*) as sro_rows from sro_kept_lower_off group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_kept_lower_off group by id, name except select id, name, count(*) as sro_rows from sro_kept_lower_on group by id, name) y),
+  (select count(*) from sro_kept_lower_on) - (select count(*) from sro_kept_lower_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_kept_lower_on group by id, name except select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%') q group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%') q group by id, name except select id, name, count(*) as sro_rows from sro_kept_lower_on group by id, name) y),
+  (select count(*) from sro_kept_lower_on) - (select count(*) from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%') q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_kept_right_pk_on group by id, name except select id, name, count(*) as sro_rows from sro_kept_right_pk_off group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_kept_right_pk_off group by id, name except select id, name, count(*) as sro_rows from sro_kept_right_pk_on group by id, name) y),
+  (select count(*) from sro_kept_right_pk_on) - (select count(*) from sro_kept_right_pk_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_kept_right_pk_on group by id, name except select id, name, count(*) as sro_rows from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null) q group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null) q group by id, name except select id, name, count(*) as sro_rows from sro_kept_right_pk_on group by id, name) y),
+  (select count(*) from sro_kept_right_pk_on) - (select count(*) from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null) q);
 ----
 0 0 0
 
@@ -1910,9 +2018,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, name, count(*) as sro_rows from sro_left_like_on group by id, name except select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%') q group by id, name) x),
-  (select count(*) from (select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%') q group by id, name except select id, name, count(*) as sro_rows from sro_left_like_on group by id, name) y),
-  (select count(*) from sro_left_like_on) - (select count(*) from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%') q);
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_left_like_on group by id, name except select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where r.name like 'a%') q group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where r.name like 'a%') q group by id, name except select id, name, count(*) as sro_rows from sro_left_like_on group by id, name) y),
+  (select count(*) from sro_left_like_on) - (select count(*) from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where r.name like 'a%') q);
 ----
 0 0 0
 
@@ -2030,17 +2138,17 @@ select
 
 query III
 select
-  (select count(*) from (select id, name, count(*) as sro_rows from sro_right_abs_on group by id, name except select id, name, count(*) as sro_rows from sro_right_abs_off group by id, name) x),
-  (select count(*) from (select id, name, count(*) as sro_rows from sro_right_abs_off group by id, name except select id, name, count(*) as sro_rows from sro_right_abs_on group by id, name) y),
-  (select count(*) from sro_right_abs_on) - (select count(*) from sro_right_abs_off);
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_right_arithmetic_on group by id, name except select id, name, count(*) as sro_rows from sro_right_arithmetic_off group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_right_arithmetic_off group by id, name except select id, name, count(*) as sro_rows from sro_right_arithmetic_on group by id, name) y),
+  (select count(*) from sro_right_arithmetic_on) - (select count(*) from sro_right_arithmetic_off);
 ----
 0 0 0
 
 query III
 select
-  (select count(*) from (select id, name, count(*) as sro_rows from sro_right_abs_on group by id, name except select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where abs(t.y) > 1) q group by id, name) x),
-  (select count(*) from (select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where abs(t.y) > 1) q group by id, name except select id, name, count(*) as sro_rows from sro_right_abs_on group by id, name) y),
-  (select count(*) from sro_right_abs_on) - (select count(*) from (select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where abs(t.y) > 1) q);
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_right_arithmetic_on group by id, name except select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.y + 1 > 2) q group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.y + 1 > 2) q group by id, name except select id, name, count(*) as sro_rows from sro_right_arithmetic_on group by id, name) y),
+  (select count(*) from sro_right_arithmetic_on) - (select count(*) from (select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.y + 1 > 2) q);
 ----
 0 0 0
 
@@ -2198,9 +2306,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, name, count(*) as sro_rows from sro_anti_right_on group by id, name except select id, name, count(*) as sro_rows from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null) q group by id, name) x),
-  (select count(*) from (select id, name, count(*) as sro_rows from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null) q group by id, name except select id, name, count(*) as sro_rows from sro_anti_right_on group by id, name) y),
-  (select count(*) from sro_anti_right_on) - (select count(*) from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null) q);
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_anti_right_on group by id, name except select id, name, count(*) as sro_rows from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.k is null) q group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.k is null) q group by id, name except select id, name, count(*) as sro_rows from sro_anti_right_on group by id, name) y),
+  (select count(*) from sro_anti_right_on) - (select count(*) from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.k is null) q);
 ----
 0 0 0
 
@@ -2249,6 +2357,38 @@ select
   (select count(*) from (select k, v, count(*) as sro_rows from sro_anti_duplicates_on group by k, v except select k, v, count(*) as sro_rows from (select n.k, n.v from sro_n n left join sro_s s on n.k = s.k where s.k is null) q group by k, v) x),
   (select count(*) from (select k, v, count(*) as sro_rows from (select n.k, n.v from sro_n n left join sro_s s on n.k = s.k where s.k is null) q group by k, v except select k, v, count(*) as sro_rows from sro_anti_duplicates_on group by k, v) y),
   (select count(*) from sro_anti_duplicates_on) - (select count(*) from (select n.k, n.v from sro_n n left join sro_s s on n.k = s.k where s.k is null) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_kept_lower_on group by id, name except select id, name, count(*) as sro_rows from sro_kept_lower_off group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_kept_lower_off group by id, name except select id, name, count(*) as sro_rows from sro_kept_lower_on group by id, name) y),
+  (select count(*) from sro_kept_lower_on) - (select count(*) from sro_kept_lower_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_kept_lower_on group by id, name except select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%') q group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%') q group by id, name except select id, name, count(*) as sro_rows from sro_kept_lower_on group by id, name) y),
+  (select count(*) from sro_kept_lower_on) - (select count(*) from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%') q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_kept_right_pk_on group by id, name except select id, name, count(*) as sro_rows from sro_kept_right_pk_off group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_kept_right_pk_off group by id, name except select id, name, count(*) as sro_rows from sro_kept_right_pk_on group by id, name) y),
+  (select count(*) from sro_kept_right_pk_on) - (select count(*) from sro_kept_right_pk_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_kept_right_pk_on group by id, name except select id, name, count(*) as sro_rows from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null) q group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null) q group by id, name except select id, name, count(*) as sro_rows from sro_kept_right_pk_on group by id, name) y),
+  (select count(*) from sro_kept_right_pk_on) - (select count(*) from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null) q);
 ----
 0 0 0
 
@@ -2454,9 +2594,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, name, count(*) as sro_rows from sro_left_like_on group by id, name except select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%') q group by id, name) x),
-  (select count(*) from (select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%') q group by id, name except select id, name, count(*) as sro_rows from sro_left_like_on group by id, name) y),
-  (select count(*) from sro_left_like_on) - (select count(*) from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%') q);
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_left_like_on group by id, name except select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where r.name like 'a%') q group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where r.name like 'a%') q group by id, name except select id, name, count(*) as sro_rows from sro_left_like_on group by id, name) y),
+  (select count(*) from sro_left_like_on) - (select count(*) from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where r.name like 'a%') q);
 ----
 0 0 0
 
@@ -2574,17 +2714,17 @@ select
 
 query III
 select
-  (select count(*) from (select id, name, count(*) as sro_rows from sro_right_abs_on group by id, name except select id, name, count(*) as sro_rows from sro_right_abs_off group by id, name) x),
-  (select count(*) from (select id, name, count(*) as sro_rows from sro_right_abs_off group by id, name except select id, name, count(*) as sro_rows from sro_right_abs_on group by id, name) y),
-  (select count(*) from sro_right_abs_on) - (select count(*) from sro_right_abs_off);
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_right_arithmetic_on group by id, name except select id, name, count(*) as sro_rows from sro_right_arithmetic_off group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_right_arithmetic_off group by id, name except select id, name, count(*) as sro_rows from sro_right_arithmetic_on group by id, name) y),
+  (select count(*) from sro_right_arithmetic_on) - (select count(*) from sro_right_arithmetic_off);
 ----
 0 0 0
 
 query III
 select
-  (select count(*) from (select id, name, count(*) as sro_rows from sro_right_abs_on group by id, name except select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where abs(t.y) > 1) q group by id, name) x),
-  (select count(*) from (select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where abs(t.y) > 1) q group by id, name except select id, name, count(*) as sro_rows from sro_right_abs_on group by id, name) y),
-  (select count(*) from sro_right_abs_on) - (select count(*) from (select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where abs(t.y) > 1) q);
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_right_arithmetic_on group by id, name except select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.y + 1 > 2) q group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.y + 1 > 2) q group by id, name except select id, name, count(*) as sro_rows from sro_right_arithmetic_on group by id, name) y),
+  (select count(*) from sro_right_arithmetic_on) - (select count(*) from (select t.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.y + 1 > 2) q);
 ----
 0 0 0
 
@@ -2742,9 +2882,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, name, count(*) as sro_rows from sro_anti_right_on group by id, name except select id, name, count(*) as sro_rows from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null) q group by id, name) x),
-  (select count(*) from (select id, name, count(*) as sro_rows from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null) q group by id, name except select id, name, count(*) as sro_rows from sro_anti_right_on group by id, name) y),
-  (select count(*) from sro_anti_right_on) - (select count(*) from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null) q);
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_anti_right_on group by id, name except select id, name, count(*) as sro_rows from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.k is null) q group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.k is null) q group by id, name except select id, name, count(*) as sro_rows from sro_anti_right_on group by id, name) y),
+  (select count(*) from sro_anti_right_on) - (select count(*) from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.k is null) q);
 ----
 0 0 0
 
@@ -2793,6 +2933,38 @@ select
   (select count(*) from (select k, v, count(*) as sro_rows from sro_anti_duplicates_on group by k, v except select k, v, count(*) as sro_rows from (select n.k, n.v from sro_n n left join sro_s s on n.k = s.k where s.k is null) q group by k, v) x),
   (select count(*) from (select k, v, count(*) as sro_rows from (select n.k, n.v from sro_n n left join sro_s s on n.k = s.k where s.k is null) q group by k, v except select k, v, count(*) as sro_rows from sro_anti_duplicates_on group by k, v) y),
   (select count(*) from sro_anti_duplicates_on) - (select count(*) from (select n.k, n.v from sro_n n left join sro_s s on n.k = s.k where s.k is null) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_kept_lower_on group by id, name except select id, name, count(*) as sro_rows from sro_kept_lower_off group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_kept_lower_off group by id, name except select id, name, count(*) as sro_rows from sro_kept_lower_on group by id, name) y),
+  (select count(*) from sro_kept_lower_on) - (select count(*) from sro_kept_lower_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_kept_lower_on group by id, name except select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%') q group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%') q group by id, name except select id, name, count(*) as sro_rows from sro_kept_lower_on group by id, name) y),
+  (select count(*) from sro_kept_lower_on) - (select count(*) from (select t.id, r.name from sro_t t left join sro_r r on t.k = r.id where lower(r.name) like 'a%') q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_kept_right_pk_on group by id, name except select id, name, count(*) as sro_rows from sro_kept_right_pk_off group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_kept_right_pk_off group by id, name except select id, name, count(*) as sro_rows from sro_kept_right_pk_on group by id, name) y),
+  (select count(*) from sro_kept_right_pk_on) - (select count(*) from sro_kept_right_pk_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, name, count(*) as sro_rows from sro_kept_right_pk_on group by id, name except select id, name, count(*) as sro_rows from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null) q group by id, name) x),
+  (select count(*) from (select id, name, count(*) as sro_rows from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null) q group by id, name except select id, name, count(*) as sro_rows from sro_kept_right_pk_on group by id, name) y),
+  (select count(*) from sro_kept_right_pk_on) - (select count(*) from (select r.id, r.name from sro_t t right join sro_r r on t.k = r.id where t.id is null) q);
 ----
 0 0 0
 
@@ -3008,6 +3180,12 @@ statement ok
 drop materialized view sro_kept_or_null_on;
 
 statement ok
+drop materialized view sro_kept_right_pk_on;
+
+statement ok
+drop materialized view sro_kept_lower_on;
+
+statement ok
 drop materialized view sro_anti_duplicates_on;
 
 statement ok
@@ -3047,7 +3225,7 @@ statement ok
 drop materialized view sro_full_one_side_on;
 
 statement ok
-drop materialized view sro_right_abs_on;
+drop materialized view sro_right_arithmetic_on;
 
 statement ok
 drop materialized view sro_left_is_true_on;
@@ -3107,6 +3285,12 @@ statement ok
 drop materialized view sro_kept_or_null_off;
 
 statement ok
+drop materialized view sro_kept_right_pk_off;
+
+statement ok
+drop materialized view sro_kept_lower_off;
+
+statement ok
 drop materialized view sro_anti_duplicates_off;
 
 statement ok
@@ -3146,7 +3330,7 @@ statement ok
 drop materialized view sro_full_one_side_off;
 
 statement ok
-drop materialized view sro_right_abs_off;
+drop materialized view sro_right_arithmetic_off;
 
 statement ok
 drop materialized view sro_left_is_true_off;

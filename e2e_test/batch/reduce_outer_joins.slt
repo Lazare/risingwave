@@ -69,10 +69,10 @@ statement ok
 create table ro_left_is_true_on (id int, name varchar);
 
 statement ok
-create table ro_right_abs_off (id int, name varchar);
+create table ro_right_arithmetic_off (id int, name varchar);
 
 statement ok
-create table ro_right_abs_on (id int, name varchar);
+create table ro_right_arithmetic_on (id int, name varchar);
 
 statement ok
 create table ro_full_one_side_off (id int, rid int);
@@ -153,6 +153,18 @@ statement ok
 create table ro_anti_duplicates_on (k int, v int);
 
 statement ok
+create table ro_kept_lower_off (id int, name varchar);
+
+statement ok
+create table ro_kept_lower_on (id int, name varchar);
+
+statement ok
+create table ro_kept_right_pk_off (id int, name varchar);
+
+statement ok
+create table ro_kept_right_pk_on (id int, name varchar);
+
+statement ok
 create table ro_kept_or_null_off (id int, name varchar);
 
 statement ok
@@ -227,13 +239,13 @@ statement ok
 delete from ro_left_like_on;
 
 statement ok
-insert into ro_left_like_off select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where lower(r.name) like 'a%';
+insert into ro_left_like_off select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where r.name like 'a%';
 
 statement ok
 set batch_reduce_outer_joins = true;
 
 statement ok
-insert into ro_left_like_on select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where lower(r.name) like 'a%';
+insert into ro_left_like_on select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where r.name like 'a%';
 
 statement ok
 set batch_reduce_outer_joins = false;
@@ -365,19 +377,19 @@ statement ok
 set batch_reduce_outer_joins = false;
 
 statement ok
-delete from ro_right_abs_off;
+delete from ro_right_arithmetic_off;
 
 statement ok
-delete from ro_right_abs_on;
+delete from ro_right_arithmetic_on;
 
 statement ok
-insert into ro_right_abs_off select t.id, r.name from ro_t t right join ro_r r on t.k = r.id where abs(t.y) > 1;
+insert into ro_right_arithmetic_off select t.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.y + 1 > 2;
 
 statement ok
 set batch_reduce_outer_joins = true;
 
 statement ok
-insert into ro_right_abs_on select t.id, r.name from ro_t t right join ro_r r on t.k = r.id where abs(t.y) > 1;
+insert into ro_right_arithmetic_on select t.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.y + 1 > 2;
 
 statement ok
 set batch_reduce_outer_joins = false;
@@ -551,13 +563,13 @@ statement ok
 delete from ro_anti_right_on;
 
 statement ok
-insert into ro_anti_right_off select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.id is null;
+insert into ro_anti_right_off select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.k is null;
 
 statement ok
 set batch_reduce_outer_joins = true;
 
 statement ok
-insert into ro_anti_right_on select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.id is null;
+insert into ro_anti_right_on select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.k is null;
 
 statement ok
 set batch_reduce_outer_joins = false;
@@ -612,6 +624,42 @@ set batch_reduce_outer_joins = true;
 
 statement ok
 insert into ro_anti_duplicates_on select n.k, n.v from ro_n n left join ro_s s on n.k = s.k where s.k is null;
+
+statement ok
+set batch_reduce_outer_joins = false;
+
+statement ok
+delete from ro_kept_lower_off;
+
+statement ok
+delete from ro_kept_lower_on;
+
+statement ok
+insert into ro_kept_lower_off select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where lower(r.name) like 'a%';
+
+statement ok
+set batch_reduce_outer_joins = true;
+
+statement ok
+insert into ro_kept_lower_on select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where lower(r.name) like 'a%';
+
+statement ok
+set batch_reduce_outer_joins = false;
+
+statement ok
+delete from ro_kept_right_pk_off;
+
+statement ok
+delete from ro_kept_right_pk_on;
+
+statement ok
+insert into ro_kept_right_pk_off select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.id is null;
+
+statement ok
+set batch_reduce_outer_joins = true;
+
+statement ok
+insert into ro_kept_right_pk_on select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.id is null;
 
 statement ok
 set batch_reduce_outer_joins = false;
@@ -882,9 +930,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, name, count(*) as ro_rows from ro_right_abs_on group by id, name except select id, name, count(*) as ro_rows from ro_right_abs_off group by id, name) x),
-  (select count(*) from (select id, name, count(*) as ro_rows from ro_right_abs_off group by id, name except select id, name, count(*) as ro_rows from ro_right_abs_on group by id, name) y),
-  (select count(*) from ro_right_abs_on) - (select count(*) from ro_right_abs_off);
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_right_arithmetic_on group by id, name except select id, name, count(*) as ro_rows from ro_right_arithmetic_off group by id, name) x),
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_right_arithmetic_off group by id, name except select id, name, count(*) as ro_rows from ro_right_arithmetic_on group by id, name) y),
+  (select count(*) from ro_right_arithmetic_on) - (select count(*) from ro_right_arithmetic_off);
 ----
 0 0 0
 
@@ -989,6 +1037,22 @@ select
   (select count(*) from (select k, v, count(*) as ro_rows from ro_anti_duplicates_on group by k, v except select k, v, count(*) as ro_rows from ro_anti_duplicates_off group by k, v) x),
   (select count(*) from (select k, v, count(*) as ro_rows from ro_anti_duplicates_off group by k, v except select k, v, count(*) as ro_rows from ro_anti_duplicates_on group by k, v) y),
   (select count(*) from ro_anti_duplicates_on) - (select count(*) from ro_anti_duplicates_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_kept_lower_on group by id, name except select id, name, count(*) as ro_rows from ro_kept_lower_off group by id, name) x),
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_kept_lower_off group by id, name except select id, name, count(*) as ro_rows from ro_kept_lower_on group by id, name) y),
+  (select count(*) from ro_kept_lower_on) - (select count(*) from ro_kept_lower_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_kept_right_pk_on group by id, name except select id, name, count(*) as ro_rows from ro_kept_right_pk_off group by id, name) x),
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_kept_right_pk_off group by id, name except select id, name, count(*) as ro_rows from ro_kept_right_pk_on group by id, name) y),
+  (select count(*) from ro_kept_right_pk_on) - (select count(*) from ro_kept_right_pk_off);
 ----
 0 0 0
 
@@ -1103,13 +1167,13 @@ statement ok
 delete from ro_left_like_on;
 
 statement ok
-insert into ro_left_like_off select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where lower(r.name) like 'a%';
+insert into ro_left_like_off select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where r.name like 'a%';
 
 statement ok
 set batch_reduce_outer_joins = true;
 
 statement ok
-insert into ro_left_like_on select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where lower(r.name) like 'a%';
+insert into ro_left_like_on select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where r.name like 'a%';
 
 statement ok
 set batch_reduce_outer_joins = false;
@@ -1241,19 +1305,19 @@ statement ok
 set batch_reduce_outer_joins = false;
 
 statement ok
-delete from ro_right_abs_off;
+delete from ro_right_arithmetic_off;
 
 statement ok
-delete from ro_right_abs_on;
+delete from ro_right_arithmetic_on;
 
 statement ok
-insert into ro_right_abs_off select t.id, r.name from ro_t t right join ro_r r on t.k = r.id where abs(t.y) > 1;
+insert into ro_right_arithmetic_off select t.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.y + 1 > 2;
 
 statement ok
 set batch_reduce_outer_joins = true;
 
 statement ok
-insert into ro_right_abs_on select t.id, r.name from ro_t t right join ro_r r on t.k = r.id where abs(t.y) > 1;
+insert into ro_right_arithmetic_on select t.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.y + 1 > 2;
 
 statement ok
 set batch_reduce_outer_joins = false;
@@ -1427,13 +1491,13 @@ statement ok
 delete from ro_anti_right_on;
 
 statement ok
-insert into ro_anti_right_off select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.id is null;
+insert into ro_anti_right_off select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.k is null;
 
 statement ok
 set batch_reduce_outer_joins = true;
 
 statement ok
-insert into ro_anti_right_on select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.id is null;
+insert into ro_anti_right_on select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.k is null;
 
 statement ok
 set batch_reduce_outer_joins = false;
@@ -1488,6 +1552,42 @@ set batch_reduce_outer_joins = true;
 
 statement ok
 insert into ro_anti_duplicates_on select n.k, n.v from ro_n n left join ro_s s on n.k = s.k where s.k is null;
+
+statement ok
+set batch_reduce_outer_joins = false;
+
+statement ok
+delete from ro_kept_lower_off;
+
+statement ok
+delete from ro_kept_lower_on;
+
+statement ok
+insert into ro_kept_lower_off select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where lower(r.name) like 'a%';
+
+statement ok
+set batch_reduce_outer_joins = true;
+
+statement ok
+insert into ro_kept_lower_on select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where lower(r.name) like 'a%';
+
+statement ok
+set batch_reduce_outer_joins = false;
+
+statement ok
+delete from ro_kept_right_pk_off;
+
+statement ok
+delete from ro_kept_right_pk_on;
+
+statement ok
+insert into ro_kept_right_pk_off select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.id is null;
+
+statement ok
+set batch_reduce_outer_joins = true;
+
+statement ok
+insert into ro_kept_right_pk_on select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.id is null;
 
 statement ok
 set batch_reduce_outer_joins = false;
@@ -1758,9 +1858,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, name, count(*) as ro_rows from ro_right_abs_on group by id, name except select id, name, count(*) as ro_rows from ro_right_abs_off group by id, name) x),
-  (select count(*) from (select id, name, count(*) as ro_rows from ro_right_abs_off group by id, name except select id, name, count(*) as ro_rows from ro_right_abs_on group by id, name) y),
-  (select count(*) from ro_right_abs_on) - (select count(*) from ro_right_abs_off);
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_right_arithmetic_on group by id, name except select id, name, count(*) as ro_rows from ro_right_arithmetic_off group by id, name) x),
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_right_arithmetic_off group by id, name except select id, name, count(*) as ro_rows from ro_right_arithmetic_on group by id, name) y),
+  (select count(*) from ro_right_arithmetic_on) - (select count(*) from ro_right_arithmetic_off);
 ----
 0 0 0
 
@@ -1865,6 +1965,22 @@ select
   (select count(*) from (select k, v, count(*) as ro_rows from ro_anti_duplicates_on group by k, v except select k, v, count(*) as ro_rows from ro_anti_duplicates_off group by k, v) x),
   (select count(*) from (select k, v, count(*) as ro_rows from ro_anti_duplicates_off group by k, v except select k, v, count(*) as ro_rows from ro_anti_duplicates_on group by k, v) y),
   (select count(*) from ro_anti_duplicates_on) - (select count(*) from ro_anti_duplicates_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_kept_lower_on group by id, name except select id, name, count(*) as ro_rows from ro_kept_lower_off group by id, name) x),
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_kept_lower_off group by id, name except select id, name, count(*) as ro_rows from ro_kept_lower_on group by id, name) y),
+  (select count(*) from ro_kept_lower_on) - (select count(*) from ro_kept_lower_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_kept_right_pk_on group by id, name except select id, name, count(*) as ro_rows from ro_kept_right_pk_off group by id, name) x),
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_kept_right_pk_off group by id, name except select id, name, count(*) as ro_rows from ro_kept_right_pk_on group by id, name) y),
+  (select count(*) from ro_kept_right_pk_on) - (select count(*) from ro_kept_right_pk_off);
 ----
 0 0 0
 
@@ -1989,13 +2105,13 @@ statement ok
 delete from ro_left_like_on;
 
 statement ok
-insert into ro_left_like_off select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where lower(r.name) like 'a%';
+insert into ro_left_like_off select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where r.name like 'a%';
 
 statement ok
 set batch_reduce_outer_joins = true;
 
 statement ok
-insert into ro_left_like_on select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where lower(r.name) like 'a%';
+insert into ro_left_like_on select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where r.name like 'a%';
 
 statement ok
 set batch_reduce_outer_joins = false;
@@ -2127,19 +2243,19 @@ statement ok
 set batch_reduce_outer_joins = false;
 
 statement ok
-delete from ro_right_abs_off;
+delete from ro_right_arithmetic_off;
 
 statement ok
-delete from ro_right_abs_on;
+delete from ro_right_arithmetic_on;
 
 statement ok
-insert into ro_right_abs_off select t.id, r.name from ro_t t right join ro_r r on t.k = r.id where abs(t.y) > 1;
+insert into ro_right_arithmetic_off select t.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.y + 1 > 2;
 
 statement ok
 set batch_reduce_outer_joins = true;
 
 statement ok
-insert into ro_right_abs_on select t.id, r.name from ro_t t right join ro_r r on t.k = r.id where abs(t.y) > 1;
+insert into ro_right_arithmetic_on select t.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.y + 1 > 2;
 
 statement ok
 set batch_reduce_outer_joins = false;
@@ -2313,13 +2429,13 @@ statement ok
 delete from ro_anti_right_on;
 
 statement ok
-insert into ro_anti_right_off select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.id is null;
+insert into ro_anti_right_off select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.k is null;
 
 statement ok
 set batch_reduce_outer_joins = true;
 
 statement ok
-insert into ro_anti_right_on select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.id is null;
+insert into ro_anti_right_on select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.k is null;
 
 statement ok
 set batch_reduce_outer_joins = false;
@@ -2374,6 +2490,42 @@ set batch_reduce_outer_joins = true;
 
 statement ok
 insert into ro_anti_duplicates_on select n.k, n.v from ro_n n left join ro_s s on n.k = s.k where s.k is null;
+
+statement ok
+set batch_reduce_outer_joins = false;
+
+statement ok
+delete from ro_kept_lower_off;
+
+statement ok
+delete from ro_kept_lower_on;
+
+statement ok
+insert into ro_kept_lower_off select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where lower(r.name) like 'a%';
+
+statement ok
+set batch_reduce_outer_joins = true;
+
+statement ok
+insert into ro_kept_lower_on select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where lower(r.name) like 'a%';
+
+statement ok
+set batch_reduce_outer_joins = false;
+
+statement ok
+delete from ro_kept_right_pk_off;
+
+statement ok
+delete from ro_kept_right_pk_on;
+
+statement ok
+insert into ro_kept_right_pk_off select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.id is null;
+
+statement ok
+set batch_reduce_outer_joins = true;
+
+statement ok
+insert into ro_kept_right_pk_on select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.id is null;
 
 statement ok
 set batch_reduce_outer_joins = false;
@@ -2644,9 +2796,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, name, count(*) as ro_rows from ro_right_abs_on group by id, name except select id, name, count(*) as ro_rows from ro_right_abs_off group by id, name) x),
-  (select count(*) from (select id, name, count(*) as ro_rows from ro_right_abs_off group by id, name except select id, name, count(*) as ro_rows from ro_right_abs_on group by id, name) y),
-  (select count(*) from ro_right_abs_on) - (select count(*) from ro_right_abs_off);
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_right_arithmetic_on group by id, name except select id, name, count(*) as ro_rows from ro_right_arithmetic_off group by id, name) x),
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_right_arithmetic_off group by id, name except select id, name, count(*) as ro_rows from ro_right_arithmetic_on group by id, name) y),
+  (select count(*) from ro_right_arithmetic_on) - (select count(*) from ro_right_arithmetic_off);
 ----
 0 0 0
 
@@ -2751,6 +2903,22 @@ select
   (select count(*) from (select k, v, count(*) as ro_rows from ro_anti_duplicates_on group by k, v except select k, v, count(*) as ro_rows from ro_anti_duplicates_off group by k, v) x),
   (select count(*) from (select k, v, count(*) as ro_rows from ro_anti_duplicates_off group by k, v except select k, v, count(*) as ro_rows from ro_anti_duplicates_on group by k, v) y),
   (select count(*) from ro_anti_duplicates_on) - (select count(*) from ro_anti_duplicates_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_kept_lower_on group by id, name except select id, name, count(*) as ro_rows from ro_kept_lower_off group by id, name) x),
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_kept_lower_off group by id, name except select id, name, count(*) as ro_rows from ro_kept_lower_on group by id, name) y),
+  (select count(*) from ro_kept_lower_on) - (select count(*) from ro_kept_lower_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_kept_right_pk_on group by id, name except select id, name, count(*) as ro_rows from ro_kept_right_pk_off group by id, name) x),
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_kept_right_pk_off group by id, name except select id, name, count(*) as ro_rows from ro_kept_right_pk_on group by id, name) y),
+  (select count(*) from ro_kept_right_pk_on) - (select count(*) from ro_kept_right_pk_off);
 ----
 0 0 0
 
@@ -2883,13 +3051,13 @@ statement ok
 delete from ro_left_like_on;
 
 statement ok
-insert into ro_left_like_off select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where lower(r.name) like 'a%';
+insert into ro_left_like_off select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where r.name like 'a%';
 
 statement ok
 set batch_reduce_outer_joins = true;
 
 statement ok
-insert into ro_left_like_on select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where lower(r.name) like 'a%';
+insert into ro_left_like_on select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where r.name like 'a%';
 
 statement ok
 set batch_reduce_outer_joins = false;
@@ -3021,19 +3189,19 @@ statement ok
 set batch_reduce_outer_joins = false;
 
 statement ok
-delete from ro_right_abs_off;
+delete from ro_right_arithmetic_off;
 
 statement ok
-delete from ro_right_abs_on;
+delete from ro_right_arithmetic_on;
 
 statement ok
-insert into ro_right_abs_off select t.id, r.name from ro_t t right join ro_r r on t.k = r.id where abs(t.y) > 1;
+insert into ro_right_arithmetic_off select t.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.y + 1 > 2;
 
 statement ok
 set batch_reduce_outer_joins = true;
 
 statement ok
-insert into ro_right_abs_on select t.id, r.name from ro_t t right join ro_r r on t.k = r.id where abs(t.y) > 1;
+insert into ro_right_arithmetic_on select t.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.y + 1 > 2;
 
 statement ok
 set batch_reduce_outer_joins = false;
@@ -3207,13 +3375,13 @@ statement ok
 delete from ro_anti_right_on;
 
 statement ok
-insert into ro_anti_right_off select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.id is null;
+insert into ro_anti_right_off select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.k is null;
 
 statement ok
 set batch_reduce_outer_joins = true;
 
 statement ok
-insert into ro_anti_right_on select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.id is null;
+insert into ro_anti_right_on select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.k is null;
 
 statement ok
 set batch_reduce_outer_joins = false;
@@ -3268,6 +3436,42 @@ set batch_reduce_outer_joins = true;
 
 statement ok
 insert into ro_anti_duplicates_on select n.k, n.v from ro_n n left join ro_s s on n.k = s.k where s.k is null;
+
+statement ok
+set batch_reduce_outer_joins = false;
+
+statement ok
+delete from ro_kept_lower_off;
+
+statement ok
+delete from ro_kept_lower_on;
+
+statement ok
+insert into ro_kept_lower_off select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where lower(r.name) like 'a%';
+
+statement ok
+set batch_reduce_outer_joins = true;
+
+statement ok
+insert into ro_kept_lower_on select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where lower(r.name) like 'a%';
+
+statement ok
+set batch_reduce_outer_joins = false;
+
+statement ok
+delete from ro_kept_right_pk_off;
+
+statement ok
+delete from ro_kept_right_pk_on;
+
+statement ok
+insert into ro_kept_right_pk_off select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.id is null;
+
+statement ok
+set batch_reduce_outer_joins = true;
+
+statement ok
+insert into ro_kept_right_pk_on select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.id is null;
 
 statement ok
 set batch_reduce_outer_joins = false;
@@ -3538,9 +3742,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, name, count(*) as ro_rows from ro_right_abs_on group by id, name except select id, name, count(*) as ro_rows from ro_right_abs_off group by id, name) x),
-  (select count(*) from (select id, name, count(*) as ro_rows from ro_right_abs_off group by id, name except select id, name, count(*) as ro_rows from ro_right_abs_on group by id, name) y),
-  (select count(*) from ro_right_abs_on) - (select count(*) from ro_right_abs_off);
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_right_arithmetic_on group by id, name except select id, name, count(*) as ro_rows from ro_right_arithmetic_off group by id, name) x),
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_right_arithmetic_off group by id, name except select id, name, count(*) as ro_rows from ro_right_arithmetic_on group by id, name) y),
+  (select count(*) from ro_right_arithmetic_on) - (select count(*) from ro_right_arithmetic_off);
 ----
 0 0 0
 
@@ -3650,6 +3854,22 @@ select
 
 query III
 select
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_kept_lower_on group by id, name except select id, name, count(*) as ro_rows from ro_kept_lower_off group by id, name) x),
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_kept_lower_off group by id, name except select id, name, count(*) as ro_rows from ro_kept_lower_on group by id, name) y),
+  (select count(*) from ro_kept_lower_on) - (select count(*) from ro_kept_lower_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_kept_right_pk_on group by id, name except select id, name, count(*) as ro_rows from ro_kept_right_pk_off group by id, name) x),
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_kept_right_pk_off group by id, name except select id, name, count(*) as ro_rows from ro_kept_right_pk_on group by id, name) y),
+  (select count(*) from ro_kept_right_pk_on) - (select count(*) from ro_kept_right_pk_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, name, count(*) as ro_rows from ro_kept_or_null_on group by id, name except select id, name, count(*) as ro_rows from ro_kept_or_null_off group by id, name) x),
   (select count(*) from (select id, name, count(*) as ro_rows from ro_kept_or_null_off group by id, name except select id, name, count(*) as ro_rows from ro_kept_or_null_on group by id, name) y),
   (select count(*) from ro_kept_or_null_on) - (select count(*) from ro_kept_or_null_off);
@@ -3753,13 +3973,13 @@ statement ok
 delete from ro_left_like_on;
 
 statement ok
-insert into ro_left_like_off select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where lower(r.name) like 'a%';
+insert into ro_left_like_off select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where r.name like 'a%';
 
 statement ok
 set batch_reduce_outer_joins = true;
 
 statement ok
-insert into ro_left_like_on select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where lower(r.name) like 'a%';
+insert into ro_left_like_on select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where r.name like 'a%';
 
 statement ok
 set batch_reduce_outer_joins = false;
@@ -3891,19 +4111,19 @@ statement ok
 set batch_reduce_outer_joins = false;
 
 statement ok
-delete from ro_right_abs_off;
+delete from ro_right_arithmetic_off;
 
 statement ok
-delete from ro_right_abs_on;
+delete from ro_right_arithmetic_on;
 
 statement ok
-insert into ro_right_abs_off select t.id, r.name from ro_t t right join ro_r r on t.k = r.id where abs(t.y) > 1;
+insert into ro_right_arithmetic_off select t.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.y + 1 > 2;
 
 statement ok
 set batch_reduce_outer_joins = true;
 
 statement ok
-insert into ro_right_abs_on select t.id, r.name from ro_t t right join ro_r r on t.k = r.id where abs(t.y) > 1;
+insert into ro_right_arithmetic_on select t.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.y + 1 > 2;
 
 statement ok
 set batch_reduce_outer_joins = false;
@@ -4077,13 +4297,13 @@ statement ok
 delete from ro_anti_right_on;
 
 statement ok
-insert into ro_anti_right_off select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.id is null;
+insert into ro_anti_right_off select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.k is null;
 
 statement ok
 set batch_reduce_outer_joins = true;
 
 statement ok
-insert into ro_anti_right_on select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.id is null;
+insert into ro_anti_right_on select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.k is null;
 
 statement ok
 set batch_reduce_outer_joins = false;
@@ -4138,6 +4358,42 @@ set batch_reduce_outer_joins = true;
 
 statement ok
 insert into ro_anti_duplicates_on select n.k, n.v from ro_n n left join ro_s s on n.k = s.k where s.k is null;
+
+statement ok
+set batch_reduce_outer_joins = false;
+
+statement ok
+delete from ro_kept_lower_off;
+
+statement ok
+delete from ro_kept_lower_on;
+
+statement ok
+insert into ro_kept_lower_off select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where lower(r.name) like 'a%';
+
+statement ok
+set batch_reduce_outer_joins = true;
+
+statement ok
+insert into ro_kept_lower_on select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where lower(r.name) like 'a%';
+
+statement ok
+set batch_reduce_outer_joins = false;
+
+statement ok
+delete from ro_kept_right_pk_off;
+
+statement ok
+delete from ro_kept_right_pk_on;
+
+statement ok
+insert into ro_kept_right_pk_off select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.id is null;
+
+statement ok
+set batch_reduce_outer_joins = true;
+
+statement ok
+insert into ro_kept_right_pk_on select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.id is null;
 
 statement ok
 set batch_reduce_outer_joins = false;
@@ -4408,9 +4664,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, name, count(*) as ro_rows from ro_right_abs_on group by id, name except select id, name, count(*) as ro_rows from ro_right_abs_off group by id, name) x),
-  (select count(*) from (select id, name, count(*) as ro_rows from ro_right_abs_off group by id, name except select id, name, count(*) as ro_rows from ro_right_abs_on group by id, name) y),
-  (select count(*) from ro_right_abs_on) - (select count(*) from ro_right_abs_off);
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_right_arithmetic_on group by id, name except select id, name, count(*) as ro_rows from ro_right_arithmetic_off group by id, name) x),
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_right_arithmetic_off group by id, name except select id, name, count(*) as ro_rows from ro_right_arithmetic_on group by id, name) y),
+  (select count(*) from ro_right_arithmetic_on) - (select count(*) from ro_right_arithmetic_off);
 ----
 0 0 0
 
@@ -4515,6 +4771,22 @@ select
   (select count(*) from (select k, v, count(*) as ro_rows from ro_anti_duplicates_on group by k, v except select k, v, count(*) as ro_rows from ro_anti_duplicates_off group by k, v) x),
   (select count(*) from (select k, v, count(*) as ro_rows from ro_anti_duplicates_off group by k, v except select k, v, count(*) as ro_rows from ro_anti_duplicates_on group by k, v) y),
   (select count(*) from ro_anti_duplicates_on) - (select count(*) from ro_anti_duplicates_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_kept_lower_on group by id, name except select id, name, count(*) as ro_rows from ro_kept_lower_off group by id, name) x),
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_kept_lower_off group by id, name except select id, name, count(*) as ro_rows from ro_kept_lower_on group by id, name) y),
+  (select count(*) from ro_kept_lower_on) - (select count(*) from ro_kept_lower_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_kept_right_pk_on group by id, name except select id, name, count(*) as ro_rows from ro_kept_right_pk_off group by id, name) x),
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_kept_right_pk_off group by id, name except select id, name, count(*) as ro_rows from ro_kept_right_pk_on group by id, name) y),
+  (select count(*) from ro_kept_right_pk_on) - (select count(*) from ro_kept_right_pk_off);
 ----
 0 0 0
 
@@ -4629,13 +4901,13 @@ statement ok
 delete from ro_left_like_on;
 
 statement ok
-insert into ro_left_like_off select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where lower(r.name) like 'a%';
+insert into ro_left_like_off select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where r.name like 'a%';
 
 statement ok
 set batch_reduce_outer_joins = true;
 
 statement ok
-insert into ro_left_like_on select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where lower(r.name) like 'a%';
+insert into ro_left_like_on select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where r.name like 'a%';
 
 statement ok
 set batch_reduce_outer_joins = false;
@@ -4767,19 +5039,19 @@ statement ok
 set batch_reduce_outer_joins = false;
 
 statement ok
-delete from ro_right_abs_off;
+delete from ro_right_arithmetic_off;
 
 statement ok
-delete from ro_right_abs_on;
+delete from ro_right_arithmetic_on;
 
 statement ok
-insert into ro_right_abs_off select t.id, r.name from ro_t t right join ro_r r on t.k = r.id where abs(t.y) > 1;
+insert into ro_right_arithmetic_off select t.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.y + 1 > 2;
 
 statement ok
 set batch_reduce_outer_joins = true;
 
 statement ok
-insert into ro_right_abs_on select t.id, r.name from ro_t t right join ro_r r on t.k = r.id where abs(t.y) > 1;
+insert into ro_right_arithmetic_on select t.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.y + 1 > 2;
 
 statement ok
 set batch_reduce_outer_joins = false;
@@ -4953,13 +5225,13 @@ statement ok
 delete from ro_anti_right_on;
 
 statement ok
-insert into ro_anti_right_off select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.id is null;
+insert into ro_anti_right_off select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.k is null;
 
 statement ok
 set batch_reduce_outer_joins = true;
 
 statement ok
-insert into ro_anti_right_on select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.id is null;
+insert into ro_anti_right_on select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.k is null;
 
 statement ok
 set batch_reduce_outer_joins = false;
@@ -5014,6 +5286,42 @@ set batch_reduce_outer_joins = true;
 
 statement ok
 insert into ro_anti_duplicates_on select n.k, n.v from ro_n n left join ro_s s on n.k = s.k where s.k is null;
+
+statement ok
+set batch_reduce_outer_joins = false;
+
+statement ok
+delete from ro_kept_lower_off;
+
+statement ok
+delete from ro_kept_lower_on;
+
+statement ok
+insert into ro_kept_lower_off select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where lower(r.name) like 'a%';
+
+statement ok
+set batch_reduce_outer_joins = true;
+
+statement ok
+insert into ro_kept_lower_on select t.id, r.name from ro_t t left join ro_r r on t.k = r.id where lower(r.name) like 'a%';
+
+statement ok
+set batch_reduce_outer_joins = false;
+
+statement ok
+delete from ro_kept_right_pk_off;
+
+statement ok
+delete from ro_kept_right_pk_on;
+
+statement ok
+insert into ro_kept_right_pk_off select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.id is null;
+
+statement ok
+set batch_reduce_outer_joins = true;
+
+statement ok
+insert into ro_kept_right_pk_on select r.id, r.name from ro_t t right join ro_r r on t.k = r.id where t.id is null;
 
 statement ok
 set batch_reduce_outer_joins = false;
@@ -5284,9 +5592,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, name, count(*) as ro_rows from ro_right_abs_on group by id, name except select id, name, count(*) as ro_rows from ro_right_abs_off group by id, name) x),
-  (select count(*) from (select id, name, count(*) as ro_rows from ro_right_abs_off group by id, name except select id, name, count(*) as ro_rows from ro_right_abs_on group by id, name) y),
-  (select count(*) from ro_right_abs_on) - (select count(*) from ro_right_abs_off);
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_right_arithmetic_on group by id, name except select id, name, count(*) as ro_rows from ro_right_arithmetic_off group by id, name) x),
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_right_arithmetic_off group by id, name except select id, name, count(*) as ro_rows from ro_right_arithmetic_on group by id, name) y),
+  (select count(*) from ro_right_arithmetic_on) - (select count(*) from ro_right_arithmetic_off);
 ----
 0 0 0
 
@@ -5391,6 +5699,22 @@ select
   (select count(*) from (select k, v, count(*) as ro_rows from ro_anti_duplicates_on group by k, v except select k, v, count(*) as ro_rows from ro_anti_duplicates_off group by k, v) x),
   (select count(*) from (select k, v, count(*) as ro_rows from ro_anti_duplicates_off group by k, v except select k, v, count(*) as ro_rows from ro_anti_duplicates_on group by k, v) y),
   (select count(*) from ro_anti_duplicates_on) - (select count(*) from ro_anti_duplicates_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_kept_lower_on group by id, name except select id, name, count(*) as ro_rows from ro_kept_lower_off group by id, name) x),
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_kept_lower_off group by id, name except select id, name, count(*) as ro_rows from ro_kept_lower_on group by id, name) y),
+  (select count(*) from ro_kept_lower_on) - (select count(*) from ro_kept_lower_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_kept_right_pk_on group by id, name except select id, name, count(*) as ro_rows from ro_kept_right_pk_off group by id, name) x),
+  (select count(*) from (select id, name, count(*) as ro_rows from ro_kept_right_pk_off group by id, name except select id, name, count(*) as ro_rows from ro_kept_right_pk_on group by id, name) y),
+  (select count(*) from ro_kept_right_pk_on) - (select count(*) from ro_kept_right_pk_off);
 ----
 0 0 0
 
@@ -5551,6 +5875,18 @@ statement ok
 drop table ro_kept_or_null_off;
 
 statement ok
+drop table ro_kept_right_pk_on;
+
+statement ok
+drop table ro_kept_right_pk_off;
+
+statement ok
+drop table ro_kept_lower_on;
+
+statement ok
+drop table ro_kept_lower_off;
+
+statement ok
 drop table ro_anti_duplicates_on;
 
 statement ok
@@ -5629,10 +5965,10 @@ statement ok
 drop table ro_full_one_side_off;
 
 statement ok
-drop table ro_right_abs_on;
+drop table ro_right_arithmetic_on;
 
 statement ok
-drop table ro_right_abs_off;
+drop table ro_right_arithmetic_off;
 
 statement ok
 drop table ro_left_is_true_on;
