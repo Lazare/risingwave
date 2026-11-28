@@ -13,9 +13,6 @@ statement ok
 set query_mode = distributed;
 
 statement ok
-set batch_cardinality_feedback_learning = true;
-
-statement ok
 create table paj_f (id int primary key, k int, k2 int, x int, y bigint);
 
 statement ok
@@ -960,6 +957,9 @@ select
   (select count(*) from paj_union_three_on) - (select count(*) from paj_union_three_off);
 ----
 0 0 0
+
+statement ok
+set batch_cardinality_feedback_learning = true;
 
 # First data: NULL keys, duplicates, rows without a match, negative values, few groups.
 

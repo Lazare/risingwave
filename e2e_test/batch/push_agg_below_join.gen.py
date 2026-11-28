@@ -7,8 +7,10 @@ other side is unique on the join columns runs before the join), `batch_partial_a
 Every query runs twice, with all three variables off, then on, through `INSERT ... SELECT` (the
 batch plan), and both results must hold the same rows with the same multiplicities, after each
 round of changes of the data. The learning (`batch_cardinality_feedback_learning`) is on in both
-runs; the group ratios that the partial forms need are learned from plain aggregations of the
-tables, run before the queries.
+runs once the tables hold rows; the group ratios that the partial forms need are learned from plain
+aggregations of the tables, run before the queries. In the last rounds, emptied inputs raise the
+largest learned ratios, so some partial aggregations are no longer chosen: the results must still
+agree.
 
 Usage: python3 e2e_test/batch/push_agg_below_join.gen.py e2e_test/batch/push_agg_below_join.slt
 """
@@ -150,7 +152,6 @@ out.append("""# Differential test of `batch_push_agg_below_join`, `batch_partial
 """)
 stmt("SET RW_IMPLICIT_FLUSH TO true")
 stmt("set query_mode = distributed")
-stmt("set batch_cardinality_feedback_learning = true")
 stmt(f"create table {F} (id int primary key, k int, k2 int, x int, y bigint)")
 stmt(f"create table {D} (id int primary key, name varchar, region int)")
 stmt(f"create table {D2} (id int, ver int, w int, primary key (id, ver))")
@@ -161,7 +162,10 @@ for name, cols, _ in CASES:
     stmt(f"create table paj_{name}_off ({cols})")
     stmt(f"create table paj_{name}_on ({cols})")
 
+# The learning is off on empty tables: a ratio over an empty input is learned as 1 (groups and
+# rows are counted as at least 1), and the partial forms use the largest learned ratio.
 run_all("Empty tables")
+stmt("set batch_cardinality_feedback_learning = true")
 
 out.append("# First data: NULL keys, duplicates, rows without a match, negative values, few groups.\n")
 stmt(f"insert into {F} select g, case when g % 97 = 0 then null else g % 20 end, g % 7, g % 13 - 3, "
