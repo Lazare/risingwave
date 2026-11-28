@@ -38,10 +38,14 @@ own rules.
 | B | Batch counterparts of 9, 9b, 9c, 7 and US, each behind a `batch_` variable | done (prototype, branch `proto/plan-reduction-batch-unnest`), see "Batch counterparts" |
 | SL | Status ladder: the branches of a top-1 by priority that read the same relation picked with one `CASE` | done (prototype, branch `proto/plan-reduction-union-scans`); default branch rewritten into a join not done |
 | NK | Join on a column known to be `NULL` matches nothing (`batch_simplify_null_join_keys`, `streaming_simplify_null_join_keys`) | done (prototype, branch `proto/plan-reduction-nullkey`), see "NK" below |
+| NV | `first_value` / `last_value` keep only the functions of the value that are read (`batch_narrow_value_aggregates`, `streaming_narrow_value_aggregates`) | done (prototype, branch `proto/plan-reduction-narrow-value`), see "NV" below |
 | BJ | Batch: cost-based ordering of the inner joins from the row counts of the tables (`batch_cost_based_join_ordering`) | first version (prototype, branch `proto/plan-reduction-batch-joinorder`, see "BJ" below); index lookups and column statistics not done |
+| BJ | Batch: cost-based ordering of the inner joins from the row counts and sizes of the tables (`batch_cost_based_join_ordering`) | first version (prototype, branch `proto/plan-reduction-batch-joinorder`, see "BJ" below), width-aware since 2026-11-27 (the build side is the side with fewer bytes; left outer, semi and anti joins can become right joins); index lookups and column statistics not done |
 | BF | Batch: cardinality feedback, step 1: count the rows of the operators at execution and compare them with the estimates (`batch_cardinality_feedback`) | first version (prototype, branch `proto/batch-cardinality-feedback`, see "BF" below): observation only, no plan changes |
+| BL2 | Batch: cardinality feedback, step 2: learn ratios (selectivity, groups, join fan-out) from the counts and use them in the estimates of BJ and in the limit of BT (`batch_cardinality_feedback_learning`) | first version (prototype, branch `proto/batch-cardinality-feedback-learning`, see "BF step 2" below); plan regression guard (step 4) not done |
 | BP | Batch: second pass of the reductions on keys after the stages that create aggregations (`batch_reduce_keys_after_conversions`) | done (prototype, branch `proto/plan-reduction-batch-pass2`, see "BP and BT" below) |
 | BT | Batch: `row_number() <= n` per partition becomes a top-n per group, small `n` only (`batch_over_window_to_topn`) | done (prototype, branch `proto/plan-reduction-batch-pass2`, see "BP and BT" below) |
+| BU | Batch: `UNION ALL` run in parallel tasks instead of one (`batch_distributed_union`) | done (prototype, branch `proto/plan-reduction-batch-union-dist`, see "BU" below) |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -645,29 +649,37 @@ Join(Inner, a.b_ref = b.id)              Values([])
 - Columns `NULL` in every row of a node: a `c IS NULL` conjunct of a filter or of a scan
   predicate (the predicate of a scan refers to the columns of the table, mapped to the output
   columns of the scan), followed up through filters, shares and projections of input references
-  or of casts of them (streaming computes the cast of a join key in a projection below the join);
-  a `NULL` literal of a projection. Nothing is derived through joins, aggregations or unions.
-- A conjunct `l = r` of the join condition whose operand is such a column, or a cast of it, on a
-  side whose rows must match to be useful: either side of an inner or semi join (the join becomes
-  empty), the right side of a left outer or left anti join (the right side becomes empty, the
-  left rows are padded or all kept), the left side of the right joins. The join is rewritten as
-  A rewrites a never-true condition, then B and C remove what is above it (an aggregation without
+  or of casts of them (streaming computes the cast of a join key in a projection below the join),
+  unions (a column `NULL` in every input), joins (a column of a side keeps the facts of that side:
+  a padded column is `NULL` too), and the operators that output the columns of their input as
+  they are (limit, top-n, dedup, over window); a `NULL` literal of a projection. Nothing is
+  derived through aggregations.
+- A conjunct `l = r` of the join condition whose operand is such a column, or a cast of it, on
+  either side, whatever the type of the join: no pair of rows matches. An inner or semi join
+  becomes empty; a left outer or left anti join keeps its left side, padded with `NULL`s or as it
+  is, and its right side becomes empty, also when the `NULL` column is on the left (preserved)
+  side, whose rows can then match nothing; symmetrically for the right joins. A full join
+  becomes a `UNION ALL` of its two sides, each padded with `NULL`s. The join is rewritten as A
+  rewrites a never-true condition, then B and C remove what is above it (an aggregation without
   `GROUP BY` becomes its constant row).
+- The preserved-side case is the one of a `not_null` test over a view `v = l LEFT JOIN r ON
+  l.k = r.k` filtered on `l.k IS NULL`, where `l` is a union of branches: the filter is pushed
+  into every branch, and the whole right side (aggregations, top-n, joins) is never read.
 - Valid: `NULL = x` is `NULL` for every `x` and every type, so no pair of rows satisfies the
   condition, whatever its other conjuncts, duplicates or empty inputs. The facts are properties
   of the rows a filter or a scan can output: they hold for every row ever produced, under
   retractions, so they are valid for a plan frozen when a streaming job is created.
-- Not rewritten: `IS NOT DISTINCT FROM` (matches `NULL`s), `FULL OUTER JOIN`, as-of joins, an
-  operand that is another expression (`coalesce(c, 0) = x` can match), a `NULL` column of the
-  preserved side of an outer join (the rewrite would be valid, but removes nothing), and a filter
-  `s.k IS NULL` above a left join on its optional side (the anti-join pattern: the filter stays
-  above the join and is not read).
+- Not rewritten: `IS NOT DISTINCT FROM` (matches `NULL`s), as-of joins, an operand that is
+  another expression (`coalesce(c, 0) = x` can match), a union where only some branches have the
+  `NULL` fact, and a filter `s.k IS NULL` above a left join on its optional side (the anti-join
+  pattern: the filter stays above the join and is not read).
 - Streaming and watermarks: the rule leaves the join untouched if a sub-plan it would remove holds
   a scan of a table with a watermark, a source with a watermark or `now()` (the same guard as the
   other rules of A and B in streaming, see the limits of A). Without this, an inner join with a
   temporal join's left side carrying the watermark of `EMIT ON WINDOW CLOSE` would become an
   empty `VALUES` without a watermark, and the job could no longer be planned. A left join whose
-  optional side is removed keeps the watermarks of its preserved side.
+  optional side is removed keeps the watermarks of its preserved side. A full join is left
+  untouched in streaming if either side may carry a watermark.
 - Stages: `STREAM_SIMPLIFY_NULL_JOIN_KEYS` right after `STREAM_PRUNE_EMPTY_RELATION`, and
   `BATCH_SIMPLIFY_NULL_JOIN_KEYS` at the start of `reduce_batch_on_keys` (after the first
   predicate pushdown, before join ordering), each with `EmptyRelationPropagateRule` and
@@ -676,6 +688,71 @@ Join(Inner, a.b_ref = b.id)              Values([])
   differential tests `e2e_test/batch/simplify_null_join_keys` and
   `e2e_test/streaming/simplify_null_join_keys` (NULL keys on both sides, duplicates, empty tables,
   updates of keys to and from `NULL`, deletes).
+
+### NV. Narrow values of `first_value` / `last_value` (added on 2026-11-26, done on the branch)
+
+Variables `batch_narrow_value_aggregates` and `streaming_narrow_value_aggregates`, rules
+`NarrowValueAggRule` and `NarrowValuePushRule`. A "latest version per key" relation keeps a whole
+value (a JSONB document, a wide row) per group, but is often read through a few fields only. The
+aggregation keeps the whole value: in memory in batch, in the state table in streaming, and the
+joins, exchanges and unions below it carry it too.
+
+```text
+SELECT count(*) FROM v WHERE fact->>'dir' IS NULL
+-- v: SELECT id, last_value(fact ORDER BY ts) AS fact FROM t GROUP BY id
+
+Agg(count)                                   Agg(count)
+└─Filter((last_value(fact)->>'dir') IS NULL) └─Filter(last_value($1))
+  └─Agg(id; last_value(fact ORDER BY ts)) =>   └─Agg(id; last_value($1 ORDER BY ts))
+    └─Scan(t)                                    └─Project(id, ts, (fact->>'dir') IS NULL AS $1)
+                                                   └─Scan(t)
+```
+
+- `NarrowValueAggRule`: `f(first_value(x ORDER BY k))` becomes `first_value(f(x) ORDER BY k)`, the
+  same for `last_value` and `internal_last_seen_value`, when the result of the call is only read
+  through such functions, by a projection or an aggregation (in its `FILTER` clauses) above it,
+  through filters, limits and projections that only select columns. The largest sub-expressions
+  that read the result only through allowed functions are moved; the rest stays above. Several
+  of them become one aggregate of `ROW(f1(x), f2(x), ...)`, whose fields are read above.
+- `NarrowValuePushRule`: a projection that reads a wide column of a `UNION ALL` only through
+  allowed functions computes them in each branch; one that reads a wide column of one side of a
+  join (not compared by the join) only through them computes them in that side. Only on the paths
+  of value aggregates: the column is the result of a value aggregate below (through filters,
+  column selections, allowed functions, unions and joins), or the projection is the input of an
+  aggregation and the column feeds the argument of a value aggregate. Other projections over
+  joins are left as they are, so that the plans without value aggregates do not change. A lower
+  `first_value(j)` in a branch, under a `CASE` over `j`, is then narrowed in turn, and the join
+  below it carries the narrow value. `JoinProjectTransposeRule` keeps such a projection below the
+  join once the rules applied to the plan (it would otherwise pull it above again).
+- Allowed functions: deterministic, pure and unable to fail, because they are evaluated on every
+  input row instead of the selected one: `->`, `->>`, `#>`, `#>>`, `jsonb_extract_path(_text)`,
+  `jsonb_typeof`, `?`, `?|`, `?&`, `@>`, `<@`, field access, `ROW`, comparisons, `IS [NOT] NULL / TRUE / FALSE / DISTINCT
+  FROM`, `AND`, `OR`, `NOT`, `CASE`, `COALESCE`, casts to text from scalar types whose text does
+  not depend on the session, widening numeric casts. A cast that may fail (`(x->>'n')::int`) or
+  `jsonb_array_length` stays above, the field below it is moved.
+- Valid: the row that the aggregate picks depends on the order key (and on ties on the input
+  order in batch, on the stream key in streaming), never on the value, and `f` of the value of
+  the picked row is `f` applied to the picked row, `NULL` included. All the fields come from one
+  aggregate of a row, so they come from the same row even when the order key ties. An aggregate
+  that may see no row (no group key, or a `FILTER` clause) returns `NULL`, and the query applies
+  `f` to it: then only expressions that are `NULL` on `NULL` are moved (`IS NULL` and `COALESCE`
+  stay above). The same holds for the padded side of an outer join. Retractions are handled by
+  the aggregate as before: it keeps its rows ordered by the order key, with the narrow value.
+- Not rewritten: `DISTINCT` aggregates, a value that is also its order key, a value read as it is
+  (output, grouped by, compared in a join), through a function outside the list, or of a narrow
+  type (only JSONB, text, bytea, structs, lists and maps are narrowed). `IGNORE NULLS` is not
+  allowed in aggregates. A right side of a join that is a scan the join may look up (the first
+  column of its key or of an index is compared) is left alone, so that a lookup join stays
+  possible; a temporal join's right side too.
+- Stage: after the column pruning that precedes `SIMPLIFY_AGG` (so that `UnifyFirstLastValueRule`
+  packs the narrowed calls), in rounds: each round is followed by column pruning and a merge of
+  the projections (`NarrowValueProjectMergeRule`, which also merges when a computed column is
+  read several times, unless it is impure), so that the next round sees one level further down.
+- Tests: planner tests `batch_narrow_value_aggregates.yaml`, `stream_narrow_value_aggregates.yaml`;
+  differential tests `e2e_test/batch/narrow_value_aggregates` and
+  `e2e_test/streaming/narrow_value_aggregates` (NULL values and order keys, missing fields,
+  fields a cast cannot read in older rows, ties, unions, joins, a `CASE` over a lower
+  `first_value`, updates and deletes of the last rows, emptied tables).
 
 ### 5. Aggregation pushed below a join onto the unique side
 
@@ -1001,12 +1078,33 @@ estimated rows instead (`cost_based_join_ordering_rule.rs`, stages
   columns holding a unique key of one side has the selectivity 1 over the rows of the table of
   that side before its filters (key to foreign key: one row of the key side per row of the other
   side, fewer if the key side is filtered); on other columns, it returns twice the larger side.
-- **Cost.** The batch hash join builds its hash table on its right side: probe rows cost 1, build
-  rows 3 (they are held in memory), output rows 1, plus the rows read by the inputs. When the
-  right side is a table scan whose key prefix (the shortest one that holds the distribution key)
-  is given by equalities with the left side, the planner makes a lookup join: it costs 2 per row
-  of the left side and the table is not scanned. The model follows what the planner does: a
-  lookup join is not optional when it is possible.
+- **Width (added on 2026-11-27).** A real plan built its hash table on 1.8 M rows holding about
+  17 GB of JSON against 4.5 M rows of 40 bytes: fewer rows, a hundred times more memory. The
+  cost therefore counts bytes. The width of a row of an input is the sum of the widths of the
+  columns that the plan above still reads (a top-down pass, `required_output_columns`, since the
+  scans still read every column before the column pruning). The width of a column of a table is
+  the average size of a row in storage (`(total_key_size + total_value_size) / total_key_count`)
+  shared out among the columns of the table by the weights of their types, or the type width
+  alone without sizes (1 to 16 bytes for numbers and times, 64 for `varchar`, 256 for `bytea`,
+  1024 for `jsonb`, 128 for the rest). Widths go through projections (an expression gets the
+  width of its type), filters, top-n, window functions and aggregations (group key columns keep
+  their width, an aggregate returning the type of its argument, such as `first_value` or
+  `last_value` of a JSON column, keeps the width of the argument), plus 8 bytes of overhead per
+  row. Widths are always known: the fallback only depends on the row counts.
+- **Cost.** The batch hash join builds its hash table on its right side: probe bytes cost 1,
+  build bytes 3 (they are held in memory), output bytes 1, plus the bytes read by the inputs.
+  When the right side is a table scan whose key prefix (the shortest one that holds the
+  distribution key) is given by equalities with the left side, the planner makes a lookup join:
+  it costs the bytes of the left row and of the row read, per row of the left side, and the table
+  is not scanned. The model follows what the planner does: a lookup join is not optional when it
+  is possible. With the same width on both sides, the side choice is the one by rows.
+- **Outer, semi and anti joins (added on 2026-11-27).** After the column pruning (exact widths)
+  and after `JoinCommuteRule` (which turns right joins into left ones), a left outer, semi or anti
+  join becomes the right join of the other side (`CostBasedOuterJoinSidesRule`) when that at
+  least halves the estimated cost of its hash join (probe bytes + 3 x build bytes): it then
+  builds the smaller side and streams the larger one (the batch hash join executor supports
+  right outer, semi and anti joins). Not done when the join may become a lookup join (the right
+  side is a table read by its key, or a table that has an index) or without estimates.
 - **Enumeration.** Dynamic programming over the connected sets of inputs (bushy trees allowed),
   up to 10 inputs per set of inputs linked by equalities, greedy beyond (the pair of linked
   sub-trees of fewest estimated rows, then of lowest cost). Sets of inputs that no equality links
@@ -1021,7 +1119,9 @@ estimated rows instead (`cost_based_join_ordering_rule.rs`, stages
   (`test_utils::set_table_row_counts_for_test`) gives the frontend row counts by table name
   before the query is planned (`batch_cost_based_join_ordering.yaml`: star and chain queries,
   outer, semi and anti joins, scalar subquery, aggregation input, no statistics, partial
-  statistics, twelve inputs). The differential test `e2e_test/batch/cost_based_join_ordering.slt`
+  statistics, twelve inputs; with the test-only option `table_sizes`, a narrow side against a
+  JSON side as a table, an aggregation or a top-1 per group, inner and left joins, equal widths).
+  The differential test `e2e_test/batch/cost_based_join_ordering.slt`
   (generated by its `.gen.py`) runs each query with and without the variable on tables of very
   different sizes, before and after changes, and compares the results as multisets.
 - **Not done.** Lookups into indexes are not modeled (index selection happens after the
@@ -1094,6 +1194,71 @@ show the same plans with the variable on and off).
   records are per frontend and lost on restart; the estimates of the plan are not shown in
   `EXPLAIN`; nothing uses the records yet (step 2).
 
+### BF step 2. Batch: learning from the counts (added on 2026-11-26)
+
+With `batch_cardinality_feedback_learning` (default false, `SESSION_INIT`), the counts of step 1
+become ratios that the estimates of BJ use instead of their fixed guesses
+(`optimizer/cardinality_learning.rs`). The session observes its batch queries as with
+`batch_cardinality_feedback` (either variable observes; the learned ratios are shared by the
+sessions of the frontend).
+
+- **Ratios, not rows**, so that they hold when the tables grow: `selectivity` (rows kept by the
+  predicate of a scan per row of the table, or by a filter per input row), `group_ratio` (groups of
+  an aggregation per input row), `fan_out` (output rows of an inner join per row of its larger
+  input). The input rows are counted too: the child operator, or the table for a scan (the count
+  of the scan when it reads the whole table, the storage statistics when it reads key ranges; the
+  rows of the table read by a lookup join come from the estimate). Only complete counts are
+  learned: a partial count (failure, cancellation, limit above) is ignored.
+- **Keys shared by planning and execution.** A ratio is keyed by its relation, computed the same
+  way from the logical plan (planning) and from the final batch plan (execution): a leaf is a
+  table and the predicate of its logical scan, before it is split into key ranges and a filter
+  (the batch scan carries the key computed from the logical scan, `BatchSeqScan::learning_leaf`);
+  a filter, an aggregation (input and sorted group columns) and an inner join (sorted base
+  relations and conjuncts, whatever the join order) are keyed from their inputs; columns are
+  identified by table and column id and constants are placeholders, so one key covers every
+  literal. The fan-out belongs to the edge between two base relations: the pair of relations and
+  of compared columns, learned from any join whose equalities compare one base relation on each
+  side. Outer joins, unions, sources... have no key: nothing above them is learned.
+- **Distribution.** Per key: number of observations, minimum, maximum, and a mean of
+  `log10(ratio)` that decays (plain mean of the first 5 observations, then weight 0.2 per new
+  one). The estimate blends the fixed guess and the learned mean in log space, the guess weighing
+  `0.25^n` after `n` observations (1/4 after one, 1/16 after two). Memory decisions use the
+  maximum: each estimate also carries pessimistic rows (largest learned ratios), and the build
+  side of a hash join is costed with them; the top-n guard uses the largest group ratio.
+- **Join ordering (BJ).** The join tree is computed with the fixed guesses, as before, and with the
+  learned estimates; the learned tree replaces the other one only when, with the learned
+  estimates, it costs less by more than `PLAN_CHANGE_FACTOR` = 1.5 (a factor of 2 could never swap
+  the two sides of a join: the build side costs 3 per row, the probe side 1). Without learned
+  ratios the plan is the one of BJ. The plan of the previous execution is not kept (step 4).
+- **Top-n per group (BT).** A `row_number() <= n` with `n` (limit + offset) above 10 becomes a
+  top-n per group when the largest group ratio learned for the input of the window and its
+  partition columns, times `n`, is at most 1 (the heaps then hold no more rows than the input,
+  which the sort holds anyway), up to `n` = 1000. The group ratio comes from aggregations of the
+  same input by the same columns (the window itself does not count its groups).
+- **Exposure.** At most 10 000 ratios per frontend (least recently observed tenth evicted when
+  full): system view `rw_catalog.rw_batch_cardinality_learning` (key in hex, kind, observations,
+  mean, minimum and maximum ratio). Ratios and hashes only.
+- **Tests.** Unit tests: distribution, decay and confidence, bounded store, partial counts ignored,
+  order-independent keys and edges (`cardinality_learning.rs`), the ratios to learn from batch
+  plans (`cardinality_feedback.rs`), complete counts only (`src/frontend/src/scheduler/cardinality_feedback.rs`).
+  Planner tests `batch_cardinality_feedback_learning.yaml`, through the test hook
+  `cardinality_observations` that records a query as executed with given counts: a two-way and a
+  three-way join that change once an aggregation is observed with one group per row, one key for
+  every literal, a small learned change kept by the change factor, the variable off, a top-n per
+  group allowed by 100 observed groups and kept as a window with 5000 groups, a too large limit or
+  other partition columns. End to end: `e2e_test/batch/cardinality_feedback_learning.slt` runs a
+  join and a window several times, checks with `EXPLAIN` that the plan changes only after an
+  execution was observed, and that the results stay the same.
+- **Not done / limits.** The learned ratios are per frontend and lost on restart. Scans of indexes
+  (index selection happens when the batch plan is built) and lookup joins into a table with a
+  predicate (the predicate moves into the join) are not matched with the logical plan, nor is a
+  sub-plan rewritten between join ordering and the batch plan (e.g. join conditions computed in a
+  projection by `PUSH_CALC_OF_JOIN`). Join fan-outs are attributed to one edge when a join
+  compares several pairs of relations or has other conditions: such joins are not learned. A
+  learned ratio does not depend on the literal (one distribution per key). The group ratio of a
+  window partition is learned from aggregations only. Step 3 (estimate intervals, gain of 2 in
+  the worst case) and step 4 (plan regression guard, previous plan per query) are not done.
+
 ### BP and BT. Batch: second pass of the reductions on keys, window top-n (added on 2026-11-26)
 
 **BP (`batch_reduce_keys_after_conversions`).** The reductions on keys of batch queries (column
@@ -1152,6 +1317,88 @@ BP).
   ties, more than ten rows per group, after deletes and updates).
 - Not done: the union join factoring, union scan merge, status ladder and empty-relation stages
   are not re-run in the pass.
+
+### BU. Batch: distributed `UNION ALL` (added on 2026-11-26, done on the branch)
+
+`BatchUnion::to_distributed` gathered every input into one task (`RequiredDist::single()` on
+each input, with a TODO about a round-robin distribution). Everything above the union then ran in
+that task, or was hashed again from it: a hash aggregation or a join over a union read all the
+rows of all the branches through one task, twice over the network.
+
+```sql
+create table a (id int primary key, k int, v int);
+create table c (k int, v int);
+select k, count(*) from (select k, v from a union all select k, v from c) u group by k;
+-- before: HashAgg <- Exchange(Hash k) <- Union <- [Exchange(Single) <- Scan(a), Exchange(Single) <- Scan(c)]
+-- BU:     HashAgg <- Union <- [Exchange(Hash k) <- Scan(a), Exchange(Hash k) <- Scan(c)]
+```
+
+**Why upstream forced `Single`.** Two reasons, both still true:
+
+- There is no round-robin exchange (`Distribution::SomeShard` becomes `DistributionMode::Single`
+  in `to_prost`, `RequiredDist::AnyShard` is `todo!()` in `to_dist`). An input can only reach the
+  tasks of a parallel stage by a hash, a consistent hash or a broadcast.
+- The stage fragmenter assumes one table scan (or source, or lookup join) per stage: it reads the
+  first scan it finds to decide the tasks of the stage and the vnodes of each task, and gives the
+  same vnodes to every other scan of the stage. Two branches that scan different tables, kept in
+  the stage of the union without an exchange, would scan the second table with the vnode mapping
+  of the first (wrong when the vnode counts differ, and against the fragmenter's assumption in any
+  case); a branch distributed as `Single` (values, a global aggregation) would run once per task
+  and duplicate its rows. So "each input kept where it is, no exchange" is not safe in general.
+
+**What BU does (variable `batch_distributed_union`, default false).** Each input is planned
+exactly as before (`to_distributed`); only the exchange above it changes. All inputs are brought to
+one distribution `target`, the same for all, and the union is then distributed as `target` in the
+stage of its parent:
+
+- the parent requires `HashShard(k)` (second side of a hash join) or `UpstreamHashShard(k, t)` (a
+  lookup join): `target` is that distribution, the exchange the parent would have put above the
+  union;
+- the parent requires a shard by key (hash aggregation, `DISTINCT`, first side of a hash join,
+  partitioned window, group top-n): the `HashShard` an input already has if it satisfies the
+  requirement, otherwise the hash of the required key, as the parent would have done;
+- no requirement (a count, a top-n, a limit or a sort above, which then run in two phases, the
+  sort merged by the exchange above it): the `HashShard` an input already has, otherwise the hash
+  of all the columns of the union;
+- a required single distribution (root, sort, nested loop join, insert), a broadcast, inputs that
+  are all single (values, global aggregations), or a union without columns: the single union, as
+  before.
+
+An input already distributed as `target` stays in the stage of the union, without exchange, only
+when the part of its plan in that stage (down to its exchanges) holds only operators that
+transform the rows of their own task (projection, filter, hash or sort aggregation, hash join,
+union, project set, expand, hop window, window, group top-n) and nothing distributed as `Single`:
+no scan, source or lookup join that would decide the tasks of the stage. Every other input gets an
+exchange to `target`, which puts its plan in a stage of its own. Projections and filters (and
+insert, max-one-row and group top-n, which used to convert their input before checking it) pass
+the required distribution down to a union below them, through the column mapping of the
+projection; without the variable, or without a union below, they convert their input as before.
+
+- Exactness: a `UNION ALL` concatenates its inputs and its order is unspecified. Each input is
+  computed once, by its own plan; each of its rows goes through exactly one exchange partition to
+  exactly one task of the union, which emits it once: the union of the tasks is the same multiset.
+  `HashShard(k)` is the same function in every input (same column types at the same positions, the
+  same hash, the parallelism of the stage of the union as the partition count), so the rows with
+  equal `k` from every branch meet in the same task, which is all the operator above relies on.
+  A union tag (a constant column per branch) is hashed like any other column. `UNION` without
+  `ALL` is a hash aggregation over a `UNION ALL`, handled as such. Local execution (`to_local`)
+  does not change.
+- Cost: with a requirement, the union replaces the gather into one task plus the hash exchange
+  above it by one hash exchange per input; the operator above runs in parallel on its input
+  partition. Without a requirement, the rows are hashed on all their columns instead of gathered:
+  the same volume crosses the network, but into all the tasks; an operator above that only needs
+  a single task (a plain `SELECT` of the union, an insert) keeps the single union. A
+  `count(*)` whose union column pruning left without columns keeps it too (nothing to hash), but
+  its inputs then send rows without data.
+- Tests: `batch_distributed_union.yaml` (planner: union under a hash aggregation, a join of two
+  unions, a lookup join, a window, a count, a top-n and a limit; inputs that are scans,
+  aggregations already hashed on the key, joins and values; a tag column; `UNION`; forced
+  two-phase aggregation; single unions kept; off by default), and the differential
+  `e2e_test/batch/distributed_union.gen.py` (29 queries run with the variable off and on, in local
+  and distributed query mode, multisets compared on empty tables, NULLs, duplicate rows, always
+  empty branches, after updates and deletes, and with a single branch left).
+- Not done: a round-robin exchange, which would let a union with no requirement keep its inputs
+  in their stages without hashing; a partial aggregation pushed into each branch.
 
 ## Not for now: sharing between materialized views
 

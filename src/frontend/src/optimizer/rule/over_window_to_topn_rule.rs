@@ -20,6 +20,7 @@ use super::prelude::{PlanRef, *};
 use crate::expr::{
     Expr, ExprImpl, ExprRewriter, ExprType, FunctionCall, InputRef, Literal, collect_input_refs,
 };
+use crate::optimizer::cardinality_learning::learned_top_n_fits;
 use crate::optimizer::plan_node::generic::GenericPlanRef;
 use crate::optimizer::plan_node::{LogicalFilter, LogicalProject, LogicalTopN, PlanTreeNodeUnary};
 use crate::optimizer::property::Order;
@@ -140,9 +141,20 @@ impl Rule<Logical> for OverWindowToTopNRule {
         let (limit, offset) = handle_rank_preds(&rank_pred.conjunctions, window_func_pos)?;
         if let Some(max_rows) = self.batch_max_rows_per_group
             && limit.saturating_add(offset) > max_rows
+            && !learned_top_n_fits(
+                &over_window.input(),
+                &window_func
+                    .partition_by
+                    .iter()
+                    .map(|i| i.index)
+                    .collect::<Vec<_>>(),
+                limit.saturating_add(offset),
+            )
         {
             // Batch: a large top-n per group would hold too much memory (see
-            // `BATCH_MAX_TOP_N_ROWS_PER_GROUP`).
+            // `BATCH_MAX_TOP_N_ROWS_PER_GROUP`), unless the groups learned from earlier
+            // executions (`batch_cardinality_feedback_learning`) show that its heaps hold no more
+            // rows than its input, which the sort it replaces would hold.
             return None;
         }
 

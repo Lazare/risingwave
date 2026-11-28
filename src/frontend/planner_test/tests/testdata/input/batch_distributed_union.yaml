@@ -1,0 +1,186 @@
+# Tests for `batch_distributed_union` (batch only): a `UNION ALL` of a distributed batch plan runs
+# in parallel tasks instead of gathering all its inputs into one task. Each input keeps its own
+# plan; only the exchange above it changes: the hash of the columns the operator above needs (the
+# operator then has no exchange of its own), or of all the columns when it needs none. An input
+# already hashed that way stays in the stage of the union. Inputs that are all single (values,
+# global aggregations) and a required single distribution keep the single union.
+- id: setup_off
+  sql: |
+    create table a (id int primary key, k int, v int, s varchar);
+    create table b (id int primary key, k int, v int, s varchar);
+    create table c (k int, v int, s varchar);
+    create table d (id int primary key, k int, w int);
+  expected_outputs: []
+- id: setup
+  sql: |
+    set batch_distributed_union = true;
+    create table a (id int primary key, k int, v int, s varchar);
+    create table b (id int primary key, k int, v int, s varchar);
+    create table c (k int, v int, s varchar);
+    create table d (id int primary key, k int, w int);
+  expected_outputs: []
+
+- name: off by default - hash aggregation over a union
+  before: [setup_off]
+  sql: |
+    select k, count(*), sum(v) from (select k, v from a union all select k, v from b union all select k, v from c) u group by k;
+  expected_outputs:
+  - batch_plan
+- name: off by default - join over a union
+  before: [setup_off]
+  sql: |
+    select u.k, d.w from (select k, v from a union all select k, v from c) u join d on u.k = d.k;
+  expected_outputs:
+  - batch_plan
+
+# The union under a hash aggregation: each input hashed on the group key, no exchange above.
+- name: hash aggregation over a union of scans
+  before: [setup]
+  sql: |
+    select k, count(*), sum(v) from (select k, v from a union all select k, v from b union all select k, v from c) u group by k;
+  expected_outputs:
+  - batch_plan
+  - batch_local_plan
+- name: hash aggregation on two keys over a union of scans
+  before: [setup]
+  sql: |
+    select k, s, count(*) from (select k, v, s from a union all select k, v, s from c) u group by k, s;
+  expected_outputs:
+  - batch_plan
+- name: hash aggregation with a filter and a projection between it and the union
+  before: [setup]
+  sql: |
+    select k, count(*) from (select k, v + 1 as w from (select k, v from a union all select k, v from c) u where v > 0) x group by k;
+  expected_outputs:
+  - batch_plan
+- name: hash aggregation on a computed key (the union is hashed on all its columns)
+  before: [setup]
+  sql: |
+    select k2, count(*) from (select coalesce(k, 0) + 1 as k2 from (select k from a union all select k from c) u) x group by k2;
+  expected_outputs:
+  - batch_plan
+- name: union with a tag column under a hash aggregation
+  before: [setup]
+  sql: |
+    select tag, k, count(*) from (select 1 as tag, k from a union all select 2 as tag, k from b union all select 3 as tag, k from c) u group by tag, k;
+  expected_outputs:
+  - batch_plan
+- name: having count over a union (duplicate keys)
+  before: [setup]
+  sql: |
+    select k from (select k from a union all select k from c) u where k is not null group by k having count(*) > 1;
+  expected_outputs:
+  - batch_plan
+- name: union distinct
+  before: [setup]
+  sql: |
+    select k, v from a union select k, v from c;
+  expected_outputs:
+  - batch_plan
+- name: two-phase aggregation forced over a union
+  before: [setup]
+  sql: |
+    set force_two_phase_agg = true;
+    select k, count(*) from (select k from a union all select k from c) u group by k;
+  expected_outputs:
+  - batch_plan
+
+# Inputs that are aggregations, joins or values.
+- name: inputs aggregated on the key of the aggregation above stay in the stage of the union
+  before: [setup]
+  sql: |
+    select k, sum(n) from (select k, count(*) as n from a group by k union all select k, count(*) as n from c group by k) u group by k;
+  expected_outputs:
+  - batch_plan
+- name: inputs aggregated on another key
+  before: [setup]
+  sql: |
+    select n, count(*) from (select k, count(*) as n from a group by k union all select v, count(*) as n from c group by v) u group by n;
+  expected_outputs:
+  - batch_plan
+- name: an input that is a join on the key of the aggregation above
+  before: [setup]
+  sql: |
+    select k, count(*) from (select a.k from a join b on a.k = b.k union all select k from c) u group by k;
+  expected_outputs:
+  - batch_plan
+- name: an input that is values
+  before: [setup]
+  sql: |
+    select k, count(*) from (select k from a union all values (1), (null), (42)) u group by k;
+  expected_outputs:
+  - batch_plan
+- name: inputs that are all global aggregations keep the single union
+  before: [setup]
+  sql: |
+    select count(*), max(m) from (select max(k) as m from a union all select max(k) as m from c) u;
+  expected_outputs:
+  - batch_plan
+
+# A count, a top-n and a limit above: the union is hashed on all its columns, they run in two
+# phases.
+- name: count over a union
+  before: [setup]
+  sql: |
+    select count(*) from (select k, v from a union all select k, v from c) u;
+  expected_outputs:
+  - batch_plan
+- name: count of a filtered union
+  before: [setup]
+  sql: |
+    select count(*) from (select * from (select k, s from a union all select k, s from b) u where s is null) x;
+  expected_outputs:
+  - batch_plan
+- name: top-n over a union
+  before: [setup]
+  sql: |
+    select k, v from (select k, v from a union all select k, v from c) u order by v desc limit 5;
+  expected_outputs:
+  - batch_plan
+- name: limit over a union
+  before: [setup]
+  sql: |
+    select k, v from (select k, v from a union all select k, v from c) u limit 5;
+  expected_outputs:
+  - batch_plan
+
+# Joins above.
+- name: hash join over a union
+  before: [setup]
+  sql: |
+    select u.k, d.w from (select k, v from a union all select k, v from c) u join d on u.k = d.k;
+  expected_outputs:
+  - batch_plan
+- name: hash join of two unions
+  before: [setup]
+  sql: |
+    select x.k, x.v, y.v from (select k, v from a union all select k, v from c) x join (select k, v from b union all select k, v from c) y on x.k = y.k;
+  expected_outputs:
+  - batch_plan
+- name: lookup join over a union
+  before: [setup]
+  sql: |
+    select u.k, a.v from (select k from b union all select k from c) u join a on u.k = a.id;
+  expected_outputs:
+  - batch_plan
+- name: window over a union
+  before: [setup]
+  sql: |
+    select k, v, row_number() over (partition by k order by v) from (select k, v from a union all select k, v from c) u;
+  expected_outputs:
+  - batch_plan
+
+# The single union is kept: the result is gathered anyway.
+- name: plain union
+  before: [setup]
+  sql: |
+    select k, v from a union all select k, v from c;
+  expected_outputs:
+  - batch_plan
+# A sort above (no required distribution): hashed on all the columns, sorted in each task.
+- name: order by over a union (sorted in parallel, merged by the exchange)
+  before: [setup]
+  sql: |
+    select k + 1 as k1 from (select k from a union all select k from c) u order by k1;
+  expected_outputs:
+  - batch_plan

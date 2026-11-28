@@ -108,7 +108,7 @@ impl<C: ConventionMarker> OptimizationStage<C> {
 }
 
 use std::collections::{HashMap, HashSet};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use risingwave_common::id::ObjectId;
 use risingwave_pb::common::PbObjectType;
@@ -305,19 +305,13 @@ static BATCH_MERGE_REPEATED_LOOKUPS: LazyLock<OptimizationStage> = LazyLock::new
     )
 });
 
-// Rules `CostBasedJoinSidesRule` and `CostBasedJoinOrderingRule` (`batch_cost_based_join_ordering`).
-static BATCH_COST_BASED_JOIN_SIDES: LazyLock<OptimizationStage> = LazyLock::new(|| {
+// Rules `CostBasedJoinSidesRule` and `CostBasedJoinOrderingRule` (`batch_cost_based_join_ordering`)
+// are built for each query (they are given the columns that the plan reads); the rule
+// `CostBasedOuterJoinSidesRule` runs after the column pruning.
+static BATCH_COST_BASED_OUTER_JOIN_SIDES: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
-        "Cost-Based Join Sides For Batch",
-        vec![CostBasedJoinSidesRule::create()],
-        ApplyOrder::TopDown,
-    )
-});
-
-static BATCH_COST_BASED_JOIN_ORDERING: LazyLock<OptimizationStage> = LazyLock::new(|| {
-    OptimizationStage::new(
-        "Cost-Based Join Ordering For Batch",
-        vec![CostBasedJoinOrderingRule::create()],
+        "Cost-Based Outer Join Sides For Batch",
+        vec![CostBasedOuterJoinSidesRule::create()],
         ApplyOrder::TopDown,
     )
 });
@@ -782,6 +776,26 @@ static BATCH_SIMPLIFY_NULL_JOIN_KEYS: LazyLock<OptimizationStage> = LazyLock::ne
     )
 });
 
+// Rules `NarrowValueAggRule` and `NarrowValuePushRule` (`streaming_narrow_value_aggregates`,
+// `batch_narrow_value_aggregates`): the functions that read the result of `first_value` /
+// `last_value` are aggregated instead of the whole value, and moved into the branches of a union
+// and into the side of a join that the value comes from.
+static NARROW_VALUE_AGGREGATES: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Narrow Value Aggregates",
+        vec![NarrowValueAggRule::create(), NarrowValuePushRule::create()],
+        ApplyOrder::TopDown,
+    )
+});
+
+static NARROW_VALUE_MERGE_PROJECTS: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Narrow Value Merge Projects",
+        vec![NarrowValueProjectMergeRule::create()],
+        ApplyOrder::TopDown,
+    )
+});
+
 static STREAM_FACTOR_UNION_JOIN: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Factor Union Join For Stream",
@@ -1032,6 +1046,32 @@ impl LogicalOptimizer {
         Ok(plan)
     }
 
+    /// Rules `NarrowValueAggRule` and `NarrowValuePushRule` (`streaming_narrow_value_aggregates`,
+    /// `batch_narrow_value_aggregates`). Each round moves the narrowing functions one level down:
+    /// the whole value that a rewrite leaves unused is pruned, and the projection that it creates
+    /// is merged with the one below, before the next round looks at them. Returns the number of
+    /// rewrites.
+    fn narrow_value_aggregates(
+        mut plan: LogicalPlanRef,
+        explain_trace: bool,
+        ctx: &OptimizerContextRef,
+    ) -> Result<(LogicalPlanRef, usize)> {
+        let mut total = 0;
+        for _ in 0..6 {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&NARROW_VALUE_AGGREGATES)?;
+            let applied = ctx.total_rule_applied() - applied_before;
+            if applied == 0 {
+                break;
+            }
+            total += applied;
+            ctx.set_values_narrowed();
+            plan = Self::column_pruning(plan, explain_trace, ctx);
+            plan = plan.optimize_by_rules(&NARROW_VALUE_MERGE_PROJECTS)?;
+        }
+        Ok((plan, total))
+    }
+
     pub fn column_pruning(
         mut plan: LogicalPlanRef,
         explain_trace: bool,
@@ -1193,6 +1233,20 @@ impl LogicalOptimizer {
         // `first_value`/`last_value` calls into one row: a field of that row can no longer be
         // pruned, so every packed column would be scanned and kept in the aggregation state.
         plan = Self::column_pruning(plan, explain_trace, &ctx);
+        // Rules `NarrowValueAggRule` and `NarrowValuePushRule` (`streaming_narrow_value_aggregates`):
+        // after the pruning above, so that the result of an aggregate is only read where it is
+        // used, and before `UnifyFirstLastValueRule`, which packs the narrowed calls. On demand
+        // only: the plan of a streaming job is frozen when the job is created.
+        if ctx
+            .session_ctx()
+            .config()
+            .streaming_narrow_value_aggregates()
+            && !ctx.is_stream_prune_baseline()
+        {
+            let (narrowed, applied) = Self::narrow_value_aggregates(plan, explain_trace, &ctx)?;
+            plan = narrowed;
+            ctx.add_stream_prune_rule_applied(applied);
+        }
         plan = plan.optimize_by_rules(&SIMPLIFY_AGG)?;
 
         plan = plan.optimize_by_rules(&JOIN_COMMUTE)?;
@@ -1663,8 +1717,20 @@ impl LogicalOptimizer {
                 .config()
                 .batch_cost_based_join_ordering()
             {
-                plan = plan.optimize_by_rules(&BATCH_COST_BASED_JOIN_SIDES)?;
-                plan = plan.optimize_by_rules(&BATCH_COST_BASED_JOIN_ORDERING)?;
+                // The columns that the plan reads, for the widths of the inputs of the joins:
+                // the scans still read all the columns of their tables at this point.
+                let required = Arc::new(required_output_columns(&plan));
+                plan = plan.optimize_by_rules(&OptimizationStage::new(
+                    "Cost-Based Join Sides For Batch",
+                    vec![CostBasedJoinSidesRule::create(required)],
+                    ApplyOrder::TopDown,
+                ))?;
+                let required = Arc::new(required_output_columns(&plan));
+                plan = plan.optimize_by_rules(&OptimizationStage::new(
+                    "Cost-Based Join Ordering For Batch",
+                    vec![CostBasedJoinOrderingRule::create(required)],
+                    ApplyOrder::TopDown,
+                ))?;
             }
 
             // Reorder multijoin into left-deep join tree.
@@ -1727,9 +1793,21 @@ impl LogicalOptimizer {
         // `first_value`/`last_value` calls into one row: a field of that row can no longer be
         // pruned, so every packed column would be scanned and kept in the aggregation state.
         plan = Self::column_pruning(plan, explain_trace, &ctx);
+        // Rules `NarrowValueAggRule` and `NarrowValuePushRule` (`batch_narrow_value_aggregates`):
+        // after the pruning above and before `UnifyFirstLastValueRule`, as for streaming.
+        if ctx.session_ctx().config().batch_narrow_value_aggregates() {
+            plan = Self::narrow_value_aggregates(plan, explain_trace, &ctx)?.0;
+        }
         plan = plan.optimize_by_rules(&SIMPLIFY_AGG)?;
 
         plan = plan.optimize_by_rules(&JOIN_COMMUTE)?;
+
+        // Cost-based sides of the outer, semi and anti joins (`batch_cost_based_join_ordering`):
+        // after the column pruning, which leaves in the inputs only the columns that are read,
+        // and after `JOIN_COMMUTE`, which would turn a right join back into a left one.
+        if ctx.session_ctx().config().batch_cost_based_join_ordering() {
+            plan = plan.optimize_by_rules(&BATCH_COST_BASED_OUTER_JOIN_SIDES)?;
+        }
 
         plan = plan.optimize_by_rules(&TOP_N_TO_VECTOR_SEARCH)?;
 

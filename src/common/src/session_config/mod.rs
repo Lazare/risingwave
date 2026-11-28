@@ -386,6 +386,16 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_cardinality_feedback: bool,
 
+    /// Cardinality feedback learning of batch queries: keep the ratios measured by the
+    /// cardinality feedback (filter selectivity, groups per input row of an aggregation, join
+    /// output per row of its larger input) by sub-plan, and use them in the estimates of the
+    /// cost-based join ordering (`batch_cost_based_join_ordering`) and in the limit of the top-n
+    /// per group (`batch_over_window_to_topn`) instead of fixed guesses. Batch queries are observed
+    /// as with `batch_cardinality_feedback`. A plan changes only when the learned estimates make
+    /// it clearly cheaper. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_cardinality_feedback_learning: bool,
+
     /// In the plan of a new streaming job, read once the table that several branches of a
     /// `UNION ALL` read, each with its own filter and projection: one scan, one copy of each row
     /// per branch, and the filter and projection of each branch applied to its copies. Defaults to
@@ -459,6 +469,40 @@ pub struct SessionConfig {
     /// The same as `streaming_simplify_null_join_keys`, for batch queries. Defaults to false.
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_simplify_null_join_keys: bool,
+
+    // Rules `NarrowValueAggRule` and `NarrowValuePushRule`.
+    /// In the plan of a new streaming job, when the result of `first_value`, `last_value` or
+    /// `internal_last_seen_value` is only read through deterministic functions that cannot fail
+    /// (`->>`, `->`, comparisons, `CASE`...), aggregate those functions of the value instead of the
+    /// whole value (`f(last_value(x ORDER BY k))` becomes `last_value(f(x) ORDER BY k)`, several of
+    /// them packed in one row), and move them into the branches of a `UNION ALL` and into the side
+    /// of a join that the value comes from: the states keep the narrow value only. Defaults to
+    /// false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    streaming_narrow_value_aggregates: bool,
+
+    /// The same as `streaming_narrow_value_aggregates`, for batch queries: the aggregations, joins
+    /// and exchanges carry the narrow value only. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_narrow_value_aggregates: bool,
+
+    // `BatchUnion::to_distributed_with_required`.
+    /// In a distributed batch query, run a `UNION ALL` in parallel tasks instead of gathering all
+    /// its inputs into one task: each input is sent to the tasks by a hash of the columns that the
+    /// operator above needs (the group key of an aggregation, the key of a join), or of all the
+    /// columns, and the operator above then needs no exchange of its own. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_distributed_union: bool,
+
+    // Revocable memory of batch queries (`query_memory.rs`).
+    /// In a distributed batch query, an operator that cannot spill to disk (top-n per group,
+    /// lookup join, nested loop join...) and must wait for memory asks the spillable operators of
+    /// the same query (hash aggregation, hash join, sort) to spill: they stop growing beyond the
+    /// memory reserved for each of them, so the next of them that needs more writes its state to
+    /// disk and gives back its memory, which the waiting operator takes. Without it, the operator
+    /// only waits for other queries to release memory, and fails when none can. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_spill_on_memory_wait: bool,
 
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]

@@ -1,0 +1,233 @@
+# Cardinality feedback learning of batch queries (`batch_cardinality_feedback_learning`): the
+# ratios measured by earlier executions replace the fixed guesses of the estimates of the
+# cost-based join ordering and of the top-n per group. `table_row_counts` gives the storage
+# statistics of the tables; `cardinality_observations` (test only) forgets the learned ratios, then
+# records each query as if it had run and its counted operators had returned the given rows (by
+# kind of operator, inputs before the operator). Every case that turns the learning on gives
+# observations, possibly none, so that it does not see the ratios of another case.
+- id: tables
+  sql: |
+    create table cfl_big (id int primary key, k int, v int);
+    create table cfl_mid (id int primary key, k int, c_id int);
+    create table cfl_dim (id int primary key, w int);
+    create table cfl_win (id int primary key, k int, v int);
+  expected_outputs: []
+- id: learning
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    set batch_cardinality_feedback_learning = true;
+  expected_outputs: []
+
+# Two-way join: the aggregation is guessed to return a tenth of its 100000 input rows, fewer than
+# the 12000 rows of `cfl_mid`, so it is the build side.
+- name: two-way join, nothing learned (the fixed guesses, the aggregation is the build side)
+  before:
+  - tables
+  - learning
+  sql: |
+    select count(*) from (select k, count(*) as n from cfl_big group by k) g join cfl_mid m on m.k = g.k;
+  table_row_counts:
+    cfl_big: 100000
+    cfl_mid: 12000
+  cardinality_observations: []
+  expected_outputs:
+  - batch_plan
+- name: two-way join, the aggregation was observed with one group per row (`cfl_mid` becomes the build side)
+  before:
+  - tables
+  - learning
+  sql: |
+    select count(*) from (select k, count(*) as n from cfl_big group by k) g join cfl_mid m on m.k = g.k;
+  table_row_counts:
+    cfl_big: 100000
+    cfl_mid: 12000
+  cardinality_observations:
+  - sql: select k, count(*) from cfl_big group by k
+    rows:
+      seq_scan: [100000]
+      hash_agg: [100000]
+  expected_outputs:
+  - batch_plan
+- name: two-way join, observed with another literal in the filter of the aggregation input (one key for every literal)
+  before:
+  - tables
+  - learning
+  sql: |
+    select count(*) from (select k, count(*) as n from cfl_big where v > 7 group by k) g join cfl_mid m on m.k = g.k;
+  table_row_counts:
+    cfl_big: 100000
+    cfl_mid: 12000
+  cardinality_observations:
+  - sql: select k, count(*) from cfl_big where v > 1000 group by k
+    rows:
+      seq_scan: [100000]
+      filter: [100000]
+      hash_agg: [100000]
+  expected_outputs:
+  - batch_plan
+- name: two-way join, the aggregation was observed with slightly more groups than guessed (plan kept, below the change factor)
+  before:
+  - tables
+  - learning
+  sql: |
+    select count(*) from (select k, count(*) as n from cfl_big group by k) g join cfl_mid m on m.k = g.k;
+  table_row_counts:
+    cfl_big: 100000
+    cfl_mid: 12000
+  cardinality_observations:
+  - sql: select k, count(*) from cfl_big group by k
+    rows:
+      seq_scan: [100000]
+      hash_agg: [15000]
+  expected_outputs:
+  - batch_plan
+- name: two-way join, observed but the learning is off (the fixed guesses)
+  before:
+  - tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    set batch_cardinality_feedback = true;
+    select count(*) from (select k, count(*) as n from cfl_big group by k) g join cfl_mid m on m.k = g.k;
+  table_row_counts:
+    cfl_big: 100000
+    cfl_mid: 12000
+  cardinality_observations:
+  - sql: select k, count(*) from cfl_big group by k
+    rows:
+      seq_scan: [100000]
+      hash_agg: [100000]
+  expected_outputs:
+  - batch_plan
+
+# Three-way join: the order of the joins changes once the aggregation is known to be large.
+- name: three-way join, nothing learned
+  before:
+  - tables
+  - learning
+  sql: |
+    set batch_enable_lookup_join = false;
+    select count(*) from (select k, count(*) as n from cfl_big group by k) g join cfl_mid m on m.k = g.k join cfl_dim d on m.c_id = d.id;
+  table_row_counts:
+    cfl_big: 100000
+    cfl_mid: 10000
+    cfl_dim: 10000
+  cardinality_observations: []
+  expected_outputs:
+  - batch_plan
+- name: three-way join, the aggregation was observed with one group per row (another join order)
+  before:
+  - tables
+  - learning
+  sql: |
+    set batch_enable_lookup_join = false;
+    select count(*) from (select k, count(*) as n from cfl_big group by k) g join cfl_mid m on m.k = g.k join cfl_dim d on m.c_id = d.id;
+  table_row_counts:
+    cfl_big: 100000
+    cfl_mid: 10000
+    cfl_dim: 10000
+  cardinality_observations:
+  - sql: select k, count(*) from cfl_big group by k
+    rows:
+      seq_scan: [100000]
+      hash_agg: [100000]
+  expected_outputs:
+  - batch_plan
+
+# Filter selectivity and join fan-out learned from the join itself.
+- name: two-way join, the filter and the join were observed (learned selectivity and fan-out)
+  before:
+  - tables
+  - learning
+  sql: |
+    set batch_enable_lookup_join = false;
+    select count(*) from cfl_big b join cfl_mid m on m.k = b.k where b.v < 10;
+  table_row_counts:
+    cfl_big: 100000
+    cfl_mid: 12000
+  cardinality_observations:
+  - sql: select count(*) from cfl_big b join cfl_mid m on m.k = b.k where b.v < 50
+    rows:
+      seq_scan: [100000, 12000]
+      filter: [100000]
+      hash_join: [400000]
+      simple_agg: [1]
+  expected_outputs:
+  - batch_plan
+
+# Top-n per group (`batch_over_window_to_topn`): 20 rows per group is above the fixed limit of 10.
+- name: top 20 per group, nothing learned (the window stays)
+  before:
+  - tables
+  - learning
+  sql: |
+    set batch_over_window_to_topn = true;
+    select count(*), sum(id), sum(v) from (select id, k, v, row_number() over (partition by k order by v, id) as rn from cfl_win) t where rn <= 20;
+  table_row_counts:
+    cfl_win: 10000
+  cardinality_observations: []
+  expected_outputs:
+  - batch_plan
+- name: top 20 per group, 100 groups of 10000 rows observed (top-n per group)
+  before:
+  - tables
+  - learning
+  sql: |
+    set batch_over_window_to_topn = true;
+    select count(*), sum(id), sum(v) from (select id, k, v, row_number() over (partition by k order by v, id) as rn from cfl_win) t where rn <= 20;
+  table_row_counts:
+    cfl_win: 10000
+  cardinality_observations:
+  - sql: select k, count(*) from cfl_win group by k
+    rows:
+      seq_scan: [10000]
+      hash_agg: [100]
+  expected_outputs:
+  - batch_plan
+- name: top 20 per group, 5000 groups of 10000 rows observed (the window stays)
+  before:
+  - tables
+  - learning
+  sql: |
+    set batch_over_window_to_topn = true;
+    select count(*), sum(id), sum(v) from (select id, k, v, row_number() over (partition by k order by v, id) as rn from cfl_win) t where rn <= 20;
+  table_row_counts:
+    cfl_win: 10000
+  cardinality_observations:
+  - sql: select k, count(*) from cfl_win group by k
+    rows:
+      seq_scan: [10000]
+      hash_agg: [5000]
+  expected_outputs:
+  - batch_plan
+- name: top 2000 per group, few groups observed (above the largest learned limit, the window stays)
+  before:
+  - tables
+  - learning
+  sql: |
+    set batch_over_window_to_topn = true;
+    select count(*), sum(id), sum(v) from (select id, k, v, row_number() over (partition by k order by v, id) as rn from cfl_win) t where rn <= 2000;
+  table_row_counts:
+    cfl_win: 10000
+  cardinality_observations:
+  - sql: select k, count(*) from cfl_win group by k
+    rows:
+      seq_scan: [10000]
+      hash_agg: [2]
+  expected_outputs:
+  - batch_plan
+- name: top 20 per other columns, the groups of `k` observed (the window stays)
+  before:
+  - tables
+  - learning
+  sql: |
+    set batch_over_window_to_topn = true;
+    select count(*), sum(id), sum(v) from (select id, k, v, row_number() over (partition by v order by k, id) as rn from cfl_win) t where rn <= 20;
+  table_row_counts:
+    cfl_win: 10000
+  cardinality_observations:
+  - sql: select k, count(*) from cfl_win group by k
+    rows:
+      seq_scan: [10000]
+      hash_agg: [100]
+  expected_outputs:
+  - batch_plan

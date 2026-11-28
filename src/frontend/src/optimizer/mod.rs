@@ -41,6 +41,8 @@ use risingwave_pb::plan_common::source_refresh_mode::RefreshMode;
 pub mod backfill_order_strategy;
 // Cardinality feedback of batch queries (`batch_cardinality_feedback`).
 pub mod cardinality_feedback;
+// Cardinality feedback learning of batch queries (`batch_cardinality_feedback_learning`).
+pub mod cardinality_learning;
 mod logical_optimization;
 mod optimizer_context;
 pub mod plan_expr_rewriter;

@@ -38,16 +38,8 @@ impl Rule<Logical> for JoinCommuteRule {
                 let left_len = left.schema().len();
                 let right_len = right.schema().len();
 
-                let new_output_indices = output_indices
-                    .into_iter()
-                    .map(|i| {
-                        if i < left_len {
-                            i + right_len
-                        } else {
-                            i - left_len
-                        }
-                    })
-                    .collect_vec();
+                let new_output_indices =
+                    swapped_output_indices(join_type, output_indices, left_len, right_len);
 
                 let mut condition_rewriter = Rewriter {
                     join_left_len: left_len,
@@ -75,6 +67,56 @@ impl Rule<Logical> for JoinCommuteRule {
             | JoinType::AsofLeftOuter
             | JoinType::Unspecified => None,
         }
+    }
+}
+
+/// The same join with its sides swapped and the inverse join type (a left outer join becomes a
+/// right outer join...), for `CostBasedOuterJoinSidesRule` (`batch_cost_based_join_ordering`).
+/// The same rewrite as [`JoinCommuteRule`], for any join type but the as-of joins.
+pub(super) fn swap_join_sides(join: &LogicalJoin) -> LogicalJoin {
+    let (left, right, on, join_type, output_indices) = join.clone().decompose();
+    let left_len = left.schema().len();
+    let right_len = right.schema().len();
+    let new_output_indices = swapped_output_indices(join_type, output_indices, left_len, right_len);
+    let mut condition_rewriter = Rewriter {
+        join_left_len: left_len,
+        join_left_offset: right_len as isize,
+        join_right_offset: -(left_len as isize),
+    };
+    let new_on = on.rewrite_expr(&mut condition_rewriter);
+    LogicalJoin::with_output_indices(
+        right,
+        left,
+        JoinCommuteRule::inverse_join_type(join_type),
+        new_on,
+        new_output_indices,
+    )
+}
+
+/// The output indices of a join once its sides are swapped. The output of a semi or anti join
+/// only holds the columns of the side it keeps, which stays the side kept once swapped (a left
+/// semi join becomes a right semi join): its indices do not change. The output of the other joins
+/// holds the columns of both sides, the left ones first.
+fn swapped_output_indices(
+    join_type: JoinType,
+    output_indices: Vec<usize>,
+    left_len: usize,
+    right_len: usize,
+) -> Vec<usize> {
+    match join_type {
+        JoinType::LeftSemi | JoinType::LeftAnti | JoinType::RightSemi | JoinType::RightAnti => {
+            output_indices
+        }
+        _ => output_indices
+            .into_iter()
+            .map(|i| {
+                if i < left_len {
+                    i + right_len
+                } else {
+                    i - left_len
+                }
+            })
+            .collect_vec(),
     }
 }
 
@@ -119,5 +161,96 @@ impl JoinCommuteRule {
             JoinType::RightAnti => JoinType::LeftAnti,
             JoinType::AsofInner | JoinType::AsofLeftOuter => unreachable!(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use risingwave_common::catalog::{Field, Schema};
+    use risingwave_common::types::DataType;
+
+    use super::*;
+    use crate::expr::{FunctionCall, assert_eq_input_ref};
+    use crate::optimizer::optimizer_context::OptimizerContext;
+    use crate::optimizer::plan_node::LogicalValues;
+    use crate::optimizer::plan_node::generic::GenericPlanRef;
+    use crate::utils::Condition;
+
+    /// A join of a 3-column left side `l0, l1, l2` and a 1-column right side `r0` on `l1 = r0`.
+    fn join(join_type: JoinType, output_indices: Vec<usize>) -> (LogicalJoin, Vec<Field>) {
+        let ctx = OptimizerContext::mock();
+        let fields: Vec<Field> = ["l0", "l1", "l2", "r0"]
+            .iter()
+            .map(|name| Field::with_name(DataType::Int32, *name))
+            .collect();
+        let left = LogicalValues::new(vec![], Schema::new(fields[0..3].to_vec()), ctx.clone());
+        let right = LogicalValues::new(vec![], Schema::new(fields[3..4].to_vec()), ctx);
+        let on = ExprImpl::FunctionCall(Box::new(
+            FunctionCall::new(
+                risingwave_pb::expr::expr_node::Type::Equal,
+                vec![
+                    InputRef::new(1, DataType::Int32).into(),
+                    InputRef::new(3, DataType::Int32).into(),
+                ],
+            )
+            .unwrap(),
+        ));
+        let join = LogicalJoin::with_output_indices(
+            left.into(),
+            right.into(),
+            join_type,
+            Condition::with_expr(on),
+            output_indices,
+        );
+        (join, fields)
+    }
+
+    fn output_names(join: &LogicalJoin) -> Vec<String> {
+        let plan: PlanRef = join.clone().into();
+        plan.schema()
+            .fields()
+            .iter()
+            .map(|f| f.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn test_swap_semi_and_anti_joins_keeps_their_output() {
+        for (join_type, swapped_type) in [
+            (JoinType::LeftSemi, JoinType::RightSemi),
+            (JoinType::LeftAnti, JoinType::RightAnti),
+        ] {
+            let (join, _) = join(join_type, vec![2, 0]);
+            let swapped = swap_join_sides(&join);
+            assert_eq!(swapped.join_type(), swapped_type);
+            assert_eq!(output_names(&swapped), ["l2", "l0"]);
+            // The condition now reads the right side first.
+            let on: ExprImpl = swapped.on().clone().into();
+            let call = on.as_function_call().unwrap();
+            assert_eq_input_ref!(&call.inputs()[0], 2);
+            assert_eq_input_ref!(&call.inputs()[1], 0);
+            // Swapping back gives the first join again.
+            let back = swap_join_sides(&swapped);
+            assert_eq!(back.join_type(), join_type);
+            assert_eq!(output_names(&back), ["l2", "l0"]);
+        }
+    }
+
+    #[test]
+    fn test_swap_inner_and_outer_joins_keeps_their_output() {
+        for join_type in [JoinType::Inner, JoinType::LeftOuter, JoinType::FullOuter] {
+            let (join, _) = join(join_type, vec![3, 0, 2]);
+            let swapped = swap_join_sides(&join);
+            assert_eq!(output_names(&swapped), ["r0", "l0", "l2"]);
+        }
+    }
+
+    #[test]
+    fn test_commute_right_semi_join_keeps_its_output() {
+        let (join, _) = join(JoinType::RightSemi, vec![0]);
+        let plan = JoinCommuteRule::create().apply(join.into()).unwrap();
+        let commuted = plan.as_logical_join().unwrap();
+        assert_eq!(commuted.join_type(), JoinType::LeftSemi);
+        assert_eq!(output_names(commuted), ["r0"]);
     }
 }

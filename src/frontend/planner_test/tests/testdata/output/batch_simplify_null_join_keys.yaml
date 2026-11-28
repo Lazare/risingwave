@@ -128,6 +128,146 @@
       └─BatchLookupJoin { type: Inner, predicate: a.id = c.id, output: all, lookup table: c }
         └─BatchExchange { order: [], dist: UpstreamHashShard(a.id) }
           └─BatchScan { table: a, columns: [a.id], distribution: UpstreamHashShard(a.id) }
+- name: left join - the key of the left (preserved) side is null, the right side is not read
+  before:
+  - setup
+  sql: |
+    select a.id, b.label from (select * from a where bk is null) a left join b on a.bk = b.k;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchProject { exprs: [a.id, null:Varchar] }
+      └─BatchFilter { predicate: IsNull(a.bk) }
+        └─BatchScan { table: a, columns: [a.id, a.bk], distribution: UpstreamHashShard(a.id) }
+- name: left join - the preserved side is a union of branches, each with a null key
+  before:
+  - setup
+  sql: |
+    select u.id, r.lab
+    from (select id, bk from a where bk is null union all select id, k from b where k is null) u
+    left join (select k, max(label) as lab from b group by k) r on u.bk = r.k;
+  batch_plan: |-
+    BatchProject { exprs: [a.id, null:Varchar] }
+    └─BatchUnion { all: true }
+      ├─BatchExchange { order: [], dist: Single }
+      │ └─BatchProject { exprs: [a.id] }
+      │   └─BatchFilter { predicate: IsNull(a.bk) }
+      │     └─BatchScan { table: a, columns: [a.id, a.bk], distribution: UpstreamHashShard(a.id) }
+      └─BatchExchange { order: [], dist: Single }
+        └─BatchProject { exprs: [b.id] }
+          └─BatchFilter { predicate: IsNull(b.k) }
+            └─BatchScan { table: b, columns: [b.id, b.k], distribution: UpstreamHashShard(b.id) }
+- name: left join - a union branch with a null literal key
+  before:
+  - setup
+  sql: |
+    select u.id, b.label
+    from (select id, null::int as bk from a union all select id, k from b where k is null) u
+    left join b on u.bk = b.k;
+  batch_plan: |-
+    BatchProject { exprs: [a.id, null:Varchar] }
+    └─BatchUnion { all: true }
+      ├─BatchExchange { order: [], dist: Single }
+      │ └─BatchScan { table: a, columns: [a.id], distribution: UpstreamHashShard(a.id) }
+      └─BatchExchange { order: [], dist: Single }
+        └─BatchProject { exprs: [b.id] }
+          └─BatchFilter { predicate: IsNull(b.k) }
+            └─BatchScan { table: b, columns: [b.id, b.k], distribution: UpstreamHashShard(b.id) }
+- name: left join - the null key comes through an inner join and a top-n below the preserved side
+  before:
+  - setup
+  sql: |
+    select x.id, c.v
+    from (
+      select id, bk from (
+        select a.id, a.bk, row_number() over (partition by a.id order by b.id) as rn
+        from a join b on a.id = b.id where a.bk is null
+      ) t where rn = 1
+    ) x
+    left join c on x.bk = c.kb;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchProject { exprs: [a.id, null:Int32] }
+      └─BatchFilter { predicate: (row_number = 1:Int32) }
+        └─BatchOverWindow { window_functions: [row_number() OVER(PARTITION BY a.id ORDER BY b.id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)] }
+          └─BatchSort { order: [a.id ASC, b.id ASC] }
+            └─BatchLookupJoin { type: Inner, predicate: a.id = b.id, output: all, lookup table: b }
+              └─BatchExchange { order: [], dist: UpstreamHashShard(a.id) }
+                └─BatchProject { exprs: [a.id] }
+                  └─BatchFilter { predicate: IsNull(a.bk) }
+                    └─BatchScan { table: a, columns: [a.id, a.bk], distribution: UpstreamHashShard(a.id) }
+- name: right join - the key of the right (preserved) side is null
+  before:
+  - setup
+  sql: |
+    select a.x, b.id, b.label from a right join (select * from b where k is null) b on a.bk = b.k;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchProject { exprs: [null:Int32, b.id, b.label] }
+      └─BatchFilter { predicate: IsNull(b.k) }
+        └─BatchScan { table: b, columns: [b.id, b.label, b.k], distribution: UpstreamHashShard(b.id) }
+- name: anti join - the key of the left side is null, every left row is kept
+  before:
+  - setup
+  sql: |
+    select a.id from a where a.bk is null and not exists (select 1 from b where b.k = a.bk);
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchProject { exprs: [a.id] }
+      └─BatchFilter { predicate: IsNull(a.bk) }
+        └─BatchScan { table: a, columns: [a.id, a.bk], distribution: UpstreamHashShard(a.id) }
+- name: full join - the key of one side is null, both sides are padded
+  before:
+  - setup
+  sql: |
+    select a.id, b.label from a full join (select * from b where k is null) b on a.bk = b.k;
+  batch_plan: |-
+    BatchUnion { all: true }
+    ├─BatchExchange { order: [], dist: Single }
+    │ └─BatchProject { exprs: [a.id, null:Varchar] }
+    │   └─BatchScan { table: a, columns: [a.id], distribution: UpstreamHashShard(a.id) }
+    └─BatchExchange { order: [], dist: Single }
+      └─BatchProject { exprs: [null:Int32, b.label] }
+        └─BatchFilter { predicate: IsNull(b.k) }
+          └─BatchScan { table: b, columns: [b.label, b.k], distribution: SomeShard }
+- name: kept - the null fact is in only one branch of the union
+  before:
+  - setup
+  sql: |
+    select u.id, b.label
+    from (select id, bk from a where bk is null union all select id, k from b) u
+    left join b on u.bk = b.k;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: LeftOuter, predicate: a.bk = b.k, output: [a.id, b.label] }
+      ├─BatchExchange { order: [], dist: HashShard(a.bk) }
+      │ └─BatchUnion { all: true }
+      │   ├─BatchExchange { order: [], dist: Single }
+      │   │ └─BatchFilter { predicate: IsNull(a.bk) }
+      │   │   └─BatchScan { table: a, columns: [a.id, a.bk], distribution: UpstreamHashShard(a.id) }
+      │   └─BatchExchange { order: [], dist: Single }
+      │     └─BatchScan { table: b, columns: [b.id, b.k], distribution: UpstreamHashShard(b.id) }
+      └─BatchExchange { order: [], dist: HashShard(b.k) }
+        └─BatchScan { table: b, columns: [b.k, b.label], distribution: SomeShard }
+- name: kept - is not distinct from with a null key on the preserved side
+  before:
+  - setup
+  sql: |
+    select u.id, b.label
+    from (select id, bk from a where bk is null union all select id, k from b where k is null) u
+    left join b on u.bk is not distinct from b.k;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: LeftOuter, predicate: a.bk IS NOT DISTINCT FROM b.k, output: [a.id, b.label] }
+      ├─BatchExchange { order: [], dist: HashShard(a.bk) }
+      │ └─BatchUnion { all: true }
+      │   ├─BatchExchange { order: [], dist: Single }
+      │   │ └─BatchFilter { predicate: IsNull(a.bk) }
+      │   │   └─BatchScan { table: a, columns: [a.id, a.bk], distribution: UpstreamHashShard(a.id) }
+      │   └─BatchExchange { order: [], dist: Single }
+      │     └─BatchFilter { predicate: IsNull(b.k) }
+      │       └─BatchScan { table: b, columns: [b.id, b.k], distribution: UpstreamHashShard(b.id) }
+      └─BatchExchange { order: [], dist: HashShard(b.k) }
+        └─BatchScan { table: b, columns: [b.k, b.label], distribution: SomeShard }
 - name: kept - is not distinct from matches nulls
   before:
   - setup
@@ -139,19 +279,6 @@
       ├─BatchExchange { order: [], dist: HashShard(a.bk) }
       │ └─BatchFilter { predicate: IsNull(a.bk) }
       │   └─BatchScan { table: a, columns: [a.id, a.bk], distribution: UpstreamHashShard(a.id) }
-      └─BatchExchange { order: [], dist: HashShard(b.k) }
-        └─BatchFilter { predicate: IsNull(b.k) }
-          └─BatchScan { table: b, columns: [b.k, b.label], distribution: SomeShard }
-- name: kept - full join
-  before:
-  - setup
-  sql: |
-    select a.id, b.label from a full join (select * from b where k is null) b on a.bk = b.k;
-  batch_plan: |-
-    BatchExchange { order: [], dist: Single }
-    └─BatchHashJoin { type: FullOuter, predicate: a.bk = b.k, output: [a.id, b.label] }
-      ├─BatchExchange { order: [], dist: HashShard(a.bk) }
-      │ └─BatchScan { table: a, columns: [a.id, a.bk], distribution: UpstreamHashShard(a.id) }
       └─BatchExchange { order: [], dist: HashShard(b.k) }
         └─BatchFilter { predicate: IsNull(b.k) }
           └─BatchScan { table: b, columns: [b.k, b.label], distribution: SomeShard }
@@ -210,19 +337,6 @@
           │ └─BatchScan { table: a, columns: [a.id, a.bk], distribution: UpstreamHashShard(a.id) }
           └─BatchExchange { order: [], dist: HashShard(b.k) }
             └─BatchScan { table: b, columns: [b.k], distribution: SomeShard }
-- name: kept - left join, the null key is on the preserved side
-  before:
-  - setup
-  sql: |
-    select a.id, b.label from (select * from a where bk is null) a left join b on a.bk = b.k;
-  batch_plan: |-
-    BatchExchange { order: [], dist: Single }
-    └─BatchHashJoin { type: LeftOuter, predicate: a.bk = b.k, output: [a.id, b.label] }
-      ├─BatchExchange { order: [], dist: HashShard(a.bk) }
-      │ └─BatchFilter { predicate: IsNull(a.bk) }
-      │   └─BatchScan { table: a, columns: [a.id, a.bk], distribution: UpstreamHashShard(a.id) }
-      └─BatchExchange { order: [], dist: HashShard(b.k) }
-        └─BatchScan { table: b, columns: [b.k, b.label], distribution: SomeShard }
 - name: kept - the key is inside an expression other than a cast
   before:
   - setup

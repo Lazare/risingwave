@@ -75,6 +75,7 @@ use risingwave_common::util::scan_range::ScanRange;
 use risingwave_pb::hummock::HummockVersionStats;
 use risingwave_pb::plan_common::JoinType;
 
+use super::cardinality_learning::{LearnInfo, LearnSpec, RatioKind, RowSource, edge_key_of};
 use super::plan_node::generic::{Agg, GenericPlanRef, Join};
 use super::plan_node::{BatchPlanRef, BatchSeqScan, PlanNodeId};
 use super::rule::{
@@ -101,13 +102,47 @@ pub fn feedback_operators(
     plan: &BatchPlanRef,
     stats: &HummockVersionStats,
 ) -> BTreeMap<u32, FeedbackOperator> {
+    feedback_plan(plan, stats).operators
+}
+
+/// The counted operators of a final batch plan and the ratios to learn from their counts
+/// (`optimizer::cardinality_learning`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FeedbackPlan {
+    /// The counted operators, by id of plan node.
+    pub operators: BTreeMap<u32, FeedbackOperator>,
+    pub learning: Vec<LearnSpec>,
+}
+
+/// The operators of the final batch plan `plan` whose output rows are counted, and the ratios to
+/// learn from them.
+pub fn feedback_plan(plan: &BatchPlanRef, stats: &HummockVersionStats) -> FeedbackPlan {
     let mut analyzer = Analyzer {
         stats,
         recording: true,
         operators: BTreeMap::new(),
+        learning: vec![],
     };
     analyzer.visit(plan);
-    analyzer.operators
+    FeedbackPlan {
+        operators: analyzer.operators,
+        learning: analyzer.learning,
+    }
+}
+
+/// The ids of the plan nodes of `plan`, children before their parent, left to right.
+pub fn plan_node_ids_post_order(plan: &BatchPlanRef) -> Vec<u32> {
+    fn walk(plan: &BatchPlanRef, out: &mut Vec<u32>) {
+        for input in plan.inputs() {
+            walk(&input, out);
+        }
+        if let Ok(id) = u32::try_from(plan.plan_base().id().0) {
+            out.push(id);
+        }
+    }
+    let mut out = vec![];
+    walk(plan, &mut out);
+    out
 }
 
 /// Estimated rows of a relation.
@@ -134,6 +169,13 @@ struct Info {
     estimate: Option<Estimate>,
     /// Output columns that hold a unique key, if known (empty: at most one row).
     key: Option<Vec<usize>>,
+    /// What the learning (`batch_cardinality_feedback_learning`) knows of the relation.
+    learn: LearnInfo,
+    /// Where the rows of the relation are counted, for the ratios of the operators above.
+    rows: Option<RowSource>,
+    /// A scan whose predicate is partly applied by the filter right above it: the key of its
+    /// relation and the rows of its table, until that filter.
+    pending_leaf: Option<(u64, Option<RowSource>)>,
 }
 
 struct Analyzer<'a> {
@@ -141,9 +183,44 @@ struct Analyzer<'a> {
     /// False below the right side of a lookup join, which is not an executed input.
     recording: bool,
     operators: BTreeMap<u32, FeedbackOperator>,
+    learning: Vec<LearnSpec>,
 }
 
 impl Analyzer<'_> {
+    /// Where the rows of the plan node `id` are counted, if they are.
+    fn counted(&self, id: PlanNodeId) -> Option<RowSource> {
+        if !self.recording {
+            return None;
+        }
+        u32::try_from(id.0).ok().map(RowSource::Node)
+    }
+
+    /// Learns the ratio `kind` of the relation `key` from the counted rows of `output` over the
+    /// largest of `inputs`, when all are known.
+    fn learn(
+        &mut self,
+        kind: RatioKind,
+        key: u64,
+        output: Option<RowSource>,
+        inputs: Vec<Option<RowSource>>,
+    ) {
+        if !self.recording {
+            return;
+        }
+        let Some(RowSource::Node(output)) = output else {
+            return;
+        };
+        let Some(inputs) = inputs.into_iter().collect::<Option<Vec<_>>>() else {
+            return;
+        };
+        self.learning.push(LearnSpec {
+            kind,
+            key,
+            output,
+            inputs,
+        });
+    }
+
     fn record(&mut self, id: PlanNodeId, kind: &'static str, info: &Info) {
         self.record_with_estimate(id, kind, info.fingerprint, info.estimate.map(|e| e.rows));
     }
@@ -173,30 +250,79 @@ impl Analyzer<'_> {
     fn visit(&mut self, plan: &BatchPlanRef) -> Info {
         let id = plan.plan_base().id();
         if let Some(scan) = plan.as_batch_seq_scan() {
-            let info = self.seq_scan(scan);
+            let mut info = self.seq_scan(scan);
+            let rows = self.counted(id);
+            info.rows = rows;
+            if let Some(leaf) = scan.learning_leaf() {
+                let width = info.columns.len();
+                // The rows of the table: counted by the scan when it reads the whole table, from
+                // the storage statistics otherwise.
+                let table_rows = if scan.scan_ranges().is_empty() && scan.limit().is_none() {
+                    rows
+                } else {
+                    info.estimate.map(|e| RowSource::Rows(e.domain))
+                };
+                if leaf.remainder {
+                    info.pending_leaf = Some((leaf.key, table_rows));
+                } else {
+                    if leaf.filtered {
+                        self.learn(RatioKind::Selectivity, leaf.key, rows, vec![table_rows]);
+                    }
+                    info.learn = LearnInfo::base(Some(leaf.key), width);
+                }
+            }
             self.record(id, "seq_scan", &info);
             return info;
         }
         if let Some(filter) = plan.as_batch_filter() {
             let input = self.visit(&plan.inputs()[0]);
-            let info = filter_info(input, filter.predicate());
+            let pending_leaf = input.pending_leaf;
+            let input_rows = input.rows;
+            let input_learn = input.learn.clone();
+            let conjuncts = sorted_conjuncts(filter.predicate(), &input.columns);
+            let mut info = filter_info(input, filter.predicate());
+            let rows = self.counted(id);
+            let width = info.columns.len();
+            info.learn = match pending_leaf {
+                // The filter that applies the rest of the predicate of the scan below.
+                Some((key, table_rows)) => {
+                    self.learn(RatioKind::Selectivity, key, rows, vec![table_rows]);
+                    LearnInfo::base(Some(key), width)
+                }
+                None => {
+                    let learn = input_learn.filter(conjuncts);
+                    if let Some(key) = learn.key {
+                        self.learn(RatioKind::Selectivity, key, rows, vec![input_rows]);
+                    }
+                    learn
+                }
+            };
+            info.rows = rows;
+            info.pending_leaf = None;
             self.record(id, "filter", &info);
             return info;
         }
         if let Some(project) = plan.as_batch_project() {
             let input = self.visit(&plan.inputs()[0]);
-            return project_info(input, project.exprs());
+            let learn = input.learn.project(project.exprs());
+            let mut info = project_info(input, project.exprs());
+            info.learn = learn;
+            return info;
         }
         if plan.as_batch_exchange().is_some() || plan.as_batch_sort().is_some() {
             return self.visit(&plan.inputs()[0]);
         }
         if let Some(limit) = plan.as_batch_limit() {
             let input = self.visit(&plan.inputs()[0]);
+            let width = input.columns.len();
             return Info {
                 fingerprint: hash(&["limit", &hex(input.fingerprint)]),
                 estimate: input
                     .estimate
                     .map(|e| Estimate::of_rows(e.rows.min(limit.limit() as f64))),
+                learn: LearnInfo::opaque(width),
+                rows: None,
+                pending_leaf: None,
                 ..input
             };
         }
@@ -209,6 +335,9 @@ impl Analyzer<'_> {
                 columns: derived_columns(fingerprint, width),
                 estimate: Some(Estimate::of_rows(rows as f64)),
                 key: if rows <= 1 { Some(vec![]) } else { None },
+                learn: LearnInfo::opaque(width),
+                rows: Some(RowSource::Rows(rows as f64)),
+                pending_leaf: None,
             };
         }
         if let Some(join) = plan.as_batch_hash_join() {
@@ -241,11 +370,15 @@ impl Analyzer<'_> {
                 .chain(inputs.iter().map(String::as_str))
                 .collect_vec(),
         );
+        let width = plan.schema().len();
         Info {
             fingerprint,
-            columns: derived_columns(fingerprint, plan.schema().len()),
+            columns: derived_columns(fingerprint, width),
             estimate: None,
             key: None,
+            learn: LearnInfo::opaque(width),
+            rows: None,
+            pending_leaf: None,
         }
     }
 
@@ -305,11 +438,15 @@ impl Analyzer<'_> {
                 .map(|column| core.output_col_idx.iter().position(|c| c == column))
                 .collect::<Option<Vec<_>>>()
         };
+        let width = core.output_col_idx.len();
         Info {
             fingerprint,
             columns: core.output_col_idx.iter().map(|&i| column(i)).collect(),
             estimate,
             key,
+            learn: LearnInfo::opaque(width),
+            rows: None,
+            pending_leaf: None,
         }
     }
 
@@ -382,11 +519,61 @@ impl Analyzer<'_> {
         });
 
         let estimate = join_estimate(core.join_type, &left, &right, left_len, &condition);
+
+        // Learning: the key of an inner join, and the fan-out of the edge between the two base
+        // relations its equalities compare, if they only compare columns of one base relation on
+        // each side. The right side of a lookup join is not counted: its estimate stands for it.
+        let rows = self.counted(id);
+        let learn = if core.join_type == JoinType::Inner {
+            let right_rows = if lookup {
+                right.estimate.map(|e| RowSource::Rows(e.rows))
+            } else {
+                right.rows
+            };
+            let mut left_indices = vec![];
+            let mut right_indices = vec![];
+            let mut only_equalities = true;
+            for conjunct in &condition.conjunctions {
+                match conjunct.as_eq_cond() {
+                    Some((x, y)) if x.index() < left_len && y.index() >= left_len => {
+                        left_indices.push(x.index());
+                        right_indices.push(y.index() - left_len);
+                    }
+                    _ => only_equalities = false,
+                }
+            }
+            if only_equalities
+                && let Some(edge) = edge_key_of(
+                    (
+                        &left.learn,
+                        left.columns.as_slice(),
+                        left_indices.as_slice(),
+                    ),
+                    (
+                        &right.learn,
+                        right.columns.as_slice(),
+                        right_indices.as_slice(),
+                    ),
+                )
+            {
+                self.learn(RatioKind::FanOut, edge, rows, vec![left.rows, right_rows]);
+            }
+            LearnInfo::inner_join(
+                &[&left.learn, &right.learn],
+                conjuncts,
+                &core.output_indices,
+            )
+        } else {
+            LearnInfo::opaque(columns.len())
+        };
         let info = Info {
             fingerprint,
             columns,
             estimate,
             key,
+            learn,
+            rows,
+            pending_leaf: None,
         };
         self.record(id, kind, &info);
         info
@@ -397,15 +584,53 @@ impl Analyzer<'_> {
             // The second phase of a two-phase aggregation: both phases get the fingerprint of the
             // one-phase aggregation, its estimate goes to the second phase only.
             let input = self.visit(&partial.input);
-            let info = agg_info(input, &partial.group_key, partial.agg_calls.len());
+            let learning = AggLearning::of(&input, &partial.group_key);
+            let mut info = agg_info(input, &partial.group_key, partial.agg_calls.len());
+            self.learn_agg(id, &mut info, learning);
             self.record_with_estimate(partial_id, partial_kind(kind), info.fingerprint, None);
             self.record(id, kind, &info);
             return info;
         }
         let input = self.visit(&core.input);
-        let info = agg_info(input, &core.group_key, core.agg_calls.len());
+        let learning = AggLearning::of(&input, &core.group_key);
+        let mut info = agg_info(input, &core.group_key, core.agg_calls.len());
+        self.learn_agg(id, &mut info, learning);
         self.record(id, kind, &info);
         info
+    }
+
+    /// Learning: the group ratio of the aggregation `id` (its last phase), whose output is `info`.
+    fn learn_agg(&mut self, id: PlanNodeId, info: &mut Info, learning: AggLearning) {
+        let rows = self.counted(id);
+        info.learn = learning.input.agg(&learning.group, info.columns.len());
+        info.rows = rows;
+        info.pending_leaf = None;
+        if !learning.group.is_empty()
+            && let Some(key) = info.learn.key
+        {
+            self.learn(RatioKind::GroupRatio, key, rows, vec![learning.input_rows]);
+        }
+    }
+}
+
+/// What the learning needs of the input of an aggregation.
+struct AggLearning {
+    input: LearnInfo,
+    input_rows: Option<RowSource>,
+    /// The identities of the group columns.
+    group: Vec<u64>,
+}
+
+impl AggLearning {
+    fn of(input: &Info, group_key: &IndexSet) -> Self {
+        AggLearning {
+            input: input.learn.clone(),
+            input_rows: input.rows,
+            group: group_key
+                .indices()
+                .map(|g| input.columns.get(g).copied().unwrap_or(input.fingerprint))
+                .collect(),
+        }
     }
 }
 
@@ -475,11 +700,15 @@ fn agg_info(input: Info, group_key: &IndexSet, agg_calls: usize) -> Info {
     });
     let mut columns = group_columns;
     columns.extend((0..agg_calls).map(|i| hash(&["agg_call", &hex(fingerprint), &i.to_string()])));
+    let width = columns.len();
     Info {
         fingerprint,
         columns,
         estimate,
         key: Some((0..group_key.len()).collect()),
+        learn: LearnInfo::opaque(width),
+        rows: None,
+        pending_leaf: None,
     }
 }
 
@@ -640,7 +869,7 @@ fn bound_columns(pk: &[usize], from: usize, len: usize, column: &impl Fn(usize) 
 }
 
 /// The normalised text of each conjunct of `condition`, sorted.
-fn sorted_conjuncts(condition: &Condition, columns: &[u64]) -> Vec<String> {
+pub(crate) fn sorted_conjuncts(condition: &Condition, columns: &[u64]) -> Vec<String> {
     condition
         .conjunctions
         .iter()
@@ -725,7 +954,10 @@ fn is_constant(expr: &ExprImpl) -> bool {
     matches!(expr, ExprImpl::Parameter(_)) || expr.is_const()
 }
 
-fn column_identity(table_id: TableId, column_id: risingwave_common::catalog::ColumnId) -> u64 {
+pub(crate) fn column_identity(
+    table_id: TableId,
+    column_id: risingwave_common::catalog::ColumnId,
+) -> u64 {
     hash(&[
         "column",
         &table_id.as_raw_id().to_string(),
@@ -746,7 +978,7 @@ pub fn hex(fingerprint: u64) -> String {
 }
 
 /// FNV-1a over the parts, each followed by a separator: stable across versions and processes.
-fn hash(parts: &[&str]) -> u64 {
+pub(crate) fn hash(parts: &[&str]) -> u64 {
     const OFFSET: u64 = 0xcbf29ce484222325;
     const PRIME: u64 = 0x100000001b3;
     let mut hash = OFFSET;
@@ -936,6 +1168,77 @@ mod tests {
                 .sorted()
                 .collect_vec()
         );
+    }
+
+    /// The ratios to learn from the plan of `sql`, in a session that observes batch queries.
+    fn learning(frontend: &LocalFrontend, sql: &str) -> Vec<LearnSpec> {
+        let session = frontend.session_ref();
+        session
+            .set_config("batch_cardinality_feedback", "true".to_owned())
+            .unwrap();
+        let stmt = Parser::parse_sql(sql).unwrap().remove(0);
+        let handler_args = HandlerArgs::new(session.clone(), &stmt, Arc::from(sql)).unwrap();
+        let context = OptimizerContext::from_handler_args(handler_args);
+        let plan = gen_batch_plan_by_statement(&session, context.into(), stmt)
+            .unwrap()
+            .unwrap_rw()
+            .unwrap()
+            .plan;
+        let stats = session
+            .env()
+            .catalog_reader()
+            .read_guard()
+            .table_stats()
+            .clone();
+        feedback_plan(&plan, &stats).learning
+    }
+
+    #[tokio::test]
+    async fn test_ratios_to_learn() {
+        let frontend = frontend().await;
+
+        // A filter that the scan ranges cannot apply, below an aggregation: the selectivity of
+        // the filtered table and the group ratio over the filtered rows.
+        let specs = learning(
+            &frontend,
+            "select a, count(*) from t1 where c > 5 group by a",
+        );
+        let kinds = specs.iter().map(|spec| spec.kind).collect_vec();
+        assert_eq!(kinds, vec![RatioKind::Selectivity, RatioKind::GroupRatio]);
+        assert_eq!(specs[0].inputs.len(), 1);
+        assert!(matches!(specs[0].inputs[0], RowSource::Node(_)));
+        assert_eq!(specs[1].inputs, vec![RowSource::Node(specs[0].output)]);
+        // Another constant: the same keys.
+        let other = learning(
+            &frontend,
+            "select count(*), a from t1 where c > 500 group by a",
+        );
+        assert_eq!(
+            specs.iter().map(|spec| spec.key).collect_vec(),
+            other.iter().map(|spec| spec.key).collect_vec()
+        );
+
+        // A join on columns that are not keys: the fan-out of the edge between the two tables,
+        // from the rows of both inputs. The scans have no predicate: no selectivity.
+        let specs = learning(&frontend, "select * from t1 join t2 on t1.a = t2.x");
+        assert_eq!(
+            specs.iter().map(|spec| spec.kind).collect_vec(),
+            vec![RatioKind::FanOut]
+        );
+        assert_eq!(specs[0].inputs.len(), 2);
+        // The same edge, written the other way round.
+        let swapped = learning(&frontend, "select * from t2 join t1 on t2.x = t1.a");
+        assert_eq!(
+            specs.iter().map(|spec| spec.key).collect_vec(),
+            swapped.iter().map(|spec| spec.key).collect_vec()
+        );
+
+        // An aggregation of a union: no key, nothing to learn.
+        let specs = learning(
+            &frontend,
+            "select a, count(*) from (select a from t1 union all select x from t2) u group by a",
+        );
+        assert!(specs.is_empty());
     }
 
     #[test]

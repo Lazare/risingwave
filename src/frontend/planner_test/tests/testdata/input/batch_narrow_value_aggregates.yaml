@@ -1,0 +1,247 @@
+# Tests for `batch_narrow_value_aggregates` (`NarrowValueAggRule`, `NarrowValuePushRule`):
+# the functions that read the result of `first_value` / `last_value` are aggregated instead of
+# the whole value, and moved into the branches of a union and the side of a join that the value
+# comes from.
+- id: setup_off
+  sql: |
+    create table ev (id int, ts timestamp, fact jsonb, k int);
+    create table ev2 (id int, ts timestamp, fact jsonb, k int);
+    create table t (id int primary key, x int, doc jsonb);
+    create table src (j jsonb, ts timestamp);
+    create table l (s varchar, n int);
+    create table r (s varchar, j jsonb, ts timestamp);
+    create table e (e jsonb, ts timestamp);
+    create table st (id int, ts timestamp, rec struct<a varchar, b int, c varchar>);
+    create view v as select id, last_value(fact order by ts) as fact from ev group by id;
+    create view v2 as select id, last_value(fact order by ts) as fact from ev2 group by id;
+    create view vf as select id, first_value(fact order by ts desc) as fact from ev group by id;
+    create view vu as select id, last_value(fact order by ts) as fact
+      from (select id, ts, fact from ev union all select id, ts, fact from ev2) u group by id;
+    create view lower_first as select s, first_value(j order by ts desc) as j, max(ts) as ts
+      from (select l.s, r.j, r.ts from l join r on l.s = r.s) x group by s;
+    create view latest as select v->>'id' as id, last_value(v order by ts) as fact from (
+      select case when j->>'kind' = 'wrapped' then j->'inner' else j end as v, ts from src
+      union all
+      select case when j->>'kind' = 'wrapped' then j->'inner' else j end as v, ts
+        from lower_first where j->>'kind' is distinct from 'skipped'
+      union all
+      select e->'data' as v, ts from e) u group by v->>'id';
+  expected_outputs: []
+- id: setup
+  sql: |
+    set batch_narrow_value_aggregates = true;
+    create table ev (id int, ts timestamp, fact jsonb, k int);
+    create table ev2 (id int, ts timestamp, fact jsonb, k int);
+    create table t (id int primary key, x int, doc jsonb);
+    create table src (j jsonb, ts timestamp);
+    create table l (s varchar, n int);
+    create table r (s varchar, j jsonb, ts timestamp);
+    create table e (e jsonb, ts timestamp);
+    create table st (id int, ts timestamp, rec struct<a varchar, b int, c varchar>);
+    create view v as select id, last_value(fact order by ts) as fact from ev group by id;
+    create view v2 as select id, last_value(fact order by ts) as fact from ev2 group by id;
+    create view vf as select id, first_value(fact order by ts desc) as fact from ev group by id;
+    create view vu as select id, last_value(fact order by ts) as fact
+      from (select id, ts, fact from ev union all select id, ts, fact from ev2) u group by id;
+    create view lower_first as select s, first_value(j order by ts desc) as j, max(ts) as ts
+      from (select l.s, r.j, r.ts from l join r on l.s = r.s) x group by s;
+    create view latest as select v->>'id' as id, last_value(v order by ts) as fact from (
+      select case when j->>'kind' = 'wrapped' then j->'inner' else j end as v, ts from src
+      union all
+      select case when j->>'kind' = 'wrapped' then j->'inner' else j end as v, ts
+        from lower_first where j->>'kind' is distinct from 'skipped'
+      union all
+      select e->'data' as v, ts from e) u group by v->>'id';
+  expected_outputs: []
+
+# The variable is off by default: nothing changes.
+- name: off by default - one field
+  before: [setup_off]
+  sql: |
+    select id, fact->>'dir' as dir from v;
+  expected_outputs:
+  - batch_plan
+- name: off by default - CASE over the value, a lower first_value over a join, a union all
+  before: [setup_off]
+  sql: |
+    select count(*) from latest where fact->>'f' is null;
+  expected_outputs:
+  - batch_plan
+
+# Rewritten.
+- name: one field
+  before: [setup]
+  sql: |
+    select id, fact->>'dir' as dir from v;
+  expected_outputs:
+  - batch_plan
+- name: several fields of the same value are packed in one row
+  before: [setup]
+  sql: |
+    select id, fact->>'a' as a, fact->'b'->>'c' as c, fact->>'dir' is null as no_dir from v;
+  expected_outputs:
+  - batch_plan
+- name: an infallible cast is moved with the field
+  before: [setup]
+  sql: |
+    select id, (fact->'n')::varchar as n from v;
+  expected_outputs:
+  - batch_plan
+- name: a cast that may fail stays above, the field is moved
+  before: [setup]
+  sql: |
+    select id, (fact->>'n')::int as n from v;
+  expected_outputs:
+  - batch_plan
+- name: through a projection of the view
+  before: [setup]
+  sql: |
+    select doc->>'dir' as dir from (select id as key, fact as doc, 1 as one from v) w where key > 0;
+  expected_outputs:
+  - batch_plan
+- name: first_value
+  before: [setup]
+  sql: |
+    select id, fact->>'dir' as dir from vf;
+  expected_outputs:
+  - batch_plan
+- name: the aggregation above a union all
+  before: [setup]
+  sql: |
+    select id, fact->>'dir' as dir from vu;
+  expected_outputs:
+  - batch_plan
+- name: a union all of two aggregations, each narrowed
+  before: [setup]
+  sql: |
+    select id, fact->>'dir' as dir from (select id, fact from v union all select id, fact from v2) u;
+  expected_outputs:
+  - batch_plan
+- name: through the side of a join
+  before: [setup]
+  sql: |
+    select v.id, v.fact->>'dir' as dir, t.x from v join t on v.id = t.id;
+  expected_outputs:
+  - batch_plan
+- name: a field used as a join key
+  before: [setup]
+  sql: |
+    select v.id, t.x from v join t on v.fact->>'ref' = t.doc->>'ref';
+  expected_outputs:
+  - batch_plan
+- name: key existence and containment
+  before: [setup]
+  sql: |
+    select id, fact ? 'dir' as has_dir, fact @> '{"a": "a1"}' as is_a1 from v;
+  expected_outputs:
+  - batch_plan
+- name: dbt-like count of a filter on one field
+  before: [setup]
+  sql: |
+    select count(*) as failures from (select * from v where fact->>'dir' is null) dbt_internal_test;
+  expected_outputs:
+  - batch_plan
+- name: dbt-like count with a limit
+  before: [setup]
+  sql: |
+    select count(*) from (select * from v where fact->>'dir' is null limit 100) t;
+  expected_outputs:
+  - batch_plan
+- name: no group key - the aggregate may see no row, a field is NULL on NULL
+  before: [setup]
+  sql: |
+    select last_value(fact order by ts)->>'a' as a from ev;
+  expected_outputs:
+  - batch_plan
+- name: no group key - IS NULL stays above, the field is moved
+  before: [setup]
+  sql: |
+    select (last_value(fact order by ts)->>'a') is null as no_a from ev;
+  expected_outputs:
+  - batch_plan
+- name: FILTER clause - kept on the aggregate, COALESCE stays above
+  before: [setup]
+  sql: |
+    select id, coalesce(last_value(fact order by ts) filter (where k > 0)->>'a', 'none') as a from ev group by id;
+  expected_outputs:
+  - batch_plan
+- name: a struct value, one field
+  before: [setup]
+  sql: |
+    select id, (last_value(rec order by ts)).a as a from st group by id;
+  expected_outputs:
+  - batch_plan
+- name: CASE over the value, a lower first_value over a join, a union all
+  before: [setup]
+  sql: |
+    select count(*) from latest where fact->>'f' is null;
+  expected_outputs:
+  - batch_plan
+- name: only the group key of the outer aggregation is read - the lower first_value is narrowed
+  before: [setup]
+  sql: |
+    select count(*) from latest where id is null;
+  expected_outputs:
+  - batch_plan
+
+# Kept: the whole value is needed, or the functions cannot be moved.
+- name: kept - the whole value is read
+  before: [setup]
+  sql: |
+    select id, fact from v;
+  expected_outputs:
+  - batch_plan
+- name: kept - the whole value and a field are read
+  before: [setup]
+  sql: |
+    select id, fact, fact->>'dir' as dir from v;
+  expected_outputs:
+  - batch_plan
+- name: kept - a function that may fail reads the value
+  before: [setup]
+  sql: |
+    select id, jsonb_array_length(fact) as n from v;
+  expected_outputs:
+  - batch_plan
+- name: kept - a function outside the allowed list reads the value
+  before: [setup]
+  sql: |
+    select id, jsonb_strip_nulls(fact)->>'a' as a from v;
+  expected_outputs:
+  - batch_plan
+- name: kept - the whole value is a join key
+  before: [setup]
+  sql: |
+    select v.id, t.x from v join t on v.fact = t.doc;
+  expected_outputs:
+  - batch_plan
+- name: kept - the value is grouped by
+  before: [setup]
+  sql: |
+    select fact, count(*) from v group by fact;
+  expected_outputs:
+  - batch_plan
+- name: kept - distinct aggregate
+  before: [setup]
+  sql: |
+    select id, first_value(distinct fact order by fact)->>'a' as a from ev group by id;
+  expected_outputs:
+  - batch_plan
+- name: kept - the value is the order key
+  before: [setup]
+  sql: |
+    select id, last_value(fact order by fact)->>'a' as a from ev group by id;
+  expected_outputs:
+  - batch_plan
+- name: kept - a narrow type
+  before: [setup]
+  sql: |
+    select id, last_value(k order by ts) + 1 as k1 from ev group by id;
+  expected_outputs:
+  - batch_plan
+- name: kept - several rows of the value - string_agg is not a value aggregate
+  before: [setup]
+  sql: |
+    select id, string_agg(fact->>'a', ',' order by ts) as a from ev group by id;
+  expected_outputs:
+  - batch_plan

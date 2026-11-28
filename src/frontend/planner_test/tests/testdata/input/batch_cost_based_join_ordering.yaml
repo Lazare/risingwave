@@ -276,3 +276,207 @@
     h: 50
   expected_outputs:
   - batch_plan
+# Width-aware sides: the build side of a hash join is the side with fewer bytes, not fewer rows.
+# `nt` is narrow (40 bytes a row), `wt` holds a large JSON column (17 GB for 1.8 M rows), `et`
+# has the same columns as `nt`.
+- id: wide_tables
+  sql: |
+    create table nt (id int primary key, src varchar, n int);
+    create table wt (id int primary key, src varchar, body jsonb, done_at timestamp, note varchar);
+    create table et (id int primary key, src varchar, n int);
+  expected_outputs: []
+- name: narrow side with more rows against a side with a JSON column, heuristic (variable off)
+  before:
+  - wide_tables
+  sql: |
+    select nt.id, wt.body, wt.done_at from nt join wt on nt.src = wt.src;
+  table_row_counts:
+    nt: 4500000
+    wt: 1800000
+  table_sizes:
+    nt: 180000000
+    wt: 17000000000
+  expected_outputs:
+  - batch_plan
+- name: narrow side with more rows against a side with a JSON column, the build goes on the narrow side
+  before:
+  - wide_tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select nt.id, wt.body, wt.done_at from nt join wt on nt.src = wt.src;
+  table_row_counts:
+    nt: 4500000
+    wt: 1800000
+  table_sizes:
+    nt: 180000000
+    wt: 17000000000
+  expected_outputs:
+  - batch_plan
+- name: the same join written the other way round is kept
+  before:
+  - wide_tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select nt.id, wt.body, wt.done_at from wt join nt on nt.src = wt.src;
+  table_row_counts:
+    nt: 4500000
+    wt: 1800000
+  table_sizes:
+    nt: 180000000
+    wt: 17000000000
+  expected_outputs:
+  - batch_plan
+- name: without table sizes the widths of the data types give the same choice
+  before:
+  - wide_tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select nt.id, wt.body, wt.done_at from nt join wt on nt.src = wt.src;
+  table_row_counts:
+    nt: 4500000
+    wt: 1800000
+  expected_outputs:
+  - batch_plan
+- name: without statistics nothing changes
+  before:
+  - wide_tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select nt.id, wt.body, wt.done_at from nt join wt on nt.src = wt.src;
+  expected_outputs:
+  - batch_plan
+- name: equal widths, the side with fewer rows is the build side (the larger side written last)
+  before:
+  - wide_tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select * from et join nt on nt.src = et.src;
+  table_row_counts:
+    nt: 4500000
+    et: 1800000
+  table_sizes:
+    nt: 180000000
+    et: 72000000
+  expected_outputs:
+  - batch_plan
+- name: equal widths, the side with fewer rows is already the build side
+  before:
+  - wide_tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select * from nt join et on nt.src = et.src;
+  table_row_counts:
+    nt: 4500000
+    et: 1800000
+  table_sizes:
+    nt: 180000000
+    et: 72000000
+  expected_outputs:
+  - batch_plan
+- name: the JSON side is an aggregation keeping the last value of the JSON column
+  before:
+  - wide_tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select nt.id, w.body from nt join (select src, last_value(body order by done_at) as body from wt group by src) w on nt.src = w.src;
+  table_row_counts:
+    nt: 4500000
+    wt: 1800000
+  table_sizes:
+    nt: 180000000
+    wt: 17000000000
+  expected_outputs:
+  - batch_plan
+- name: the JSON side is a top-1 per group
+  before:
+  - wide_tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select nt.id, w.body from nt join (select src, body from (select src, body, row_number() over (partition by src order by done_at desc) as rn from wt) where rn = 1) w on nt.src = w.src;
+  table_row_counts:
+    nt: 4500000
+    wt: 1800000
+  table_sizes:
+    nt: 180000000
+    wt: 17000000000
+  expected_outputs:
+  - batch_plan
+- name: left join with the JSON side optional, heuristic (variable off)
+  before:
+  - wide_tables
+  sql: |
+    select nt.id, wt.body from nt left join wt on nt.src = wt.src;
+  table_row_counts:
+    nt: 4500000
+    wt: 1800000
+  table_sizes:
+    nt: 180000000
+    wt: 17000000000
+  expected_outputs:
+  - batch_plan
+- name: left join with the JSON side optional becomes a right join that builds the narrow side
+  before:
+  - wide_tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select nt.id, wt.body from nt left join wt on nt.src = wt.src;
+  table_row_counts:
+    nt: 4500000
+    wt: 1800000
+  table_sizes:
+    nt: 180000000
+    wt: 17000000000
+  expected_outputs:
+  - batch_plan
+- name: left join with the JSON side preserved is kept (it already builds the narrow side)
+  before:
+  - wide_tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select nt.n, wt.body from wt left join nt on nt.src = wt.src;
+  table_row_counts:
+    nt: 4500000
+    wt: 1800000
+  table_sizes:
+    nt: 180000000
+    wt: 17000000000
+  expected_outputs:
+  - batch_plan
+- name: left join with equal widths and similar sizes is kept
+  before:
+  - wide_tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select nt.id, et.n from nt left join et on nt.src = et.src;
+  table_row_counts:
+    nt: 4500000
+    et: 1800000
+  table_sizes:
+    nt: 180000000
+    et: 72000000
+  expected_outputs:
+  - batch_plan
+- name: left join without statistics is kept
+  before:
+  - wide_tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select nt.id, wt.body from nt left join wt on nt.src = wt.src;
+  expected_outputs:
+  - batch_plan
+- name: three-way join with a JSON side (multi-join ordering by bytes)
+  before:
+  - wide_tables
+  sql: |
+    set batch_cost_based_join_ordering = true;
+    select nt.id, wt.body, et.n from nt join wt on nt.src = wt.src join et on et.src = nt.src;
+  table_row_counts:
+    nt: 4500000
+    wt: 1800000
+    et: 1800000
+  table_sizes:
+    nt: 180000000
+    wt: 17000000000
+    et: 72000000
+  expected_outputs:
+  - batch_plan

@@ -1,0 +1,223 @@
+# Cardinality feedback learning of batch queries (`batch_cardinality_feedback_learning`): the
+# ratios measured when a query runs replace the fixed guesses of the planner for the next queries.
+# Each query below runs several times: its plan changes only once an execution was observed, and
+# its result stays the same. The expected plans are the ones of the planner test
+# `batch_cardinality_feedback_learning.yaml` (verbose explain, distributed).
+#
+# The ratios are kept in the memory of the frontend: the plans below hold for a frontend that did
+# not run this test before (as in CI). They are recorded when the query is over, which may be a
+# moment after its last row reached the client: the checks that follow an execution retry.
+
+statement ok
+SET RW_IMPLICIT_FLUSH TO true;
+
+statement ok
+create table cfl_big (id int primary key, k int, v int);
+
+statement ok
+create table cfl_mid (id int primary key, k int, c_id int);
+
+statement ok
+create table cfl_win (id int primary key, k int, v int);
+
+# One value of `k` per row: an aggregation by `k` returns as many groups as rows, ten times the
+# fixed guess of the planner.
+statement ok
+insert into cfl_big select g, g, g % 1000 from generate_series(1, 100000) g;
+
+# Each row matches one group of the aggregation of `cfl_big`.
+statement ok
+insert into cfl_mid select g, g * 7, g % 100 + 1 from generate_series(1, 12000) g;
+
+# 100 values of `k`, 100 rows each.
+statement ok
+insert into cfl_win select g, g % 100, g % 37 from generate_series(1, 10000) g;
+
+# The estimates use the storage statistics of the tables: wait until the frontend has them.
+query I retry 30 backoff 1s
+select count(*) from rw_catalog.rw_table_stats s join rw_catalog.rw_tables t on s.id = t.id
+where (t.name = 'cfl_big' and s.total_key_count >= 100000)
+   or (t.name = 'cfl_mid' and s.total_key_count >= 12000)
+   or (t.name = 'cfl_win' and s.total_key_count >= 10000);
+----
+3
+
+statement ok
+set query_mode = distributed;
+
+statement ok
+set batch_cost_based_join_ordering = true;
+
+statement ok
+set batch_cardinality_feedback_learning = true;
+
+# Nothing learned yet.
+query I
+select count(*) from rw_catalog.rw_batch_cardinality_learning;
+----
+0
+
+# Join ordering. With the fixed guesses, the aggregation returns a tenth of its 100000 rows, fewer
+# than the 12000 rows of `cfl_mid`: it is the build side of the hash join.
+query T
+explain (verbose) select count(*) from (select k, count(*) as n from cfl_big group by k) g join cfl_mid m on m.k = g.k;
+----
+BatchSimpleAgg { aggs: [sum0(count)] }
+└─BatchExchange { order: [], dist: Single }
+  └─BatchSimpleAgg { aggs: [count] }
+    └─BatchHashJoin { type: Inner, predicate: cfl_mid.k = cfl_big.k, output: [] }
+      ├─BatchExchange { order: [], dist: HashShard(cfl_mid.k) }
+      │ └─BatchScan { table: cfl_mid, columns: [cfl_mid.k], distribution: SomeShard }
+      └─BatchHashAgg { group_key: [cfl_big.k], aggs: [] }
+        └─BatchExchange { order: [], dist: HashShard(cfl_big.k) }
+          └─BatchScan { table: cfl_big, columns: [cfl_big.k], distribution: SomeShard }
+
+query I
+select count(*) from (select k, count(*) as n from cfl_big group by k) g join cfl_mid m on m.k = g.k;
+----
+12000
+
+# The execution measured one group per input row: `cfl_mid` becomes the build side.
+query TIR retry 5 backoff 1s
+select ratio_kind, observations, max_ratio from rw_catalog.rw_batch_cardinality_learning
+where ratio_kind = 'group_ratio';
+----
+group_ratio 1 1
+
+query T retry 5 backoff 1s
+explain (verbose) select count(*) from (select k, count(*) as n from cfl_big group by k) g join cfl_mid m on m.k = g.k;
+----
+BatchSimpleAgg { aggs: [sum0(count)] }
+└─BatchExchange { order: [], dist: Single }
+  └─BatchSimpleAgg { aggs: [count] }
+    └─BatchHashJoin { type: Inner, predicate: cfl_big.k = cfl_mid.k, output: [] }
+      ├─BatchHashAgg { group_key: [cfl_big.k], aggs: [] }
+      │ └─BatchExchange { order: [], dist: HashShard(cfl_big.k) }
+      │   └─BatchScan { table: cfl_big, columns: [cfl_big.k], distribution: SomeShard }
+      └─BatchExchange { order: [], dist: HashShard(cfl_mid.k) }
+        └─BatchScan { table: cfl_mid, columns: [cfl_mid.k], distribution: SomeShard }
+
+# The same result with the other plan, which stays the same over more executions.
+query I
+select count(*) from (select k, count(*) as n from cfl_big group by k) g join cfl_mid m on m.k = g.k;
+----
+12000
+
+query I
+select count(*) from (select k, count(*) as n from cfl_big group by k) g join cfl_mid m on m.k = g.k;
+----
+12000
+
+query TI retry 5 backoff 1s
+select ratio_kind, observations from rw_catalog.rw_batch_cardinality_learning
+where ratio_kind = 'group_ratio';
+----
+group_ratio 3
+
+query T
+explain (verbose) select count(*) from (select k, count(*) as n from cfl_big group by k) g join cfl_mid m on m.k = g.k;
+----
+BatchSimpleAgg { aggs: [sum0(count)] }
+└─BatchExchange { order: [], dist: Single }
+  └─BatchSimpleAgg { aggs: [count] }
+    └─BatchHashJoin { type: Inner, predicate: cfl_big.k = cfl_mid.k, output: [] }
+      ├─BatchHashAgg { group_key: [cfl_big.k], aggs: [] }
+      │ └─BatchExchange { order: [], dist: HashShard(cfl_big.k) }
+      │   └─BatchScan { table: cfl_big, columns: [cfl_big.k], distribution: SomeShard }
+      └─BatchExchange { order: [], dist: HashShard(cfl_mid.k) }
+        └─BatchScan { table: cfl_mid, columns: [cfl_mid.k], distribution: SomeShard }
+
+# Top-n per group (`batch_over_window_to_topn`): 20 rows per group is above the fixed limit of 10,
+# so the window stays...
+statement ok
+set batch_over_window_to_topn = true;
+
+query T
+explain (verbose) select count(*), sum(id), sum(v) from (select id, k, v, row_number() over (partition by k order by v, id) as rn from cfl_win) t where rn <= 20;
+----
+BatchSimpleAgg { aggs: [sum0(count), sum(sum(cfl_win.id)), sum(sum(cfl_win.v))] }
+└─BatchExchange { order: [], dist: Single }
+  └─BatchSimpleAgg { aggs: [count, sum(cfl_win.id), sum(cfl_win.v)] }
+    └─BatchFilter { predicate: (row_number <= 20:Int32) }
+      └─BatchOverWindow { window_functions: [row_number() OVER(PARTITION BY cfl_win.k ORDER BY cfl_win.v ASC, cfl_win.id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)] }
+        └─BatchExchange { order: [cfl_win.k ASC, cfl_win.v ASC, cfl_win.id ASC], dist: HashShard(cfl_win.k) }
+          └─BatchSort { order: [cfl_win.k ASC, cfl_win.v ASC, cfl_win.id ASC] }
+            └─BatchScan { table: cfl_win, columns: [cfl_win.id, cfl_win.k, cfl_win.v], distribution: UpstreamHashShard(cfl_win.id) }
+
+query III
+select count(*), sum(id), sum(v) from (select id, k, v, row_number() over (partition by k order by v, id) as rn from cfl_win) t where rn <= 20;
+----
+2000 9700900 6419
+
+# ... until an aggregation by `k` shows 100 groups of 10000 rows: 20 rows per group then hold
+# fewer rows than the input, and the window becomes a top-n per group.
+query I
+select count(*) from (select k, count(*) from cfl_win group by k) x;
+----
+100
+
+query TIR retry 5 backoff 1s
+select ratio_kind, observations, max_ratio from rw_catalog.rw_batch_cardinality_learning
+where ratio_kind = 'group_ratio' and max_ratio < 0.5;
+----
+group_ratio 1 0.01
+
+query T retry 5 backoff 1s
+explain (verbose) select count(*), sum(id), sum(v) from (select id, k, v, row_number() over (partition by k order by v, id) as rn from cfl_win) t where rn <= 20;
+----
+BatchSimpleAgg { aggs: [sum0(count), sum(sum(cfl_win.id)), sum(sum(cfl_win.v))] }
+└─BatchExchange { order: [], dist: Single }
+  └─BatchSimpleAgg { aggs: [count, sum(cfl_win.id), sum(cfl_win.v)] }
+    └─BatchGroupTopN { order: [cfl_win.v ASC, cfl_win.id ASC], limit: 20, offset: 0, group_key: [cfl_win.k] }
+      └─BatchExchange { order: [], dist: HashShard(cfl_win.k) }
+        └─BatchScan { table: cfl_win, columns: [cfl_win.id, cfl_win.k, cfl_win.v], distribution: UpstreamHashShard(cfl_win.id) }
+
+query III
+select count(*), sum(id), sum(v) from (select id, k, v, row_number() over (partition by k order by v, id) as rn from cfl_win) t where rn <= 20;
+----
+2000 9700900 6419
+
+# The learning off: the fixed guesses again, the same results.
+statement ok
+set batch_cardinality_feedback_learning = false;
+
+query T
+explain (verbose) select count(*) from (select k, count(*) as n from cfl_big group by k) g join cfl_mid m on m.k = g.k;
+----
+BatchSimpleAgg { aggs: [sum0(count)] }
+└─BatchExchange { order: [], dist: Single }
+  └─BatchSimpleAgg { aggs: [count] }
+    └─BatchHashJoin { type: Inner, predicate: cfl_mid.k = cfl_big.k, output: [] }
+      ├─BatchExchange { order: [], dist: HashShard(cfl_mid.k) }
+      │ └─BatchScan { table: cfl_mid, columns: [cfl_mid.k], distribution: SomeShard }
+      └─BatchHashAgg { group_key: [cfl_big.k], aggs: [] }
+        └─BatchExchange { order: [], dist: HashShard(cfl_big.k) }
+          └─BatchScan { table: cfl_big, columns: [cfl_big.k], distribution: SomeShard }
+
+query I
+select count(*) from (select k, count(*) as n from cfl_big group by k) g join cfl_mid m on m.k = g.k;
+----
+12000
+
+query III
+select count(*), sum(id), sum(v) from (select id, k, v, row_number() over (partition by k order by v, id) as rn from cfl_win) t where rn <= 20;
+----
+2000 9700900 6419
+
+statement ok
+set batch_over_window_to_topn = false;
+
+statement ok
+set batch_cost_based_join_ordering = false;
+
+statement ok
+set query_mode = auto;
+
+statement ok
+drop table cfl_big;
+
+statement ok
+drop table cfl_mid;
+
+statement ok
+drop table cfl_win;

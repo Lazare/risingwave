@@ -1171,7 +1171,7 @@ pub use batch_over_window::BatchOverWindow;
 pub use batch_postgres_query::BatchPostgresQuery;
 pub use batch_project::BatchProject;
 pub use batch_project_set::BatchProjectSet;
-pub use batch_seq_scan::BatchSeqScan;
+pub use batch_seq_scan::{BatchSeqScan, LearningLeaf};
 pub use batch_simple_agg::BatchSimpleAgg;
 pub use batch_sort::BatchSort;
 pub use batch_sort_agg::BatchSortAgg;

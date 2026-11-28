@@ -24,6 +24,11 @@
 //!
 //! The peaks are recorded with one atomic operation per accounted allocation, and written once
 //! when the query leaves the node, to tell whether the limits should be raised or lowered.
+//!
+//! With `batch_spill_on_memory_wait`, an operator that cannot spill and must wait for memory asks
+//! the spillable operators of its own query to give back what they took from the shared part of
+//! the pool: their contexts stop growing, so the next of them that needs more spills to disk and
+//! releases its memory, which the waiting operator then takes from the pool.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
@@ -44,6 +49,10 @@ const REPORT_MIN_PEAK_BYTES: i64 = 64 << 20;
 
 /// A wait for memory is reported in the logs each time it has lasted this much longer.
 const LONG_WAIT_REPORT_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How long an operator that asked the spillable operators of its query to spill keeps waiting
+/// for them, even when no other query can release memory.
+const SPILL_REQUEST_GRACE: Duration = Duration::from_secs(60);
 
 /// The memory limits of the queries of a node, derived from its batch memory limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,6 +192,8 @@ struct QueryMemoryStats {
     overflow_peak: AtomicI64,
     overflow: AtomicI64,
     overflow_wait_ms: AtomicU64,
+    /// How many times an operator that cannot spill asked the spillable operators to spill.
+    spill_requests: AtomicU64,
 }
 
 /// Counts the memory of the whole query and records its peak.
@@ -428,25 +439,32 @@ impl MemoryBudget {
     /// Takes `mb` for an operator of a running query, beyond the pool of the query.
     ///
     /// `try_pool` is tried first, each time memory may have been released. Then the memory of
-    /// the node that nobody took. When there is none, waits for another query to release some,
-    /// and fails when no other query runs that is not waiting itself, or when the wait lasts
-    /// longer than the limit of the budget: a query that runs may hold its memory for hours, or
-    /// wait for something that never comes. Cancel safe.
+    /// the node that nobody took. When there is none, `request_spill` is called once, to ask the
+    /// spillable operators of the query to release memory into its pool, and the operator waits
+    /// for them or for another query to release some. It fails when no other query runs that is
+    /// not waiting itself (after a grace period when its own spillable operators were asked to
+    /// spill), or when the wait lasts longer than the limit of the budget: a query that runs may
+    /// hold its memory for hours, or wait for something that never comes. Cancel safe.
     async fn take_overflow(
         self: &Arc<Self>,
         mb: u64,
         query_waiters: &AtomicUsize,
+        operator: &str,
         mut try_pool: impl FnMut() -> bool,
+        mut request_spill: impl FnMut() -> Option<SpillRequest>,
     ) -> std::result::Result<Option<BudgetPermit>, ()> {
         let mut waiter = None;
+        let mut spill_request: Option<SpillRequest> = None;
         let start = Instant::now();
         let mut next_report = LONG_WAIT_REPORT_INTERVAL;
         loop {
             if start.elapsed() >= next_report {
                 next_report = start.elapsed() + LONG_WAIT_REPORT_INTERVAL;
                 tracing::warn!(
+                    operator,
                     waited_secs = start.elapsed().as_secs(),
                     needed_mb = mb,
+                    spill_requested = spill_request.is_some(),
                     budget = self.describe(),
                     "batch operator still waits for memory beyond the pool of its query"
                 );
@@ -478,15 +496,32 @@ impl MemoryBudget {
                 }
                 state.active_queries <= state.blocked_queries
             };
-            if stuck {
+            if spill_request.is_none() {
+                spill_request = request_spill();
+            }
+            // The spillable operators of the query may still release memory into its pool.
+            let spilling = spill_request
+                .as_ref()
+                .is_some_and(|r| r.revocable && start.elapsed() < SPILL_REQUEST_GRACE);
+            if stuck && !spilling {
+                tracing::warn!(
+                    operator,
+                    waited_secs = start.elapsed().as_secs(),
+                    needed_mb = mb,
+                    spill_requested = spill_request.is_some(),
+                    budget = self.describe(),
+                    "batch operator fails: no running query can release the memory that it needs"
+                );
                 return Err(());
             }
             if let Some(limit) = self.overflow_wait_limit
                 && start.elapsed() >= limit
             {
                 tracing::warn!(
+                    operator,
                     waited_secs = start.elapsed().as_secs(),
                     needed_mb = mb,
+                    spill_requested = spill_request.is_some(),
                     budget = self.describe(),
                     "batch operator gives up waiting for memory beyond the pool of its query"
                 );
@@ -517,6 +552,14 @@ pub struct QueryMemory {
     /// The part of the pool that is not reserved, charged with what the spillable operators use
     /// beyond their reservation.
     shared_pool: MemoryContext,
+    /// Between the spillable operators and `shared_pool`: what they use beyond their reservation.
+    /// Its limit is lowered while an operator that cannot spill asks them to spill.
+    spill_gate: MemoryContext,
+    /// `batch_spill_on_memory_wait`: an operator that cannot spill and waits for memory asks the
+    /// spillable operators of the query to spill.
+    spill_on_memory_wait: AtomicBool,
+    /// The operators that currently ask the spillable operators to spill.
+    spill_requests: Mutex<usize>,
     query_limit: u64,
     operator_pool: u64,
     operator_reserved: u64,
@@ -550,7 +593,7 @@ impl QueryMemory {
             stats: self.stats.clone(),
         };
         MemoryContext::new_with_reservation(
-            self.shared_pool.clone(),
+            self.spill_gate.clone(),
             self.context.clone(),
             self.operator_reserved,
             counter,
@@ -568,6 +611,7 @@ impl QueryMemory {
         ExecutorMemory {
             meter,
             managed: Some(ManagedMemory {
+                operator: String::new(),
                 query: self.clone(),
                 budget: registry.budget.clone(),
                 settled: 0,
@@ -595,6 +639,44 @@ impl QueryMemory {
 
     pub fn query_limit(&self) -> u64 {
         self.query_limit
+    }
+
+    /// `batch_spill_on_memory_wait`: from now on, an operator of the query that cannot spill and
+    /// waits for memory asks the spillable operators of the query to spill.
+    pub fn enable_spill_on_memory_wait(&self) {
+        self.spill_on_memory_wait.store(true, Ordering::Relaxed);
+    }
+
+    fn spills_on_memory_wait(&self) -> bool {
+        self.spill_on_memory_wait.load(Ordering::Relaxed)
+    }
+
+    /// Asks the spillable operators of the query to release `needed` bytes into the pool: what
+    /// they may use beyond their reservations is capped below what they use now, so that the next
+    /// of them that needs more spills to disk and gives its memory back. The cap is lifted when
+    /// the last request ends.
+    fn request_spill(self: &Arc<Self>, needed: i64, operator: &str) -> SpillRequest {
+        let held = self.spill_gate.get_bytes_used();
+        {
+            let mut requests = self.spill_requests.lock();
+            *requests += 1;
+            let cap = (held - needed).max(0) as u64;
+            if cap < self.spill_gate.mem_limit() {
+                self.spill_gate.set_mem_limit(cap);
+            }
+        }
+        self.stats.spill_requests.fetch_add(1, Ordering::Relaxed);
+        tracing::warn!(
+            query_id = self.query_id,
+            operator,
+            needed_mb = needed >> 20,
+            spillable_held_mb = held >> 20,
+            "batch operator waits for memory: the spillable operators of its query are asked to spill"
+        );
+        SpillRequest {
+            query: self.clone(),
+            revocable: held > 0,
+        }
     }
 
     /// Waits until the memory that the query reserves is available on the node. Queries are
@@ -642,6 +724,25 @@ impl QueryMemory {
     }
 }
 
+/// A request of an operator that cannot spill to the spillable operators of its query. They
+/// may grow again once the last request of the query is dropped.
+struct SpillRequest {
+    query: Arc<QueryMemory>,
+    /// Whether the spillable operators held memory beyond their reservations when asked: if not,
+    /// there is nothing to wait for.
+    revocable: bool,
+}
+
+impl Drop for SpillRequest {
+    fn drop(&mut self) {
+        let mut requests = self.query.spill_requests.lock();
+        *requests -= 1;
+        if *requests == 0 {
+            self.query.spill_gate.set_mem_limit(u64::MAX);
+        }
+    }
+}
+
 /// The memory of an operator that cannot spill to disk.
 ///
 /// The operator counts what it uses in [`meter`](Self::meter), which never refuses, and calls
@@ -654,6 +755,8 @@ pub struct ExecutorMemory {
 }
 
 struct ManagedMemory {
+    /// The identity of the operator, for the errors and the logs.
+    operator: String,
     query: Arc<QueryMemory>,
     budget: Arc<MemoryBudget>,
     /// What was settled so far, and where it was taken from.
@@ -691,6 +794,14 @@ impl ExecutorMemory {
         }
     }
 
+    /// Names the operator in the errors and logs about its memory.
+    pub fn with_identity(mut self, identity: &str) -> Self {
+        if let Some(managed) = &mut self.managed {
+            managed.operator = identity.to_owned();
+        }
+        self
+    }
+
     /// Whether the memory is bounded by the node: when it is not, [`settle`](Self::settle) never
     /// waits nor fails.
     pub fn is_managed(&self) -> bool {
@@ -722,8 +833,12 @@ impl ExecutorMemory {
 impl ManagedMemory {
     async fn grow(&mut self, bytes: i64) -> Result<()> {
         // Once the operator went beyond the pool, it stays there until it has given it all back,
-        // so that what is released is always the memory taken last.
-        if self.overflow_bytes == 0 && self.pool.add(bytes) {
+        // so that what is released is always the memory taken last. Except when it may ask the
+        // spillable operators of its query to spill: the memory that they release goes to the
+        // pool, where it must be able to take it.
+        let spill_on_wait = self.query.spills_on_memory_wait();
+        let from_pool = self.overflow_bytes == 0 || spill_on_wait;
+        if from_pool && self.pool.add(bytes) {
             return Ok(());
         }
         const MB: i64 = 1 << 20;
@@ -732,12 +847,17 @@ impl ManagedMemory {
         if needed_mb > held_mb {
             let start = Instant::now();
             let pool = &self.pool;
-            let from_pool = self.overflow_bytes == 0;
+            let query = &self.query;
+            let operator = self.operator.as_str();
             let taken = self
                 .budget
-                .take_overflow(needed_mb - held_mb, &self.query.overflow_waiters, || {
-                    from_pool && pool.add(bytes)
-                })
+                .take_overflow(
+                    needed_mb - held_mb,
+                    &self.query.overflow_waiters,
+                    operator_name(operator),
+                    || from_pool && pool.add(bytes),
+                    || spill_on_wait.then(|| query.request_spill(bytes, operator_name(operator))),
+                )
                 .await;
             let stats = &self.query.stats;
             stats
@@ -748,13 +868,15 @@ impl ManagedMemory {
                 Ok(Some(permit)) => self.overflow_permits.push(permit),
                 Err(()) => {
                     return Err(BatchError::NoMemoryLeft(
+                        operator_name(&self.operator).to_owned(),
                         ((self.settled + bytes) >> 20) as u64,
                     ));
                 }
             }
         }
-        // Counted for the node only: the limit of the query does not apply.
-        self.overflow.add(bytes);
+        // Counted for the node only: the limit of the query does not apply. The permit guarantees
+        // the room in the budget; counted whatever the context says, as its release is.
+        self.overflow.force_add(bytes);
         self.overflow_bytes += bytes;
         let stats = &self.query.stats;
         let overflow = stats.overflow.fetch_add(bytes, Ordering::Relaxed) + bytes;
@@ -778,6 +900,15 @@ impl ManagedMemory {
         if bytes > from_overflow {
             self.pool.add(-(bytes - from_overflow));
         }
+    }
+}
+
+/// The name of an operator in the errors and logs, when it was not given.
+fn operator_name(operator: &str) -> &str {
+    if operator.is_empty() {
+        "unknown operator"
+    } else {
+        operator
     }
 }
 
@@ -839,6 +970,7 @@ impl Drop for QueryMemory {
             && !query_at_limit
             && queued_ms < 1000
             && overflow_peak == 0
+            && stats.spill_requests.load(Ordering::Relaxed) == 0
         {
             return;
         }
@@ -864,6 +996,7 @@ impl Drop for QueryMemory {
             queued_ms,
             overflow_peak_mb = overflow_peak >> 20,
             overflow_wait_ms = stats.overflow_wait_ms.load(Ordering::Relaxed),
+            spill_requests = stats.spill_requests.load(Ordering::Relaxed),
             "batch query memory"
         );
     }
@@ -948,10 +1081,18 @@ impl QueryMemoryRegistry {
                 operator_reserved.saturating_mul(spillable_operator_instances as u64),
             ),
         );
+        let spill_gate = MemoryContext::new_with_mem_limit(
+            Some(shared_pool.clone()),
+            PlainCounter(AtomicI64::new(0)),
+            u64::MAX,
+        );
         let query = Arc::new(QueryMemory {
             query_id: query_id.to_owned(),
             context,
             shared_pool,
+            spill_gate,
+            spill_on_memory_wait: AtomicBool::new(false),
+            spill_requests: Mutex::new(0),
             query_limit: limits.query_limit(spillable_operator_instances),
             operator_pool,
             operator_reserved,
@@ -1189,7 +1330,7 @@ mod tests {
         // Up to the whole batch memory, never beyond: no other query can release any.
         meter.add(800 * MB as i64);
         let error = memory.settle().await.unwrap_err();
-        assert!(matches!(error, BatchError::NoMemoryLeft(_)), "{error:?}");
+        assert!(matches!(error, BatchError::NoMemoryLeft(..)), "{error:?}");
         meter.add(-(800 * MB as i64));
         meter.add(744 * MB as i64);
         memory.settle().await.unwrap();
@@ -1284,7 +1425,7 @@ mod tests {
         // ... which cannot wait for the first one in turn: it fails, and the first one goes on.
         m2.meter().add(1000 * MB as i64);
         let error = m2.settle().await.unwrap_err();
-        assert!(matches!(error, BatchError::NoMemoryLeft(_)), "{error:?}");
+        assert!(matches!(error, BatchError::NoMemoryLeft(..)), "{error:?}");
         drop(m2);
         waiter.await.unwrap();
     }
@@ -1318,11 +1459,117 @@ mod tests {
         m2.meter().add(1000 * MB as i64);
         let start = std::time::Instant::now();
         let error = m2.settle().await.unwrap_err();
-        assert!(matches!(error, BatchError::NoMemoryLeft(_)), "{error:?}");
+        assert!(matches!(error, BatchError::NoMemoryLeft(..)), "{error:?}");
         assert!(start.elapsed() >= std::time::Duration::from_secs(1));
         drop(m2);
         assert_eq!(registry.inner.budget.state.lock().overflow_waiters, 0);
         drop(m1);
         assert_eq!(root.get_bytes_used(), 0);
+    }
+
+    /// A query alone on a node of 4000 MB: one operator that cannot spill holds all the memory
+    /// of the node beyond the pool of the query, and a spillable operator holds 150 MB of the
+    /// shared part of the pool (192 MB). Returns the query, the memory of the first operator and
+    /// the context of the spillable one.
+    async fn query_holding_the_node(
+        registry: &QueryMemoryRegistry,
+        spill_on_memory_wait: bool,
+    ) -> (
+        Arc<QueryMemory>,
+        AdmissionGuard,
+        ExecutorMemory,
+        MemoryContext,
+    ) {
+        let query = registry.get_or_create("q", 4);
+        if spill_on_memory_wait {
+            query.enable_spill_on_memory_wait();
+        }
+        let guard = query.admit().await;
+        let mut holder = query.executor_memory(meter()).with_identity("Holder");
+        holder.meter().add((4000 - 256) * MB as i64);
+        holder.settle().await.unwrap();
+        assert_eq!(registry.inner.budget.state.lock().taken_mb, 4000);
+        let spillable = query.spillable_operator_context();
+        assert!(spillable.add(166 * MB as i64));
+        assert_eq!(query.spill_gate.get_bytes_used(), 150 * MB as i64);
+        (query, guard, holder, spillable)
+    }
+
+    #[tokio::test]
+    async fn test_executor_memory_names_the_operator_when_it_fails() {
+        let (registry, _root) = registry(4000 * MB);
+        let (query, _guard, _holder, _spillable) = query_holding_the_node(&registry, false).await;
+        // Nothing left on the node and no other query: without spill requests, the operator
+        // fails at once, and the error names it.
+        let mut memory = query.executor_memory(meter()).with_identity("GroupTopN 42");
+        memory.meter().add(100 * MB as i64);
+        let error = memory.settle().await.unwrap_err();
+        assert!(matches!(error, BatchError::NoMemoryLeft(..)), "{error:?}");
+        assert!(error.to_string().contains("GroupTopN 42"), "{error}");
+        assert_eq!(query.stats.spill_requests.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn test_executor_memory_asks_the_spillable_operators_to_spill() {
+        let (registry, root) = registry(4000 * MB);
+        let (query, _guard, holder, spillable) = query_holding_the_node(&registry, true).await;
+
+        // The operator needs 100 MB: the pool lacks them, the node has nothing left, and no
+        // other query runs. It asks the spillable operator to spill and waits for it.
+        let mut memory = query.executor_memory(meter()).with_identity("GroupTopN 42");
+        memory.meter().add(100 * MB as i64);
+        let waiter = tokio::spawn(async move {
+            memory.settle().await.unwrap();
+            memory
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!waiter.is_finished());
+        assert_eq!(query.stats.spill_requests.load(Ordering::Relaxed), 1);
+
+        // The spillable operator can no longer grow beyond its reservation: it spills, and gives
+        // its memory back.
+        assert!(!spillable.add(1));
+        assert!(spillable.add(-(166 * MB as i64)));
+        // Its reservation is still granted, and beyond it what the waiting operator does not
+        // need: 150 - 100 MB.
+        assert!(spillable.add(16 * MB as i64));
+        assert!(spillable.add(50 * MB as i64));
+        assert!(!spillable.add(1));
+
+        // The waiting operator takes what was released from the pool.
+        let memory = tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(query.shared_pool.get_bytes_used(), 150 * MB as i64);
+        // The request ended: the spillable operator may grow again, within the pool.
+        assert_eq!(query.spill_gate.mem_limit(), u64::MAX);
+        assert!(spillable.add(42 * MB as i64));
+        assert!(!spillable.add(1));
+
+        drop((memory, holder, spillable));
+        assert_eq!(root.get_bytes_used(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_spill_request_does_not_wait_for_operators_that_hold_nothing() {
+        let (registry, _root) = registry(4000 * MB);
+        let (query, _guard, _holder, spillable) = query_holding_the_node(&registry, true).await;
+        // The spillable operator holds nothing beyond its reservation: there is nothing to wait
+        // for, the operator fails at once, as without spill requests.
+        assert!(spillable.add(-(150 * MB as i64)));
+        // Another operator that cannot spill fills the pool.
+        let mut other = query.executor_memory(meter());
+        other.meter().add(192 * MB as i64);
+        other.settle().await.unwrap();
+        let mut memory = query.executor_memory(meter()).with_identity("LookupJoin 7");
+        memory.meter().add(100 * MB as i64);
+        let start = Instant::now();
+        let error = memory.settle().await.unwrap_err();
+        assert!(error.to_string().contains("LookupJoin 7"), "{error}");
+        assert!(start.elapsed() < Duration::from_secs(5));
+        assert_eq!(query.stats.spill_requests.load(Ordering::Relaxed), 1);
+        // The request ended with the wait.
+        assert_eq!(query.spill_gate.mem_limit(), u64::MAX);
     }
 }

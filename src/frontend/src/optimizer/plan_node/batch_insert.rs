@@ -18,6 +18,7 @@ use risingwave_pb::batch_plan::plan_node::NodeBody;
 use risingwave_pb::plan_common::{DefaultColumns, IndexAndExpr};
 
 use super::batch::prelude::*;
+use super::batch_union::input_to_distributed_with_required;
 use super::utils::{Distill, childless_record};
 use super::{
     BatchPlanRef as PlanRef, ExprRewritable, PlanTreeNodeUnary, ToBatchPb, ToDistributedBatch,
@@ -73,10 +74,12 @@ impl ToDistributedBatch for BatchInsert {
     fn to_distributed(&self) -> Result<PlanRef> {
         if DistributedDmlVisitor::dml_should_run_in_distributed(self.input()) {
             // Add an hash shuffle between the insert and its input.
-            let new_input = RequiredDist::PhysicalDist(Distribution::HashShard(
-                (0..self.input().schema().len()).collect(),
-            ))
-            .batch_enforce_if_not_satisfies(self.input().to_distributed()?, &Order::any())?;
+            let new_input = input_to_distributed_with_required(
+                &self.input(),
+                &RequiredDist::PhysicalDist(Distribution::HashShard(
+                    (0..self.input().schema().len()).collect(),
+                )),
+            )?;
             let new_insert: PlanRef = self.clone_with_input(new_input).into();
             if self.core.returning {
                 Ok(new_insert)
@@ -84,8 +87,8 @@ impl ToDistributedBatch for BatchInsert {
                 utils::sum_affected_row(new_insert)
             }
         } else {
-            let new_input = RequiredDist::single()
-                .batch_enforce_if_not_satisfies(self.input().to_distributed()?, &Order::any())?;
+            let new_input =
+                input_to_distributed_with_required(&self.input(), &RequiredDist::single())?;
             Ok(self.clone_with_input(new_input).into())
         }
     }

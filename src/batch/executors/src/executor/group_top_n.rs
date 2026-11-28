@@ -209,8 +209,10 @@ impl<K: HashKey> GroupTopNExecutor<K> {
                 .enumerate()
                 .filter_by_bitmap(chunk.visibility())
             {
+                // Most groups may hold fewer rows than the limit: the heaps grow with their rows
+                // instead of reserving the limit up front.
                 let heap = groups.entry(key).or_insert_with(|| {
-                    TopNHeap::new(
+                    TopNHeap::new_lazy(
                         self.limit,
                         self.offset,
                         self.with_ties,
@@ -346,5 +348,66 @@ mod tests {
         }
 
         assert_eq!(0, parent_mem.get_bytes_used());
+    }
+
+    /// The heaps of the groups grow with their rows: 1000 groups of one row each, with a limit
+    /// of 1000 rows per group, do not reserve room for 1000 rows per group.
+    #[tokio::test]
+    async fn test_group_top_n_heaps_grow_with_their_rows() {
+        use risingwave_common::array::{Array, I32Array};
+
+        const GROUPS: i32 = 1000;
+        const LIMIT: usize = 1000;
+        let schema = Schema {
+            fields: vec![
+                Field::unnamed(DataType::Int32),
+                Field::unnamed(DataType::Int32),
+            ],
+        };
+        let mut mock_executor = MockExecutor::new(schema);
+        mock_executor.add(DataChunk::new(
+            vec![
+                I32Array::from_iter(0..GROUPS).into_ref(),
+                I32Array::from_iter(0..GROUPS).into_ref(),
+            ],
+            GROUPS as usize,
+        ));
+        let mem_ctx = MemoryContext::root(LabelGuardedIntGauge::test_int_gauge::<4>(), u64::MAX);
+        let top_n_executor = (GroupTopNExecutorBuilder {
+            child: Box::new(mock_executor),
+            column_orders: vec![ColumnOrder {
+                column_index: 1,
+                order_type: OrderType::ascending(),
+            }],
+            offset: 0,
+            limit: LIMIT,
+            with_ties: false,
+            group_key: vec![0],
+            group_key_types: vec![DataType::Int32],
+            identity: "GroupTopNExecutor".to_owned(),
+            // One output chunk per two groups: the other groups are still in memory when the
+            // first chunk is out.
+            chunk_size: 2,
+            memory: mem_ctx.clone().into(),
+        })
+        .dispatch();
+
+        let mut stream = top_n_executor.execute();
+        let first = stream.next().await.unwrap().unwrap();
+        assert_eq!(first.cardinality(), 2);
+        let reserved_up_front = (GROUPS as usize - 2) * LIMIT * std::mem::size_of::<HeapElem>();
+        let used = mem_ctx.get_bytes_used() as usize;
+        assert!(
+            used < reserved_up_front / 10,
+            "{used} bytes used, {reserved_up_front} bytes for heaps of the limit"
+        );
+
+        let mut rows = first.cardinality();
+        while let Some(chunk) = stream.next().await {
+            rows += chunk.unwrap().cardinality();
+        }
+        assert_eq!(rows, GROUPS as usize);
+        drop(stream);
+        assert_eq!(mem_ctx.get_bytes_used(), 0);
     }
 }

@@ -248,6 +248,17 @@ pub fn set_table_row_counts_for_test(
     session: &SessionImpl,
     row_counts: &BTreeMap<String, u64>,
 ) -> Result<()> {
+    set_table_stats_for_test(session, row_counts, &BTreeMap::new())
+}
+
+/// Test only: as [`set_table_row_counts_for_test`], with the total size in bytes of some tables
+/// (key and value sizes in storage, read by the cost-based join ordering for the width of the
+/// rows). A table with a size and no row count is not given statistics.
+pub fn set_table_stats_for_test(
+    session: &SessionImpl,
+    row_counts: &BTreeMap<String, u64>,
+    sizes: &BTreeMap<String, u64>,
+) -> Result<()> {
     use risingwave_pb::hummock::{HummockVersionStats, TableStats};
 
     use crate::catalog::root_catalog::SchemaPath;
@@ -276,12 +287,102 @@ pub fn set_table_row_counts_for_test(
                 table_id,
                 TableStats {
                     total_key_count: i64::try_from(*rows).unwrap_or(i64::MAX),
+                    total_value_size: sizes
+                        .get(qualified_name)
+                        .map_or(0, |size| i64::try_from(*size).unwrap_or(i64::MAX)),
                     ..Default::default()
                 },
             );
         }
     }
     catalog_reader.set_table_stats_for_test(stats);
+    Ok(())
+}
+
+/// Test only: forgets the ratios learned by the cardinality feedback learning
+/// (`batch_cardinality_feedback_learning`) in this process.
+pub fn clear_cardinality_learning_for_test() {
+    crate::optimizer::cardinality_learning::CARDINALITY_LEARNING_STORE.clear();
+}
+
+/// Test only: plans the batch query `sql` in `session` (which must observe batch queries:
+/// `batch_cardinality_feedback` or `batch_cardinality_feedback_learning` on) and records it as if
+/// it had run to completion, its counted operators returning the given rows: by kind of operator
+/// (`seq_scan`, `filter`, `hash_join`, `hash_agg`...), one number per operator of that kind, in
+/// the order of a walk of the plan that visits the inputs of an operator, left to right, before
+/// the operator. The first phase of a two-phase aggregation (`*_partial`) may be left out. The
+/// planner tests use it (`cardinality_observations`) to give the learning the counts that a
+/// running frontend measures.
+pub fn record_cardinality_observation_for_test(
+    session: &Arc<SessionImpl>,
+    sql: &str,
+    rows: &BTreeMap<String, Vec<u64>>,
+) -> Result<()> {
+    use risingwave_pb::batch_plan::OperatorCardinality;
+    use risingwave_sqlparser::parser::Parser;
+
+    use crate::handler::HandlerArgs;
+    use crate::handler::query::gen_batch_plan_by_statement;
+    use crate::optimizer::OptimizerContext;
+    use crate::optimizer::cardinality_feedback::plan_node_ids_post_order;
+    use crate::scheduler::cardinality_feedback::plan_cardinality_feedback;
+
+    let stmt = Parser::parse_sql(sql)
+        .map_err(|e| ErrorCode::InternalError(format!("cannot parse `{sql}`: {e}")))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| ErrorCode::InternalError(format!("no statement in `{sql}`")))?;
+    let handler_args = HandlerArgs::new(session.clone(), &stmt, Arc::from(sql))?;
+    let context = OptimizerContext::from_handler_args(handler_args);
+    let plan = gen_batch_plan_by_statement(session, context.into(), stmt)?
+        .unwrap_rw()?
+        .plan;
+    let feedback = plan_cardinality_feedback(session, &plan).ok_or_else(|| {
+        ErrorCode::InternalError(format!(
+            "`{sql}` is not observed: is the cardinality feedback on?"
+        ))
+    })?;
+    let operators = plan_node_ids_post_order(&plan)
+        .into_iter()
+        .filter_map(|id| feedback.operator_kind(id).map(|kind| (id, kind)))
+        .collect::<Vec<_>>();
+    let kinds = operators.iter().map(|(_, kind)| *kind).collect::<Vec<_>>();
+    let mut used: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut counts = vec![];
+    for (id, kind) in &operators {
+        let n = used.entry(*kind).or_default();
+        match rows.get(*kind).and_then(|values| values.get(*n)) {
+            Some(&value) => counts.push(OperatorCardinality {
+                node_id: *id,
+                rows: value,
+                instances: 1,
+                completed: 1,
+            }),
+            None if kind.ends_with("_partial") => {}
+            None => {
+                return Err(ErrorCode::InternalError(format!(
+                    "no rows for the operator {} of kind `{kind}` of `{sql}`; counted operators: {kinds:?}",
+                    *n + 1
+                ))
+                .into());
+            }
+        }
+        *n += 1;
+    }
+    for (kind, values) in rows {
+        let found = used.get(kind.as_str()).copied().unwrap_or(0);
+        if values.len() != found {
+            return Err(ErrorCode::InternalError(format!(
+                "{} rows given for `{kind}` but {found} such operators in `{sql}`; counted operators: {kinds:?}",
+                values.len()
+            ))
+            .into());
+        }
+    }
+    feedback.counters().merge(&counts);
+    feedback.set_succeeded();
+    // Recorded and learned when the last reference is dropped.
+    drop(feedback);
     Ok(())
 }
 

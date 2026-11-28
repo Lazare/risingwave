@@ -173,9 +173,9 @@ impl BatchTaskContext for ComputeNodeContext {
 
     fn create_executor_memory(&self, executor_id: &str) -> ExecutorMemory {
         match &self.query_memory {
-            Some(query_memory) => {
-                query_memory.executor_memory(MemoryContext::root(TrAdderAtomic::new(0), u64::MAX))
-            }
+            Some(query_memory) => query_memory
+                .executor_memory(MemoryContext::root(TrAdderAtomic::new(0), u64::MAX))
+                .with_identity(executor_id),
             None => ExecutorMemory::unmanaged(self.create_executor_mem_context(executor_id)),
         }
     }
@@ -211,16 +211,20 @@ impl ComputeNodeContext {
     /// Creates the context of a task of the given query, which runs
     /// `spillable_operator_instances` spillable operators in total (0 if unknown).
     /// `cardinality_counters`: the counters of the plan nodes counted by the cardinality feedback,
-    /// see [`CardinalityCounters::for_plan`].
+    /// see [`CardinalityCounters::for_plan`]. `spill_on_memory_wait`: `batch_spill_on_memory_wait`
+    /// of the query.
     pub fn create(
         env: BatchEnvironment,
         query_id: &str,
         spillable_operator_instances: u32,
+        spill_on_memory_wait: bool,
         cardinality_counters: Option<Arc<CardinalityCounters>>,
     ) -> Arc<dyn BatchTaskContext> {
-        let query_memory = env
-            .task_manager()
-            .query_memory(query_id, spillable_operator_instances);
+        let query_memory = env.task_manager().query_memory(
+            query_id,
+            spillable_operator_instances,
+            spill_on_memory_wait,
+        );
         let mem_context = query_memory.context();
         let batch_metrics = Arc::new(BatchMetricsInner::new(
             env.task_manager().metrics(),

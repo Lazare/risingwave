@@ -16,6 +16,7 @@ use itertools::Itertools;
 use risingwave_common::util::column_index_mapping::ColIndexMapping;
 use risingwave_pb::plan_common::JoinType;
 
+use super::keeps_narrowing_projection_below_join;
 use super::prelude::{PlanRef, *};
 use crate::expr::{ExprRewriter, InputRef};
 use crate::optimizer::plan_node::{LogicalJoin, LogicalProject};
@@ -59,6 +60,8 @@ impl Rule<Logical> for JoinProjectTransposeRule {
             && join_type != JoinType::RightSemi
             && join_type != JoinType::RightOuter
             && join_type != JoinType::FullOuter
+            // Rule `NarrowValuePushRule`: keep a projection that narrows a value below the join.
+            && !keeps_narrowing_projection_below_join(project)
         {
             let (exprs, child) = project.clone().decompose();
 
@@ -98,6 +101,8 @@ impl Rule<Logical> for JoinProjectTransposeRule {
             && join_type != JoinType::LeftSemi
             && join_type != JoinType::LeftOuter
             && join_type != JoinType::FullOuter
+            // Rule `NarrowValuePushRule`: keep a projection that narrows a value below the join.
+            && !keeps_narrowing_projection_below_join(project)
         {
             let (exprs, child) = project.clone().decompose();
 
