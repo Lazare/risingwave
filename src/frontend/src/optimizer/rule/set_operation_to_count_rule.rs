@@ -53,7 +53,7 @@ use risingwave_expr::aggregate::PbAggKind;
 use super::prelude::{PlanRef, *};
 use crate::expr::{ExprImpl, ExprType, FunctionCall, InputRef};
 use crate::optimizer::plan_node::generic::{Agg, GenericPlanRef, PlanAggCall};
-use crate::optimizer::plan_node::{LogicalFilter, LogicalProject, LogicalUnion, PlanTreeNode};
+use crate::optimizer::plan_node::{LogicalFilter, LogicalProject, LogicalUnion};
 use crate::utils::Condition;
 
 /// Whether two equal values of the type are always identical: same text, same result of every
