@@ -264,6 +264,20 @@ fn cost_based_join(
         .session_ctx()
         .config()
         .batch_cardinality_feedback_learning();
+    // Implied equalities (`batch_transitive_predicates`): the inputs that the equalities of the
+    // multi-join link only through other inputs are linked too, see [`ImpliedEqualities`].
+    let original = join;
+    let implied = (ctx.session_ctx().config().batch_transitive_predicates()
+        && join.inputs().len() < 64)
+        .then(|| ImpliedEqualities::of(join))
+        .filter(|implied| !implied.equalities.is_empty());
+    let augmented = implied.as_ref().map(|implied| implied.augment(join));
+    let join = augmented.as_ref().unwrap_or(join);
+    let separate_implied = |graph: &mut JoinGraph| {
+        if let Some(implied) = &implied {
+            graph.separate_implied(implied);
+        }
+    };
     let catalog_reader = ctx.session_ctx().env().catalog_reader().read_guard();
     let estimator = Estimator {
         stats: catalog_reader.table_stats(),
@@ -271,6 +285,7 @@ fn cost_based_join(
         learned: None,
     };
     let mut graph = estimator.graph(join, required)?;
+    separate_implied(&mut graph);
     let mut tree = graph.best_tree(heuristic)?;
 
     // The learned estimates (`batch_cardinality_feedback_learning`): their join tree replaces the
@@ -281,8 +296,11 @@ fn cost_based_join(
             lookup_join_enabled,
             learned: Some(&**CARDINALITY_LEARNING_STORE),
         };
-        if let Some(learned_graph) = learned_estimator.graph(join, required)
-            && let Some(candidate) = learned_graph.best_tree(heuristic)
+        if let Some(mut learned_graph) = learned_estimator.graph(join, required)
+            && let Some(candidate) = {
+                separate_implied(&mut learned_graph);
+                learned_graph.best_tree(heuristic)
+            }
             && candidate != tree
         {
             let current_cost = learned_graph.planned(&tree).cost;
@@ -323,6 +341,15 @@ fn cost_based_join(
     }
     let inputs = join.inputs();
     let joined = tree.build(&inputs);
+    // Only the implied equalities that the tree needs: those between two sub-trees that no
+    // equality of the same class links.
+    if let Some(implied) = &implied {
+        return Some(
+            implied
+                .needed_by(original, &tree)
+                .finish_reordered_join(joined, &ordering),
+        );
+    }
     Some(join.finish_reordered_join(joined, &ordering))
 }
 
@@ -976,6 +1003,8 @@ impl Estimator<'_> {
             factors,
             eq_columns,
             lookup_columns,
+            implied: vec![],
+            written: vec![],
         })
     }
 }
@@ -1014,6 +1043,12 @@ struct JoinGraph {
     eq_columns: Vec<Vec<BTreeSet<usize>>>,
     /// The columns of each input that a lookup into it needs, if it can be read by key.
     lookup_columns: Vec<Option<BTreeSet<usize>>>,
+    /// Implied equalities (`batch_transitive_predicates`): the selectivity of the equalities
+    /// between two inputs that are only implied by others, `(a, b, selectivity, pessimistic)`,
+    /// and the inputs linked to each input by a written equality. See
+    /// [`JoinGraph::implied_selectivity`].
+    implied: Vec<(usize, usize, f64, f64)>,
+    written: Vec<u64>,
 }
 
 /// A sub-tree of the join tree being built.
@@ -1040,6 +1075,7 @@ impl JoinGraph {
                 rows *= selectivity;
             }
         }
+        rows *= self.implied_selectivity(inputs, false);
         rows.max(1.0)
     }
 
@@ -1052,6 +1088,7 @@ impl JoinGraph {
                 rows *= selectivity;
             }
         }
+        rows *= self.implied_selectivity(inputs, true);
         rows.max(1.0)
     }
 
@@ -1385,4 +1422,231 @@ fn input_required_columns(plan: &PlanRef, columns: &BTreeSet<usize>) -> Vec<BTre
         .iter()
         .map(|input| (0..input.schema().len()).collect())
         .collect()
+}
+
+// Implied equalities of the cost-based join ordering (`batch_transitive_predicates`, rule
+// `TransitivePredicateRule` for the predicates).
+
+/// The equalities between the inputs of a multi-join that its written equalities imply but do not
+/// state: `a.x = b.y AND b.y = c.z` implies `a.x = c.z` (PostgreSQL
+/// `generate_base_implied_equalities_no_const`). Without them, the ordering only joins `a` with
+/// `c` after `b`, or with a cross join.
+///
+/// The columns compared with `=` (same type, `IS NOT DISTINCT FROM` excluded) form equivalence
+/// classes. For each class and each pair of inputs that hold one of its columns but that no
+/// written equality links, the equality of the first column of each input is implied: `=` is an
+/// equivalence relation for every type that a hash join can compare (it is reflexive on the
+/// values it is `TRUE` for, symmetric and transitive), so the condition of the multi-join, an
+/// `AND` of inner join conditions, holds only on rows where the implied equality holds too.
+/// Adding it never changes the result. The multi-join only merges inner joins: no equality crosses
+/// an outer join.
+struct ImpliedEqualities {
+    /// `(a, b, class, a.x = b.y)`: an implied equality between the inputs `a < b`.
+    equalities: Vec<(usize, usize, usize, ExprImpl)>,
+    /// `class_links[class][i]`: the inputs linked to input `i` by a written equality of `class`.
+    class_links: Vec<Vec<u64>>,
+    /// `written[i]`: the inputs linked to input `i` by a written equality.
+    written: Vec<u64>,
+}
+
+impl ImpliedEqualities {
+    fn of(join: &LogicalMultiJoin) -> Self {
+        let col_nums = join.input_col_nums();
+        let mut column_input = vec![];
+        for (input, &num) in col_nums.iter().enumerate() {
+            column_input.extend(std::iter::repeat_n(input, num));
+        }
+        let n = col_nums.len();
+        let mut parent: Vec<usize> = (0..column_input.len()).collect();
+        fn find(parent: &mut [usize], mut x: usize) -> usize {
+            while parent[x] != x {
+                parent[x] = parent[parent[x]];
+                x = parent[x];
+            }
+            x
+        }
+        let mut written = vec![0u64; n];
+        let mut edges = vec![];
+        let mut types = HashMap::new();
+        for conjunct in &join.on().conjunctions {
+            let Some((x, y)) = conjunct.as_eq_cond() else {
+                continue;
+            };
+            if x.return_type() != y.return_type() {
+                continue;
+            }
+            let (a, b) = (column_input[x.index()], column_input[y.index()]);
+            if a != b {
+                written[a] |= 1 << b;
+                written[b] |= 1 << a;
+            }
+            let (rx, ry) = (find(&mut parent, x.index()), find(&mut parent, y.index()));
+            parent[rx] = ry;
+            types.insert(x.index(), x.return_type());
+            types.insert(y.index(), y.return_type());
+            edges.push((x.index(), y.index()));
+        }
+        // The classes, by root column, with their columns in order.
+        let mut classes: Vec<(usize, Vec<usize>)> = vec![];
+        for column in types.keys().copied().sorted() {
+            let root = find(&mut parent, column);
+            match classes.iter_mut().find(|(r, _)| *r == root) {
+                Some((_, members)) => members.push(column),
+                None => classes.push((root, vec![column])),
+            }
+        }
+        let mut class_links = vec![vec![0u64; n]; classes.len()];
+        for (x, y) in edges {
+            let root = find(&mut parent, x);
+            let class = classes.iter().position(|(r, _)| *r == root).unwrap();
+            let (a, b) = (column_input[x], column_input[y]);
+            if a != b {
+                class_links[class][a] |= 1 << b;
+                class_links[class][b] |= 1 << a;
+            }
+        }
+        let mut equalities = vec![];
+        let mut implied_pairs = vec![];
+        for (class, (_, members)) in classes.iter().enumerate() {
+            // The first column of the class in each input.
+            let mut firsts: Vec<(usize, usize)> = vec![];
+            for &column in members {
+                let input = column_input[column];
+                if !firsts.iter().any(|(i, _)| *i == input) {
+                    firsts.push((input, column));
+                }
+            }
+            for (k, &(a, x)) in firsts.iter().enumerate() {
+                for &(b, y) in &firsts[k + 1..] {
+                    let (a, b, x, y) = if a < b { (a, b, x, y) } else { (b, a, y, x) };
+                    if written[a] & (1 << b) != 0 || implied_pairs.contains(&(a, b)) {
+                        continue;
+                    }
+                    implied_pairs.push((a, b));
+                    let data_type = types[&x].clone();
+                    let equality: ExprImpl = crate::expr::FunctionCall::new_unchecked(
+                        crate::expr::ExprType::Equal,
+                        vec![
+                            crate::expr::InputRef::new(x, data_type.clone()).into(),
+                            crate::expr::InputRef::new(y, data_type).into(),
+                        ],
+                        DataType::Boolean,
+                    )
+                    .into();
+                    equalities.push((a, b, class, equality));
+                }
+            }
+        }
+        ImpliedEqualities {
+            equalities,
+            class_links,
+            written,
+        }
+    }
+
+    /// The multi-join with all the implied equalities in its condition, for the estimates.
+    fn augment(&self, join: &LogicalMultiJoin) -> LogicalMultiJoin {
+        let mut on = join.on().clone();
+        on.conjunctions
+            .extend(self.equalities.iter().map(|(_, _, _, e)| e.clone()));
+        join.clone_with_cond(on)
+    }
+
+    /// The multi-join with the implied equalities that `tree` needs: an equality between `a` and
+    /// `b` is needed where the tree joins the sub-tree of `a` with the sub-tree of `b`, unless a
+    /// written equality of the same class already links these two sub-trees.
+    fn needed_by(&self, join: &LogicalMultiJoin, tree: &JoinTree) -> LogicalMultiJoin {
+        let mut on = join.on().clone();
+        for (a, b, class, equality) in &self.equalities {
+            let Some((left, right)) = tree.split_of(*a, *b) else {
+                continue;
+            };
+            let links = &self.class_links[*class];
+            if !bits(left).any(|i| links[i] & right != 0) {
+                on.conjunctions.push(equality.clone());
+            }
+        }
+        join.clone_with_cond(on)
+    }
+}
+
+impl JoinTree {
+    /// The inputs of the tree, as a bit set.
+    fn mask(&self) -> u64 {
+        match self {
+            JoinTree::Leaf(input) => 1 << input,
+            JoinTree::Join(left, right) => left.mask() | right.mask(),
+        }
+    }
+
+    /// The inputs of the two sides of the join of the tree that brings `a` and `b` together.
+    fn split_of(&self, a: usize, b: usize) -> Option<(u64, u64)> {
+        let JoinTree::Join(left, right) = self else {
+            return None;
+        };
+        let (l, r) = (left.mask(), right.mask());
+        let both = (1u64 << a) | (1u64 << b);
+        if l & both == both {
+            left.split_of(a, b)
+        } else if r & both == both {
+            right.split_of(a, b)
+        } else if (l | r) & both == both {
+            Some((l, r))
+        } else {
+            None
+        }
+    }
+}
+
+impl JoinGraph {
+    /// Takes the factors of the implied equalities out of [`JoinGraph::factors`]: the factor of
+    /// the equalities between two inputs comes first among those of their bit set, and an implied
+    /// equality is the only one between its two inputs.
+    fn separate_implied(&mut self, implied: &ImpliedEqualities) {
+        for (a, b, _, _) in &implied.equalities {
+            let mask = (1u64 << a) | (1u64 << b);
+            if self.implied.iter().any(|(x, y, _, _)| (x, y) == (a, b)) {
+                continue;
+            }
+            if let Some(position) = self.factors.iter().position(|(m, _, _)| *m == mask) {
+                let (_, selectivity, selectivity_hi) = self.factors.remove(position);
+                self.implied.push((*a, *b, selectivity, selectivity_hi));
+            }
+        }
+        self.written.clone_from(&implied.written);
+    }
+
+    /// The selectivity of the implied equalities within `inputs`, so that they are not counted
+    /// twice: an implied equality counts only when the inputs it links are not already linked
+    /// within `inputs` by written equalities or by the implied equalities counted before it. For
+    /// `a.x = b.y AND b.y = c.z`, `{a, c}` counts `a.x = c.z`, and `{a, b, c}` does not.
+    fn implied_selectivity(&self, inputs: u64, pessimistic: bool) -> f64 {
+        if self.implied.is_empty() {
+            return 1.0;
+        }
+        let mut label: Vec<usize> = (0..self.neighbours.len()).collect();
+        let merge = |label: &mut [usize], a: usize, b: usize| {
+            let (from, to) = (label[b], label[a]);
+            for l in label.iter_mut() {
+                if *l == from {
+                    *l = to;
+                }
+            }
+        };
+        for i in bits(inputs) {
+            for j in bits(self.written[i] & inputs) {
+                if label[i] != label[j] {
+                    merge(&mut label, i, j);
+                }
+            }
+        }
+        let mut selectivity = 1.0;
+        for &(a, b, s, s_hi) in &self.implied {
+            if inputs & (1 << a) != 0 && inputs & (1 << b) != 0 && label[a] != label[b] {
+                selectivity *= if pessimistic { s_hi } else { s };
+                merge(&mut label, a, b);
+            }
+        }
+        selectivity
+    }
 }
