@@ -14,6 +14,8 @@
 
 use std::collections::HashMap;
 
+use risingwave_common::util::iter_util::ZipEqFast;
+
 use super::prelude::{PlanRef, *};
 use crate::expr::{Expr, ExprImpl, ExprType, FunctionCall};
 use crate::optimizer::optimizer_context::MaterializedViewCandidate;
@@ -75,9 +77,12 @@ impl MvSelectionRule {
             .map(|(index, _)| index)
             .collect();
         if output_col_idx.len() != fields.len()
-            || output_col_idx.iter().zip(fields).any(|(&index, field)| {
-                candidate.table.columns()[index].data_type() != &field.data_type
-            })
+            || output_col_idx
+                .iter()
+                .zip_eq_fast(fields)
+                .any(|(&index, field)| {
+                    candidate.table.columns()[index].data_type() != &field.data_type
+                })
         {
             return None;
         }
