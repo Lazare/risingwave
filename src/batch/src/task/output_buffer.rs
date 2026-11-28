@@ -186,8 +186,14 @@ mod tests {
         let (forwarded, _held) = buffer.hold(slices[0].clone()).await;
         assert_eq!(buffer.held_bytes(), bytes);
         drop(forwarded);
-        // A copy of the rows does not share the count.
-        let copy = slices[1].clone().compact_vis();
+        // A fully visible chunk is not copied by `compact_vis`: it still shares the count.
+        assert!(slices[1].clone().compact_vis().shared_memory().is_some());
+        // A copy of the visible rows does not share the count.
+        let copy = slices[1]
+            .with_visibility(risingwave_common::bitmap::Bitmap::from_bool_slice(&[
+                true, false,
+            ]))
+            .compact_vis();
         assert!(copy.shared_memory().is_none());
         drop(slices);
         assert_eq!(buffer.held_bytes(), 0);
