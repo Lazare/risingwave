@@ -1,0 +1,111 @@
+# `IS NOT NULL` filters on the columns that a join compares with `=` (`batch_join_keys_not_null`,
+# rule `JoinKeyNotNullRule`).
+- id: tables
+  sql: |
+    create table jkn_a (id int primary key, k int, v int);
+    create table jkn_b (id int primary key, k int, w int);
+    create table jkn_c (id int primary key, k int not null, w int);
+  expected_outputs: []
+- name: variable off by default
+  before:
+  - tables
+  sql: |
+    select * from jkn_a a join jkn_b b on a.k = b.k;
+  expected_outputs:
+  - batch_plan
+- name: inner join, both sides filtered
+  before:
+  - tables
+  sql: |
+    set batch_join_keys_not_null = true;
+    select * from jkn_a a join jkn_b b on a.k = b.k;
+  expected_outputs:
+  - batch_plan
+- name: inner join with a column declared not null (no filter on that side)
+  before:
+  - tables
+  sql: |
+    set batch_join_keys_not_null = true;
+    select * from jkn_a a join jkn_c c on a.k = c.k;
+  expected_outputs:
+  - batch_plan
+- name: inner join with a key already restricted by a filter (no filter on that side)
+  before:
+  - tables
+  sql: |
+    set batch_join_keys_not_null = true;
+    select * from jkn_a a join jkn_b b on a.k = b.k where a.k > 10;
+  expected_outputs:
+  - batch_plan
+- name: left join, only the right side
+  before:
+  - tables
+  sql: |
+    set batch_join_keys_not_null = true;
+    select * from jkn_a a left join jkn_b b on a.k = b.k;
+  expected_outputs:
+  - batch_plan
+- name: right join, only the left side
+  before:
+  - tables
+  sql: |
+    set batch_join_keys_not_null = true;
+    select * from jkn_a a right join jkn_b b on a.k = b.k;
+  expected_outputs:
+  - batch_plan
+- name: full join, no filter
+  before:
+  - tables
+  sql: |
+    set batch_join_keys_not_null = true;
+    select * from jkn_a a full join jkn_b b on a.k = b.k;
+  expected_outputs:
+  - batch_plan
+- name: semi join, both sides
+  before:
+  - tables
+  sql: |
+    set batch_join_keys_not_null = true;
+    select * from jkn_a a where a.k in (select b.k from jkn_b b);
+  expected_outputs:
+  - batch_plan
+- name: anti join, only the right side (a left row with a null key is kept)
+  before:
+  - tables
+  sql: |
+    set batch_join_keys_not_null = true;
+    select * from jkn_a a where not exists (select 1 from jkn_b b where b.k = a.k);
+  expected_outputs:
+  - batch_plan
+- name: null-safe equality, no filter
+  before:
+  - tables
+  sql: |
+    set batch_join_keys_not_null = true;
+    select * from jkn_a a join jkn_b b on a.k is not distinct from b.k;
+  expected_outputs:
+  - batch_plan
+- name: lookup into the key of the right side, only the left side
+  before:
+  - tables
+  sql: |
+    set batch_join_keys_not_null = true;
+    select * from jkn_a a join jkn_b b on a.k = b.id;
+  expected_outputs:
+  - batch_plan
+- name: key computed by an expression
+  before:
+  - tables
+  sql: |
+    set batch_join_keys_not_null = true;
+    select * from jkn_a a join jkn_b b on a.k + 1 = b.k;
+  expected_outputs:
+  - batch_plan
+- name: three-way join, each key filtered once
+  before:
+  - tables
+  sql: |
+    set batch_join_keys_not_null = true;
+    select * from jkn_a a join jkn_b b on a.k = b.k join jkn_c c on c.w = b.w;
+  expected_outputs:
+  - batch_plan

@@ -236,6 +236,9 @@ pub use cost_based_join_ordering_rule::*;
 // Inner join to semi join (`batch_inner_join_to_semi_join`).
 mod inner_join_to_semi_join_rule;
 pub use inner_join_to_semi_join_rule::*;
+// `IS NOT NULL` on equi-join keys (`batch_join_keys_not_null`).
+mod join_key_not_null_rule;
+pub use join_key_not_null_rule::*;
 // Rule `UnionScanMergeRule` (`streaming_merge_union_scans`).
 mod union_scan_merge_rule;
 pub use union_scan_merge_rule::*;
@@ -425,6 +428,7 @@ macro_rules! for_all_rules {
             , { CostBasedOuterJoinSidesRule }
             , { InnerJoinToSemiJoinRule }
             , { SemiJoinDistinctRemoveRule }
+            , { JoinKeyNotNullRule }
             , { UnionScanMergeRule }
             , { StackedAggMergeRule }
             , { LateralTableFunctionRule }

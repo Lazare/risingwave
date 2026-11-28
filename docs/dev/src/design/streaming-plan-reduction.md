@@ -47,6 +47,7 @@ own rules.
 | BT | Batch: `row_number() <= n` per partition becomes a top-n per group, small `n` only (`batch_over_window_to_topn`) | done (prototype, branch `proto/plan-reduction-batch-pass2`, see "BP and BT" below) |
 | BU | Batch: `UNION ALL` run in parallel tasks instead of one (`batch_distributed_union`) | done (prototype, branch `proto/plan-reduction-batch-union-dist`, see "BU" below) |
 | SJ17 | Batch: inner join to semi join on a unique side that is not read; `DISTINCT` removed under a semi or anti join by estimates (`batch_inner_join_to_semi_join`) | done (prototype, branch `proto/plan-reduction-batch-joins`, see "SJ" below) |
+| SJ18 | Batch: `IS NOT NULL` on equi-join keys, on the sides whose unmatched rows are not output (`batch_join_keys_not_null`) | done (prototype, branch `proto/plan-reduction-batch-joins`, see "SJ" below) |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -1452,6 +1453,33 @@ select t.* from t join (select distinct k from u) x on t.k = x.k;
   (19 queries with the variable off and on, compared as multisets, on empty tables, duplicates and
   `NULL` keys, a distinct side with few and with many groups, updates, deletes, each side emptied,
   with a pause after each change so that the storage statistics reach the frontend).
+
+**18. `IS NOT NULL` on equi-join keys (`batch_join_keys_not_null`, Calcite
+`JoinDeriveIsNotNullFilterRule`).** `JoinKeyNotNullRule` adds, below a join, a filter
+`c IS NOT NULL` on each column of an input that a top-level conjunct `l = r` of the condition
+compares with a column of the other input, on the sides whose rows without a match are not
+output: both sides of an inner or semi join, the right side of a left outer or left anti join,
+the left side of a right outer or right anti join. `NULL = x` is `NULL` for every `x`, so such a
+row matches nothing, whatever the other conjuncts. The predicate pushdown that follows moves the
+filters into the scans: the rows with a `NULL` key are no longer shuffled by the exchanges of the
+hash join.
+
+- Not for a column already known to be never `NULL` (column facts: `NOT NULL` constraint, a
+  null-rejecting filter or join condition below, which also covers the keys of the inner joins
+  below), so the rule adds a filter once and never twice; not for `IS NOT DISTINCT FROM`, full
+  outer or as-of joins; not for the right side of a possible lookup join (a table read by key or
+  with an index: it is not scanned, and a lookup with a `NULL` key finds nothing).
+- Stage `BATCH_JOIN_KEYS_NOT_NULL` after the join ordering (the cost-based ordering would count
+  the new conjuncts in its estimates, as the survey warns) and after `PUSH_CALC_OF_JOIN` (a key
+  computed by an expression is a column of a projection below the join; the filter is pushed
+  through it as `expr IS NOT NULL`), then a predicate pushdown. The fingerprints of the learned
+  ratios of BF step 2 include the filters of a scan: a scan with the new filter is a new relation
+  for the learning.
+- Streaming: rejected by the design note (no state gain: a `NULL` key already costs no join state).
+- Tests: planner tests `batch_join_keys_not_null.yaml` (inner, `NOT NULL` column, key filtered
+  below, left, right, full, semi, anti, null-safe, lookup, expression key, three-way join; off by
+  default); differential test `e2e_test/batch/join_keys_not_null.gen.py` (16 queries, `NULL` keys
+  on both sides, duplicates, keys set to `NULL` and back, a side with only `NULL` keys, deletes).
 
 ## Not for now: sharing between materialized views
 

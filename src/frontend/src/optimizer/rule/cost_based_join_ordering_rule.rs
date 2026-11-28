@@ -1417,3 +1417,16 @@ pub(crate) fn estimated_rows(plan: &PlanRef) -> Option<f64> {
         estimator.input_estimate(plan).map(|estimate| estimate.rows)
     })
 }
+
+/// Whether the planner may read `plan`, the right side of a join, by key with the given columns
+/// (a lookup join): it is a table scan whose key prefix the columns give, or a table with an index.
+pub(super) fn may_be_lookup_join_side(plan: &PlanRef, columns: &BTreeSet<usize>) -> bool {
+    if !plan.ctx().session_ctx().config().batch_enable_lookup_join() {
+        return false;
+    }
+    let Some(scan) = plan.as_logical_scan() else {
+        return false;
+    };
+    scan_lookup_columns(scan).is_some_and(|key| key.is_subset(columns))
+        || !scan.table_indexes().is_empty()
+}

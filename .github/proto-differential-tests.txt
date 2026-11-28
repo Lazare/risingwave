@@ -1,3 +1,4 @@
 # Differential tests of the branch `proto/plan-reduction-batch-joins` (rules 14, 15, 17, 18 of the
 # survey of Calcite and PostgreSQL rules): `<name> <file under e2e_test without .slt> <minutes>`.
 batchsemijoin batch/inner_join_to_semi_join 60
+batchkeysnotnull batch/join_keys_not_null 60

@@ -391,6 +391,15 @@ static BATCH_INNER_JOIN_TO_SEMI_JOIN: LazyLock<OptimizationStage> = LazyLock::ne
     )
 });
 
+// Rule `JoinKeyNotNullRule` (`batch_join_keys_not_null`).
+static BATCH_JOIN_KEYS_NOT_NULL: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Join Keys Not Null For Batch",
+        vec![JoinKeyNotNullRule::create()],
+        ApplyOrder::TopDown,
+    )
+});
+
 // Rule `UnionScanMergeRule` (`streaming_merge_union_scans`).
 static STREAM_MERGE_UNION_SCANS: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
@@ -1761,6 +1770,18 @@ impl LogicalOptimizer {
 
         // Push down the calculation of inputs of join's condition.
         plan = plan.optimize_by_rules(&PUSH_CALC_OF_JOIN)?;
+
+        // `IS NOT NULL` filters on the columns that a join compares with `=`
+        // (`batch_join_keys_not_null`): after the join ordering, which would count them in its
+        // estimates, and after the calculation of the keys is pushed below the joins, so that
+        // the keys are columns. The filters are pushed into the scans.
+        if ctx.session_ctx().config().batch_join_keys_not_null() {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&BATCH_JOIN_KEYS_NOT_NULL)?;
+            if ctx.total_rule_applied() != applied_before {
+                plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+            }
+        }
 
         // Duplicates found with `lag` over a window ordered by the column
         // (`batch_rewrite_lag_duplicates`): after predicate pushdown, which puts the filter

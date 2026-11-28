@@ -512,6 +512,13 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_inner_join_to_semi_join: bool,
 
+    /// In a batch query, filter out below a join the rows whose column compared with `=` to the
+    /// other side is `NULL` (`c IS NOT NULL`, pushed into the scans), on the sides whose rows
+    /// without a match are not output: such rows are then neither read nor shuffled further.
+    /// Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_join_keys_not_null: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,
