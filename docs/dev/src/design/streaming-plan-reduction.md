@@ -1243,8 +1243,12 @@ fragment from the `SpoolRegistry` of the executor builder):
   `UNION ALL` goes through its own exchange: copies under different branches are only shared when
   the whole branch is identical. Joins on different keys put the copies in different stages too.
   The local mode, where everything above the scans runs in one stage, shares them. Copies that
-  differ by their columns or by a filter pushed into one of them are not shared (the streaming
-  idea 10 widens them; not ported).
+  differ by their columns or by a filter pushed into one of them are not shared: column pruning
+  narrows each copy to what its consumer reads, so `latest a join latest b` where `a` reads one
+  aggregate and `b` another keeps two aggregations. The widening of the streaming idea 10
+  (`share_widened_subplans`, then `DAG_TO_TREE`) would make such copies identical, but every
+  widened copy left in another stage would then compute the aggregates of all of them: not done,
+  it needs to know the stages, which the logical plan does not.
 
 ## Not for now: sharing between materialized views
 
