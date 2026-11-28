@@ -1,4 +1,4 @@
-# Upsert between equal values with different texts was dropped (ghost rows downstream)
+# Upsert or UPDATE between equal values with different texts was dropped (ghost rows downstream)
 
 - **Kind**: upstream bug (streaming, table materialization), found by the differential test of
   the transitive predicates of the plan reduction prototype on 2026-11-28 (independent of any
@@ -21,6 +21,10 @@ select k::varchar from t;      -- wrong: 1.0     correct: 1.00
 select * from m;               -- wrong: 1       correct: no row
 delete from t;
 select * from m;               -- wrong: 1 (for ever)   correct: no row
+
+insert into t values (1, 1.00);
+update t set k = 1.0;
+select k::varchar from t;      -- wrong: 1.00    correct: 1.0
 ```
 
 ## Cause
@@ -30,7 +34,9 @@ The materialization of a table with a primary key accumulates the changes of a c
 (`old_row != new_row`, the SQL equality of each value). The dropped update was neither written to
 the storage nor sent downstream, but the materialization cache had already taken the new row.
 The delete then emitted the cached new row (`1.00`), which the filter of the view rejects, so the
-view never deleted its row.
+view never deleted its row. The batch `UPDATE` executor also skipped the rows whose new values
+were equal to the old ones (`row_delete == row_insert`), so an `UPDATE` to an equal value written
+differently changed nothing.
 
 ## Fix
 
@@ -38,16 +44,19 @@ view never deleted its row.
 whose type has a single representation, otherwise equal values with the same text). The change
 buffer drops only identical updates (trait `Identical`, implemented for the row types it holds),
 and so do the other places that drop no-op updates (see
-[noop-update-elimination-equal-values.md](noop-update-elimination-equal-values.md)). Commit
-`34bb3a7631` on branch `proto/plan-reduction-fix-correctness` (applies to upstream code alone).
+[noop-update-elimination-equal-values.md](noop-update-elimination-equal-values.md)), as well as
+the batch `UPDATE` executor. Commits on branch `proto/plan-reduction-fix-correctness`, all
+applying to upstream code alone: `34bb3a7631` (streaming), `a33e0d3f2d` (clippy fix of it, to
+squash into it), `993657d223` (batch `UPDATE`).
 
 ## Tests
 
 `e2e_test/streaming/correctness_fixes.slt`: the table itself and two materialized views through an
-upsert of equal values (numeric and float), an update back, and a delete. Unit test
+upsert of equal values (numeric and float), an update back, and a delete;
+`e2e_test/batch/correctness_fixes.slt`: `UPDATE` and upsert to equal values. Unit test
 `test_identical` in `src/common/src/row/mod.rs`.
 
 ## Upstream status
 
-Not fixed on `main` (2026-11-28): `ChangeBuffer::into_records` still compares with `!=`. No
-upstream issue found.
+Not fixed on `main` (2026-11-28): `ChangeBuffer::into_records` still compares with `!=`, and the
+batch `UPDATE` executor with `==`. No upstream issue found.

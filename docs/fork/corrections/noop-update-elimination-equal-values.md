@@ -37,7 +37,7 @@ representations (`1.0` / `1.00`, `0` / `-0`, `'1 day'` / `'24 hours'`) were take
 ## Fix
 
 These places use `risingwave_common::row::identical` (value and representation) instead of the
-equality. Commit `34bb3a7631` on branch `proto/plan-reduction-fix-correctness` (applies to
+equality. Commits `34bb3a7631` and `a33e0d3f2d` (clippy fix, to squash into it) on branch `proto/plan-reduction-fix-correctness` (applies to
 upstream code alone), with the table materialization case of
 [upsert-equal-values-lost.md](upsert-equal-values-lost.md).
 
