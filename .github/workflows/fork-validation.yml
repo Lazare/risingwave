@@ -1,15 +1,16 @@
-# Validation of selective barriers (`docs/dev/src/design/selective-barriers.md`) on a GitHub
-# runner: a dev build (debug assertions on, embedded UDF runtimes) started by risedev, with
-# Postgres, a Kafka API (Redpanda) and MySQL in containers, then the tests of
-# `scripts/selective_barriers`, the streaming, batch and UDF SLT. A second job upgrades in place:
-# it creates sources, sinks and functions with the binary of the deployed commit, restarts on the
-# same data with the binary of the commit under test and checks every object. A third job runs
-# the unit tests of the main crates.
+# End-to-end validation of the whole fork on a GitHub runner, meant for an integration branch
+# (the tag plus every `fork/*` branch): a dev build (debug assertions on, embedded UDF runtimes)
+# started by risedev, with Postgres, a Kafka API (Redpanda) and MySQL in containers, then the tests
+# of `scripts/selective_barriers` (connector and sink matrix, sinks into tables, chaos tests of
+# selective barriers, `docs/dev/src/design/selective-barriers.md`), the streaming, batch and UDF
+# SLT. A second job upgrades in place: it creates sources, sinks and functions with the binary of
+# the deployed commit, restarts on the same data with the binary of the commit under test and
+# checks every object. A third job runs the unit tests of the main crates.
 #
 # It builds no image. To run it:
 # - push the commit to validate to a branch named `validate/<anything>`, or
-# - once this file is on the default branch: gh workflow run 'Selective Barriers Validation' --ref <branch>
-name: Selective Barriers Validation
+# - once this file is on the default branch: gh workflow run 'Fork Validation' --ref <branch>
+name: Fork Validation
 
 permissions:
   contents: read
@@ -32,7 +33,7 @@ on:
       - 'validate/**'
 
 concurrency:
-  group: selective-barriers-validation-${{ github.ref }}
+  group: fork-validation-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -238,7 +239,7 @@ jobs:
         if: ${{ always() }}
         run: |
           {
-            echo "## Selective barriers validation"
+            echo "## Fork validation"
             echo ""
             echo "| Step | Result |"
             echo "|---|---|"
@@ -266,7 +267,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: selective-barriers-validation
+          name: fork-validation
           path: selbar-out/
           if-no-files-found: warn
           retention-days: 14

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# One step of the validation of selective barriers, on a cluster started by risedev with the
+# One step of the end-to-end validation of the fork, on a cluster started by risedev with the
 # profiles of `scripts/selective_barriers/risedev-profiles.yml`. Used by the workflow
-# `.github/workflows/selective-barriers-validation.yml` and usable locally.
+# `.github/workflows/fork-validation.yml` and usable locally.
 #
 # Usage: scripts/selective_barriers/ci_validate.sh <step>
 #   build                 build the binaries and start a cluster once

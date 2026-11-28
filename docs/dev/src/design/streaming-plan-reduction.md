@@ -1,14 +1,19 @@
-# Reducing the streaming graph at planning time
+# Streaming and batch plan reduction
 
-Working notes of the prototype branches `proto/streaming-prune-empty-relation` and
-`proto/streaming-merge-repeated-lookups` (idea 3, derived from the former): what is done, what
-is being done, and every idea that was considered, including those that are not pursued for now.
-Not listed in `SUMMARY.md` while this is a prototype.
+Working notes of the plan-reduction prototype branches, which reduce streaming graphs and batch
+plans at planning time. The work started with the streaming branches
+`proto/streaming-prune-empty-relation` and `proto/streaming-merge-repeated-lookups` (idea 3,
+derived from the former); the batch counterparts and the batch-only rules (BK, BL, BJ, BF, BP, BT,
+BU and "Batch counterparts") followed on `proto/plan-reduction-*` and `proto/batch-*` branches.
+The note records what is done, what is being done, and every idea that was considered, including
+those that are not pursued for now. The file keeps its historical name,
+`streaming-plan-reduction.md`.
 
 A streaming job is planned once and its plan is frozen: a rewrite must hold for all future data,
 including retractions, `NULL`s (three-valued logic) and watermarks. This is why everything below
 is opt-in through session variables that are off by default, and why the batch optimizer keeps its
-own rules.
+own rules. The batch rules are opt-in too, through `batch_` session variables that are off by
+default.
 
 ## Status
 
@@ -40,7 +45,6 @@ own rules.
 | SL | Status ladder: the branches of a top-1 by priority that read the same relation picked with one `CASE` | done (prototype, branch `proto/plan-reduction-union-scans`); `GROUP BY` branches of the same relation merged into one aggregation and second pass after the sharing of widened copies done (branch `proto/plan-reduction-ladder-ext`); default branch rewritten into a join not done (not beneficial) |
 | NK | Join on a column known to be `NULL` matches nothing (`batch_simplify_null_join_keys`, `streaming_simplify_null_join_keys`) | done (prototype, branch `proto/plan-reduction-nullkey`), see "NK" below |
 | NV | `first_value` / `last_value` keep only the functions of the value that are read (`batch_narrow_value_aggregates`, `streaming_narrow_value_aggregates`) | done (prototype, branch `proto/plan-reduction-narrow-value`), see "NV" below |
-| BJ | Batch: cost-based ordering of the inner joins from the row counts of the tables (`batch_cost_based_join_ordering`) | first version (prototype, branch `proto/plan-reduction-batch-joinorder`, see "BJ" below); index lookups and column statistics not done |
 | BJ | Batch: cost-based ordering of the inner joins from the row counts and sizes of the tables (`batch_cost_based_join_ordering`) | first version (prototype, branch `proto/plan-reduction-batch-joinorder`, see "BJ" below), width-aware since 2026-11-27 (the build side is the side with fewer bytes; left outer, semi and anti joins can become right joins); index lookups and column statistics not done |
 | BF | Batch: cardinality feedback, step 1: count the rows of the operators at execution and compare them with the estimates (`batch_cardinality_feedback`) | first version (prototype, branch `proto/batch-cardinality-feedback`, see "BF" below): observation only, no plan changes |
 | BL2 | Batch: cardinality feedback, step 2: learn ratios (selectivity, groups, join fan-out) from the counts and use them in the estimates of BJ and in the limit of BT (`batch_cardinality_feedback_learning`) | first version (prototype, branch `proto/batch-cardinality-feedback-learning`, see "BF step 2" below); plan regression guard (step 4) not done |
