@@ -1,0 +1,178 @@
+# Predicates copied to the other side of a join through its equalities in streaming plans
+# (`streaming_transitive_predicates`): `TransitivePredicateRule`. A predicate that holds on every
+# row of one side and only reads columns compared with `=` is copied to the other side: the rows
+# that can not match are dropped before the join state.
+- id: setup_off
+  sql: |
+    create table o (id int primary key, region varchar, amount int, k numeric, f float8);
+    create table s (sid int primary key, order_id int, region varchar, w int, k numeric, f float8);
+    create view eu_o as select * from o where region = 'EU' and id > 1000;
+  expected_outputs: []
+- id: setup
+  sql: |
+    set streaming_transitive_predicates = true;
+    create table o (id int primary key, region varchar, amount int, k numeric, f float8);
+    create table s (sid int primary key, order_id int, region varchar, w int, k numeric, f float8);
+    create table s2 (region varchar, order_id int, x int, primary key (region, order_id));
+    create table c (id int primary key, order_id int, note varchar);
+    create table h (id int primary key, ts timestamptz, v int);
+    create table hs (id int primary key, ts timestamptz, w int);
+    create view eu_o as select * from o where region = 'EU' and id > 1000;
+  expected_outputs: []
+
+- name: off by default - the filter of the view stays on its side
+  before: [setup_off]
+  sql: |
+    select o.id, s.sid from eu_o o join s on s.region = o.region and s.order_id = o.id;
+  expected_outputs:
+  - stream_plan
+- name: inner join - the filter of a view is copied to the other side
+  before: [setup]
+  sql: |
+    select o.id, s.sid from eu_o o join s on s.region = o.region and s.order_id = o.id;
+  expected_outputs:
+  - stream_plan
+- name: inner join - the copied filter becomes a range of the primary key of the other side
+  before: [setup]
+  sql: |
+    select o.id, s2.x from eu_o o join s2 on s2.region = o.region and s2.order_id = o.id;
+  expected_outputs:
+  - stream_plan
+- name: inner join - only the conjuncts on the join columns are copied
+  before: [setup]
+  sql: |
+    select o.id, s.sid
+    from (select * from o where amount > 5 and id > 1000 and amount + id < 10000) o
+    join s on s.order_id = o.id;
+  expected_outputs:
+  - stream_plan
+- name: chain of three joins - the filter reaches the third table
+  before: [setup]
+  sql: |
+    select o.id, s.sid, c.note from eu_o o
+    join s on s.order_id = o.id
+    join c on c.order_id = s.order_id;
+  expected_outputs:
+  - stream_plan
+- name: union - the tags of the branches become an IN list on the other side
+  before: [setup]
+  sql: |
+    select u.tag, u.id, s.sid
+    from (select 'A' as tag, id from o union all select 'B' as tag, id from o where amount > 5) u
+    join s on s.region = u.tag and s.order_id = u.id;
+  expected_outputs:
+  - stream_plan
+- name: values - the constant rows become an IN list on the other side
+  before: [setup]
+  sql: |
+    select v.x, s.sid from (values (1), (2), (3)) v(x) join s on s.order_id = v.x;
+  expected_outputs:
+  - stream_plan
+- name: aggregation - a filter on the group key is copied
+  before: [setup]
+  sql: |
+    select g.region, g.n, s.sid
+    from (select region, count(*) as n from o where region in ('EU', 'US') group by region) g
+    join s on s.region = g.region;
+  expected_outputs:
+  - stream_plan
+- name: left join - copied from the preserved side into the optional side
+  before: [setup]
+  sql: |
+    select o.id, s.sid from eu_o o left join s on s.region = o.region and s.order_id = o.id;
+  expected_outputs:
+  - stream_plan
+- name: left join - kept, a filter of the optional side is not copied into the preserved side
+  before: [setup]
+  sql: |
+    select o.id, s.sid
+    from o left join (select * from s where region = 'EU') s on s.region = o.region;
+  expected_outputs:
+  - stream_plan
+- name: right join - copied from the preserved right side into the left side only
+  before: [setup]
+  sql: |
+    select s0.sid, o.id
+    from (select * from s where order_id > 7) s0
+    right join (select * from o where id < 100) o on s0.order_id = o.id;
+  expected_outputs:
+  - stream_plan
+- name: full join - kept
+  before: [setup]
+  sql: |
+    select o.id, s.sid from eu_o o full join s on s.region = o.region and s.order_id = o.id;
+  expected_outputs:
+  - stream_plan
+- name: semi join - a filter of the subquery is copied to the outer side
+  before: [setup]
+  sql: |
+    select o.id from o where o.id in (select order_id from s where order_id > 5);
+  expected_outputs:
+  - stream_plan
+- name: anti join - kept, a filter of the subquery is not copied to the outer side
+  before: [setup]
+  sql: |
+    select o.id from o where not exists (select 1 from s where s.order_id = o.id and s.order_id > 5);
+  expected_outputs:
+  - stream_plan
+- name: anti join - a filter of the outer side is copied into the subquery
+  before: [setup]
+  sql: |
+    select o.id from eu_o o where not exists (select 1 from s where s.order_id = o.id);
+  expected_outputs:
+  - stream_plan
+- name: kept - a filter with now() is not copied
+  before: [setup]
+  sql: |
+    select h.id, hs.id as hid
+    from (select * from h where ts > now() - interval '1 hour') h join hs on hs.ts = h.ts;
+  expected_outputs:
+  - stream_plan
+- name: kept - numeric key, a predicate on the text of the value is not copied
+  before: [setup]
+  sql: |
+    select o.id, s.sid from (select * from o where k::varchar = '1.0') o join s on s.k = o.k;
+  expected_outputs:
+  - stream_plan
+- name: numeric and float keys, comparisons with constants are copied
+  before: [setup]
+  sql: |
+    select o.id, s.sid
+    from (select * from o where k > 1.5 and f between 1 and 2) o
+    join s on s.k = o.k and s.f = o.f;
+  expected_outputs:
+  - stream_plan
+- name: kept - null-safe key that may be NULL
+  before: [setup]
+  sql: |
+    select o.id, s.sid from eu_o o join s on s.order_id is not distinct from o.id;
+  expected_outputs:
+  - stream_plan
+- name: null-safe key that is never NULL on both sides
+  before: [setup]
+  sql: |
+    select o.id, s.sid
+    from eu_o o join (select * from s where order_id is not null) s
+    on s.order_id is not distinct from o.id;
+  expected_outputs:
+  - stream_plan
+- name: no duplicate - a filter pushed from above is not copied again
+  before: [setup]
+  sql: |
+    select o.id, s.sid from o join s on s.order_id = o.id where o.id > 5;
+  expected_outputs:
+  - stream_plan
+- name: contradictory filter - copied as it is
+  before: [setup]
+  sql: |
+    select o.id, s.sid from (select * from o where id > 5 and id < 3) o join s on s.order_id = o.id;
+  expected_outputs:
+  - stream_plan
+- name: kept - temporal join
+  before: [setup]
+  sql: |
+    select s.sid, o.region
+    from (select * from s where order_id > 5) s
+    join o for system_time as of proctime() on s.order_id = o.id;
+  expected_outputs:
+  - stream_plan

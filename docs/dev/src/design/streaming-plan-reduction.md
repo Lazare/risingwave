@@ -46,6 +46,7 @@ own rules.
 | BP | Batch: second pass of the reductions on keys after the stages that create aggregations (`batch_reduce_keys_after_conversions`) | done (prototype, branch `proto/plan-reduction-batch-pass2`, see "BP and BT" below) |
 | BT | Batch: `row_number() <= n` per partition becomes a top-n per group, small `n` only (`batch_over_window_to_topn`) | done (prototype, branch `proto/plan-reduction-batch-pass2`, see "BP and BT" below) |
 | BU | Batch: `UNION ALL` run in parallel tasks instead of one (`batch_distributed_union`) | done (prototype, branch `proto/plan-reduction-batch-union-dist`, see "BU" below) |
+| TP | Predicates copied to the other side of a join through its equalities, transitively; implied equalities in the batch cost-based join ordering (`streaming_transitive_predicates`, `batch_transitive_predicates`) | done (prototype, branch `proto/plan-reduction-transitive-preds`, see "TP" below) |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -1399,6 +1400,86 @@ projection; without the variable, or without a union below, they convert their i
   empty branches, after updates and deletes, and with a single branch left).
 - Not done: a round-robin exchange, which would let a union with no requirement keep its inputs
   in their stages without hashing; a partial aggregation pushed into each branch.
+
+### TP. Transitive predicates and implied equalities (added on 2026-11-28, done on the branch)
+
+Variables `streaming_transitive_predicates` and `batch_transitive_predicates`, rule
+`TransitivePredicateRule`; implied equalities in `cost_based_join_ordering_rule.rs`. Sources:
+Calcite `JoinPushTransitivePredicatesRule` with `RelMdPredicates`, the equivalence classes of
+PostgreSQL (`generate_base_implied_equalities_const` and `_no_const`).
+
+Predicate pushdown derives, through the equalities of a join, the predicates that it pushes into
+the join from above or from its condition (`derive_predicate_from_eq_condition`). A predicate that
+is already inside an input never meets the join: the filter of a view, the predicate of a scan, a
+constant column, the tags of the branches of a `UNION ALL`. The rule copies it:
+
+```text
+CREATE VIEW eu_o AS SELECT * FROM o WHERE region = 'EU' AND id > 1000;
+SELECT ... FROM eu_o JOIN s ON s.region = eu_o.region AND s.order_id = eu_o.id;
+
+Join(o.region = s.region AND o.id = s.order_id)       Join(...)
+├─Scan(o, region = 'EU' AND id > 1000)          =>     ├─Scan(o, region = 'EU' AND id > 1000)
+└─Scan(s)                                              └─Scan(s, region = 'EU' AND order_id > 1000)
+```
+
+- Predicates that hold on every row of a node (`pulled_predicates`): the conjuncts of filters and
+  scan predicates; through projections (a predicate on the input rewritten on the output columns
+  that compute the same pure expressions; a literal column `c = v`), the sides of a join that are
+  not padded (with the condition of an inner join), unions (the predicates of every branch, and
+  `c IN (...)` for a column that every branch fixes to a few values: the tags), `VALUES` (`c IN`
+  the literals of the column), the group key of an aggregation, and the operators that only
+  select rows (share, dedup, top-n, limit, over window). At most 32 per node, `IN` lists of at
+  most 64 values.
+- Copied: the deterministic predicates (columns, literals, pure functions: no `now()`, sub-query
+  or user-defined function) whose columns are all keys compared with `=` (same type), or with
+  `IS NOT DISTINCT FROM` when both columns are never `NULL`, rewritten on the keys of the other
+  side, unless the other side already holds them, and except `k IS NOT NULL` (implied by `=`).
+- Directions: inner and semi joins both ways; left outer and left anti joins from the left side
+  into the right side only (an unmatched right row is never output; an unmatched left row is);
+  right joins symmetrically; never for full outer, as-of or temporal joins.
+- Valid: a predicate `p` holds on every row `l` of a side; for a matching pair `l.k = r.k`, `p`
+  gives the same result on `r.k` when the two equal values are indistinguishable by `p`, so the
+  rows of the other side for which `p` is not `TRUE` match nothing, and only an unmatched row of
+  the other side could be output, which the directions above exclude. Equal values are
+  indistinguishable for integers, booleans, `varchar`, `bytea`, dates, times and timestamps; for
+  `numeric`, floats and `interval` (`1.0 = 1.00`, `-0.0 = 0.0`, `'1 day' = '24 hours'`) only
+  comparisons with constants and `NULL` tests are copied (the same restriction as the correction
+  of `derive_predicate_from_eq_condition`, see `docs/fork/corrections/`; the two copies of the
+  check are to be merged into one helper). A deterministic row filter keeps or drops a row the
+  same way when it is inserted and when it is deleted: exact under retractions and duplicates, for
+  any future data, without statistics.
+- Transitivity: the rule is applied bottom-up, so a join sees the filters that it added below it,
+  through the inner joins of its inputs (`a.x = b.y`, then `b.y = c.z`: the filter of `a` reaches
+  `c`); predicate pushdown then moves the new filters into the scans and derives them further down
+  through the joins below. Two rounds at most; a round that adds nothing ends the loop.
+- Gains: streaming, the rows of the other side that can not match never enter the join state, its
+  backfill or the exchanges below the join; a constant on a prefix of the primary key becomes a
+  `pk_scan_range`. Batch, the copied constants and ranges become scan ranges (with lookup joins off,
+  or when the hash join is chosen) and fewer rows are shuffled.
+- Implied equalities (batch, with `batch_cost_based_join_ordering`): the columns compared with `=`
+  in the inner joins of a multi-join form equivalence classes; two inputs that hold columns of the
+  same class but that no written equality links get the implied equality of their first columns
+  (`a.x = b.y AND b.y = c.z` gives `a.x = c.z`), so the dynamic programming can join `a` with `c`
+  first. `=` is an equivalence relation for every type a hash join compares, and the multi-join
+  only merges inner joins: the result is unchanged. The estimate of a set of inputs counts the
+  selectivity of an implied equality only when the inputs it links are not already linked within
+  the set by written equalities (or implied ones counted before): `{a, c}` counts it, `{a, b, c}`
+  does not. Only the implied equalities that the chosen tree needs are added to the condition:
+  those between two sub-trees that no equality of the same class links. Without statistics, or
+  when the tree is the heuristic one, the plan is unchanged.
+- Not done: predicates on expressions of the keys (`a.k + 1 = b.j`); copies through `OR`
+  conditions (idea 6 of the survey); implied equalities in the streaming orderings (the bushy
+  ordering already derives them in one step); same-input implied equalities as filters.
+- Risk: the batch estimates count a copied filter on both sides of a join whose selectivity
+  already accounts for it (PostgreSQL documents the same problem); the learned selectivities of
+  `batch_cardinality_feedback_learning` correct it once observed.
+- Stages: `TRANSITIVE_PREDICATES` (bottom-up) after the first predicate pushdown and before join
+  ordering, in both pipelines, each round followed by predicate pushdown.
+- Tests: planner tests `stream_transitive_predicates.yaml`, `batch_transitive_predicates.yaml`;
+  differential tests `e2e_test/streaming/transitive_predicates` and
+  `e2e_test/batch/transitive_predicates` (numeric `1.0` / `1.00`, floats `-0` / `0`, `NULL` keys,
+  duplicates, outer, semi and anti joins, unions, `VALUES`, contradictions, empty sides, updates of
+  keys and of filtered columns, deletes).
 
 ## Not for now: sharing between materialized views
 

@@ -393,6 +393,8 @@ pub(crate) fn gen_create_mv_graph(
             || config.streaming_simplify_null_join_keys()
             // Rules `NarrowValueAggRule` and `NarrowValuePushRule`.
             || config.streaming_narrow_value_aggregates()
+            // Rule `TransitivePredicateRule`.
+            || config.streaming_transitive_predicates()
     };
     let baseline_args = prune_enabled.then(|| {
         (

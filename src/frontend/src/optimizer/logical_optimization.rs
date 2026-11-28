@@ -839,6 +839,18 @@ static STREAM_SIMPLIFY_ON_UNIQUE_KEY: LazyLock<OptimizationStage> = LazyLock::ne
     )
 });
 
+// Rule `TransitivePredicateRule` (`streaming_transitive_predicates`, `batch_transitive_predicates`):
+// the predicates that hold on every row of a side of a join are copied to its other side through
+// the equalities of the join. Bottom-up, so that a join sees the filters that the rule added below
+// it; the caller pushes the new filters down.
+static TRANSITIVE_PREDICATES: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Transitive Predicates",
+        vec![TransitivePredicateRule::create()],
+        ApplyOrder::BottomUp,
+    )
+});
+
 static LIMIT_PUSH_DOWN: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Push Down Limit",
@@ -1183,6 +1195,26 @@ impl LogicalOptimizer {
 
         // Predicate Push-down
         plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+
+        // Rule `TransitivePredicateRule` (`streaming_transitive_predicates`): after the first
+        // predicate pushdown, which puts the filters of the views next to their scans, and before
+        // join ordering. The copied filters are pushed down, then derived further down by the
+        // pushdown through the joins below; a second round sees the filters in their scans. On
+        // demand only: the plan of a streaming job is frozen when the job is created.
+        if ctx.session_ctx().config().streaming_transitive_predicates()
+            && !ctx.is_stream_prune_baseline()
+        {
+            for _ in 0..2 {
+                let applied_before = ctx.total_rule_applied();
+                plan = plan.optimize_by_rules(&TRANSITIVE_PREDICATES)?;
+                let applied = ctx.total_rule_applied() - applied_before;
+                if applied == 0 {
+                    break;
+                }
+                ctx.add_stream_prune_rule_applied(applied);
+                plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+            }
+        }
 
         if plan.ctx().session_ctx().config().enable_join_ordering() {
             // Merge inner joins and intermediate filters into multijoin
@@ -1698,6 +1730,18 @@ impl LogicalOptimizer {
             if ctx.total_rule_applied() != applied_before {
                 plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
                 plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
+            }
+        }
+        // Rule `TransitivePredicateRule` (`batch_transitive_predicates`): before join ordering, so
+        // that the estimates of the inputs count the copied filters, as for streaming above.
+        if ctx.session_ctx().config().batch_transitive_predicates() {
+            for _ in 0..2 {
+                let applied_before = ctx.total_rule_applied();
+                plan = plan.optimize_by_rules(&TRANSITIVE_PREDICATES)?;
+                if ctx.total_rule_applied() == applied_before {
+                    break;
+                }
+                plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
             }
         }
 

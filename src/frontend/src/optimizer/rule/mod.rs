@@ -258,6 +258,9 @@ mod top_one_default_branch_rule;
 pub use top_one_default_branch_rule::*;
 mod unused_join_under_dedup_rule;
 pub use unused_join_under_dedup_rule::*;
+// Rule `TransitivePredicateRule` (`streaming_transitive_predicates`, `batch_transitive_predicates`).
+mod transitive_predicate_rule;
+pub use transitive_predicate_rule::*;
 mod unique_key_simplify_rule;
 pub use unique_key_simplify_rule::*;
 mod join_project_transpose_rule;
@@ -427,6 +430,7 @@ macro_rules! for_all_rules {
             , { SelfAggregateJoinRule }
             , { StackedAggOverUnionMergeRule }
             , { StatusLadderCaseRule }
+            , { TransitivePredicateRule }
             , { BushyTreeJoinOrderingRule }
             , { StreamProjectMergeRule }
             , { StreamProjectSplitRule }
