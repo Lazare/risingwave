@@ -1,0 +1,100 @@
+# Hash exchanges of wide rows (JSONB of about 300 bytes) in distributed batch queries, with the
+# exchange variables off and on: `batch_compact_shuffle_output` (each consumer gets chunks of its
+# own rows) and `batch_exchange_buffer_max_mb` (a tiny bound, so that producers wait for their
+# consumers). The results must not change. Expected values computed by hand.
+
+statement ok
+SET RW_IMPLICIT_FLUSH TO true;
+
+statement ok
+SET QUERY_MODE TO distributed;
+
+statement ok
+CREATE TABLE t1 (id INT PRIMARY KEY, k INT, v JSONB);
+
+statement ok
+CREATE TABLE t2 (id INT PRIMARY KEY, k INT, w INT);
+
+statement ok
+INSERT INTO t1 SELECT i, i % 1000, jsonb_build_object('id', i, 'pad', repeat('a', 300)) FROM generate_series(1, 10000) i;
+
+statement ok
+INSERT INTO t2 SELECT i, i % 1000, i FROM generate_series(1, 5000) i;
+
+query TT
+SELECT current_setting('batch_compact_shuffle_output'), current_setting('batch_exchange_buffer_max_mb');
+----
+false 0
+
+# Join on a column that is not the distribution key: both sides are shuffled by `k`, the wide
+# values with them. Each row of t1 matches the 5 rows of t2 with the same `k`.
+query III
+SELECT count(*), count(DISTINCT t1.v), sum(t2.w) FROM t1 JOIN t2 ON t1.k = t2.k;
+----
+50000 10000 125025000
+
+query I
+SELECT sum((t1.v->>'id')::BIGINT) FROM t1 JOIN t2 ON t1.k = t2.k;
+----
+250025000
+
+# Aggregation by `k` of the wide values: shuffled by `k`.
+query III
+SELECT count(*), sum(c), sum(m) FROM (SELECT k, count(*) c, max((v->>'id')::INT) m, max(length(v->>'pad')) l FROM t1 GROUP BY k) WHERE l = 300;
+----
+1000 10000 9500500
+
+statement ok
+SET batch_compact_shuffle_output = true;
+
+query III
+SELECT count(*), count(DISTINCT t1.v), sum(t2.w) FROM t1 JOIN t2 ON t1.k = t2.k;
+----
+50000 10000 125025000
+
+query I
+SELECT sum((t1.v->>'id')::BIGINT) FROM t1 JOIN t2 ON t1.k = t2.k;
+----
+250025000
+
+query III
+SELECT count(*), sum(c), sum(m) FROM (SELECT k, count(*) c, max((v->>'id')::INT) m, max(length(v->>'pad')) l FROM t1 GROUP BY k) WHERE l = 300;
+----
+1000 10000 9500500
+
+# A bound of 1 MB on the output channels of each task: producers wait for their consumers.
+statement ok
+SET batch_exchange_buffer_max_mb = 1;
+
+query III
+SELECT count(*), count(DISTINCT t1.v), sum(t2.w) FROM t1 JOIN t2 ON t1.k = t2.k;
+----
+50000 10000 125025000
+
+query III
+SELECT count(*), sum(c), sum(m) FROM (SELECT k, count(*) c, max((v->>'id')::INT) m, max(length(v->>'pad')) l FROM t1 GROUP BY k) WHERE l = 300;
+----
+1000 10000 9500500
+
+# The bound alone, with slices of the input chunks.
+statement ok
+SET batch_compact_shuffle_output = false;
+
+query III
+SELECT count(*), count(DISTINCT t1.v), sum(t2.w) FROM t1 JOIN t2 ON t1.k = t2.k;
+----
+50000 10000 125025000
+
+query I
+SELECT sum((t1.v->>'id')::BIGINT) FROM t1 JOIN t2 ON t1.k = t2.k;
+----
+250025000
+
+statement ok
+SET batch_exchange_buffer_max_mb = 0;
+
+statement ok
+DROP TABLE t1;
+
+statement ok
+DROP TABLE t2;

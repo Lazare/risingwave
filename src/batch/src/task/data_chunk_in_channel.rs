@@ -16,20 +16,37 @@ use risingwave_common::array::DataChunk;
 use risingwave_pb::data::PbDataChunk;
 use tokio::sync::OnceCell;
 
+use crate::task::output_buffer::HeldBytes;
+
 #[derive(Debug, Clone)]
 pub(super) struct DataChunkInChannel {
     data_chunk: DataChunk,
     /// If the data chunk is only needed to transfer locally,
     /// this field should not be initialized.
     prost_data_chunk: OnceCell<PbDataChunk>,
+    /// The hold of the chunk on the output buffer (room in its bound), released when the chunk
+    /// (and all the other slices of its columns) left the channels.
+    held: HeldBytes,
 }
 
 impl DataChunkInChannel {
-    pub fn new(data_chunk: DataChunk) -> Self {
+    pub fn new(data_chunk: DataChunk, held: HeldBytes) -> Self {
         Self {
             data_chunk,
             prost_data_chunk: OnceCell::new(),
+            held,
         }
+    }
+
+    /// The hold of the chunk, to keep it after the chunk is serialized, while its serialized
+    /// form waits for the consumer.
+    pub fn held(&self) -> HeldBytes {
+        self.held.clone()
+    }
+
+    /// What the chunk holds of its columns: about the size of its serialized form.
+    pub fn kept_bytes(&self) -> usize {
+        self.data_chunk.kept_bytes()
     }
 
     pub async fn to_protobuf(&self) -> PbDataChunk {

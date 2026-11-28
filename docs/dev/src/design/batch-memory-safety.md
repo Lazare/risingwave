@@ -20,8 +20,8 @@ Sizes below use a query with parallelism `P` on one node, chunks of 1024 rows of
 
 | Place | Counted? | Size at stake | Status |
 |---|---|---|---|
-| Task output channels (`output_channel_size` = 64 chunks per output) | no | `64 x 1024 x R` per output channel; an exchange `Single` with `P` producers holds up to `P x 64` chunks, e.g. 16 x 64 x 3 MB = 3 GB for rows of 3 KB | open, see (b) |
-| Hash shuffle: each output gets the whole chunk with a visibility bitmap (`hash_shuffle_channel.rs`) | no | a chunk stays alive until the slowest of the `P` consumers reads its part: up to 64 full chunks per slow consumer | open |
+| Task output channels (`output_channel_size` = 64 chunks per output) | no | `64 x 1024 x R` per output channel; an exchange `Single` with `P` producers holds up to `P x 64` chunks, e.g. 16 x 64 x 3 MB = 3 GB for rows of 3 KB | **counted** (section 7); bound in bytes with `batch_exchange_buffer_max_mb` |
+| Hash shuffle: each output gets the whole chunk with a visibility bitmap (`hash_shuffle_channel.rs`) | no | a chunk stays alive until the slowest of the `P` consumers reads its part: up to 64 full chunks per slow consumer | **counted once**; compact mode `batch_compact_shuffle_output` (section 7) |
 | Storage scans: one iterator per vnode (256), all polled at once (`flatten_unordered(1024)` in `batch_table/mod.rs`) | no | at least one decoded block per SST level per vnode: 256 x levels x 64 KB, i.e. 80 MB per active scan with 5 levels | open |
 | Storage prefetch (`prefetch_blocks`, up to 16 blocks per iterator) | node-wide cap = block cache capacity, counted on the **compressed** size while the **decoded** blocks are held | decoded size is 2-5 times the cap for compressible rows (JSON) | open: count `uncompressed_size` |
 | Blocks pinned by iterators and evicted from the block cache | foyer subtracts evicted entries from its usage even when they are still referenced | as much as the iterators hold | open |
@@ -137,3 +137,96 @@ section 4.
    `ExecutorMemory` of the task), the outer batch of the lookup join.
 2. Spilling output channels (section 4).
 3. Phased execution as an option for the heaviest queries (section 5).
+
+## 7. Exchange buffers (implemented)
+
+**One count per block.** A chunk that a task sends is counted once in the memory of its query (a
+context `task output`, child of the query context) when it enters the output channels. The count
+is attached to the chunk itself (`SharedChunkMemory`, an `Arc` held by `DataChunk`): the slices
+that a hash shuffle (or a consistent hash shuffle, or a broadcast) sends to its outputs share the
+columns of the chunk and share its count, and so does every chunk downstream that keeps sharing
+the columns (`with_visibility`, `clone`, projections). The count is released when the last of them
+is dropped, wherever it went. A chunk that copies the rows (`compact_vis`, a new chunk) does not
+share it. A task that forwards a chunk that is already counted does not count it again.
+
+The count is forced (memory that is already allocated cannot be refused): a query whose buffers
+grow leaves less room to its spillable operators, which then spill, and the memory of the node
+sees it.
+
+**Operators that keep slices.** The consumers of a shuffle are the tasks of one stage that run the
+same plan: they usually all keep their slices (all build their hash table) or all drop them.
+Sharing is the common case, and copying the visible rows of each slice would duplicate the block
+for nothing. So an operator that keeps a slice (hash join build side, nested loop join left side,
+merge sort) does not copy it: it counts its share in its own context, the bytes of the block times
+its visible rows over the rows of the block (`DataChunk::kept_bytes`), and takes that share out of
+the shared count (`adopt_shared_memory`). The shares of all the holders sum to the block, which is
+counted once in total. The sort still copies every chunk it keeps, as before (it needs compact
+rows).
+
+**Copy only as the sole holder.** When the hash join needs memory, before it spills or waits, it
+copies the visible rows of the slices that no other chunk shares any more (`Arc::strong_count` of
+the shared count is 1) and of which fewer than half of the rows are visible: the other consumers
+spilled, ended or dropped theirs, and the copy frees the rest of the block. A slice that others
+still share is never copied.
+
+**What remains uncounted.** When a holder that adopted its share drops its slice while others still
+hold the block, its share is no longer counted until the block is freed (the consumers of a stage
+usually drop their slices together). The columns that an operator reuses in a new chunk (a
+projection of input columns into its output) are no longer attached to the count.
+
+**Bound in bytes and remote consumers.** The bound of `batch_exchange_buffer_max_mb` covers the time
+spent in the channels only: a slice releases its room when it leaves them, never later, since an
+operator that keeps a slice must not block the producer that it waits for. A serialized chunk that
+waits in the `GetData` stream of a remote consumer (`receiver_channel_size`, 1000 responses) is
+counted for its size and keeps the room of its chunk until gRPC takes it.
+
+**Compact mode (`batch_compact_shuffle_output`, default false).** The hash shuffle appends the rows
+of each output to a chunk builder of its own and sends full chunks: no chunk is pinned by the
+slowest consumer, consumers get full chunks, and the count is exact. Cost: one copy of each row,
+and up to one partial chunk per output gathered in the producer (not counted). Optional and off by default: sharing the block is the common case. The visibilities
+of the outputs are now computed in one pass over the rows instead of one pass per output, in both
+modes.
+
+**Bound in bytes (`batch_exchange_buffer_max_mb`, default 0 = none).** The output channels of a task
+hold at most this many bytes, on top of their bound in chunks: a producer whose consumers are slow
+waits earlier when its rows are wide. A chunk larger than the whole bound waits for the buffer to
+be empty. The bound is per task and shared by its outputs: like the bound in chunks, it can only
+block a producer whose consumers do not read.
+
+**Not counted yet.** The rows gathered by the compact mode, the root stage channel of the frontend
+(`root_stage_channel_size`), the buffers of tonic and HTTP/2.
+
+**How much a producer pins.** A producer sends the slices of each block to its `Q` output queues in
+turn (`HashShuffleSender::send_chunk`, empty slices skipped) and blocks as soon as one queue is
+full (`slots` = `output_channel_size` = 64). The blocks that it keeps alive are those between the
+oldest slice still queued (in the queue of the slowest consumer) and the block being sent: at most
+`slots + 1` blocks when every block has rows for every output, which is the normal case with a
+hash distribution and chunks of 1024 rows, whatever `Q` is. The local exchange memory of a
+producer is then about `(slots + 1) x chunk bytes`, and of an exchange of `P` producers about
+`P x (slots + 1) x 1024 x W` for rows of width `W`: not `Q` times more, since the `Q` outputs
+share each block. Exception: with a skewed distribution, an output that gets rows from only a
+fraction `f` of the blocks holds 64 queued slices spanning about `64 / f` blocks, and the pinned
+window grows up to that, bounded by the blocking of the producer on its other queues.
+
+On the gRPC path (consumers on other nodes), each slice is compacted when it is serialized, and
+each `GetData` stream buffers up to `receiver_channel_size` (1000) messages of about `1024 / Q`
+rows: up to about `1000 x 1024 x W` per producer over its `Q` streams, plus the window of 64
+slots, again independent of `Q`, and much larger than the local window. The byte bound
+`batch_exchange_buffer_max_mb` is what limits it: a serialized chunk keeps the room of its slice
+in the bound until gRPC takes it.
+
+**Choosing the parallelism of a stage from its exchanges (design only).** The frontend already
+lowers the parallelism until the reserved memory of the spillable operators fits the limit of the
+query (`batch_limits.rs`). The same loop could add the exchanges: choose the largest `P` such that
+
+    reserved operators
+      + sum over local exchanges of P x (slots + 1) x 1024 x W
+      + sum over remote exchanges of P x min(B, 1000 x 1024 x W)
+      <= query limit
+
+with `B` the byte bound (no bound: `1000 x 1024 x W`), and `W` taken from the cardinality feedback
+when it has observed the sub-plan (bytes per row are not recorded yet: they would be added to the
+feedback store next to the row counts), else from the schema (fixed-size types exact,
+variable-size types at an assumed average). Gain: wide-row exchanges get a lower parallelism
+instead of filling the node. Risk: a wrong width estimate lowers the parallelism of a query that
+would have fit; the rule must only ever lower the parallelism chosen today, never raise it.

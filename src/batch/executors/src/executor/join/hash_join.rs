@@ -163,6 +163,27 @@ impl<K: HashKey> SingleBuildKey<K> {
     }
 }
 
+/// When the join needs memory, before it spills or waits: compacts the kept slices of shared
+/// columns that no other chunk shares any more and of which fewer than half of the rows are
+/// visible. The other consumers of the columns spilled, ended or dropped them: copying the visible
+/// rows frees the rest. The consumers of a stage run the same plan and usually keep their slices
+/// at the same time: a slice that others still share is never copied, which would only duplicate
+/// it. Returns whether memory was released.
+fn compact_sole_held_slices(build_side: &mut [DataChunk], mem_ctx: &MemoryContext) -> bool {
+    let mut released = false;
+    for chunk in build_side.iter_mut() {
+        if chunk.is_sole_holder_of_shared_memory() && chunk.cardinality() * 2 < chunk.capacity() {
+            let before = chunk.kept_bytes() as i64;
+            let compacted = std::mem::replace(chunk, DataChunk::new_dummy(0)).compact_vis();
+            let after = compacted.estimated_heap_size() as i64;
+            *chunk = compacted;
+            mem_ctx.force_add(after - before);
+            released = true;
+        }
+    }
+    released
+}
+
 /// Takes `bytes` from the memory of the query for a join that cannot reduce its memory by
 /// spilling. Waits for other operators of the query to release memory, as long as some of them
 /// hold memory that they can release.
@@ -624,10 +645,20 @@ impl<K: HashKey> HashJoinExecutor<K> {
             let build_chunk = build_chunk?;
             if build_chunk.cardinality() > 0 {
                 build_row_count += build_chunk.cardinality();
-                let chunk_estimated_heap_size = build_chunk.estimated_heap_size();
+                // A slice of an exchange is counted for its share of the columns that it shares
+                // with the slices of the other consumers (`DataChunk::kept_bytes`).
+                let chunk_estimated_heap_size = build_chunk.kept_bytes();
+                let mut granted = self.mem_ctx.add(chunk_estimated_heap_size as i64);
+                if !granted && compact_sole_held_slices(&mut build_side, &self.mem_ctx) {
+                    granted = self.mem_ctx.add(chunk_estimated_heap_size as i64);
+                }
+                if granted {
+                    // Counted here: no longer in the shared count of the columns.
+                    build_chunk.adopt_shared_memory();
+                }
                 // push build_chunk to build_side before checking memory limit, otherwise we will lose that chunk when spilling.
                 build_side.push(build_chunk);
-                if !self.mem_ctx.add(chunk_estimated_heap_size as i64) && check_memory {
+                if !granted && check_memory {
                     if self.spill_backend.is_none() {
                         Err(BatchError::OutOfMemory(self.mem_ctx.mem_limit()))?;
                     }
@@ -738,7 +769,7 @@ impl<K: HashKey> HashJoinExecutor<K> {
             let tracked_chunks = build_side.len() - last_build_chunk_untracked as usize;
             let tracked_chunk_bytes: i64 = build_side[..tracked_chunks]
                 .iter()
-                .map(|chunk| chunk.estimated_heap_size() as i64)
+                .map(|chunk| chunk.kept_bytes() as i64)
                 .sum();
             self.mem_ctx
                 .add(-(mem_added_by_hash_table + tracked_chunk_bytes - unsplittable_bytes));
@@ -4609,5 +4640,53 @@ mod tests {
         let test_fixture = TestFixture::with_join_type(JoinType::RightSemi);
         test_fixture.do_test_shutdown(false).await;
         test_fixture.do_test_shutdown(true).await;
+    }
+
+    /// A kept slice of shared columns is copied only once no other chunk shares them, and only
+    /// when fewer than half of its rows are visible.
+    #[test]
+    fn test_compact_sole_held_slices() {
+        use std::sync::Arc;
+
+        use risingwave_common::array::{Array, I64Array};
+        use risingwave_common::bitmap::Bitmap;
+        use risingwave_common::memory::SharedChunkMemory;
+        use risingwave_common_estimate_size::EstimateSize;
+
+        let query = MemoryContext::root(LabelGuardedIntGauge::test_int_gauge::<4>(), u64::MAX);
+        let join = MemoryContext::new(
+            Some(query.clone()),
+            LabelGuardedIntGauge::test_int_gauge::<4>(),
+        );
+        let block = DataChunk::new(vec![I64Array::from_iter(0..1000i64).into_ref()], 1000);
+        let bytes = block.estimated_heap_size() as i64;
+        let block =
+            block.with_shared_memory(Arc::new(SharedChunkMemory::new(query.clone(), bytes)));
+        let quarter = (0..1000).map(|i| i % 4 == 0).collect::<Vec<_>>();
+        let others = quarter.iter().map(|v| !v).collect::<Vec<_>>();
+        // The join keeps a quarter of the rows, another consumer the rest.
+        let kept = block.with_visibility(Bitmap::from_bool_slice(&quarter));
+        let other = block.with_visibility(Bitmap::from_bool_slice(&others));
+        drop(block);
+        assert!(join.add(kept.kept_bytes() as i64));
+        kept.adopt_shared_memory();
+        assert_eq!(query.get_bytes_used(), bytes);
+        let mut build_side = vec![kept];
+        // Shared with the other consumer: never copied.
+        assert!(!super::compact_sole_held_slices(&mut build_side, &join));
+        assert_eq!(build_side[0].capacity(), 1000);
+        // The other consumer is done: the hidden rows are freed by a copy of the visible ones.
+        drop(other);
+        assert!(super::compact_sole_held_slices(&mut build_side, &join));
+        assert_eq!(build_side[0].capacity(), 250);
+        assert!(build_side[0].shared_memory().is_none());
+        assert_eq!(
+            query.get_bytes_used(),
+            build_side[0].estimated_heap_size() as i64
+        );
+        assert_eq!(build_side[0].column_at(0).as_int64().value_at(1), Some(4));
+        drop(build_side);
+        drop(join);
+        assert_eq!(query.get_bytes_used(), 0);
     }
 }

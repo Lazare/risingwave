@@ -28,6 +28,7 @@ use crate::task::fifo_channel::{FifoReceiver, FifoSender, new_fifo_channel};
 use crate::task::hash_shuffle_channel::{
     HashShuffleReceiver, HashShuffleSender, new_hash_shuffle_channel,
 };
+use crate::task::output_buffer::OutputBuffer;
 
 pub(super) trait ChanSender: Send {
     /// This function will block until there's enough resource to process the chunk.
@@ -94,22 +95,46 @@ impl ChanReceiverImpl {
     }
 }
 
+/// How a task sends its output.
+#[derive(Clone)]
+pub struct OutputOptions {
+    /// The chunks that each output channel holds at most.
+    pub channel_size: usize,
+    /// Counts, and optionally bounds in bytes, the chunks that wait in the channels.
+    pub buffer: OutputBuffer,
+    /// `batch_compact_shuffle_output`: a hash shuffle sends each output chunks of its own rows,
+    /// of this size, instead of slices of its input chunks.
+    pub compact_shuffle_chunk_size: Option<usize>,
+}
+
 /// Output-channel is a synchronous, bounded single-producer-multiple-consumer queue.
 /// The producer is the local task executor, the consumer is
 /// [`BatchExchangeService`](risingwave_pb::task_service::batch_exchange_service_server::BatchExchangeService).
 /// The implementation depends on the shuffling strategy.
 pub fn create_output_channel(
     shuffle: &ExchangeInfo,
-    output_channel_size: usize,
+    options: OutputOptions,
 ) -> Result<(ChanSenderImpl, Vec<ChanReceiverImpl>)> {
+    let OutputOptions {
+        channel_size,
+        buffer,
+        compact_shuffle_chunk_size,
+    } = options;
     match shuffle.get_mode()? {
-        ShuffleDistributionMode::Single => Ok(new_fifo_channel(output_channel_size)),
-        ShuffleDistributionMode::Hash => Ok(new_hash_shuffle_channel(shuffle, output_channel_size)),
-        ShuffleDistributionMode::ConsistentHash => {
-            Ok(new_consistent_shuffle_channel(shuffle, output_channel_size))
-        }
+        ShuffleDistributionMode::Single => Ok(new_fifo_channel(channel_size, buffer)),
+        ShuffleDistributionMode::Hash => Ok(new_hash_shuffle_channel(
+            shuffle,
+            channel_size,
+            buffer,
+            compact_shuffle_chunk_size,
+        )),
+        ShuffleDistributionMode::ConsistentHash => Ok(new_consistent_shuffle_channel(
+            shuffle,
+            channel_size,
+            buffer,
+        )),
         ShuffleDistributionMode::Broadcast => {
-            Ok(new_broadcast_channel(shuffle, output_channel_size))
+            Ok(new_broadcast_channel(shuffle, channel_size, buffer))
         }
         ShuffleDistributionMode::Unspecified => unreachable!(),
     }

@@ -16,6 +16,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use risingwave_batch::rpc::service::exchange::GetDataItem;
 use risingwave_batch::task::BatchManager;
 use risingwave_common_service::GrpcCall;
 use risingwave_pb::task_service::batch_exchange_service_server::BatchExchangeService;
@@ -27,13 +28,13 @@ use tonic::{Request, Response, Status};
 type BatchData = std::result::Result<GetDataResponse, Status>;
 
 pub struct BatchDataStream {
-    inner: ReceiverStream<BatchData>,
+    inner: ReceiverStream<GetDataItem>,
     await_tree_root: Option<await_tree::TreeRoot>,
 }
 
 impl BatchDataStream {
     fn new(
-        receiver: tokio::sync::mpsc::Receiver<BatchData>,
+        receiver: tokio::sync::mpsc::Receiver<GetDataItem>,
         await_tree_root: Option<await_tree::TreeRoot>,
     ) -> Self {
         Self {
@@ -48,7 +49,11 @@ impl tokio_stream::Stream for BatchDataStream {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        let result = Pin::new(&mut this.inner).poll_next(cx);
+        // The count of the chunk in the memory of its task is released here, when gRPC takes the
+        // response.
+        let result = Pin::new(&mut this.inner)
+            .poll_next(cx)
+            .map(|item| item.map(|(data, _held)| data));
         if matches!(&result, Poll::Ready(None)) {
             this.await_tree_root.take();
         }

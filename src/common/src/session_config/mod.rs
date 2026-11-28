@@ -504,6 +504,21 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_spill_on_memory_wait: bool,
 
+    // Memory of batch exchanges (`output_buffer.rs`, `hash_shuffle_channel.rs`).
+    /// In a distributed batch query, a hash exchange copies the rows of each consumer into chunks
+    /// of their own, sent when full, instead of sending each consumer the whole chunk with the
+    /// visibility of its rows. Each consumer then holds only its rows, in full chunks, at the cost
+    /// of one copy of each row. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_compact_shuffle_output: bool,
+
+    /// In a distributed batch query, the memory, in MB, that the chunks waiting in the output
+    /// channels of a task may use, on top of their number per channel: a task whose consumers are
+    /// slow then waits before it sends more. The chunks are counted in the memory of the query
+    /// whether or not they are bounded. 0 for no bound. Defaults to 0.
+    #[parameter(default = 0u32, flags = "SESSION_INIT")]
+    batch_exchange_buffer_max_mb: u32,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,

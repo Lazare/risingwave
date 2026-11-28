@@ -25,12 +25,14 @@ use crate::error::BatchError::{Internal, SenderError};
 use crate::error::{BatchError, Result as BatchResult, SharedResult};
 use crate::task::channel::{ChanReceiver, ChanReceiverImpl, ChanSender, ChanSenderImpl};
 use crate::task::data_chunk_in_channel::DataChunkInChannel;
+use crate::task::output_buffer::OutputBuffer;
 
 /// `BroadcastSender` sends the same chunk to a number of `BroadcastReceiver`s.
 #[derive(Clone)]
 pub struct BroadcastSender {
     senders: Vec<mpsc::Sender<SharedResult<Option<DataChunkInChannel>>>>,
     broadcast_info: BroadcastInfo,
+    buffer: OutputBuffer,
 }
 
 impl Debug for BroadcastSender {
@@ -43,7 +45,9 @@ impl Debug for BroadcastSender {
 
 impl ChanSender for BroadcastSender {
     async fn send(&mut self, chunk: DataChunk) -> BatchResult<()> {
-        let broadcast_data_chunk = DataChunkInChannel::new(chunk);
+        // Counted once: the copies share the columns of the chunk.
+        let (chunk, held) = self.buffer.hold(chunk).await;
+        let broadcast_data_chunk = DataChunkInChannel::new(chunk, held);
         for sender in &self.senders {
             sender
                 .send(Ok(Some(broadcast_data_chunk.clone())))
@@ -84,6 +88,7 @@ impl ChanReceiver for BroadcastReceiver {
 pub fn new_broadcast_channel(
     shuffle: &ExchangeInfo,
     output_channel_size: usize,
+    buffer: OutputBuffer,
 ) -> (ChanSenderImpl, Vec<ChanReceiverImpl>) {
     let broadcast_info = match shuffle.distribution {
         Some(exchange_info::Distribution::BroadcastInfo(ref v)) => *v,
@@ -101,6 +106,7 @@ pub fn new_broadcast_channel(
     let channel_sender = ChanSenderImpl::Broadcast(BroadcastSender {
         senders,
         broadcast_info,
+        buffer,
     });
     let channel_receivers = receivers
         .into_iter()

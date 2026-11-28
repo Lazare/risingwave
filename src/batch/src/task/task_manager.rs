@@ -24,15 +24,15 @@ use risingwave_common::util::runtime::BackgroundShutdownRuntime;
 use risingwave_common::util::tracing::TracingContext;
 use risingwave_pb::batch_plan::{PbTaskId, PbTaskOutputId, PlanFragment};
 use risingwave_pb::plan_common::ExprContext;
+use risingwave_pb::task_service::TaskInfoResponse;
 use risingwave_pb::task_service::task_info_response::TaskStatus;
-use risingwave_pb::task_service::{GetDataResponse, TaskInfoResponse};
 use tokio::sync::mpsc::Sender;
-use tonic::Status;
 
 use super::BatchTaskContext;
 use crate::error::Result;
 use crate::monitor::BatchManagerMetrics;
-use crate::rpc::service::exchange::GrpcExchangeWriter;
+use crate::rpc::service::exchange::{GetDataItem, HeldExchangeWriter};
+use crate::task::output_buffer::HeldBytes;
 use crate::task::query_memory::{QueryMemory, QueryMemoryLimits, QueryMemoryRegistry};
 use crate::task::{BatchTaskExecution, StateReporter, TaskId, TaskOutput, TaskOutputId};
 
@@ -241,7 +241,7 @@ impl BatchManager {
 
     pub fn get_data(
         &self,
-        tx: Sender<std::result::Result<GetDataResponse, Status>>,
+        tx: Sender<GetDataItem>,
         peer_addr: SocketAddr,
         pb_task_output_id: &PbTaskOutputId,
     ) -> Result<()> {
@@ -249,7 +249,7 @@ impl BatchManager {
         tracing::debug!(target: "events::compute::exchange", peer_addr = %peer_addr, from = ?task_id, "serve exchange RPC");
         let mut task_output = self.take_output(pb_task_output_id)?;
         self.runtime.spawn(async move {
-            let mut writer = GrpcExchangeWriter::new(tx.clone());
+            let mut writer = HeldExchangeWriter::new(tx.clone());
             tokio::select! {
                 result = task_output.take_data(&mut writer) => match result {
                     Ok(_) => {
@@ -260,7 +260,7 @@ impl BatchManager {
                         );
                         Ok(())
                     }
-                    Err(e) => tx.send(Err(e.into())).await,
+                    Err(e) => tx.send((Err(e.into()), HeldBytes::none())).await,
                 },
                 _ = tx.closed() => Ok(()),
             }

@@ -40,7 +40,10 @@ use crate::executor::{BoxedExecutor, ExecutorBuilder};
 use crate::rpc::service::exchange::ExchangeWriter;
 use crate::rpc::service::task_service::TaskInfoResponseResult;
 use crate::task::BatchTaskContext;
-use crate::task::channel::{ChanReceiverImpl, ChanSenderImpl, create_output_channel};
+use crate::task::channel::{
+    ChanReceiverImpl, ChanSenderImpl, OutputOptions, create_output_channel,
+};
+use crate::task::output_buffer::OutputBuffer;
 use crate::task::query_memory::AdmissionGuard;
 
 // Now we will only at most have 2 status for each status channel. Running -> Failed or Finished.
@@ -141,6 +144,8 @@ impl TaskOutputId {
 
 pub struct TaskOutput {
     receiver: ChanReceiverImpl,
+    /// Counts the serialized chunks that wait for a remote consumer.
+    buffer: OutputBuffer,
     output_id: TaskOutputId,
     failure: Arc<Mutex<Option<Arc<BatchError>>>>,
 }
@@ -177,12 +182,16 @@ impl TaskOutput {
                         self.output_id,
                         chunk.cardinality()
                     );
+                    // The serialized chunk is counted, and keeps the hold of the chunk on the
+                    // bound of the buffer, until it leaves the stream.
+                    let held = chunk.held().and(self.buffer.count(chunk.kept_bytes()));
                     let pb = chunk.to_protobuf().await;
+                    drop(chunk);
                     let resp = GetDataResponse {
                         record_batch: Some(pb),
                         cardinalities: vec![],
                     };
-                    writer.write(Ok(resp)).await?;
+                    writer.write_held(Ok(resp), held).await?;
                 }
                 // Reached EOF
                 Ok(None) => {
@@ -313,6 +322,8 @@ pub struct BatchTaskExecution {
 
     /// Sender for sending chunks between different executors.
     sender: ChanSenderImpl,
+    /// Counts the chunks that the task sends while they wait for their consumers.
+    output_buffer: OutputBuffer,
 
     /// Context for task execution
     context: Arc<dyn BatchTaskContext>,
@@ -347,10 +358,21 @@ impl BatchTaskExecution {
     ) -> Result<Self> {
         let task_id = TaskId::from(prost_tid);
 
-        let (sender, receivers) = create_output_channel(
-            plan.get_exchange_info()?,
-            context.get_config().developer.output_channel_size,
-        )?;
+        // The chunks that wait in the output channels are counted in the memory of the query.
+        let settings = context.exchange_settings();
+        let config = context.get_config();
+        let output_options = OutputOptions {
+            channel_size: config.developer.output_channel_size,
+            buffer: OutputBuffer::new(
+                context.create_executor_mem_context("task output"),
+                settings.buffer_limit_bytes,
+            ),
+            compact_shuffle_chunk_size: settings
+                .compact_shuffle
+                .then_some(config.developer.chunk_size),
+        };
+        let output_buffer = output_options.buffer.clone();
+        let (sender, receivers) = create_output_channel(plan.get_exchange_info()?, output_options)?;
 
         let mut rts = Vec::new();
         rts.extend(receivers.into_iter().map(Some));
@@ -365,6 +387,7 @@ impl BatchTaskExecution {
             context,
             runtime,
             sender,
+            output_buffer,
             shutdown_tx,
             shutdown_rx,
             heartbeat_join_handle: Mutex::new(None),
@@ -742,6 +765,7 @@ impl BatchTaskExecution {
             })?;
         let task_output = TaskOutput {
             receiver,
+            buffer: self.output_buffer.clone(),
             output_id: output_id.try_into()?,
             failure: self.failure.clone(),
         };

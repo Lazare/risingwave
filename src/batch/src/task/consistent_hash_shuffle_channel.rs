@@ -18,7 +18,6 @@ use std::sync::Arc;
 use anyhow::anyhow;
 use itertools::Itertools;
 use risingwave_common::array::DataChunk;
-use risingwave_common::bitmap::Bitmap;
 use risingwave_common::hash::VirtualNode;
 use risingwave_pb::batch_plan::exchange_info::ConsistentHashInfo;
 use risingwave_pb::batch_plan::*;
@@ -28,12 +27,14 @@ use crate::error::BatchError::{Internal, SenderError};
 use crate::error::{BatchError, Result as BatchResult, SharedResult};
 use crate::task::channel::{ChanReceiver, ChanReceiverImpl, ChanSender, ChanSenderImpl};
 use crate::task::data_chunk_in_channel::DataChunkInChannel;
+use crate::task::output_buffer::OutputBuffer;
 
 #[derive(Clone)]
 pub struct ConsistentHashShuffleSender {
     senders: Vec<mpsc::Sender<SharedResult<Option<DataChunkInChannel>>>>,
     consistent_hash_info: ConsistentHashInfo,
     output_count: usize,
+    buffer: OutputBuffer,
 }
 
 impl Debug for ConsistentHashShuffleSender {
@@ -76,19 +77,12 @@ fn generate_new_data_chunks(
     output_count: usize,
     hash_values: &[usize],
 ) -> Vec<DataChunk> {
-    let mut vis_maps = vec![vec![]; output_count];
-    hash_values.iter().for_each(|hash| {
-        for (sink_id, vis_map) in vis_maps.iter_mut().enumerate() {
-            if *hash == sink_id {
-                vis_map.push(true);
-            } else {
-                vis_map.push(false);
-            }
-        }
-    });
     let mut res = Vec::with_capacity(output_count);
-    for (sink_id, vis_map_vec) in vis_maps.into_iter().enumerate() {
-        let vis_map = Bitmap::from_bool_slice(&vis_map_vec) & chunk.visibility();
+    for (sink_id, vis_map) in
+        crate::task::hash_shuffle_channel::output_visibilities(chunk, output_count, hash_values)
+            .into_iter()
+            .enumerate()
+    {
         let new_data_chunk = chunk.with_visibility(vis_map);
         trace!(
             "send to sink:{}, cardinality:{}",
@@ -112,6 +106,8 @@ impl ChanSender for ConsistentHashShuffleSender {
 
 impl ConsistentHashShuffleSender {
     async fn send_chunk(&mut self, chunk: DataChunk) -> BatchResult<()> {
+        // Counted once: the slices share the columns of the chunk, and its count.
+        let (chunk, held) = self.buffer.hold(chunk).await;
         let hash_values = generate_hash_values(&chunk, &self.consistent_hash_info)?;
         let new_data_chunks = generate_new_data_chunks(&chunk, self.output_count, &hash_values);
 
@@ -125,7 +121,10 @@ impl ConsistentHashShuffleSender {
             // `generate_new_data_chunks` may generate an empty chunk.
             if new_data_chunk.cardinality() > 0 {
                 self.senders[sink_id]
-                    .send(Ok(Some(DataChunkInChannel::new(new_data_chunk))))
+                    .send(Ok(Some(DataChunkInChannel::new(
+                        new_data_chunk,
+                        held.clone(),
+                    ))))
                     .await
                     .map_err(|_| SenderError)?
             }
@@ -158,6 +157,7 @@ impl ChanReceiver for ConsistentHashShuffleReceiver {
 pub fn new_consistent_shuffle_channel(
     shuffle: &ExchangeInfo,
     output_channel_size: usize,
+    buffer: OutputBuffer,
 ) -> (ChanSenderImpl, Vec<ChanReceiverImpl>) {
     let consistent_hash_info = match shuffle.distribution {
         Some(exchange_info::Distribution::ConsistentHashInfo(ref v)) => v.clone(),
@@ -183,6 +183,7 @@ pub fn new_consistent_shuffle_channel(
         senders,
         consistent_hash_info,
         output_count,
+        buffer,
     });
     let channel_receivers = receivers
         .into_iter()

@@ -52,6 +52,12 @@ message CreateTaskRequest {
   // `batch_spill_on_memory_wait`: an operator that cannot spill and waits for memory asks the
   // spillable operators of the query to spill.
   bool spill_on_memory_wait = 7;
+  // `batch_compact_shuffle_output`: a hash shuffle sends each output chunks of its own rows
+  // instead of slices of the input chunks.
+  bool compact_shuffle_output = 8;
+  // `batch_exchange_buffer_max_mb`, in bytes: the bytes that the output channels of the task may
+  // hold at most. 0: no bound beyond their number of chunks.
+  uint64 exchange_buffer_max_bytes = 9;
 }
 
 message GetBatchLimitsRequest {}

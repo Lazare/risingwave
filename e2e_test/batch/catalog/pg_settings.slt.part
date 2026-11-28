@@ -25,11 +25,13 @@ user backfill_rate_limit
 user background_ddl
 user batch_cardinality_feedback
 user batch_cardinality_feedback_learning
+user batch_compact_shuffle_output
 user batch_cost_based_join_ordering
 user batch_distributed_union
 user batch_enable_distributed_dml
 user batch_enable_lookup_join
 user batch_enable_sort_agg
+user batch_exchange_buffer_max_mb
 user batch_expr_strict_mode
 user batch_factor_union_join
 user batch_hnsw_ef_search

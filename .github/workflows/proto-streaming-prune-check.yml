@@ -131,6 +131,9 @@ jobs:
           cargo nextest run --locked --no-fail-fast --lib \
             -p risingwave_frontend -p risingwave_common -p risingwave_batch \
             -p risingwave_batch_executors
+          # What the shuffle of batch exchanges costs (printed, never fails on timing).
+          cargo nextest run --locked --no-fail-fast --lib -p risingwave_batch \
+            --run-ignored only -E 'test(/measure_shuffle_cost/)' --no-capture
           # The memory pool of the DataFusion engine (feature of the release builds).
           cargo nextest run --locked --no-fail-fast --lib -p risingwave_frontend \
             --features risingwave_frontend/datafusion -E 'test(/datafusion::execute::memory_ctx/)'

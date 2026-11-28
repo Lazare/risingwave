@@ -22,7 +22,6 @@ use risingwave_common::row::{RowExt, repeat_n};
 use risingwave_common::types::{DataType, Datum};
 use risingwave_common::util::chunk_coalesce::DataChunkBuilder;
 use risingwave_common::util::iter_util::ZipEqDebug;
-use risingwave_common_estimate_size::EstimateSize;
 use risingwave_expr::expr::{BoxedExpression, build_from_prost as expr_build_from_prost};
 use risingwave_pb::batch_plan::plan_node::NodeBody;
 
@@ -98,10 +97,12 @@ impl NestedLoopJoinExecutor {
             #[for_await]
             for chunk in self.left_child.execute() {
                 let c = chunk?;
-                trace!("Estimated chunk size is {:?}", c.estimated_heap_size());
-                if !self.mem_context.add(c.estimated_heap_size() as i64) {
+                // A slice of an exchange is counted for its share of the shared columns.
+                trace!("Estimated chunk size is {:?}", c.kept_bytes());
+                if !self.mem_context.add(c.kept_bytes() as i64) {
                     Err(BatchError::OutOfMemory(self.mem_context.mem_limit()))?;
                 }
+                c.adopt_shared_memory();
                 memory.settle().await?;
                 ret.push(c);
             }

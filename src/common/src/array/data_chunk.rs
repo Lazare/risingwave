@@ -31,6 +31,7 @@ use crate::array::data_chunk_iter::RowRef;
 use crate::bitmap::{Bitmap, BitmapBuilder};
 use crate::field_generator::{FieldGeneratorImpl, VarcharProperty};
 use crate::hash::HashCode;
+use crate::memory::SharedChunkMemory;
 use crate::row::Row;
 use crate::types::{DataType, DatumRef, MapType, StructType, ToOwnedDatum, ToText};
 use crate::util::chunk_coalesce::DataChunkBuilder;
@@ -60,11 +61,16 @@ use crate::util::value_encoding::{
 /// |----|----|----|
 /// | 1  | a  | t  |
 /// | 3  | c  | t  |
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 #[must_use]
 pub struct DataChunk {
     columns: Arc<[ArrayRef]>,
     visibility: Bitmap,
+    /// The memory of the columns when other chunks share them, e.g. the slices that a batch hash
+    /// exchange sends to its outputs: counted once, released with the last chunk that shares
+    /// them. Kept by the chunks that share the columns (`with_visibility`, `clone`, projections),
+    /// dropped by the chunks that copy them (`compact_vis`, new chunks).
+    shared_memory: Option<Arc<SharedChunkMemory>>,
 }
 
 impl DataChunk {
@@ -83,6 +89,7 @@ impl DataChunk {
         DataChunk {
             columns: columns.into(),
             visibility,
+            shared_memory: None,
         }
     }
 
@@ -91,6 +98,7 @@ impl DataChunk {
         DataChunk {
             columns: Arc::new([]),
             visibility: Bitmap::ones(cardinality),
+            shared_memory: None,
         }
     }
 
@@ -132,6 +140,7 @@ impl DataChunk {
         Self {
             columns,
             visibility: visibilities,
+            shared_memory: None,
         }
     }
 
@@ -170,6 +179,47 @@ impl DataChunk {
         DataChunk {
             columns: self.columns.clone(),
             visibility: visibility.into(),
+            shared_memory: self.shared_memory.clone(),
+        }
+    }
+
+    /// Counts the columns of the chunk once, in `memory`, for as long as a chunk shares them.
+    pub fn with_shared_memory(mut self, memory: Arc<SharedChunkMemory>) -> Self {
+        self.shared_memory = Some(memory);
+        self
+    }
+
+    /// The memory of the columns, when other chunks may share them.
+    pub fn shared_memory(&self) -> Option<&Arc<SharedChunkMemory>> {
+        self.shared_memory.as_ref()
+    }
+
+    /// Whether no other chunk shares the columns any more: compacting this chunk then frees the
+    /// rows that it does not show.
+    pub fn is_sole_holder_of_shared_memory(&self) -> bool {
+        self.shared_memory
+            .as_ref()
+            .is_some_and(|memory| Arc::strong_count(memory) == 1)
+    }
+
+    /// What the chunk holds in memory: its share of the columns when other chunks share them
+    /// (the bytes of the columns times its visible rows over their rows), else its estimated size.
+    pub fn kept_bytes(&self) -> usize {
+        match &self.shared_memory {
+            Some(memory) if self.capacity() > 0 => {
+                (memory.bytes().max(0) as u128 * self.cardinality() as u128
+                    / self.capacity() as u128) as usize
+            }
+            _ => self.estimated_heap_size(),
+        }
+    }
+
+    /// For an operator that keeps this chunk and counts [`kept_bytes`](Self::kept_bytes) in its
+    /// own context: takes that share out of the count of the shared columns, so that they are not
+    /// counted twice.
+    pub fn adopt_shared_memory(&self) {
+        if let Some(memory) = &self.shared_memory {
+            memory.adopt(self.kept_bytes() as i64);
         }
     }
 
@@ -425,6 +475,7 @@ impl DataChunk {
         DataChunk {
             columns,
             visibility: self.visibility.clone(),
+            shared_memory: self.shared_memory.clone(),
         }
     }
 
@@ -437,6 +488,7 @@ impl DataChunk {
         Self {
             columns: indices.iter().map(|i| self.columns[*i].clone()).collect(),
             visibility: self.visibility.clone(),
+            shared_memory: self.shared_memory.clone(),
         }
     }
 
@@ -446,6 +498,7 @@ impl DataChunk {
         Self {
             columns: indices.iter().map(|i| self.columns[*i].clone()).collect(),
             visibility,
+            shared_memory: self.shared_memory.clone(),
         }
     }
 
@@ -606,6 +659,13 @@ impl DataChunk {
     }
 }
 
+/// The data of the chunks, not where their memory is counted.
+impl PartialEq for DataChunk {
+    fn eq(&self, other: &Self) -> bool {
+        self.columns == other.columns && self.visibility == other.visibility
+    }
+}
+
 impl fmt::Debug for DataChunk {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -623,6 +683,7 @@ impl<'a> From<&'a StructArray> for DataChunk {
         Self {
             columns: array.fields().cloned().collect(),
             visibility: Bitmap::ones(array.len()),
+            shared_memory: None,
         }
     }
 }
