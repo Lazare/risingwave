@@ -38,6 +38,9 @@
 //!   `NULL`s is `NULL`). A kept group key column is read from the group key; another column from
 //!   one `internal_last_seen_value` call, whose state is one value per group, where `min` and `max`
 //!   over an input that retracts rows keep every value of the group.
+//! - Not for an aggregation without group key: it has a row when no row is left (an empty input,
+//!   rows all retracted, a partition without rows in the first phase of a two-phase aggregation),
+//!   where `max` is `NULL` but `internal_last_seen_value` would keep the last value seen.
 //!
 //! In a streaming job the group key is the key of the state and of the output (a materialized
 //! view gets a narrower primary key). Not in a streaming job that may carry watermarks (a source,
@@ -103,7 +106,11 @@ enum Out {
 impl Rule<Logical> for AggGroupKeyReduceRule {
     fn apply(&self, plan: PlanRef) -> Option<PlanRef> {
         let agg = plan.as_logical_agg()?;
-        if !agg.grouping_sets().is_empty() {
+        // Not without group key: such an aggregation has a row when its input has none (or when
+        // all its rows were retracted, or for a partition without rows of a two-phase
+        // aggregation), and `internal_last_seen_value` would then keep a value where `max` gives
+        // `NULL`. A group of a grouped aggregation always has rows.
+        if !agg.grouping_sets().is_empty() || agg.group_key().is_empty() {
             return None;
         }
         let input = agg.input();

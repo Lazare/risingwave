@@ -1515,6 +1515,11 @@ SELECT k, max(k), min(k) FROM t GROUP BY k                => GROUP BY k, project
   input that retracts rows keeps every value of the group (materialized input state), replaced by
   one value. Not under a source, `now()` or a table with a watermark: a column with a watermark
   must stay in the group key (state cleaning, `EMIT ON WINDOW CLOSE`).
+- Not for an aggregation without group key: it has a row when no row is left (empty input, all
+  rows retracted in streaming, a partition without rows in the first phase of a two-phase batch
+  aggregation), where `max` is `NULL` but `internal_last_seen_value` keeps the last value seen.
+  The differential tests found this on a first version (`max(b) ... WHERE b = 3` without
+  `GROUP BY`, wrong in both batch and streaming).
 - Stage: `STREAM_REDUCE_GROUP_KEYS` after the last stages of the prototype (after the final column
   pruning, so that the dependencies are those of the columns read), then column pruning;
   `BATCH_REDUCE_GROUP_KEYS` after the status ladder stage.

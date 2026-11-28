@@ -84,13 +84,6 @@
   expected_outputs:
   - batch_plan
   - stream_plan
-- name: max of a constant without group key
-  before: [setup]
-  sql: |
-    select max(b) as mb, count(*) from t where b = 3;
-  expected_outputs:
-  - batch_plan
-  - stream_plan
 - name: a key determined by the key of a sub-aggregation
   before: [setup]
   sql: |
@@ -132,6 +125,13 @@
   before: [setup]
   sql: |
     select a, b, count(*) from t group by a, b;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: no group key - max of a constant is kept (a row with no input)
+  before: [setup]
+  sql: |
+    select max(b) as mb, count(*) from t where b = 3;
   expected_outputs:
   - batch_plan
   - stream_plan
