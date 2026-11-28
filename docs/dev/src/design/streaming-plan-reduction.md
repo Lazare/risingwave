@@ -47,6 +47,8 @@ own rules.
 | BT | Batch: `row_number() <= n` per partition becomes a top-n per group, small `n` only (`batch_over_window_to_topn`) | done (prototype, branch `proto/plan-reduction-batch-pass2`, see "BP and BT" below) |
 | BU | Batch: `UNION ALL` run in parallel tasks instead of one (`batch_distributed_union`) | done (prototype, branch `proto/plan-reduction-batch-union-dist`, see "BU" below) |
 | BS | Batch: identical sub-plans of a stage computed once per task and read again through a spool (`batch_share_identical_subplans`) | first version (prototype, branch `proto/plan-reduction-batch-spool`, see "BS" below); copies in different stages not shared |
+| BLM | Batch: a copy of a `LIMIT` / top-n pushed into the branches of a `UNION ALL` and into the preserved side of a left or right join (`batch_push_down_limit`) | done (prototype, branch `proto/plan-reduction-batch-limit`, see "BLM" below); full outer join rejected (wrong results) |
+| BLD | Batch: a distinct under a `LIMIT` (`SELECT DISTINCT`, `UNION`) read by a non-blocking operator that stops after `limit + offset` rows, also in each branch of the union (`batch_limit_distinct`) | done (prototype, branch `proto/plan-reduction-batch-limit`, see "BLD" below); ordered variant not done |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -1495,6 +1497,156 @@ fragment from the `SpoolRegistry` of the executor builder):
   (`share_widened_subplans`, then `DAG_TO_TREE`) would make such copies identical, but every
   widened copy left in another stage would then compute the aggregates of all of them: not done,
   it needs to know the stages, which the logical plan does not.
+
+### BLM. Batch: limit and top-n pushed into unions and outer joins (added on 2026-11-28)
+
+**What existed.** `LimitPushDownRule` moves a limit below a projection, `TopNProjectTransposeRule`
+and `ProjectTopNTransposeRule` move a top-n across a pure projection, and the batch rule
+`BatchPushLimitToScanRule` puts a limit into the scan right below it. Nothing crossed a union or a
+join: `SELECT .. FROM a UNION ALL SELECT .. FROM c LIMIT 10` read both tables whole into the single
+task of the limit, and `.. FROM l LEFT JOIN r .. LIMIT 10` joined every row of `l`.
+
+**What BLM does (variable `batch_push_down_limit`, default false, rule
+`LimitUnionJoinPushDownRule`).** The limit or top-n stays where it is; a copy with `n + k` rows
+(`LIMIT n OFFSET k`), without offset, goes below it:
+
+```sql
+create table a (x int, y int);
+create table c (x int, y int);
+create table l (id int primary key, k int, v int);
+create table r (k int primary key, w varchar);
+select x, y from a union all select x, y from c order by x limit 10 offset 5;
+-- before: TopN(x, 10, 5) <- Union <- [Scan(a), Scan(c)]
+-- BLM:    TopN(x, 10, 5) <- Union <- [TopN(x, 15) <- Scan(a), TopN(x, 15) <- Scan(c)]
+select l.id, r.w from l left join r on l.k = r.k limit 10;
+-- before: Limit(10) <- LeftJoin(Scan(l), Scan(r))
+-- BLM:    Limit(10) <- LeftJoin(Limit(10) <- Scan(l), Scan(r))
+```
+
+- `Limit(n, k)` over `UNION ALL`: `Limit(n + k)` on each branch. Any `n + k` rows of the union are
+  valid for the limit above, and the cut branches hold `n + k` rows together, or the whole union.
+- `TopN(order, n, k)` over `UNION ALL`: `TopN(order, n + k)` on each branch (Calcite's
+  `SortUnionTransposeRule`): each of the first `n + k` rows of the union is among the first
+  `n + k` rows of its own branch. `WITH TIES` (no offset allowed): `TopN(order, n) WITH TIES` on
+  each branch, which keeps every row of the branch whose key is not after the `n`-th key of the
+  union.
+- `Limit(n, k)` over `LEFT JOIN(L, R)`: `Limit(n + k)` on `L`. Every row of `L` gives at least one
+  row of the join (its matches, or itself padded with `NULL`s), whatever the condition, and those
+  rows depend only on that row and on `R`: the join of `n + k` rows of `L` is a part of the true
+  join with `n + k` rows at least (or the whole join). A unique key of `R` on the join columns is
+  not needed for this; it would only make the upper limit removable, which is not done.
+- `TopN(order, n, k)` over `LEFT JOIN(L, R)` when every column of `order` comes from `L`:
+  `TopN(order, n + k)` on `L` (Calcite's `SortJoinTransposeRule`). Every row of the join carries
+  the order key of its row of `L`, and every row of `L` gives at least one row, so the first
+  `n + k` rows of the join come from the first `n + k` rows of `L` (rows of `L` that tie at the
+  bound give rows that tie as well). `WITH TIES` is pushed as `WITH TIES`. `RIGHT JOIN` is
+  symmetric.
+- The rule sees through the projections between the limit and the union or join (a projection
+  keeps one row per row; for a top-n, each order column must be a plain column of the input of the
+  projection). Applied top-down, the copy put into a branch is pushed further into the unions and
+  outer joins below it. A branch that already returns `n + k` rows at most (a limit, a top-n
+  without ties, values, an aggregation without groups) gets no copy; a copy put right above a
+  limit with more rows becomes one limit with the smaller count. `OFFSET` without `LIMIT` and
+  `LIMIT 0` are left alone.
+- Where: after the last predicate pushdown (which has moved into the branches of the union, or
+  into the preserved side of the join, the filters that a limit cannot cross; a filter left between
+  the limit and the union or join stops the rule) and the column pruning, and before
+  `TOP_N_AGG_ON_INDEX`, so that a top-n put on a scan may read an index ordered by its key, and
+  before `LIMIT_PUSH_DOWN` and `BatchPushLimitToScanRule`, which then put the branch limits into
+  the scans. Batch only: a plain `LIMIT` is not a streaming operator (it becomes a top-n), and a
+  top-n per branch in streaming would add state for no clear gain.
+
+**Not done, deliberately.**
+
+- `UNION` without `ALL`: a distinct over a union all; a limit above a distinct cannot go below it
+  (the rows cut may be the distinct ones).
+- Inner, semi and anti joins: the row cut on one side may be the only one that matches (or, for an
+  anti join, the one that does not).
+- A top-n ordered by a column of the side padded with `NULL`s, a top-n per group, a top-n ordered
+  by an expression computed above the union or join.
+- Full outer join, on either side or both: wrong results. On `L`: with `L = {1, 3}`,
+  `R = {1}` and `ON l = r`, the true join is `{(1, 1), (3, NULL)}`, so `LIMIT 1` must return one
+  of these two rows. Cutting `L` to `{3}` gives the join `{(3, NULL), (NULL, 1)}`, and
+  `LIMIT 1` may return `(NULL, 1)`, which is not a row of the true join: the row of `R` lost its
+  match and was padded instead. On `R`, symmetric (`L = {1}`, `R = {1, 2}`, `R` cut to `{2}`
+  gives `(1, NULL)`). Cutting both sides has the same problem. The top-n is wrong for the same
+  reason. A correct variant would need the cut side's rows to be known unmatched beforehand,
+  which is a join in itself.
+
+**Tests.** `batch_push_down_limit.yaml` (planner: limit, offset, top-n, `WITH TIES` over a union
+all, a filter above the union, expressions in the branches, nested unions, a branch with a wider
+limit, a left join inside a branch, a limit inside a count, left joins on a key, without a key,
+with a non-equality condition, right join, top-n on the preserved side, with expressions and with
+ties; kept: top-n on a column of the padded side, full joins, inner, semi and anti joins, a left
+join turned inner by a filter, a filter that stays above the join, `UNION`, an order on an
+expression, branches already limited, offset only, top-n per group, off by default), and the
+differential `e2e_test/batch/push_down_limit.gen.py` (38 queries whose result does not depend on
+which rows a limit keeps: counts of the rows of a limit, an order on all the output columns or on
+a unique key, `WITH TIES`, limits larger than the input; run with the variable off and on, in local
+and distributed query mode, multisets compared on empty tables, NULLs, duplicate rows, unmatched
+keys, after updates and deletes, with empty right sides and an empty left side).
+
+**Risks.** The copies add operators: a top-n per branch sorts each branch (in two phases when it is
+distributed) where the plan sorted the union once; with a large `n + k` and branches barely larger
+than it, the gain is small. The copy on the preserved side of a join bounds the rows that the
+join reads from that side, whatever the operator chosen for the join (hash, lookup, nested loop);
+it does not help when the join is not where the time goes.
+
+### BLD. Batch: limit over a distinct (added on 2026-11-28)
+
+**Problem.** `SELECT DISTINCT a FROM t LIMIT 10` and `SELECT a FROM t1 UNION SELECT a FROM t2
+LIMIT 10` plan a hash aggregation without aggregate calls under the limit. The hash aggregation is
+blocking: it reads and deduplicates its whole input before the limit takes 10 rows, although the
+first 10 distinct values seen would do.
+
+**What BLD does (variable `batch_limit_distinct`, default false, rule `BatchLimitDistinctRule`,
+operator `BatchLimitDistinct`, proto `LimitDistinctNode`, executor `LimitDistinctExecutor`).**
+On the physical batch plan before its distribution, a `BatchLimit(n, k)` over a `BatchHashAgg`
+with a group key, no aggregate calls and no grouping sets (through projections) gets a
+`BatchLimitDistinct(n + k)` in place of the aggregation; the limit stays above and applies the
+offset. The executor keeps a hash set of the values emitted so far (counted in its memory context,
+`n + k` values at most), emits each value with the chunk where it first sees it (`NULL`s equal, as
+for `DISTINCT`), and stops reading its input once it has emitted `n + k` values: it drops its input
+stream, which ends the input as under a `BatchLimit` (an exchange ends its producers the same way).
+
+```sql
+create table t1 (a int, b int);
+create table t2 (a int, b int);
+select a from t1 union select a from t2 limit 10;
+-- before: Limit(10) <- HashAgg(a) <- Exchange(Hash a) <- Union <- [Exchange(Single) <- Scan(t1), ..]
+-- BLD:    Limit(10) <- LimitDistinct(a, 10) <- Union <- [Exchange(Single) <- LimitDistinct(a, 10, per task) <- Scan(t1), ..]
+```
+
+- `UNION` (an aggregation over a `UNION ALL`): each branch gets a per-task
+  `BatchLimitDistinct(n + k)` too. Correctness: if the union has at least `n + k` distinct values,
+  either one branch has `n + k` distinct values and emits `n + k` of them, or every branch emits
+  all its distinct values; in both cases what the branches emit holds `n + k` distinct values (or
+  every distinct value of the union), and the global operator above keeps `n + k` distinct values
+  of them. With fewer distinct values in the union, every branch emits all its values and the
+  global operator emits them all.
+- Distribution: a global operator over an input distributed in several tasks becomes a per-task
+  operator in each task (each stops after `n + k` values), a gather into one task, and the global
+  operator again: the same argument with the tasks in place of the branches. Over an input already
+  hashed on a part of the group key, or single, the operator runs once per task without gather
+  (the tasks hold disjoint values). A per-task copy only promises values distinct within its task.
+- Not rewritten: aggregations with calls (`GROUP BY` with `count`...), `DISTINCT ON` (an
+  aggregation with `first_value` calls, or a top-n per group), a sort aggregation (it already
+  streams its groups, so the limit stops it early), `OFFSET` without `LIMIT`, and an `ORDER BY`
+  over the distinct (a top-n, not a limit; `WITH TIES` included).
+- Not done: the ordered variant (`SELECT DISTINCT a .. ORDER BY a LIMIT n`): a top-n of distinct
+  rows per branch would need a heap that deduplicates its rows, which no operator has (the top-n
+  per group keeps rows per key, not distinct keys); a distinct then a top-n per branch still holds
+  every distinct value of the branch. Left as it is.
+- Tests: `batch_limit_distinct.yaml` (planner: distinct with a limit, with an offset, on two
+  columns, of an expression, over a join hashed on the distinct column, `UNION` of two and three
+  branches, inside a count, distributed and local plans; kept: aggregation with calls (also a
+  distinct on a primary key, planned with `internal_last_seen_value`), `DISTINCT ON`, top-n, `WITH
+  TIES`, offset only, off by default), the unit test of the executor (early end, `NULL`s, a limit
+  larger than the values), and the differential `e2e_test/batch/limit_distinct.gen.py` (20 queries
+  with a result that does not depend on which distinct rows the limit keeps: counts of the rows of
+  the limit, counts of values that appear twice in it, which must be 0, and limits larger than the
+  number of distinct rows; local and distributed query mode; NULLs, duplicates, several chunks and
+  tasks, updates and deletes, an empty branch, one distinct row).
 
 ## Not for now: sharing between materialized views
 

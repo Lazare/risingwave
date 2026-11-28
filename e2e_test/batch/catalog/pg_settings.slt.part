@@ -35,11 +35,13 @@ user batch_exchange_buffer_max_mb
 user batch_expr_strict_mode
 user batch_factor_union_join
 user batch_hnsw_ef_search
+user batch_limit_distinct
 user batch_merge_repeated_lookups
 user batch_merge_union_scans
 user batch_narrow_value_aggregates
 user batch_over_window_to_topn
 user batch_parallelism
+user batch_push_down_limit
 user batch_reduce_keys_after_conversions
 user batch_rewrite_lag_duplicates
 user batch_share_identical_subplans

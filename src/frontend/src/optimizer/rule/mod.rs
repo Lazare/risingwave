@@ -264,6 +264,9 @@ mod join_project_transpose_rule;
 pub use join_project_transpose_rule::*;
 mod limit_push_down_rule;
 pub use limit_push_down_rule::*;
+// Rule `LimitUnionJoinPushDownRule` (`batch_push_down_limit`).
+mod limit_union_join_push_down_rule;
+pub use limit_union_join_push_down_rule::*;
 mod pull_up_hop_rule;
 pub use pull_up_hop_rule::*;
 mod apply_offset_rewriter;
@@ -333,6 +336,7 @@ mod table_function_to_postgres_query_rule;
 mod top_n_to_vector_search_rule;
 mod values_extract_project_rule;
 pub use add_logstore_rule::*;
+pub use batch::batch_limit_distinct_rule::*;
 pub use batch::batch_push_limit_to_scan_rule::*;
 pub use correlated_topn_to_vector_search::*;
 pub use iceberg_count_star_rule::IcebergCountStarRule;
@@ -434,6 +438,7 @@ macro_rules! for_all_rules {
             , { LogicalFilterExpressionSimplifyRule }
             , { JoinProjectTransposeRule }
             , { LimitPushDownRule }
+            , { LimitUnionJoinPushDownRule }
             , { PullUpHopRule }
             , { IntersectToSemiJoinRule }
             , { ExceptToAntiJoinRule }
@@ -464,6 +469,7 @@ macro_rules! for_all_rules {
             , { UnifyFirstLastValueRule }
             , { ValuesExtractProjectRule }
             , { BatchPushLimitToScanRule }
+            , { BatchLimitDistinctRule }
             , { PullUpCorrelatedPredicateAggRule }
             , { SourceToKafkaScanRule }
             , { IcebergEngineStorageSelectionRule }

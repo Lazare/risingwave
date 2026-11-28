@@ -527,6 +527,24 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_share_identical_subplans: bool,
 
+    // Rule `LimitUnionJoinPushDownRule`.
+    /// In a batch query, put a copy of a `LIMIT` (or of an `ORDER BY .. LIMIT`) into each branch of
+    /// a `UNION ALL` below it, and into the side of a left or right join that keeps all its rows
+    /// (a top-n only when it is ordered by columns of that side), with `LIMIT n + OFFSET` rows;
+    /// the limit itself stays above. Not through `UNION`, inner, semi, anti or full joins, nor
+    /// through a filter. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_push_down_limit: bool,
+
+    // Rule `BatchLimitDistinctRule`, operator `BatchLimitDistinct`.
+    /// In a batch query, read the distinct rows under a `LIMIT` (`SELECT DISTINCT .. LIMIT n`,
+    /// `UNION .. LIMIT n`) with an operator that emits each distinct row the first time it sees it
+    /// and stops reading its input after `n + OFFSET` rows, instead of a hash aggregation that
+    /// reads its whole input first; the branches of a `UNION` get the same operator. Defaults to
+    /// false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_limit_distinct: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,
