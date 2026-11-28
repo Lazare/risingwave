@@ -121,10 +121,8 @@ mod tests {
     /// hands the response to gRPC.
     #[tokio::test]
     async fn test_held_writer_keeps_the_count_until_taken() {
-        use risingwave_common::array::DataChunk;
         use risingwave_common::memory::MemoryContext;
         use risingwave_common::metrics::LabelGuardedIntGauge;
-        use risingwave_common::test_prelude::DataChunkTestExt;
 
         use crate::rpc::service::exchange::HeldExchangeWriter;
         use crate::task::output_buffer::OutputBuffer;
@@ -132,22 +130,16 @@ mod tests {
         let mem_context =
             MemoryContext::root(LabelGuardedIntGauge::test_int_gauge::<4>(), u64::MAX);
         let buffer = OutputBuffer::new(mem_context.clone(), 0);
-        let chunk = DataChunk::from_pretty(
-            "I
-             1
-             2",
-        );
-        let held = buffer.hold(&chunk).await;
-        drop(chunk);
+        let held = buffer.count(100);
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
         let mut writer = HeldExchangeWriter::new(tx);
         writer
             .write_held(Ok(GetDataResponse::default()), held)
             .await
             .unwrap();
-        assert!(mem_context.get_bytes_used() > 0);
+        assert_eq!(mem_context.get_bytes_used(), 100);
         let item = rx.recv().await.unwrap();
-        assert!(mem_context.get_bytes_used() > 0);
+        assert_eq!(mem_context.get_bytes_used(), 100);
         drop(item);
         assert_eq!(mem_context.get_bytes_used(), 0);
         assert_eq!(writer.written_chunks(), 1);

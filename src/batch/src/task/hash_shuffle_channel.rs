@@ -144,10 +144,9 @@ impl ChanSender for HashShuffleSender {
 
 impl HashShuffleSender {
     async fn send_chunk(&mut self, chunk: DataChunk) -> BatchResult<()> {
-        let hash_values = generate_hash_values(&chunk, &self.hash_info)?;
-        let new_data_chunks = generate_new_data_chunks(&chunk, &self.hash_info, &hash_values);
-
         if let Some(compact) = &mut self.compact {
+            let hash_values = generate_hash_values(&chunk, &self.hash_info)?;
+            let new_data_chunks = generate_new_data_chunks(&chunk, &self.hash_info, &hash_values);
             if compact.builders.is_empty() {
                 compact.builders = (0..self.senders.len())
                     .map(|_| DataChunkBuilder::new(chunk.data_types(), compact.chunk_size))
@@ -167,8 +166,10 @@ impl HashShuffleSender {
             return Ok(());
         }
 
-        // Counted once: the slices share the columns of the chunk.
-        let held = self.buffer.hold(&chunk).await;
+        // Counted once: the slices share the columns of the chunk, and its count.
+        let (chunk, held) = self.buffer.hold(chunk).await;
+        let hash_values = generate_hash_values(&chunk, &self.hash_info)?;
+        let new_data_chunks = generate_new_data_chunks(&chunk, &self.hash_info, &hash_values);
         for (sink_id, new_data_chunk) in new_data_chunks.into_iter().enumerate() {
             trace!(
                 "send to sink:{}, cardinality:{}",
@@ -218,7 +219,7 @@ async fn send_one(
     buffer: &OutputBuffer,
     chunk: DataChunk,
 ) -> BatchResult<()> {
-    let held = buffer.hold(&chunk).await;
+    let (chunk, held) = buffer.hold(chunk).await;
     sender
         .send(Ok(Some(DataChunkInChannel::new(chunk, held))))
         .await
@@ -343,7 +344,7 @@ mod tests {
     }
 
     /// The slices that the outputs receive share one count of the chunk, released when the last
-    /// of them leaves the channels.
+    /// of them is dropped, wherever it went.
     #[tokio::test]
     async fn test_shared_chunk_counted_once() {
         let mem_context =
@@ -359,10 +360,22 @@ mod tests {
         sender.send(input).await.unwrap();
         assert_eq!(mem_context.get_bytes_used(), bytes);
         sender.close(None).await.unwrap();
-        let (rows, chunks) = receive_all(receivers).await;
-        // Taken out of the channels: no longer counted, although the consumers hold the slices.
-        assert_eq!(mem_context.get_bytes_used(), 0);
+        let (rows, mut chunks) = receive_all(receivers).await;
         assert_eq!(chunks.len(), OUTPUTS);
+        // The consumers hold the slices: still counted, once.
+        assert_eq!(mem_context.get_bytes_used(), bytes);
+        // A consumer that keeps its slice counts its share elsewhere, which leaves the count.
+        let share = chunks[0].kept_bytes() as i64;
+        assert!(share > 0 && share < bytes);
+        chunks[0].adopt_shared_memory();
+        assert_eq!(mem_context.get_bytes_used(), bytes - share);
+        // Released with the last slice only.
+        let last = chunks.pop().unwrap();
+        drop(chunks);
+        assert_eq!(mem_context.get_bytes_used(), bytes - share);
+        assert!(last.is_sole_holder_of_shared_memory());
+        drop(last);
+        assert_eq!(mem_context.get_bytes_used(), 0);
         let mut all = rows.concat();
         all.sort_unstable();
         assert_eq!(all, (0..1000).collect::<Vec<_>>());
@@ -388,7 +401,6 @@ mod tests {
         assert!(held > 0);
         sender.close(None).await.unwrap();
         let (rows, chunks) = receive_all(receivers).await;
-        assert_eq!(mem_context.get_bytes_used(), 0);
         for chunk in &chunks {
             // Chunks of their own rows: nothing hidden, nothing shared.
             assert!(chunk.visibility().all());
@@ -400,6 +412,10 @@ mod tests {
         let mut all = rows.concat();
         all.sort_unstable();
         assert_eq!(all, (0..1000).collect::<Vec<_>>());
+        // Each chunk of its own carries its count, released with it.
+        assert!(mem_context.get_bytes_used() > 0);
+        drop(chunks);
+        assert_eq!(mem_context.get_bytes_used(), 0);
         // The same rows go to the same output as without the compact mode.
         let (mut plain_sender, plain_receivers) =
             new_hash_shuffle_channel(&hash_exchange(), 64, OutputBuffer::unbounded(), None);

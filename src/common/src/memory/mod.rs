@@ -18,3 +18,5 @@ mod alloc;
 pub use alloc::*;
 mod monitored_heap;
 pub use monitored_heap::*;
+mod shared_chunk;
+pub use shared_chunk::*;

@@ -23,7 +23,6 @@ use risingwave_common::catalog::Schema;
 use risingwave_common::memory::{MemMonitoredHeap, MemoryContext, MonitoredGlobalAlloc};
 use risingwave_common::types::ToOwnedDatum;
 use risingwave_common::util::sort_util::{ColumnOrder, HeapElem};
-use risingwave_common_estimate_size::EstimateSize;
 
 use super::{BoxedDataChunkStream, BoxedExecutor, Executor};
 use crate::error::{BatchError, Result};
@@ -44,7 +43,7 @@ impl Drop for MergeSortExecutor {
         // The chunks still held when the sort is dropped before its end, e.g. when the query is
         // cancelled: each was counted once when it was taken from its input.
         for chunk in self.current_chunks.iter().flatten() {
-            self.mem_context.add(-(chunk.estimated_heap_size() as i64));
+            self.mem_context.add(-(chunk.kept_bytes() as i64));
         }
     }
 }
@@ -78,8 +77,10 @@ impl MergeSortExecutor {
                     let chunk = chunk?;
                     // Counted like the next chunks of the input: `get_input_chunk` subtracts it
                     // when it is replaced.
-                    self.mem_context
-                        .force_add(chunk.estimated_heap_size() as i64);
+                    // A slice of an exchange counts its share of the shared columns, which leaves
+                    // their shared count.
+                    self.mem_context.force_add(chunk.kept_bytes() as i64);
+                    chunk.adopt_shared_memory();
                     self.current_chunks.push(Some(chunk));
                     if let Some(chunk) = &self.current_chunks[input_idx] {
                         // We assume that we would always get a non-empty chunk from the upstream of
@@ -156,7 +157,8 @@ impl MergeSortExecutor {
             Some(chunk) => {
                 let chunk = chunk?;
                 assert_ne!(chunk.cardinality(), 0);
-                let new_chunk_size = chunk.estimated_heap_size() as i64;
+                let new_chunk_size = chunk.kept_bytes() as i64;
+                chunk.adopt_shared_memory();
                 let old = self.current_chunks[input_idx].replace(chunk);
                 // The chunk is held whatever the limit: count it, as its release is counted.
                 self.mem_context.force_add(new_chunk_size);
@@ -167,7 +169,7 @@ impl MergeSortExecutor {
 
         if let Some(chunk) = old {
             // Reduce the heap size of retired chunk
-            self.mem_context.add(-(chunk.estimated_heap_size() as i64));
+            self.mem_context.add(-(chunk.kept_bytes() as i64));
         }
 
         Ok(())

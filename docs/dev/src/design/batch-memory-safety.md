@@ -140,44 +140,52 @@ section 4.
 
 ## 7. Exchange buffers (implemented)
 
-**Counting.** Each chunk that a task sends is counted in the memory of its query (a context
-`task output`, child of the query context) when it enters the output channels, and released
-when it leaves them (`output_buffer.rs`):
+**One count per block.** A chunk that a task sends is counted once in the memory of its query (a
+context `task output`, child of the query context) when it enters the output channels. The count
+is attached to the chunk itself (`SharedChunkMemory`, an `Arc` held by `DataChunk`): the slices
+that a hash shuffle (or a consistent hash shuffle, or a broadcast) sends to its outputs share the
+columns of the chunk and share its count, and so does every chunk downstream that keeps sharing
+the columns (`with_visibility`, `clone`, projections). The count is released when the last of them
+is dropped, wherever it went. A chunk that copies the rows (`compact_vis`, a new chunk) does not
+share it. A task that forwards a chunk that is already counted does not count it again.
 
-- a local consumer takes it from the channel;
-- a remote consumer: the count travels with the serialized response through the `GetData`
-  stream (`receiver_channel_size`, 1000 responses) and is released when gRPC takes the response;
-- the slices that a hash shuffle (or a consistent hash shuffle, or a broadcast) sends to its
-  outputs share the columns of the input chunk: they share one count, released with the last of
-  them.
+The count is forced (memory that is already allocated cannot be refused): a query whose buffers
+grow leaves less room to its spillable operators, which then spill, and the memory of the node
+sees it.
 
-The count is forced (an allocation that already happened cannot be refused): a query whose
-buffers grow leaves less room to its spillable operators, which then spill, and the memory of the
-node sees it.
+**Operators that keep slices.** The consumers of a shuffle are the tasks of one stage that run the
+same plan: they usually all keep their slices (all build their hash table) or all drop them.
+Sharing is the common case, and copying the visible rows of each slice would duplicate the block
+for nothing. So an operator that keeps a slice (hash join build side, nested loop join left side,
+merge sort) does not copy it: it counts its share in its own context, the bytes of the block times
+its visible rows over the rows of the block (`DataChunk::kept_bytes`), and takes that share out of
+the shared count (`adopt_shared_memory`). The shares of all the holders sum to the block, which is
+counted once in total. The sort still copies every chunk it keeps, as before (it needs compact
+rows).
 
-**Over-count on the consumer side.** A local consumer of a hash shuffle receives the whole input
-chunk with a visibility that keeps about `1/Q` of its rows (`Q` outputs). An operator that kept it
-counted the full chunk (`estimated_heap_size` counts the shared columns), `Q` times over all the
-consumers, and kept the whole chunk alive. The operators that keep chunks for a while (hash join
-build side, nested loop join left side, the outer batches of the lookup join) now compact a chunk
-when fewer than half of its rows are visible (`compact_if_sparse`): they copy the visible rows,
-count that copy in their own context, and drop their reference to the shared block. A chunk with
-at least half of its rows visible is kept as it is and counted in full by the operator: at most
-two consumers can keep such a slice of one block. The sort already compacted every chunk; the
-other operators keep rows, not chunks.
+**Copy only as the sole holder.** When the hash join needs memory, before it spills or waits, it
+copies the visible rows of the slices that no other chunk shares any more (`Arc::strong_count` of
+the shared count is 1) and of which fewer than half of the rows are visible: the other consumers
+spilled, ended or dropped theirs, and the copy frees the rest of the block. A slice that others
+still share is never copied.
 
-**Lifetime of the count.** The block is counted once from the moment it enters the channels until
-its last slice leaves them (taken by a local consumer, or handed to gRPC). Afterwards, a consumer
-that streams the slice drops it right away, and a consumer that keeps it either compacts it or
-counts it itself. A small window remains uncounted: a slice being processed by a streaming
-operator, and the columns that an operator reuses in its output (a projection of input columns)
-while that output waits downstream.
+**What remains uncounted.** When a holder that adopted its share drops its slice while others still
+hold the block, its share is no longer counted until the block is freed (the consumers of a stage
+usually drop their slices together). The columns that an operator reuses in a new chunk (a
+projection of input columns into its output) are no longer attached to the count.
+
+**Bound in bytes and remote consumers.** The bound of `batch_exchange_buffer_max_mb` covers the time
+spent in the channels only: a slice releases its room when it leaves them, never later, since an
+operator that keeps a slice must not block the producer that it waits for. A serialized chunk that
+waits in the `GetData` stream of a remote consumer (`receiver_channel_size`, 1000 responses) is
+counted for its size and keeps the room of its chunk until gRPC takes it.
 
 **Compact mode (`batch_compact_shuffle_output`, default false).** The hash shuffle appends the rows
 of each output to a chunk builder of its own and sends full chunks: no chunk is pinned by the
 slowest consumer, consumers get full chunks, and the count is exact. Cost: one copy of each row,
-and up to one partial chunk per output gathered in the producer (not counted). The visibilities of
-the outputs are now computed in one pass over the rows instead of one pass per output.
+and up to one partial chunk per output gathered in the producer (not counted). Optional and off by default: sharing the block is the common case. The visibilities
+of the outputs are now computed in one pass over the rows instead of one pass per output, in both
+modes.
 
 **Bound in bytes (`batch_exchange_buffer_max_mb`, default 0 = none).** The output channels of a task
 hold at most this many bytes, on top of their bound in chunks: a producer whose consumers are slow

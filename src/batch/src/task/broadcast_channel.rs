@@ -46,7 +46,7 @@ impl Debug for BroadcastSender {
 impl ChanSender for BroadcastSender {
     async fn send(&mut self, chunk: DataChunk) -> BatchResult<()> {
         // Counted once: the copies share the columns of the chunk.
-        let held = self.buffer.hold(&chunk).await;
+        let (chunk, held) = self.buffer.hold(chunk).await;
         let broadcast_data_chunk = DataChunkInChannel::new(chunk, held);
         for sender in &self.senders {
             sender

@@ -12,18 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The memory of the chunks that wait in the output channels of a task, until their consumer
-//! takes them (local exchange) or until they are handed to the gRPC stream of a remote consumer.
+//! The memory of the chunks that a task sends to its consumers.
 //!
-//! Each chunk is counted once in the memory context of the task when it enters the channels, and
-//! released when the last of its copies leaves them: the slices that a hash shuffle sends to its
-//! outputs share the columns of the chunk, and so share its count. Optionally, the bytes that wait
-//! are bounded: the producer then waits for its consumers before it sends more.
+//! A chunk is counted once in the memory context of the task (a child of the memory of its query)
+//! when it enters the output channels: the count is attached to the chunk
+//! ([`SharedChunkMemory`]), shared by the slices that a hash shuffle sends to its outputs and by
+//! every chunk that keeps sharing the columns downstream, and released when the last of them is
+//! dropped. The consumers of a stage run the same plan and usually all keep their slices or all
+//! drop them: sharing is the common case, so the slices are not copied. An operator that keeps a
+//! slice counts its share in its own context and takes it out of the shared count.
+//!
+//! Optionally, the bytes that wait in the channels are bounded: the producer then waits for its
+//! consumers before it sends more. The bound only covers the time spent in the channels (and in
+//! the `GetData` stream of a remote consumer): an operator that keeps a slice must never block the
+//! producer that it waits for.
 
 use std::sync::Arc;
 
 use risingwave_common::array::DataChunk;
-use risingwave_common::memory::MemoryContext;
+use risingwave_common::memory::{MemoryContext, SharedChunkMemory};
 use risingwave_common_estimate_size::EstimateSize;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -56,9 +63,13 @@ impl OutputBuffer {
         Self::new(MemoryContext::none(), 0)
     }
 
-    /// Counts `chunk` while it waits in the channels, after waiting for room when the buffer is
-    /// bounded. A chunk larger than the whole bound waits for the buffer to be empty.
-    pub async fn hold(&self, chunk: &DataChunk) -> HeldBytes {
+    /// Prepares `chunk` to enter the channels: waits for room when the buffer is bounded (a chunk
+    /// larger than the whole bound waits for the buffer to be empty), and counts its columns once,
+    /// until the last chunk that shares them is dropped. Columns already counted upstream (a chunk
+    /// that came from another exchange and still shares its columns) are not counted again.
+    ///
+    /// Returns the chunk, and the hold on the bound, released when the chunk leaves the channels.
+    pub async fn hold(&self, chunk: DataChunk) -> (DataChunk, HeldBytes) {
         let bytes = chunk.estimated_heap_size() as u64;
         let permit = match &self.limit {
             Some((semaphore, max_permits)) => {
@@ -68,35 +79,59 @@ impl OutputBuffer {
             }
             None => None,
         };
-        self.mem_context.force_add(bytes as i64);
-        HeldBytes(Some(Arc::new(Held {
-            mem_context: self.mem_context.clone(),
-            bytes: bytes as i64,
-            _permit: permit,
-        })))
+        let chunk = if chunk.shared_memory().is_some() {
+            chunk
+        } else {
+            let memory = SharedChunkMemory::new(self.mem_context.clone(), bytes as i64);
+            chunk.with_shared_memory(Arc::new(memory))
+        };
+        (chunk, HeldBytes::new(MemoryContext::none(), 0, permit))
     }
 
-    /// The bytes counted for the chunks that currently wait.
+    /// Counts `bytes` held outside of any chunk, e.g. a serialized chunk waiting for gRPC.
+    pub fn count(&self, bytes: usize) -> HeldBytes {
+        self.mem_context.force_add(bytes as i64);
+        HeldBytes::new(self.mem_context.clone(), bytes as i64, None)
+    }
+
+    /// The bytes counted in the memory of the task for its output.
     pub fn held_bytes(&self) -> i64 {
         self.mem_context.get_bytes_used()
     }
 }
 
-/// The count of a chunk in the output channels, shared by its copies, released when the last of
-/// them is dropped.
+/// Holds on the output buffer (room in the bound, bytes counted outside of chunks), released when
+/// the last copy is dropped.
 #[derive(Clone, Default)]
-pub struct HeldBytes(Option<Arc<Held>>);
+pub struct HeldBytes(Vec<Arc<Held>>);
 
 impl HeldBytes {
+    fn new(mem_context: MemoryContext, bytes: i64, permit: Option<OwnedSemaphorePermit>) -> Self {
+        if bytes == 0 && permit.is_none() {
+            return Self::none();
+        }
+        Self(vec![Arc::new(Held {
+            mem_context,
+            bytes,
+            _permit: permit,
+        })])
+    }
+
     pub fn none() -> Self {
-        Self(None)
+        Self(vec![])
+    }
+
+    /// Holds both.
+    pub fn and(mut self, other: HeldBytes) -> Self {
+        self.0.extend(other.0);
+        self
     }
 }
 
 impl std::fmt::Debug for HeldBytes {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("HeldBytes")
-            .field(&self.0.as_ref().map_or(0, |held| held.bytes))
+            .field(&self.0.iter().map(|held| held.bytes).sum::<i64>())
             .finish()
     }
 }
@@ -131,20 +166,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_chunk_counted_once_while_held() {
+    async fn test_chunk_counted_once_until_its_last_holder() {
         let mem_context = MemoryContext::root(LabelGuardedIntGauge::test_int_gauge::<4>(), 0);
         let buffer = OutputBuffer::new(mem_context.clone(), 0);
-        let chunk = chunk();
-        let bytes = chunk.estimated_heap_size() as i64;
-        let held = buffer.hold(&chunk).await;
+        let input = chunk();
+        let bytes = input.estimated_heap_size() as i64;
+        let (sent, held) = buffer.hold(input).await;
         // Counted even beyond the limit of the context: the chunk is there.
-        assert_eq!(mem_context.get_bytes_used(), bytes);
-        // The slices of a shuffle share the count, released with the last of them.
-        let mut slices = vec![held.clone(), held.clone(), held];
         assert_eq!(buffer.held_bytes(), bytes);
-        slices.truncate(1);
+        // The slices share the count, also once they left the channels.
+        let slices = vec![
+            sent.clone(),
+            sent.with_visibility(sent.visibility().clone()),
+            sent,
+        ];
+        drop(held);
         assert_eq!(buffer.held_bytes(), bytes);
+        // Sent again by a task that forwards it: not counted twice.
+        let (forwarded, _held) = buffer.hold(slices[0].clone()).await;
+        assert_eq!(buffer.held_bytes(), bytes);
+        drop(forwarded);
+        // A copy of the rows does not share the count.
+        let copy = slices[1].clone().compact_vis();
+        assert!(copy.shared_memory().is_none());
         drop(slices);
+        assert_eq!(buffer.held_bytes(), 0);
+        drop(copy);
+        // Bytes held outside of chunks.
+        let serialized = buffer.count(100);
+        assert_eq!(buffer.held_bytes(), 100);
+        drop(serialized);
         assert_eq!(buffer.held_bytes(), 0);
     }
 
@@ -152,31 +203,31 @@ mod tests {
     async fn test_bounded_buffer_waits_for_room() {
         let mem_context =
             MemoryContext::root(LabelGuardedIntGauge::test_int_gauge::<4>(), u64::MAX);
-        let chunk = chunk();
-        let bytes = chunk.estimated_heap_size() as u64;
+        let input = chunk();
+        let bytes = input.estimated_heap_size() as u64;
         // Room for one chunk and a half.
         let buffer = OutputBuffer::new(mem_context, bytes * 3 / 2);
-        let first = buffer.hold(&chunk).await;
+        let (first, first_held) = buffer.hold(input.clone()).await;
         let waiter = {
             let buffer = buffer.clone();
-            let chunk = chunk.clone();
-            tokio::spawn(async move { buffer.hold(&chunk).await })
+            let input = input.clone();
+            tokio::spawn(async move { buffer.hold(input).await })
         };
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(!waiter.is_finished());
-        // The first chunk leaves the channels: the second one enters.
-        drop(first);
-        let second = tokio::time::timeout(Duration::from_secs(5), waiter)
+        // The first chunk leaves the channels: the second one enters, although a consumer still
+        // keeps the first one.
+        drop(first_held);
+        let (_second, _second_held) = tokio::time::timeout(Duration::from_secs(5), waiter)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(buffer.held_bytes(), bytes as i64);
-        drop(second);
+        drop(first);
         // A chunk larger than the whole bound waits for an empty buffer, never forever.
         let small = OutputBuffer::new(MemoryContext::none(), 1);
-        let held = small.hold(&chunk).await;
+        let (_, held) = small.hold(input.clone()).await;
         drop(held);
-        let _held = tokio::time::timeout(Duration::from_secs(5), small.hold(&chunk))
+        let _held = tokio::time::timeout(Duration::from_secs(5), small.hold(input))
             .await
             .unwrap();
     }

@@ -144,6 +144,8 @@ impl TaskOutputId {
 
 pub struct TaskOutput {
     receiver: ChanReceiverImpl,
+    /// Counts the serialized chunks that wait for a remote consumer.
+    buffer: OutputBuffer,
     output_id: TaskOutputId,
     failure: Arc<Mutex<Option<Arc<BatchError>>>>,
 }
@@ -180,8 +182,9 @@ impl TaskOutput {
                         self.output_id,
                         chunk.cardinality()
                     );
-                    // The chunk stays counted until its serialized form leaves the stream.
-                    let held = chunk.held();
+                    // The serialized chunk is counted, and keeps the hold of the chunk on the
+                    // bound of the buffer, until it leaves the stream.
+                    let held = chunk.held().and(self.buffer.count(chunk.kept_bytes()));
                     let pb = chunk.to_protobuf().await;
                     drop(chunk);
                     let resp = GetDataResponse {
@@ -319,6 +322,8 @@ pub struct BatchTaskExecution {
 
     /// Sender for sending chunks between different executors.
     sender: ChanSenderImpl,
+    /// Counts the chunks that the task sends while they wait for their consumers.
+    output_buffer: OutputBuffer,
 
     /// Context for task execution
     context: Arc<dyn BatchTaskContext>,
@@ -366,6 +371,7 @@ impl BatchTaskExecution {
                 .compact_shuffle
                 .then_some(config.developer.chunk_size),
         };
+        let output_buffer = output_options.buffer.clone();
         let (sender, receivers) = create_output_channel(plan.get_exchange_info()?, output_options)?;
 
         let mut rts = Vec::new();
@@ -381,6 +387,7 @@ impl BatchTaskExecution {
             context,
             runtime,
             sender,
+            output_buffer,
             shutdown_tx,
             shutdown_rx,
             heartbeat_join_handle: Mutex::new(None),
@@ -758,6 +765,7 @@ impl BatchTaskExecution {
             })?;
         let task_output = TaskOutput {
             receiver,
+            buffer: self.output_buffer.clone(),
             output_id: output_id.try_into()?,
             failure: self.failure.clone(),
         };

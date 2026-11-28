@@ -42,7 +42,7 @@ pub struct FifoReceiver {
 
 impl ChanSender for FifoSender {
     async fn send(&mut self, chunk: DataChunk) -> BatchResult<()> {
-        let held = self.buffer.hold(&chunk).await;
+        let (chunk, held) = self.buffer.hold(chunk).await;
         let data = DataChunkInChannel::new(chunk, held);
         self.sender
             .send(Ok(Some(data)))

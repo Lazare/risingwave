@@ -106,10 +106,10 @@ impl ChanSender for ConsistentHashShuffleSender {
 
 impl ConsistentHashShuffleSender {
     async fn send_chunk(&mut self, chunk: DataChunk) -> BatchResult<()> {
+        // Counted once: the slices share the columns of the chunk, and its count.
+        let (chunk, held) = self.buffer.hold(chunk).await;
         let hash_values = generate_hash_values(&chunk, &self.consistent_hash_info)?;
         let new_data_chunks = generate_new_data_chunks(&chunk, self.output_count, &hash_values);
-        // Counted once: the slices share the columns of the chunk.
-        let held = self.buffer.hold(&chunk).await;
 
         for (sink_id, new_data_chunk) in new_data_chunks.into_iter().enumerate() {
             trace!(

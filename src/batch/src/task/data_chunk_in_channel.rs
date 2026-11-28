@@ -24,8 +24,8 @@ pub(super) struct DataChunkInChannel {
     /// If the data chunk is only needed to transfer locally,
     /// this field should not be initialized.
     prost_data_chunk: OnceCell<PbDataChunk>,
-    /// The count of the chunk in the memory of the task, released when the chunk (and all the
-    /// other copies of it) left the channels.
+    /// The hold of the chunk on the output buffer (room in its bound), released when the chunk
+    /// (and all the other slices of its columns) left the channels.
     held: HeldBytes,
 }
 
@@ -38,10 +38,15 @@ impl DataChunkInChannel {
         }
     }
 
-    /// The count of the chunk, to keep it counted after the chunk is serialized, while its
-    /// serialized form waits for the consumer.
+    /// The hold of the chunk, to keep it after the chunk is serialized, while its serialized
+    /// form waits for the consumer.
     pub fn held(&self) -> HeldBytes {
         self.held.clone()
+    }
+
+    /// What the chunk holds of its columns: about the size of its serialized form.
+    pub fn kept_bytes(&self) -> usize {
+        self.data_chunk.kept_bytes()
     }
 
     pub async fn to_protobuf(&self) -> PbDataChunk {
