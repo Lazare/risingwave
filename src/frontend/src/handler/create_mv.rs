@@ -427,6 +427,9 @@ pub(crate) fn gen_create_mv_graph(
             || config.streaming_simplify_exists_subquery()
             // Rule `OuterJoinReduceRule`.
             || config.streaming_reduce_outer_joins()
+            // Rules `NullContradictionRule` and `InListCoalesceSimplifyRule`.
+            || config.streaming_fold_null_contradictions()
+            || config.streaming_simplify_in_lists_and_coalesce()
             // Rule `ValuesJoinInlineRule`.
             || config.streaming_inline_values_join()
             // Rule `OrRestrictionDeriveRule`.
