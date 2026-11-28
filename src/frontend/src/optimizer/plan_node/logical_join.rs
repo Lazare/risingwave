@@ -836,8 +836,8 @@ fn order_agrees_with_equality(data_type: &DataType) -> bool {
 /// type whose equal values are identical can be used in any way; any column can be tested for
 /// `NULL`; a column of a type whose order agrees with its equality can be compared with values
 /// that do not depend on any column. Anything else, such as `x::varchar = '1.0'` on a `numeric`,
-/// does not respect the equality.
-fn respects_column_equality(expr: &ExprImpl) -> bool {
+/// does not respect the equality. Shared with `TransitivePredicateRule`.
+pub(crate) fn respects_column_equality(expr: &ExprImpl) -> bool {
     let ordered_column = |expr: &ExprImpl| {
         expr.as_input_ref()
             .is_some_and(|input_ref| order_agrees_with_equality(&input_ref.return_type()))

@@ -1207,6 +1207,7 @@ pub use logical_iceberg_scan::LogicalIcebergScan;
 pub use logical_insert::LogicalInsert;
 pub use logical_intersect::LogicalIntersect;
 pub use logical_join::LogicalJoin;
+pub(crate) use logical_join::respects_column_equality;
 pub use logical_kafka_scan::LogicalKafkaScan;
 pub use logical_limit::LogicalLimit;
 pub use logical_locality_provider::LogicalLocalityProvider;

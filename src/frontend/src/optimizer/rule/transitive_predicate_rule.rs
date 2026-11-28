@@ -20,12 +20,12 @@ use risingwave_pb::plan_common::JoinType;
 use super::column_facts_simplify_rule::column_facts;
 use super::prelude::{PlanRef, *};
 use crate::expr::{
-    Expr, ExprImpl, ExprRewriter, ExprType, ExprVisitor, FunctionCall, InputRef, Literal,
-    default_rewrite_expr,
+    Expr, ExprImpl, ExprRewriter, ExprType, FunctionCall, InputRef, Literal, default_rewrite_expr,
 };
 use crate::optimizer::plan_node::generic::GenericPlanRef;
 use crate::optimizer::plan_node::{
     EqJoinPredicate, LogicalFilter, PlanNodeId, PlanTreeNodeBinary, PlanTreeNodeUnary,
+    respects_column_equality,
 };
 use crate::utils::Condition;
 
@@ -532,93 +532,4 @@ fn in_list(column: usize, data_type: &DataType, lists: Vec<Vec<Literal>>) -> Opt
     };
     inputs.extend(values.into_iter().map(ExprImpl::from));
     Some(FunctionCall::new_unchecked(func_type, inputs, DataType::Boolean).into())
-}
-
-// The same restriction as `derive_predicate_from_eq_condition` of `LogicalJoin` (only types whose
-// equal values are identical, see the corrections of the fork): to be replaced by a single shared
-// helper once both are merged.
-
-/// Whether two equal values of this type are indistinguishable: any expression gives the same
-/// result for both. Integers, booleans, strings and byte strings (compared byte by byte), dates,
-/// times and timestamps. Not `numeric` (`1.0 = 1.00`), floats (`-0.0 = 0.0`), `interval`
-/// (`'1 day' = '24 hours'`), `jsonb` (the numbers `1` and `1.0`), nor the composite types, whose
-/// fields may be of these types.
-fn equal_values_are_identical(data_type: &DataType) -> bool {
-    matches!(
-        data_type,
-        DataType::Boolean
-            | DataType::Int16
-            | DataType::Int32
-            | DataType::Int64
-            | DataType::Int256
-            | DataType::Serial
-            | DataType::Varchar
-            | DataType::Bytea
-            | DataType::Date
-            | DataType::Time
-            | DataType::Timestamp
-            | DataType::Timestamptz
-    )
-}
-
-/// Whether the order of this type agrees with its equality, so that two equal values compare the
-/// same way with any value, though they may differ otherwise: `numeric`, floats and `interval`.
-fn order_agrees_with_equality(data_type: &DataType) -> bool {
-    matches!(
-        data_type,
-        DataType::Decimal | DataType::Float32 | DataType::Float64 | DataType::Interval
-    )
-}
-
-/// Whether `expr` gives the same result for any two rows whose columns are pairwise equal. A
-/// column of a type whose equal values are identical can be used in any way; any column can be
-/// tested for `NULL`; a column of a type whose order agrees with its equality can be compared with
-/// values that do not depend on any column. Anything else, such as `x::varchar = '1.0'` on a
-/// `numeric`, does not respect the equality.
-fn respects_column_equality(expr: &ExprImpl) -> bool {
-    let ordered_column = |expr: &ExprImpl| {
-        expr.as_input_ref()
-            .is_some_and(|input_ref| order_agrees_with_equality(&input_ref.return_type()))
-    };
-    match expr {
-        ExprImpl::InputRef(input_ref) => equal_values_are_identical(&input_ref.return_type()),
-        ExprImpl::FunctionCall(call) => {
-            let inputs = call.inputs();
-            let compared = match call.func_type() {
-                ExprType::IsNull | ExprType::IsNotNull => {
-                    inputs.len() == 1 && inputs[0].as_input_ref().is_some()
-                }
-                ExprType::Equal
-                | ExprType::NotEqual
-                | ExprType::LessThan
-                | ExprType::LessThanOrEqual
-                | ExprType::GreaterThan
-                | ExprType::GreaterThanOrEqual
-                | ExprType::IsDistinctFrom
-                | ExprType::IsNotDistinctFrom => {
-                    inputs.len() == 2
-                        && ((ordered_column(&inputs[0]) && !inputs[1].has_input_ref())
-                            || (ordered_column(&inputs[1]) && !inputs[0].has_input_ref()))
-                }
-                ExprType::In => {
-                    !inputs.is_empty()
-                        && ordered_column(&inputs[0])
-                        && inputs[1..].iter().all(|input| !input.has_input_ref())
-                }
-                _ => false,
-            };
-            compared || inputs.iter().all(respects_column_equality)
-        }
-        _ => {
-            struct AllIdentical(bool);
-            impl ExprVisitor for AllIdentical {
-                fn visit_input_ref(&mut self, input_ref: &InputRef) {
-                    self.0 &= equal_values_are_identical(&input_ref.return_type());
-                }
-            }
-            let mut visitor = AllIdentical(true);
-            visitor.visit_expr(expr);
-            visitor.0
-        }
-    }
 }
