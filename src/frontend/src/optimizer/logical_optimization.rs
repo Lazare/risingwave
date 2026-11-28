@@ -1861,6 +1861,21 @@ impl LogicalOptimizer {
                     ctx.trace(plan.explain_to_string());
                 }
             }
+            // Rule `StatusLadderCaseRule`, again: the branches of a status ladder whose copies of
+            // the same join or aggregation were merged above now read the same shared core, and
+            // become one branch that picks the best of them with a `CASE`.
+            if merged_copies > 0 && ctx.session_ctx().config().streaming_status_ladder_case() {
+                let applied_before = ctx.total_rule_applied();
+                plan = plan.optimize_by_rules(&STATUS_LADDER_CASE)?;
+                let applied = ctx.total_rule_applied() - applied_before;
+                if applied > 0 {
+                    // No predicate pushdown here: as after the widening, the plan is final but
+                    // for its columns.
+                    ctx.add_stream_prune_rule_applied(applied);
+                    plan = Self::column_pruning(plan, explain_trace, &ctx);
+                    plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
+                }
+            }
             let (shared, new_shares) = share_identical_subplans(plan);
             plan = shared;
             if new_shares > 0 {

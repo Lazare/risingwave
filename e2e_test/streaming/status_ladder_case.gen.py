@@ -1,8 +1,10 @@
 """Generates `e2e_test/streaming/status_ladder_case.slt`, the differential test of the status ladder
 picked with one `CASE` in streaming plans (`streaming_status_ladder_case`).
 
-Every query is materialized four times: without the variable (the reference), with it, with
-`streaming_merge_union_scans` only, and with both. The four materialized views must hold the same
+Every query is materialized five times: without the variable (the reference), with it, with
+`streaming_merge_union_scans` only, with both, and with the variable, `streaming_share_identical_subplans`
+and `streaming_factor_union_join` (the rule runs again after the sharing of widened copies, and
+after the factoring of joins). The five materialized views must hold the same
 multiset of rows (each distinct row with its number of occurrences), and the reference must hold
 the rows of the batch query, after the backfill and after each round of changes.
 
@@ -62,6 +64,44 @@ def cases(E, F, G):
          ladder([OPEN, ACTIVE, CLOSED], keep='rn <= 2')),
         ('kept_tables', 'kept: each branch over its own table', 2,
          ladder([f"select id, 'new' as st, 1 as p from {E}", f"select k, 'held', 2 from {G}"], key='id')),
+        # Branches over aggregations of the same table with the same group key: one aggregation.
+        ('agg_dedup', 'two GROUP BY branches over the same table, and a default branch over another table', 2,
+         ladder([f"select id as k, 'new' as st, 1 as p from {E}",
+                 f"select k, 'active', 2 from {F} where amt > 0 group by k",
+                 f"select k, 'closed', 3 from {F} where st = 'back' group by k"])),
+        ('agg_only', 'every branch is a GROUP BY of the same table by the key: the top-1 is removed', 2,
+         ladder([f"select k, 'seen' as st, 1 as p from {F} group by k",
+                 f"select k, 'active', 2 from {F} where amt > 0 group by k",
+                 f"select k, 'closed', 3 from {F} where st = 'back' and amt is not null group by k"])),
+        ('agg_having', 'GROUP BY branches with conditions on their aggregates', 2,
+         ladder([f"select k, 'neg' as st, 1 as p from {F} where amt < 0 group by k having count(*) >= 1",
+                 f"select k, 'some', 2 from {F} where st = 'back' group by k having max(amt) > 0",
+                 f"select k, 'big', 3 from {F} group by k having coalesce(sum(amt), 0) > 10"])),
+        ('agg_distinct', 'SELECT DISTINCT branches over the same table', 2,
+         ladder([f"select distinct k, 'active' as st, 2 as p from {F} where amt > 0",
+                 f"select distinct k, 'closed', 3 from {F} where st = 'back'",
+                 f"select k, 'held', 4 from {G}"])),
+        ('agg_expr_key', 'GROUP BY branches by the same expression', 2,
+         ladder([f"select k % 3 as k, 'odd' as st, 1 as p from {F} where amt % 2 = 1 group by k % 3",
+                 f"select k % 3, 'back', 2 from {F} where st = 'back' group by k % 3"])),
+        ('agg_shared_join', 'GROUP BY branches over the same shared join', 2,
+         f"with c as (select {F}.k, {F}.amt, {F}.st from {F} join {G} on {F}.k = {G}.k) "
+         + ladder(["select k, 'open' as st, 1 as p from c where amt > 0 group by k",
+                   "select k, 'back', 2 from c where st = 'back' group by k",
+                   f"select id, 'new', 0 from {E}"])),
+        ('agg_joins', 'GROUP BY branches over copies of the same join with filters on either side', 2,
+         ladder([f"select {F}.k, 'matched' as st, 1 as p from {F} join {G} on {F}.k = {G}.k where {G}.r > 2 group by {F}.k",
+                 f"select {F}.k, 'paid', 2 from {F} join {G} on {F}.k = {G}.k where {F}.amt > 0 group by {F}.k"])),
+        ('joins', 'branches that join the same tables, with filters on either side', 2,
+         ladder([f"select {F}.k, 'matched' as st, 1 as p from {F} join {G} on {F}.k = {G}.k where {G}.r > 2",
+                 f"select {F}.k, 'paid', 2 from {F} join {G} on {F}.k = {G}.k where {F}.amt > 0",
+                 f"select id, 'new', 0 from {E}"])),
+        ('kept_agg_keys', 'kept: GROUP BY branches with different group keys', 2,
+         ladder([f"select k, 'active' as st, 2 as p from {F} where amt > 0 group by k",
+                 f"select k, 'closed', 3 from {F} where st = 'back' group by k, st"])),
+        ('kept_agg_distinct_call', 'kept: a GROUP BY branch with a distinct aggregate', 2,
+         ladder([f"select k, 'active' as st, 2 as p from {F} where amt > 0 group by k",
+                 f"select k, 'many', 3 from {F} group by k having count(distinct amt) > 1"])),
     ]
 
 
@@ -167,7 +207,8 @@ def counted(relation, width):
 
 
 HEADER = """# Differential test of `streaming_status_ladder_case`: every query is materialized without the
-# variable, with it, with `streaming_merge_union_scans` only and with both, and the materialized
+# variable, with it, with `streaming_merge_union_scans` only, with both, and with the variable,
+# `streaming_share_identical_subplans` and `streaming_factor_union_join`, and the materialized
 # views must hold the same multiset of rows, and the rows of the query, after the backfill and after
 # each round of changes.
 #
@@ -175,8 +216,10 @@ HEADER = """# Differential test of `streaming_status_ladder_case`: every query i
 # of queries there and regenerate rather than editing by hand.
 """
 
-# (suffix, streaming_status_ladder_case, streaming_merge_union_scans)
-VARIANTS = [('ref', False, False), ('case', True, False), ('merge', False, True), ('both', True, True)]
+# (suffix, streaming_status_ladder_case, streaming_merge_union_scans, streaming_share_identical_subplans
+# and streaming_factor_union_join)
+VARIANTS = [('ref', False, False, False), ('case', True, False, False), ('merge', False, True, False),
+            ('both', True, True, False), ('share', True, False, True)]
 
 
 def main():
@@ -187,7 +230,7 @@ def main():
     def compare_all(title):
         slt.comment(f"{title}: with and without the variables, every materialized view holds the same rows.")
         for name, _, width, _ in queries:
-            for suffix, _, _ in VARIANTS[1:]:
+            for suffix, _, _, _ in VARIANTS[1:]:
                 slt.same_multiset(f"sl_{name}_{suffix}", f"sl_{name}_ref", width)
         slt.comment(f"{title}: the reference holds the rows of its query.")
         for name, _, width, sql in queries:
@@ -201,14 +244,18 @@ def main():
     for sql in initial_rows(E, F, G):
         slt.stmt(sql)
 
-    for suffix, case, merge in VARIANTS:
+    for suffix, case, merge, share in VARIANTS:
         slt.stmt(f"set streaming_status_ladder_case = {'true' if case else 'false'}")
         slt.stmt(f"set streaming_merge_union_scans = {'true' if merge else 'false'}")
+        slt.stmt(f"set streaming_share_identical_subplans = {'true' if share else 'false'}")
+        slt.stmt(f"set streaming_factor_union_join = {'true' if share else 'false'}")
         for name, comment, _, sql in queries:
             slt.comment(comment)
             slt.stmt(f"create materialized view sl_{name}_{suffix} as {sql}")
     slt.stmt("set streaming_status_ladder_case = false")
     slt.stmt("set streaming_merge_union_scans = false")
+    slt.stmt("set streaming_share_identical_subplans = false")
+    slt.stmt("set streaming_factor_union_join = false")
 
     compare_all("After the backfill")
 
@@ -225,7 +272,7 @@ def main():
         compare_all(f"After the changes ({title})")
 
     slt.comment("Cleanup.")
-    for suffix, _, _ in reversed(VARIANTS):
+    for suffix, _, _, _ in reversed(VARIANTS):
         for name, _, _, _ in reversed(queries):
             slt.stmt(f"drop materialized view sl_{name}_{suffix}")
     for table in (G, F, E):

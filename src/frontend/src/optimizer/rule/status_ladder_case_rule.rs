@@ -54,6 +54,28 @@
 //! When the branches of the union all read the relation, and the relation is unique on the key,
 //! each key has at most one row: the `TopN` is useless and removed.
 //!
+//! Branches that read an aggregation of the same relation, with the same group key, each with its
+//! own filter below the aggregation (a state defined as "the keys that have a row of kind x", a
+//! `GROUP BY` or `DISTINCT` per state), are merged first into one aggregation of the relation,
+//! filtered by the disjunction of their filters, that counts the rows of each branch with
+//! `count(*) FILTER (WHERE <its filter>)` and computes the calls of each branch with its filter
+//! added; each branch then reads that aggregation and keeps the groups where its count is
+//! positive, which are the groups that its own aggregation had, with the same values:
+//!
+//! ```text
+//! Union                                     Project(k, CASE WHEN c2 > 0 THEN 'b' ELSE 'a' END, ..)
+//! ├─Project(k, 'a', 1)                      └─Agg(group: k, c1: count(*) FILTER (WHERE p1),
+//! │ └─Agg(group: k)                     =>  │                c2: count(*) FILTER (WHERE p2))
+//! │   └─Filter(p1) <- Scan(t)                 └─Filter(p1 OR p2)
+//! └─Project(k, 'b', 2)                          └─Scan(t)
+//!   └─Agg(group: k)
+//!     └─Filter(p2) <- Scan(t)
+//! ```
+//!
+//! The merged aggregation holds one group per key of any of the branches, where the branches held
+//! one per key each, and the `TopN` one row per group instead of one per branch. When the merged
+//! branch is the whole union and the key is the group key, the `TopN` is removed as above.
+//!
 //! Only used on demand: `streaming_status_ladder_case` for streaming plans, where a branch with
 //! `now()` is a join at this stage and stays a separate branch, and `batch_status_ladder_case`
 //! for batch plans, where `now()` is a constant.
@@ -69,8 +91,9 @@ use super::union_scan_merge_rule::{
     Base, Branch, branch_of, or, position_in, read_base, split_predicates,
 };
 use crate::expr::{Expr, ExprImpl, ExprType, FunctionCall, InputRef};
-use crate::optimizer::plan_node::generic::GenericPlanRef;
+use crate::optimizer::plan_node::generic::{Agg, GenericPlanRef, PlanAggCall};
 use crate::optimizer::plan_node::{LogicalProject, LogicalUnion, PlanTreeNodeUnary};
+use crate::utils::{Condition, IndexSet};
 
 /// The value of a priority literal, if it is an integer.
 fn priority_of(expr: &ExprImpl) -> Option<i64> {
@@ -242,7 +265,7 @@ fn reduce_ladder(
 
     // The branches that only filter and project a relation, output the key and literals, and
     // a priority that is an integer.
-    let branches: Vec<Option<(Branch, i64)>> = inputs
+    let mut branches: Vec<Option<(Branch, i64)>> = inputs
         .iter()
         .map(|input| {
             let branch = branch_of(input, false)?;
@@ -259,6 +282,10 @@ fn reduce_ladder(
             Some((branch, priority))
         })
         .collect();
+
+    // The branches that read an aggregation of the same base with the same group key are
+    // replaced with branches that read one merged aggregation: they then read the same base.
+    merge_aggregations(&inputs, &mut branches, group_key, priority_column);
 
     // The groups of branches that read the same base with the same key.
     let key_of = |branch: &Branch| -> Vec<ExprImpl> {
@@ -392,4 +419,319 @@ fn best_of(members: &[&Branch], group_key: &[usize]) -> PlanRef {
         })
         .collect();
     LogicalProject::create(input, exprs)
+}
+
+/// A branch of a status ladder that reads an aggregation: `(Project | Filter)* <- Agg <- input`,
+/// where the input of the aggregation has the form of a [`Branch`].
+struct AggBranch {
+    /// The output columns of the branch, over the output columns of the aggregation without the
+    /// group key columns that are literals: the group key of `group_exprs`, then the calls.
+    exprs: Vec<ExprImpl>,
+    /// The conjuncts that a row of the aggregation satisfies to give a row of the branch, over the
+    /// same columns as `exprs`.
+    predicate: Vec<ExprImpl>,
+    /// The group key without its literals, over the columns of the base of the input.
+    group_exprs: Vec<ExprImpl>,
+    /// The calls of the aggregation, over its input columns.
+    calls: Vec<PlanAggCall>,
+    /// The input of the aggregation.
+    input: Branch,
+    enable_two_phase: bool,
+}
+
+/// Describes a branch that reads an aggregation with a group key, if it has the form of an
+/// [`AggBranch`].
+fn agg_branch_of(plan: &PlanRef) -> Option<AggBranch> {
+    // The projection and the filters above the aggregation, over the output of the node reached.
+    let mut exprs: Option<Vec<ExprImpl>> = None;
+    let mut predicate: Vec<ExprImpl> = vec![];
+    let mut node = plan.clone();
+    loop {
+        if let Some(project) = node.as_logical_project() {
+            let through =
+                |expr: &ExprImpl| map_input_refs(expr, |r| project.exprs()[r.index()].clone());
+            exprs = Some(match &exprs {
+                Some(exprs) => exprs.iter().map(through).collect(),
+                None => project.exprs().clone(),
+            });
+            predicate = predicate.iter().map(through).collect();
+            node = project.input();
+        } else if let Some(filter) = node.as_logical_filter() {
+            predicate.extend(filter.predicate().conjunctions.iter().cloned());
+            node = filter.input();
+        } else {
+            break;
+        }
+    }
+    let agg = node.as_logical_agg()?;
+    if !agg.grouping_sets().is_empty() || agg.group_key().is_empty() {
+        return None;
+    }
+    // A distinct call would count the rows of every branch in one set of distinct values.
+    if agg.agg_calls().iter().any(|call| call.distinct) {
+        return None;
+    }
+    let exprs = match exprs {
+        Some(exprs) => exprs,
+        None => (0..node.schema().len())
+            .map(|index| -> ExprImpl {
+                InputRef::new(index, node.schema()[index].data_type()).into()
+            })
+            .collect(),
+    };
+    if !exprs
+        .iter()
+        .chain(&predicate)
+        .all(|expr| expr.is_pure() && expr.count_nows() == 0)
+    {
+        return None;
+    }
+    let input = branch_of(&agg.input(), false)?;
+    // A group key column that is a literal (`SELECT DISTINCT k, 'x'`) does not change the groups:
+    // it is left out of the group key, and the branch outputs the literal.
+    let mut group_exprs: Vec<ExprImpl> = vec![];
+    let mut output: Vec<ExprImpl> = vec![];
+    for column in agg.group_key().indices() {
+        let expr = &input.exprs[column];
+        if is_literal(expr) {
+            output.push(expr.clone());
+        } else {
+            output.push(InputRef::new(group_exprs.len(), expr.return_type()).into());
+            group_exprs.push(expr.clone());
+        }
+    }
+    if group_exprs.is_empty() {
+        return None;
+    }
+    for (index, call) in agg.agg_calls().iter().enumerate() {
+        output.push(InputRef::new(group_exprs.len() + index, call.return_type.clone()).into());
+    }
+    let on_output = |expr: &ExprImpl| map_input_refs(expr, |r| output[r.index()].clone());
+    let exprs: Vec<ExprImpl> = exprs.iter().map(&on_output).collect();
+    let predicate: Vec<ExprImpl> = predicate.iter().map(&on_output).collect();
+    Some(AggBranch {
+        exprs,
+        predicate,
+        group_exprs,
+        calls: agg.agg_calls().clone(),
+        input,
+        enable_two_phase: agg.core().enable_two_phase,
+    })
+}
+
+/// Replaces, in `branches`, the branches of the union that read an aggregation of the same base
+/// with the same group key (and that are not branches of another form) with branches that read
+/// one merged aggregation, see the documentation of the module. Groups of one branch are left
+/// alone.
+fn merge_aggregations(
+    inputs: &[PlanRef],
+    branches: &mut [Option<(Branch, i64)>],
+    group_key: &[usize],
+    priority_column: usize,
+) {
+    let width = inputs[0].schema().len();
+    let candidates: Vec<Option<(AggBranch, i64)>> = inputs
+        .iter()
+        .zip_eq_fast(branches.iter())
+        .map(|(input, branch)| {
+            if branch.is_some() {
+                return None;
+            }
+            let agg_branch = agg_branch_of(input)?;
+            if agg_branch.exprs.len() != width {
+                return None;
+            }
+            // The key is made of group key columns, the other columns are literals.
+            let group_len = agg_branch.group_exprs.len();
+            let well_formed = (0..width).all(|column| {
+                let expr = &agg_branch.exprs[column];
+                if group_key.contains(&column) {
+                    expr.as_input_ref()
+                        .is_some_and(|input_ref| input_ref.index() < group_len)
+                } else {
+                    is_literal(expr)
+                }
+            });
+            if !well_formed {
+                return None;
+            }
+            let priority = priority_of(&agg_branch.exprs[priority_column])?;
+            Some((agg_branch, priority))
+        })
+        .collect();
+
+    // The groups of branches with the same base, group key and key.
+    let mut groups: Vec<Vec<usize>> = vec![];
+    for (index, candidate) in candidates.iter().enumerate() {
+        let Some((candidate, _)) = candidate else {
+            continue;
+        };
+        let compatible = |other: &AggBranch| {
+            other.input.base == candidate.input.base
+                && other.group_exprs == candidate.group_exprs
+                && group_key
+                    .iter()
+                    .all(|&column| other.exprs[column] == candidate.exprs[column])
+        };
+        match groups.iter_mut().find(|group| {
+            let (first, _) = candidates[group[0]].as_ref().expect("a candidate");
+            compatible(first)
+        }) {
+            Some(group) => group.push(index),
+            None => groups.push(vec![index]),
+        }
+    }
+    for group in groups.into_iter().filter(|group| group.len() >= 2) {
+        let members: Vec<&AggBranch> = group
+            .iter()
+            .map(|&index| &candidates[index].as_ref().expect("a candidate").0)
+            .collect();
+        let merged = merged_aggregation(&members);
+        for (&index, branch) in group.iter().zip_eq_fast(merged) {
+            let priority = candidates[index].as_ref().expect("a candidate").1;
+            branches[index] = Some((branch, priority));
+        }
+    }
+}
+
+/// The position of a value among `values`, added if it is not there yet.
+fn position_of<T: PartialEq>(value: T, values: &mut Vec<T>) -> usize {
+    match values.iter().position(|existing| *existing == value) {
+        Some(position) => position,
+        None => {
+            values.push(value);
+            values.len() - 1
+        }
+    }
+}
+
+/// One aggregation that computes the aggregations of the members, which read the same base with
+/// the same group key; and each member as a [`Branch`] over it.
+///
+/// The aggregation reads the base filtered by what every member requires, and by one of what each
+/// member requires besides (unless a member requires nothing more). It groups by the group key,
+/// counts the rows of each member that requires more with `count(*) FILTER (WHERE <what it
+/// requires besides>)`, and computes the calls of each member with that filter added to their own.
+/// A member keeps the groups where its count is positive: a group has rows of that member exactly
+/// then, and its calls then see exactly the rows that its own aggregation saw.
+fn merged_aggregation(members: &[&AggBranch]) -> Vec<Branch> {
+    let inputs: Vec<&Branch> = members.iter().map(|member| &member.input).collect();
+    let (common, own) = split_predicates(&inputs);
+    let mut below = common;
+    if own.iter().all(|conjuncts| !conjuncts.is_empty()) {
+        below.push(
+            own.iter()
+                .map(|conjuncts| and_all(conjuncts.clone()))
+                .reduce(or)
+                .expect("at least two members"),
+        );
+    }
+    let (input, read) = read_base(&inputs, below);
+    let group_len = members[0].group_exprs.len();
+    // The input of the aggregation: the group key, then the columns of the read of the base, then
+    // the other expressions that the calls read.
+    let on_read = |expr: &ExprImpl| {
+        map_input_refs(expr, |r| {
+            InputRef::new(group_len + position_in(&read, r.index()), r.return_type()).into()
+        })
+    };
+    let read_len = input.schema().len();
+    let mut exprs: Vec<ExprImpl> = members[0]
+        .group_exprs
+        .iter()
+        .map(|expr| {
+            map_input_refs(expr, |r| {
+                InputRef::new(position_in(&read, r.index()), r.return_type()).into()
+            })
+        })
+        .collect();
+    exprs.extend((0..read_len).map(|index| -> ExprImpl {
+        InputRef::new(index, input.schema()[index].data_type()).into()
+    }));
+
+    let mut calls: Vec<PlanAggCall> = vec![];
+    // For each member, the column of the aggregation of each of its output columns, and the
+    // call that counts its rows if it requires more than the others.
+    let mut maps: Vec<Vec<usize>> = vec![];
+    let mut counts: Vec<Option<usize>> = vec![];
+    for (member, conjuncts) in members.iter().zip_eq_fast(&own) {
+        let filter: Vec<ExprImpl> = conjuncts.iter().map(&on_read).collect();
+        // A column of the input of the member's aggregation, as a column of the new input.
+        let column_of = |column: usize, exprs: &mut Vec<ExprImpl>| -> usize {
+            let expr = on_read(&member.input.exprs[column]);
+            match expr.as_input_ref() {
+                Some(input_ref) => input_ref.index(),
+                None => position_of(expr, exprs),
+            }
+        };
+        counts.push((!filter.is_empty()).then(|| {
+            let count = PlanAggCall::count_star().with_condition(Condition {
+                conjunctions: filter.clone(),
+            });
+            position_of(count, &mut calls)
+        }));
+        let mut map: Vec<usize> = (0..group_len).collect();
+        for call in &member.calls {
+            let mut call = call.clone();
+            for input_ref in &mut call.inputs {
+                let column = column_of(input_ref.index(), &mut exprs);
+                *input_ref = InputRef::new(column, input_ref.return_type());
+            }
+            for order in &mut call.order_by {
+                order.column_index = column_of(order.column_index, &mut exprs);
+            }
+            let mut conjunctions: Vec<ExprImpl> = call
+                .filter
+                .conjunctions
+                .iter()
+                .map(|conjunct| {
+                    map_input_refs(conjunct, |r| on_read(&member.input.exprs[r.index()]))
+                })
+                .collect();
+            conjunctions.extend(filter.iter().cloned());
+            call.filter = Condition { conjunctions };
+            map.push(group_len + position_of(call, &mut calls));
+        }
+        maps.push(map);
+    }
+    let core: PlanRef = Agg::new(
+        calls,
+        (0..group_len).collect::<IndexSet>(),
+        LogicalProject::create(input, exprs),
+    )
+    .with_enable_two_phase(members[0].enable_two_phase)
+    .into();
+
+    // Each member over the merged aggregation, read as it is, like a shared sub-plan.
+    members
+        .iter()
+        .zip_eq_fast(maps)
+        .zip_eq_fast(counts)
+        .map(|((member, map), count)| {
+            let on_core = |expr: &ExprImpl| {
+                map_input_refs(expr, |r| {
+                    InputRef::new(map[r.index()], r.return_type()).into()
+                })
+            };
+            let mut predicate: Vec<ExprImpl> = vec![];
+            if let Some(call) = count {
+                let count: ExprImpl = InputRef::new(group_len + call, DataType::Int64).into();
+                predicate.push(
+                    FunctionCall::new_unchecked(
+                        ExprType::GreaterThan,
+                        vec![count, ExprImpl::literal_bigint(0)],
+                        DataType::Boolean,
+                    )
+                    .into(),
+                );
+            }
+            predicate.extend(member.predicate.iter().map(&on_core));
+            Branch {
+                base: Base::Share(core.id()),
+                plan: core.clone(),
+                predicate,
+                exprs: member.exprs.iter().map(&on_core).collect(),
+            }
+        })
+        .collect()
 }
