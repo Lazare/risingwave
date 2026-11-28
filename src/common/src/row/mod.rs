@@ -23,6 +23,7 @@ use itertools::Itertools;
 use self::empty::EMPTY;
 use crate::hash::HashCode;
 use crate::types::{DatumRef, ToDatumRef, ToOwnedDatum, ToText, hash_datum};
+use crate::util::iter_util::ZipEqDebug;
 use crate::util::row_serde::OrderedRowSerde;
 use crate::util::value_encoding;
 
@@ -485,7 +486,7 @@ pub fn identical(this: impl Row, other: impl Row) -> bool {
     this.len() == other.len()
         && this
             .iter()
-            .zip(other.iter())
+            .zip_eq_debug(other.iter())
             .all(|(a, b)| datum_identical(a, b))
 }
 
