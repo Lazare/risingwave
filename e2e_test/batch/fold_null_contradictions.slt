@@ -105,6 +105,12 @@ statement ok
 create table fnc_anti_join_on_on (id int);
 
 statement ok
+create table fnc_other_coalesce_order_off (id int);
+
+statement ok
+create table fnc_other_coalesce_order_on (id int);
+
+statement ok
 create table fnc_kept_coalesce_constant_off (id int);
 
 statement ok
@@ -425,6 +431,24 @@ statement ok
 set batch_fold_null_contradictions = false;
 
 statement ok
+delete from fnc_other_coalesce_order_off;
+
+statement ok
+delete from fnc_other_coalesce_order_on;
+
+statement ok
+insert into fnc_other_coalesce_order_off select id from fnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x';
+
+statement ok
+set batch_fold_null_contradictions = true;
+
+statement ok
+insert into fnc_other_coalesce_order_on select id from fnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x';
+
+statement ok
+set batch_fold_null_contradictions = false;
+
+statement ok
 delete from fnc_kept_coalesce_constant_off;
 
 statement ok
@@ -575,13 +599,13 @@ statement ok
 delete from fnc_kept_other_expression_on;
 
 statement ok
-insert into fnc_kept_other_expression_off select id from fnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x';
+insert into fnc_kept_other_expression_off select id from fnc_t where coalesce(a, b) is null and coalesce(a, c::varchar) ~ '^x';
 
 statement ok
 set batch_fold_null_contradictions = true;
 
 statement ok
-insert into fnc_kept_other_expression_on select id from fnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x';
+insert into fnc_kept_other_expression_on select id from fnc_t where coalesce(a, b) is null and coalesce(a, c::varchar) ~ '^x';
 
 statement ok
 set batch_fold_null_contradictions = false;
@@ -733,6 +757,14 @@ select
   (select count(*) from (select id, count(*) as fnc_rows from fnc_anti_join_on_on group by id except select id, count(*) as fnc_rows from fnc_anti_join_on_off group by id) x),
   (select count(*) from (select id, count(*) as fnc_rows from fnc_anti_join_on_off group by id except select id, count(*) as fnc_rows from fnc_anti_join_on_on group by id) y),
   (select count(*) from fnc_anti_join_on_on) - (select count(*) from fnc_anti_join_on_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, count(*) as fnc_rows from fnc_other_coalesce_order_on group by id except select id, count(*) as fnc_rows from fnc_other_coalesce_order_off group by id) x),
+  (select count(*) from (select id, count(*) as fnc_rows from fnc_other_coalesce_order_off group by id except select id, count(*) as fnc_rows from fnc_other_coalesce_order_on group by id) y),
+  (select count(*) from fnc_other_coalesce_order_on) - (select count(*) from fnc_other_coalesce_order_off);
 ----
 0 0 0
 
@@ -1090,6 +1122,24 @@ statement ok
 set batch_fold_null_contradictions = false;
 
 statement ok
+delete from fnc_other_coalesce_order_off;
+
+statement ok
+delete from fnc_other_coalesce_order_on;
+
+statement ok
+insert into fnc_other_coalesce_order_off select id from fnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x';
+
+statement ok
+set batch_fold_null_contradictions = true;
+
+statement ok
+insert into fnc_other_coalesce_order_on select id from fnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x';
+
+statement ok
+set batch_fold_null_contradictions = false;
+
+statement ok
 delete from fnc_kept_coalesce_constant_off;
 
 statement ok
@@ -1240,13 +1290,13 @@ statement ok
 delete from fnc_kept_other_expression_on;
 
 statement ok
-insert into fnc_kept_other_expression_off select id from fnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x';
+insert into fnc_kept_other_expression_off select id from fnc_t where coalesce(a, b) is null and coalesce(a, c::varchar) ~ '^x';
 
 statement ok
 set batch_fold_null_contradictions = true;
 
 statement ok
-insert into fnc_kept_other_expression_on select id from fnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x';
+insert into fnc_kept_other_expression_on select id from fnc_t where coalesce(a, b) is null and coalesce(a, c::varchar) ~ '^x';
 
 statement ok
 set batch_fold_null_contradictions = false;
@@ -1398,6 +1448,14 @@ select
   (select count(*) from (select id, count(*) as fnc_rows from fnc_anti_join_on_on group by id except select id, count(*) as fnc_rows from fnc_anti_join_on_off group by id) x),
   (select count(*) from (select id, count(*) as fnc_rows from fnc_anti_join_on_off group by id except select id, count(*) as fnc_rows from fnc_anti_join_on_on group by id) y),
   (select count(*) from fnc_anti_join_on_on) - (select count(*) from fnc_anti_join_on_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, count(*) as fnc_rows from fnc_other_coalesce_order_on group by id except select id, count(*) as fnc_rows from fnc_other_coalesce_order_off group by id) x),
+  (select count(*) from (select id, count(*) as fnc_rows from fnc_other_coalesce_order_off group by id except select id, count(*) as fnc_rows from fnc_other_coalesce_order_on group by id) y),
+  (select count(*) from fnc_other_coalesce_order_on) - (select count(*) from fnc_other_coalesce_order_off);
 ----
 0 0 0
 
@@ -1770,6 +1828,24 @@ statement ok
 set batch_fold_null_contradictions = false;
 
 statement ok
+delete from fnc_other_coalesce_order_off;
+
+statement ok
+delete from fnc_other_coalesce_order_on;
+
+statement ok
+insert into fnc_other_coalesce_order_off select id from fnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x';
+
+statement ok
+set batch_fold_null_contradictions = true;
+
+statement ok
+insert into fnc_other_coalesce_order_on select id from fnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x';
+
+statement ok
+set batch_fold_null_contradictions = false;
+
+statement ok
 delete from fnc_kept_coalesce_constant_off;
 
 statement ok
@@ -1920,13 +1996,13 @@ statement ok
 delete from fnc_kept_other_expression_on;
 
 statement ok
-insert into fnc_kept_other_expression_off select id from fnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x';
+insert into fnc_kept_other_expression_off select id from fnc_t where coalesce(a, b) is null and coalesce(a, c::varchar) ~ '^x';
 
 statement ok
 set batch_fold_null_contradictions = true;
 
 statement ok
-insert into fnc_kept_other_expression_on select id from fnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x';
+insert into fnc_kept_other_expression_on select id from fnc_t where coalesce(a, b) is null and coalesce(a, c::varchar) ~ '^x';
 
 statement ok
 set batch_fold_null_contradictions = false;
@@ -2078,6 +2154,14 @@ select
   (select count(*) from (select id, count(*) as fnc_rows from fnc_anti_join_on_on group by id except select id, count(*) as fnc_rows from fnc_anti_join_on_off group by id) x),
   (select count(*) from (select id, count(*) as fnc_rows from fnc_anti_join_on_off group by id except select id, count(*) as fnc_rows from fnc_anti_join_on_on group by id) y),
   (select count(*) from fnc_anti_join_on_on) - (select count(*) from fnc_anti_join_on_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, count(*) as fnc_rows from fnc_other_coalesce_order_on group by id except select id, count(*) as fnc_rows from fnc_other_coalesce_order_off group by id) x),
+  (select count(*) from (select id, count(*) as fnc_rows from fnc_other_coalesce_order_off group by id except select id, count(*) as fnc_rows from fnc_other_coalesce_order_on group by id) y),
+  (select count(*) from fnc_other_coalesce_order_on) - (select count(*) from fnc_other_coalesce_order_off);
 ----
 0 0 0
 
@@ -2438,6 +2522,24 @@ statement ok
 set batch_fold_null_contradictions = false;
 
 statement ok
+delete from fnc_other_coalesce_order_off;
+
+statement ok
+delete from fnc_other_coalesce_order_on;
+
+statement ok
+insert into fnc_other_coalesce_order_off select id from fnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x';
+
+statement ok
+set batch_fold_null_contradictions = true;
+
+statement ok
+insert into fnc_other_coalesce_order_on select id from fnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x';
+
+statement ok
+set batch_fold_null_contradictions = false;
+
+statement ok
 delete from fnc_kept_coalesce_constant_off;
 
 statement ok
@@ -2588,13 +2690,13 @@ statement ok
 delete from fnc_kept_other_expression_on;
 
 statement ok
-insert into fnc_kept_other_expression_off select id from fnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x';
+insert into fnc_kept_other_expression_off select id from fnc_t where coalesce(a, b) is null and coalesce(a, c::varchar) ~ '^x';
 
 statement ok
 set batch_fold_null_contradictions = true;
 
 statement ok
-insert into fnc_kept_other_expression_on select id from fnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x';
+insert into fnc_kept_other_expression_on select id from fnc_t where coalesce(a, b) is null and coalesce(a, c::varchar) ~ '^x';
 
 statement ok
 set batch_fold_null_contradictions = false;
@@ -2746,6 +2848,14 @@ select
   (select count(*) from (select id, count(*) as fnc_rows from fnc_anti_join_on_on group by id except select id, count(*) as fnc_rows from fnc_anti_join_on_off group by id) x),
   (select count(*) from (select id, count(*) as fnc_rows from fnc_anti_join_on_off group by id except select id, count(*) as fnc_rows from fnc_anti_join_on_on group by id) y),
   (select count(*) from fnc_anti_join_on_on) - (select count(*) from fnc_anti_join_on_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, count(*) as fnc_rows from fnc_other_coalesce_order_on group by id except select id, count(*) as fnc_rows from fnc_other_coalesce_order_off group by id) x),
+  (select count(*) from (select id, count(*) as fnc_rows from fnc_other_coalesce_order_off group by id except select id, count(*) as fnc_rows from fnc_other_coalesce_order_on group by id) y),
+  (select count(*) from fnc_other_coalesce_order_on) - (select count(*) from fnc_other_coalesce_order_off);
 ----
 0 0 0
 
@@ -3097,6 +3207,24 @@ statement ok
 set batch_fold_null_contradictions = false;
 
 statement ok
+delete from fnc_other_coalesce_order_off;
+
+statement ok
+delete from fnc_other_coalesce_order_on;
+
+statement ok
+insert into fnc_other_coalesce_order_off select id from fnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x';
+
+statement ok
+set batch_fold_null_contradictions = true;
+
+statement ok
+insert into fnc_other_coalesce_order_on select id from fnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x';
+
+statement ok
+set batch_fold_null_contradictions = false;
+
+statement ok
 delete from fnc_kept_coalesce_constant_off;
 
 statement ok
@@ -3247,13 +3375,13 @@ statement ok
 delete from fnc_kept_other_expression_on;
 
 statement ok
-insert into fnc_kept_other_expression_off select id from fnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x';
+insert into fnc_kept_other_expression_off select id from fnc_t where coalesce(a, b) is null and coalesce(a, c::varchar) ~ '^x';
 
 statement ok
 set batch_fold_null_contradictions = true;
 
 statement ok
-insert into fnc_kept_other_expression_on select id from fnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x';
+insert into fnc_kept_other_expression_on select id from fnc_t where coalesce(a, b) is null and coalesce(a, c::varchar) ~ '^x';
 
 statement ok
 set batch_fold_null_contradictions = false;
@@ -3405,6 +3533,14 @@ select
   (select count(*) from (select id, count(*) as fnc_rows from fnc_anti_join_on_on group by id except select id, count(*) as fnc_rows from fnc_anti_join_on_off group by id) x),
   (select count(*) from (select id, count(*) as fnc_rows from fnc_anti_join_on_off group by id except select id, count(*) as fnc_rows from fnc_anti_join_on_on group by id) y),
   (select count(*) from fnc_anti_join_on_on) - (select count(*) from fnc_anti_join_on_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, count(*) as fnc_rows from fnc_other_coalesce_order_on group by id except select id, count(*) as fnc_rows from fnc_other_coalesce_order_off group by id) x),
+  (select count(*) from (select id, count(*) as fnc_rows from fnc_other_coalesce_order_off group by id except select id, count(*) as fnc_rows from fnc_other_coalesce_order_on group by id) y),
+  (select count(*) from fnc_other_coalesce_order_on) - (select count(*) from fnc_other_coalesce_order_off);
 ----
 0 0 0
 
@@ -3754,6 +3890,24 @@ statement ok
 set batch_fold_null_contradictions = false;
 
 statement ok
+delete from fnc_other_coalesce_order_off;
+
+statement ok
+delete from fnc_other_coalesce_order_on;
+
+statement ok
+insert into fnc_other_coalesce_order_off select id from fnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x';
+
+statement ok
+set batch_fold_null_contradictions = true;
+
+statement ok
+insert into fnc_other_coalesce_order_on select id from fnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x';
+
+statement ok
+set batch_fold_null_contradictions = false;
+
+statement ok
 delete from fnc_kept_coalesce_constant_off;
 
 statement ok
@@ -3904,13 +4058,13 @@ statement ok
 delete from fnc_kept_other_expression_on;
 
 statement ok
-insert into fnc_kept_other_expression_off select id from fnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x';
+insert into fnc_kept_other_expression_off select id from fnc_t where coalesce(a, b) is null and coalesce(a, c::varchar) ~ '^x';
 
 statement ok
 set batch_fold_null_contradictions = true;
 
 statement ok
-insert into fnc_kept_other_expression_on select id from fnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x';
+insert into fnc_kept_other_expression_on select id from fnc_t where coalesce(a, b) is null and coalesce(a, c::varchar) ~ '^x';
 
 statement ok
 set batch_fold_null_contradictions = false;
@@ -4062,6 +4216,14 @@ select
   (select count(*) from (select id, count(*) as fnc_rows from fnc_anti_join_on_on group by id except select id, count(*) as fnc_rows from fnc_anti_join_on_off group by id) x),
   (select count(*) from (select id, count(*) as fnc_rows from fnc_anti_join_on_off group by id except select id, count(*) as fnc_rows from fnc_anti_join_on_on group by id) y),
   (select count(*) from fnc_anti_join_on_on) - (select count(*) from fnc_anti_join_on_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, count(*) as fnc_rows from fnc_other_coalesce_order_on group by id except select id, count(*) as fnc_rows from fnc_other_coalesce_order_off group by id) x),
+  (select count(*) from (select id, count(*) as fnc_rows from fnc_other_coalesce_order_off group by id except select id, count(*) as fnc_rows from fnc_other_coalesce_order_on group by id) y),
+  (select count(*) from fnc_other_coalesce_order_on) - (select count(*) from fnc_other_coalesce_order_off);
 ----
 0 0 0
 
@@ -4220,6 +4382,12 @@ drop table fnc_kept_coalesce_constant_on;
 
 statement ok
 drop table fnc_kept_coalesce_constant_off;
+
+statement ok
+drop table fnc_other_coalesce_order_on;
+
+statement ok
+drop table fnc_other_coalesce_order_off;
 
 statement ok
 drop table fnc_anti_join_on_on;

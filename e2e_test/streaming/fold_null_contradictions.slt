@@ -71,6 +71,9 @@ statement ok
 create materialized view sfnc_agg_over_union_off as select c, count(*) as n from (select c from sfnc_t where d > 0 union all select c from sfnc_t where c is null and c + d > 1) u group by c;
 
 statement ok
+create materialized view sfnc_other_coalesce_order_off as select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x';
+
+statement ok
 create materialized view sfnc_kept_coalesce_constant_off as select id from sfnc_t where a is null and coalesce(a, 'z') = 'z';
 
 statement ok
@@ -83,7 +86,7 @@ statement ok
 create materialized view sfnc_kept_inside_or_off as select id from sfnc_t where (coalesce(a, b) is null and coalesce(a, b) ~ '^x') or d = 1;
 
 statement ok
-create materialized view sfnc_kept_other_expression_off as select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x';
+create materialized view sfnc_kept_other_expression_off as select id from sfnc_t where coalesce(a, b) is null and coalesce(a, c::varchar) ~ '^x';
 
 statement ok
 create materialized view sfnc_kept_padded_side_off as select t.id, r.id as rid from sfnc_t t left join sfnc_r r on t.id = r.id where r.k is null and coalesce(r.k, t.a) = 'x';
@@ -128,6 +131,9 @@ statement ok
 create materialized view sfnc_agg_over_union_on as select c, count(*) as n from (select c from sfnc_t where d > 0 union all select c from sfnc_t where c is null and c + d > 1) u group by c;
 
 statement ok
+create materialized view sfnc_other_coalesce_order_on as select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x';
+
+statement ok
 create materialized view sfnc_kept_coalesce_constant_on as select id from sfnc_t where a is null and coalesce(a, 'z') = 'z';
 
 statement ok
@@ -140,7 +146,7 @@ statement ok
 create materialized view sfnc_kept_inside_or_on as select id from sfnc_t where (coalesce(a, b) is null and coalesce(a, b) ~ '^x') or d = 1;
 
 statement ok
-create materialized view sfnc_kept_other_expression_on as select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x';
+create materialized view sfnc_kept_other_expression_on as select id from sfnc_t where coalesce(a, b) is null and coalesce(a, c::varchar) ~ '^x';
 
 statement ok
 create materialized view sfnc_kept_padded_side_on as select t.id, r.id as rid from sfnc_t t left join sfnc_r r on t.id = r.id where r.k is null and coalesce(r.k, t.a) = 'x';
@@ -344,6 +350,22 @@ select
 
 query III
 select
+  (select count(*) from (select id, count(*) as sfnc_rows from sfnc_other_coalesce_order_on group by id except select id, count(*) as sfnc_rows from sfnc_other_coalesce_order_off group by id) x),
+  (select count(*) from (select id, count(*) as sfnc_rows from sfnc_other_coalesce_order_off group by id except select id, count(*) as sfnc_rows from sfnc_other_coalesce_order_on group by id) y),
+  (select count(*) from sfnc_other_coalesce_order_on) - (select count(*) from sfnc_other_coalesce_order_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, count(*) as sfnc_rows from sfnc_other_coalesce_order_on group by id except select id, count(*) as sfnc_rows from (select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x') q group by id) x),
+  (select count(*) from (select id, count(*) as sfnc_rows from (select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x') q group by id except select id, count(*) as sfnc_rows from sfnc_other_coalesce_order_on group by id) y),
+  (select count(*) from sfnc_other_coalesce_order_on) - (select count(*) from (select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x') q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, count(*) as sfnc_rows from sfnc_kept_coalesce_constant_on group by id except select id, count(*) as sfnc_rows from sfnc_kept_coalesce_constant_off group by id) x),
   (select count(*) from (select id, count(*) as sfnc_rows from sfnc_kept_coalesce_constant_off group by id except select id, count(*) as sfnc_rows from sfnc_kept_coalesce_constant_on group by id) y),
   (select count(*) from sfnc_kept_coalesce_constant_on) - (select count(*) from sfnc_kept_coalesce_constant_off);
@@ -416,9 +438,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, count(*) as sfnc_rows from sfnc_kept_other_expression_on group by id except select id, count(*) as sfnc_rows from (select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x') q group by id) x),
-  (select count(*) from (select id, count(*) as sfnc_rows from (select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x') q group by id except select id, count(*) as sfnc_rows from sfnc_kept_other_expression_on group by id) y),
-  (select count(*) from sfnc_kept_other_expression_on) - (select count(*) from (select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x') q);
+  (select count(*) from (select id, count(*) as sfnc_rows from sfnc_kept_other_expression_on group by id except select id, count(*) as sfnc_rows from (select id from sfnc_t where coalesce(a, b) is null and coalesce(a, c::varchar) ~ '^x') q group by id) x),
+  (select count(*) from (select id, count(*) as sfnc_rows from (select id from sfnc_t where coalesce(a, b) is null and coalesce(a, c::varchar) ~ '^x') q group by id except select id, count(*) as sfnc_rows from sfnc_kept_other_expression_on group by id) y),
+  (select count(*) from sfnc_kept_other_expression_on) - (select count(*) from (select id from sfnc_t where coalesce(a, b) is null and coalesce(a, c::varchar) ~ '^x') q);
 ----
 0 0 0
 
@@ -667,6 +689,22 @@ select
 
 query III
 select
+  (select count(*) from (select id, count(*) as sfnc_rows from sfnc_other_coalesce_order_on group by id except select id, count(*) as sfnc_rows from sfnc_other_coalesce_order_off group by id) x),
+  (select count(*) from (select id, count(*) as sfnc_rows from sfnc_other_coalesce_order_off group by id except select id, count(*) as sfnc_rows from sfnc_other_coalesce_order_on group by id) y),
+  (select count(*) from sfnc_other_coalesce_order_on) - (select count(*) from sfnc_other_coalesce_order_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, count(*) as sfnc_rows from sfnc_other_coalesce_order_on group by id except select id, count(*) as sfnc_rows from (select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x') q group by id) x),
+  (select count(*) from (select id, count(*) as sfnc_rows from (select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x') q group by id except select id, count(*) as sfnc_rows from sfnc_other_coalesce_order_on group by id) y),
+  (select count(*) from sfnc_other_coalesce_order_on) - (select count(*) from (select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x') q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, count(*) as sfnc_rows from sfnc_kept_coalesce_constant_on group by id except select id, count(*) as sfnc_rows from sfnc_kept_coalesce_constant_off group by id) x),
   (select count(*) from (select id, count(*) as sfnc_rows from sfnc_kept_coalesce_constant_off group by id except select id, count(*) as sfnc_rows from sfnc_kept_coalesce_constant_on group by id) y),
   (select count(*) from sfnc_kept_coalesce_constant_on) - (select count(*) from sfnc_kept_coalesce_constant_off);
@@ -739,9 +777,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, count(*) as sfnc_rows from sfnc_kept_other_expression_on group by id except select id, count(*) as sfnc_rows from (select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x') q group by id) x),
-  (select count(*) from (select id, count(*) as sfnc_rows from (select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x') q group by id except select id, count(*) as sfnc_rows from sfnc_kept_other_expression_on group by id) y),
-  (select count(*) from sfnc_kept_other_expression_on) - (select count(*) from (select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x') q);
+  (select count(*) from (select id, count(*) as sfnc_rows from sfnc_kept_other_expression_on group by id except select id, count(*) as sfnc_rows from (select id from sfnc_t where coalesce(a, b) is null and coalesce(a, c::varchar) ~ '^x') q group by id) x),
+  (select count(*) from (select id, count(*) as sfnc_rows from (select id from sfnc_t where coalesce(a, b) is null and coalesce(a, c::varchar) ~ '^x') q group by id except select id, count(*) as sfnc_rows from sfnc_kept_other_expression_on group by id) y),
+  (select count(*) from sfnc_kept_other_expression_on) - (select count(*) from (select id from sfnc_t where coalesce(a, b) is null and coalesce(a, c::varchar) ~ '^x') q);
 ----
 0 0 0
 
@@ -974,6 +1012,22 @@ select
 
 query III
 select
+  (select count(*) from (select id, count(*) as sfnc_rows from sfnc_other_coalesce_order_on group by id except select id, count(*) as sfnc_rows from sfnc_other_coalesce_order_off group by id) x),
+  (select count(*) from (select id, count(*) as sfnc_rows from sfnc_other_coalesce_order_off group by id except select id, count(*) as sfnc_rows from sfnc_other_coalesce_order_on group by id) y),
+  (select count(*) from sfnc_other_coalesce_order_on) - (select count(*) from sfnc_other_coalesce_order_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, count(*) as sfnc_rows from sfnc_other_coalesce_order_on group by id except select id, count(*) as sfnc_rows from (select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x') q group by id) x),
+  (select count(*) from (select id, count(*) as sfnc_rows from (select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x') q group by id except select id, count(*) as sfnc_rows from sfnc_other_coalesce_order_on group by id) y),
+  (select count(*) from sfnc_other_coalesce_order_on) - (select count(*) from (select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x') q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, count(*) as sfnc_rows from sfnc_kept_coalesce_constant_on group by id except select id, count(*) as sfnc_rows from sfnc_kept_coalesce_constant_off group by id) x),
   (select count(*) from (select id, count(*) as sfnc_rows from sfnc_kept_coalesce_constant_off group by id except select id, count(*) as sfnc_rows from sfnc_kept_coalesce_constant_on group by id) y),
   (select count(*) from sfnc_kept_coalesce_constant_on) - (select count(*) from sfnc_kept_coalesce_constant_off);
@@ -1046,9 +1100,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, count(*) as sfnc_rows from sfnc_kept_other_expression_on group by id except select id, count(*) as sfnc_rows from (select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x') q group by id) x),
-  (select count(*) from (select id, count(*) as sfnc_rows from (select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x') q group by id except select id, count(*) as sfnc_rows from sfnc_kept_other_expression_on group by id) y),
-  (select count(*) from sfnc_kept_other_expression_on) - (select count(*) from (select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x') q);
+  (select count(*) from (select id, count(*) as sfnc_rows from sfnc_kept_other_expression_on group by id except select id, count(*) as sfnc_rows from (select id from sfnc_t where coalesce(a, b) is null and coalesce(a, c::varchar) ~ '^x') q group by id) x),
+  (select count(*) from (select id, count(*) as sfnc_rows from (select id from sfnc_t where coalesce(a, b) is null and coalesce(a, c::varchar) ~ '^x') q group by id except select id, count(*) as sfnc_rows from sfnc_kept_other_expression_on group by id) y),
+  (select count(*) from sfnc_kept_other_expression_on) - (select count(*) from (select id from sfnc_t where coalesce(a, b) is null and coalesce(a, c::varchar) ~ '^x') q);
 ----
 0 0 0
 
@@ -1269,6 +1323,22 @@ select
 
 query III
 select
+  (select count(*) from (select id, count(*) as sfnc_rows from sfnc_other_coalesce_order_on group by id except select id, count(*) as sfnc_rows from sfnc_other_coalesce_order_off group by id) x),
+  (select count(*) from (select id, count(*) as sfnc_rows from sfnc_other_coalesce_order_off group by id except select id, count(*) as sfnc_rows from sfnc_other_coalesce_order_on group by id) y),
+  (select count(*) from sfnc_other_coalesce_order_on) - (select count(*) from sfnc_other_coalesce_order_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, count(*) as sfnc_rows from sfnc_other_coalesce_order_on group by id except select id, count(*) as sfnc_rows from (select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x') q group by id) x),
+  (select count(*) from (select id, count(*) as sfnc_rows from (select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x') q group by id except select id, count(*) as sfnc_rows from sfnc_other_coalesce_order_on group by id) y),
+  (select count(*) from sfnc_other_coalesce_order_on) - (select count(*) from (select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x') q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, count(*) as sfnc_rows from sfnc_kept_coalesce_constant_on group by id except select id, count(*) as sfnc_rows from sfnc_kept_coalesce_constant_off group by id) x),
   (select count(*) from (select id, count(*) as sfnc_rows from sfnc_kept_coalesce_constant_off group by id except select id, count(*) as sfnc_rows from sfnc_kept_coalesce_constant_on group by id) y),
   (select count(*) from sfnc_kept_coalesce_constant_on) - (select count(*) from sfnc_kept_coalesce_constant_off);
@@ -1341,9 +1411,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, count(*) as sfnc_rows from sfnc_kept_other_expression_on group by id except select id, count(*) as sfnc_rows from (select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x') q group by id) x),
-  (select count(*) from (select id, count(*) as sfnc_rows from (select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x') q group by id except select id, count(*) as sfnc_rows from sfnc_kept_other_expression_on group by id) y),
-  (select count(*) from sfnc_kept_other_expression_on) - (select count(*) from (select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x') q);
+  (select count(*) from (select id, count(*) as sfnc_rows from sfnc_kept_other_expression_on group by id except select id, count(*) as sfnc_rows from (select id from sfnc_t where coalesce(a, b) is null and coalesce(a, c::varchar) ~ '^x') q group by id) x),
+  (select count(*) from (select id, count(*) as sfnc_rows from (select id from sfnc_t where coalesce(a, b) is null and coalesce(a, c::varchar) ~ '^x') q group by id except select id, count(*) as sfnc_rows from sfnc_kept_other_expression_on group by id) y),
+  (select count(*) from sfnc_kept_other_expression_on) - (select count(*) from (select id from sfnc_t where coalesce(a, b) is null and coalesce(a, c::varchar) ~ '^x') q);
 ----
 0 0 0
 
@@ -1565,6 +1635,22 @@ select
 
 query III
 select
+  (select count(*) from (select id, count(*) as sfnc_rows from sfnc_other_coalesce_order_on group by id except select id, count(*) as sfnc_rows from sfnc_other_coalesce_order_off group by id) x),
+  (select count(*) from (select id, count(*) as sfnc_rows from sfnc_other_coalesce_order_off group by id except select id, count(*) as sfnc_rows from sfnc_other_coalesce_order_on group by id) y),
+  (select count(*) from sfnc_other_coalesce_order_on) - (select count(*) from sfnc_other_coalesce_order_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, count(*) as sfnc_rows from sfnc_other_coalesce_order_on group by id except select id, count(*) as sfnc_rows from (select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x') q group by id) x),
+  (select count(*) from (select id, count(*) as sfnc_rows from (select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x') q group by id except select id, count(*) as sfnc_rows from sfnc_other_coalesce_order_on group by id) y),
+  (select count(*) from sfnc_other_coalesce_order_on) - (select count(*) from (select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x') q);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, count(*) as sfnc_rows from sfnc_kept_coalesce_constant_on group by id except select id, count(*) as sfnc_rows from sfnc_kept_coalesce_constant_off group by id) x),
   (select count(*) from (select id, count(*) as sfnc_rows from sfnc_kept_coalesce_constant_off group by id except select id, count(*) as sfnc_rows from sfnc_kept_coalesce_constant_on group by id) y),
   (select count(*) from sfnc_kept_coalesce_constant_on) - (select count(*) from sfnc_kept_coalesce_constant_off);
@@ -1637,9 +1723,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, count(*) as sfnc_rows from sfnc_kept_other_expression_on group by id except select id, count(*) as sfnc_rows from (select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x') q group by id) x),
-  (select count(*) from (select id, count(*) as sfnc_rows from (select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x') q group by id except select id, count(*) as sfnc_rows from sfnc_kept_other_expression_on group by id) y),
-  (select count(*) from sfnc_kept_other_expression_on) - (select count(*) from (select id from sfnc_t where coalesce(a, b) is null and coalesce(b, a) ~ '^x') q);
+  (select count(*) from (select id, count(*) as sfnc_rows from sfnc_kept_other_expression_on group by id except select id, count(*) as sfnc_rows from (select id from sfnc_t where coalesce(a, b) is null and coalesce(a, c::varchar) ~ '^x') q group by id) x),
+  (select count(*) from (select id, count(*) as sfnc_rows from (select id from sfnc_t where coalesce(a, b) is null and coalesce(a, c::varchar) ~ '^x') q group by id except select id, count(*) as sfnc_rows from sfnc_kept_other_expression_on group by id) y),
+  (select count(*) from sfnc_kept_other_expression_on) - (select count(*) from (select id from sfnc_t where coalesce(a, b) is null and coalesce(a, c::varchar) ~ '^x') q);
 ----
 0 0 0
 
@@ -1712,6 +1798,9 @@ statement ok
 drop materialized view sfnc_kept_coalesce_constant_on;
 
 statement ok
+drop materialized view sfnc_other_coalesce_order_on;
+
+statement ok
 drop materialized view sfnc_agg_over_union_on;
 
 statement ok
@@ -1764,6 +1853,9 @@ drop materialized view sfnc_kept_greatest_off;
 
 statement ok
 drop materialized view sfnc_kept_coalesce_constant_off;
+
+statement ok
+drop materialized view sfnc_other_coalesce_order_off;
 
 statement ok
 drop materialized view sfnc_agg_over_union_off;

@@ -1446,6 +1446,12 @@ impl LogicalOptimizer {
             }
         }
 
+        // Rules `InListCoalesceSimplifyRule` (`streaming_simplify_in_lists_and_coalesce`) and
+        // `NullContradictionRule` (`streaming_fold_null_contradictions`): after the first predicate
+        // pushdown, the conjuncts on the same expression are in the same filter, scan or join
+        // condition, and the expressions of a join condition are not yet computed below it.
+        plan = Self::simplify_conjunctions_for_stream(plan, explain_trace, &ctx)?;
+
         // Rule `NullSafeEqToEqRule` (`streaming_null_safe_eq_to_eq`): after the predicate pushdown,
         // which puts the filters that prove a column not `NULL` next to the scans, and before join
         // ordering, which then sees plain equi-joins. On demand only: the plan of a streaming job
@@ -1613,33 +1619,9 @@ impl LogicalOptimizer {
         plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
 
         // Rules `InListCoalesceSimplifyRule` (`streaming_simplify_in_lists_and_coalesce`) and
-        // `NullContradictionRule` (`streaming_fold_null_contradictions`): after the final
-        // predicate pushdown, the conjuncts on the same expression are in the same filter, scan
-        // or join condition. On demand only: the plan of a streaming job is frozen when the job
-        // is created.
-        {
-            let (in_lists, contradictions) = {
-                let config = ctx.session_ctx().config();
-                (
-                    config.streaming_simplify_in_lists_and_coalesce(),
-                    config.streaming_fold_null_contradictions(),
-                )
-            };
-            if (in_lists || contradictions) && !ctx.is_stream_prune_baseline() {
-                let applied_before = ctx.total_rule_applied();
-                plan = plan.optimize_by_rules(&Self::simplify_conjunctions_stage(
-                    true,
-                    in_lists,
-                    contradictions,
-                ))?;
-                let applied = ctx.total_rule_applied() - applied_before;
-                ctx.add_stream_prune_rule_applied(applied);
-                if applied > 0 {
-                    // The removed sub-plans may have been the only readers of some columns.
-                    plan = Self::column_pruning(plan, explain_trace, &ctx);
-                }
-            }
-        }
+        // `NullContradictionRule` (`streaming_fold_null_contradictions`), again after the final
+        // predicate pushdown.
+        plan = Self::simplify_conjunctions_for_stream(plan, explain_trace, &ctx)?;
 
         // After the final predicate pushdown, the conjuncts that contradict each other have been
         // merged into the same filter, scan or join. Remove the sub-plans that are proven to be
@@ -2097,6 +2079,39 @@ impl LogicalOptimizer {
             rules,
             ApplyOrder::BottomUp,
         )
+    }
+
+    /// [`Self::simplify_conjunctions_stage`] for a streaming job, on demand
+    /// (`streaming_simplify_in_lists_and_coalesce`, `streaming_fold_null_contradictions`): the plan
+    /// of a streaming job is frozen when the job is created.
+    fn simplify_conjunctions_for_stream(
+        mut plan: LogicalPlanRef,
+        explain_trace: bool,
+        ctx: &OptimizerContextRef,
+    ) -> Result<LogicalPlanRef> {
+        let (in_lists, contradictions) = {
+            let config = ctx.session_ctx().config();
+            (
+                config.streaming_simplify_in_lists_and_coalesce(),
+                config.streaming_fold_null_contradictions(),
+            )
+        };
+        if !(in_lists || contradictions) || ctx.is_stream_prune_baseline() {
+            return Ok(plan);
+        }
+        let applied_before = ctx.total_rule_applied();
+        plan = plan.optimize_by_rules(&Self::simplify_conjunctions_stage(
+            true,
+            in_lists,
+            contradictions,
+        ))?;
+        let applied = ctx.total_rule_applied() - applied_before;
+        ctx.add_stream_prune_rule_applied(applied);
+        if applied > 0 {
+            // The removed sub-plans may have been the only readers of some columns.
+            plan = Self::column_pruning(plan, explain_trace, ctx);
+        }
+        Ok(plan)
     }
 
     /// [`Self::simplify_conjunctions_stage`] for a batch query, on demand

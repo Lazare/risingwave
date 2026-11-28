@@ -46,6 +46,8 @@ CASES = [
     ('agg_over_union', 'c, n',
      f"select c, count(*) as n from (select c from {T} where d > 0 union all "
      f"select c from {T} where c is null and c + d > 1) u group by c"),
+    ('other_coalesce_order', 'id',
+     f"select id from {T} where coalesce(a, b) is null and coalesce(b, a) ~ '^x'"),
     # Left as they are by the rule.
     ('kept_coalesce_constant', 'id',
      f"select id from {T} where a is null and coalesce(a, 'z') = 'z'"),
@@ -56,7 +58,7 @@ CASES = [
     ('kept_inside_or', 'id',
      f"select id from {T} where (coalesce(a, b) is null and coalesce(a, b) ~ '^x') or d = 1"),
     ('kept_other_expression', 'id',
-     f"select id from {T} where coalesce(a, b) is null and coalesce(b, a) ~ '^x'"),
+     f"select id from {T} where coalesce(a, b) is null and coalesce(a, c::varchar) ~ '^x'"),
     ('kept_padded_side', 'id, rid',
      f"select t.id, r.id as rid from {T} t left join {R} r on t.id = r.id "
      f"where r.k is null and coalesce(r.k, t.a) = 'x'"),

@@ -49,6 +49,8 @@ CASES = [
     ('anti_join_on', 'id int',
      f"select t.id from {T} t where not exists "
      f"(select 1 from {R} r where coalesce(t.a, t.b) is null and coalesce(t.a, t.b) = r.k)"),
+    ('other_coalesce_order', 'id int',
+     f"select id from {T} where coalesce(a, b) is null and coalesce(b, a) ~ '^x'"),
     # Left as they are by the rule.
     ('kept_coalesce_constant', 'id int',
      f"select id from {T} where a is null and coalesce(a, 'z') = 'z'"),
@@ -67,7 +69,7 @@ CASES = [
     ('kept_is_null_or', 'id int',
      f"select id from {T} where a is null or a ~ '^x'"),
     ('kept_other_expression', 'id int',
-     f"select id from {T} where coalesce(a, b) is null and coalesce(b, a) ~ '^x'"),
+     f"select id from {T} where coalesce(a, b) is null and coalesce(a, c::varchar) ~ '^x'"),
     ('kept_padded_side', 'id int',
      f"select t.id from {T} t left join {R} r on t.id = r.id where r.k is null and coalesce(r.k, t.a) = 'x'"),
     ('kept_padded_null', 'id int',

@@ -2783,14 +2783,17 @@ rewrite holds for every content of the inputs, so for every change of a streamin
 **Not rewritten.** `COALESCE` with a non-`NULL` argument, `GREATEST` / `LEAST` with one
 (`greatest(c, 1)` is not `NULL`), `concat`, `CASE`, `IS DISTINCT FROM`, any function outside the
 allow-list; the contradiction under an `OR` or a `NOT`; a volatile `e` (`random()`), user-defined
-functions, subqueries; two structurally different expressions (`coalesce(a, b)` and
-`coalesce(b, a)`). In streaming, a part of the plan that may carry a watermark, and a filter or a
+functions, subqueries; a conjunct on an expression that may be non-`NULL` while `e` is `NULL`
+(`coalesce(a, b) IS NULL AND coalesce(a, c::varchar) ~ '^x'`; `coalesce(b, a)` is recognized,
+since `a` and `b` are both `NULL`). In streaming, a part of the plan that may carry a watermark, and a filter or a
 scan of the lookup side of a temporal join, are never emptied (as in A).
 
 **Placement.** Batch: after `reduce_batch_on_keys` (before join ordering, so that the joins of a
 removed sub-plan are not ordered) and again right before `BATCH_PRUNE_EMPTY_RELATION`, after the
-final predicate pushdown. Streaming: after the final predicate pushdown, right before
-`STREAM_PRUNE_EMPTY_RELATION`. A column pruning follows when something was removed.
+final predicate pushdown. Streaming: after the first predicate pushdown (before the expressions of
+a join condition are computed in a projection below the join, which hides `e` behind a column),
+and again after the final predicate pushdown, right before `STREAM_PRUNE_EMPTY_RELATION`. A column
+pruning follows when something was removed.
 
 **Effect on the sample workload** (local analysis of the replayed plan of the data test that
 motivated the rule, with the settings of the staging tests): its plan holds both shapes, `IsNull(Coalesce(E)) AND

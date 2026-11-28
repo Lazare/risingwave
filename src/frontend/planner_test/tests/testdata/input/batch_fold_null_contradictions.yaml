@@ -96,6 +96,12 @@
     where q.key is null and q.key ~ '^[0-9]+$';
   expected_outputs:
   - batch_plan
+- name: another coalesce of the same columns - all its arguments are null
+  before: [setup]
+  sql: |
+    select id from t where coalesce(a, b) is null and coalesce(b, a) ~ '^x';
+  expected_outputs:
+  - batch_plan
 - name: left join condition never true - the right side is removed
   before: [setup]
   sql: |
@@ -153,10 +159,10 @@
     select id from t where a is null or a ~ '^x';
   expected_outputs:
   - batch_plan
-- name: kept - a different expression is null
+- name: kept - another expression of a column that may not be null
   before: [setup]
   sql: |
-    select id from t where coalesce(a, b) is null and coalesce(b, a) ~ '^x';
+    select id from t where coalesce(a, b) is null and coalesce(a, c::varchar) ~ '^x';
   expected_outputs:
   - batch_plan
 - name: kept - a volatile expression is evaluated twice
