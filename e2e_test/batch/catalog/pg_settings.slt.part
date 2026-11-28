@@ -26,6 +26,7 @@ user background_ddl
 user batch_cardinality_feedback
 user batch_cardinality_feedback_learning
 user batch_cost_based_join_ordering
+user batch_derive_or_restrictions
 user batch_distributed_union
 user batch_enable_distributed_dml
 user batch_enable_lookup_join
@@ -94,6 +95,7 @@ user statement_timeout
 user streaming_allow_jsonb_in_stream_key
 user streaming_asof_join_use_cache
 user streaming_cache_refill_policy
+user streaming_derive_or_restrictions
 user streaming_enable_bushy_join
 user streaming_enable_delta_join
 user streaming_enable_unaligned_join

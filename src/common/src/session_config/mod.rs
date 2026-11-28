@@ -517,6 +517,19 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_inline_values_join: bool,
 
+    // Rule `OrRestrictionDeriveRule`.
+    /// In the plan of a new streaming job, derive from a condition `(a.x = 1 AND b.y = 2) OR
+    /// (a.x = 3 AND b.y = 4)` of a join a restriction of each side (`a.x = 1 OR a.x = 3`,
+    /// `b.y = 2 OR b.y = 4`), pushed into that side, the original condition being kept: fewer
+    /// rows in the join states. Only from parts that are deterministic and can not fail. Defaults
+    /// to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    streaming_derive_or_restrictions: bool,
+
+    /// The same as `streaming_derive_or_restrictions`, for batch queries. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_derive_or_restrictions: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,

@@ -1,2 +1,4 @@
 valuesbatch batch/inline_values_join 60
 valuesstream streaming/inline_values_join 60
+orderivebatch batch/derive_or_restrictions 60
+orderivestream streaming/derive_or_restrictions 60

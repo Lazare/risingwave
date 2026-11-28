@@ -47,6 +47,7 @@ own rules.
 | BT | Batch: `row_number() <= n` per partition becomes a top-n per group, small `n` only (`batch_over_window_to_topn`) | done (prototype, branch `proto/plan-reduction-batch-pass2`, see "BP and BT" below) |
 | BU | Batch: `UNION ALL` run in parallel tasks instead of one (`batch_distributed_union`) | done (prototype, branch `proto/plan-reduction-batch-union-dist`, see "BU" below) |
 | IV | Join with a small constant `VALUES` becomes a filter (`IN` list) and a `CASE` (`batch_inline_values_join`, `streaming_inline_values_join`; survey rule 8) | done (prototype, branch `proto/plan-reduction-or-values`), see "IV" below |
+| OR | Restrictions of each side derived from an `OR` of a join condition (`batch_derive_or_restrictions`, `streaming_derive_or_restrictions`; survey rule 6) | done (prototype, branch `proto/plan-reduction-or-values`), see "OR" below |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -1473,6 +1474,57 @@ no fragment for the constant rows; the constant side has no watermark, the kept 
   and on, and the batch query, compared as multisets over `NULL` codes, duplicate rows, upserts,
   updates of the key and of the flag, deletes, no match at all and empty tables; the range
   queries, which streaming can only plan with the rule, are compared with batch only).
+
+### OR. Restrictions derived from an `OR` (added on 2026-11-28, survey rule 6)
+
+Sources: PostgreSQL `extract_restriction_or_clauses` (`orclauses.c`), Calcite
+`ExpandDisjunctionForJoinInputsRule`. `Condition` only factors out the conjuncts common to every
+disjunct of an `OR`; an `OR` whose disjuncts each restrict both sides stayed in the join, and each
+side kept all its rows in the join (and its state, in streaming).
+
+```sql
+create table a (id int primary key, k int, x int);
+create table b (id int primary key, k int, y int);
+select a.id, b.y from a join b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 3 and b.y = 4);
+-- OR: Scan(a) gets (a.x = 1 OR a.x = 3), Scan(b) gets (b.y = 2 OR b.y = 4); the join keeps the OR
+```
+
+**Rule** (`OrRestrictionDeriveRule`, variables `batch_derive_or_restrictions` and
+`streaming_derive_or_restrictions`, default false). For each conjunct `d_1 OR ... OR d_n`
+(2 to 16 disjuncts) of the condition of a join that refers to both sides, and for each side `X`
+into which predicate pushdown moves an `ON` conjunct (`can_push_left_from_on`,
+`can_push_right_from_on`: both sides of an inner join, the optional side of an outer join, the
+outer side of a left semi join), let `p_i` be the conjunction of the conjuncts of `d_i` that only
+refer to `X`. When every `p_i` is non-empty, `p_1 OR ... OR p_n` is added to the condition, which
+keeps the `OR`; predicate pushdown then moves it into `X` (and, through the equalities of the join,
+into the other side when it may).
+
+- Exactness: a pair of rows that satisfies the `OR` satisfies some `d_i`, hence each of its
+  conjuncts, hence `p_i`, hence the derived `OR`: adding an implied conjunct changes no result, for
+  any join type. A disjunct without a part on `X` implies nothing on `X` (no derivation). Only
+  where pushdown moves the conjunct into `X` (on the preserved side of an outer join, a conjunct of
+  the `ON` condition does not remove rows, it would stay in the join for nothing).
+- Safety: the parts are made only of column references, literals, comparisons, `IS [NOT] NULL`,
+  `IS [NOT] TRUE/FALSE`, `IS [NOT] DISTINCT FROM`, `IN`, `NOT`, `AND` and `OR`: deterministic and
+  unable to fail, since they are now evaluated on rows that the join would not have compared
+  (`10 / b.z`, `lower(a.s)`, `random()`, `now()` are never derived). Temporal and as-of joins are
+  left untouched.
+- Placement: batch and streaming, after the first predicate pushdown (the `WHERE` conjuncts of
+  inner joins are in the join conditions), before join ordering; predicate pushdown right after.
+  The rule adds a conjunct only if the condition changes (a join reached again through a shared
+  sub-plan is not extended twice).
+- Not done: a `WHERE` filter above an outer join (its preserved side could be restricted too);
+  derivation inside a single scan for index ranges (Calcite `ExpandDisjunctionForTableRule`); an
+  `OR` of equalities is not turned into an `IN` list (scan ranges already merge the arms of an
+  `OR`).
+- Tests: `stream_derive_or_restrictions.yaml`, `batch_derive_or_restrictions.yaml` (inner joins with
+  one or several parts per side, `IS NULL`, `IN`, a disjunct with one side only, no equality, left,
+  right and semi joins, three tables, scan ranges on a primary key; kept: an `OR` on one side, the
+  preserved side of a left join, anti and full joins, parts that may fail, volatile parts, `now()`;
+  off by default), and the differentials `e2e_test/batch/derive_or_restrictions.gen.py` and
+  `e2e_test/streaming/derive_or_restrictions.gen.py` (17 and 16 queries compared with the variable
+  off and on, and with batch, over `NULL` keys and compared columns, duplicates, upserts, updates of
+  the compared columns and of the keys, deletes and empty sides).
 
 ## Not for now: sharing between materialized views
 

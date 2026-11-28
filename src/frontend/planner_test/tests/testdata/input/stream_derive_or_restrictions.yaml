@@ -1,0 +1,125 @@
+# Tests for `streaming_derive_or_restrictions` (`OrRestrictionDeriveRule`): an `OR` of the condition of a join that refers
+# to both sides gives each side the `OR` of its own parts, pushed into that side.
+- id: setup_off
+  sql: |
+    create table a (id int primary key, k int, x int, s varchar, ts timestamptz);
+    create table b (id int primary key, k int, y int, z int);
+  expected_outputs: []
+- id: setup
+  sql: |
+    set streaming_derive_or_restrictions = true;
+    create table a (id int primary key, k int, x int, s varchar, ts timestamptz);
+    create table b (id int primary key, k int, y int, z int);
+    create table c (id int primary key, k int, w int);
+  expected_outputs: []
+
+# The variable is off by default: the `OR` stays in the join only.
+- name: off by default - the or stays in the join
+  before: [setup_off]
+  sql: |
+    select a.id, b.y from a join b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 3 and b.y = 4);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+
+# Rewritten.
+
+- name: inner join - a restriction for each side
+  before: [setup]
+  sql: |
+    select a.id, b.y from a join b on a.k = b.k where (a.x = 1 and b.y = 2) or (a.x = 3 and b.y = 4);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: inner join - several parts per side and is null
+  before: [setup]
+  sql: |
+    select a.id, b.y from a join b on a.k = b.k where (a.x = 1 and a.id > 5 and b.y = 2) or (a.x = 3 and b.y is null);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: inner join - one disjunct without a part of the left side restricts the right side only
+  before: [setup]
+  sql: |
+    select a.id, b.y from a join b on a.k = b.k where (a.x = 1 and b.y = 2) or b.y = 4;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: inner join - three disjuncts, in lists and comparisons
+  before: [setup]
+  sql: |
+    select a.id, b.y from a join b on a.k = b.k where (a.x in (1, 2) and b.y > 10) or (a.x = 3 and b.z <= 0) or (a.s = 'p' and b.y is not distinct from b.z);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: inner join without equality - the restrictions are pushed anyway
+  before: [setup]
+  sql: |
+    select a.id, b.y from a join b on (a.x = 1 and b.y = 2) or (a.x = 3 and b.y = 4);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: left join - only the optional side is restricted
+  before: [setup]
+  sql: |
+    select a.id, b.y from a left join b on a.k = b.k and ((a.x = 1 and b.y = 2) or (a.x = 3 and b.y = 4));
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: right join - only the optional side is restricted
+  before: [setup]
+  sql: |
+    select a.id, b.y from a right join b on a.k = b.k and ((a.x = 1 and b.y = 2) or (a.x = 3 and b.y = 4));
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: semi join - the outer side is restricted
+  before: [setup]
+  sql: |
+    select a.id from a where exists (select 1 from b where b.k = a.k and ((a.x = 1 and b.y = 2) or (a.x = 3 and b.y = 4)));
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: three tables - each join derives its own restrictions
+  before: [setup]
+  sql: |
+    select a.id, b.y, c.w from a join b on a.k = b.k join c on c.k = b.k where ((a.x = 1 and c.w = 2) or (a.x = 3 and c.w = 4)) and ((b.y = 1 and c.w = 2) or (b.y = 5 and c.w = 6));
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+
+# Left as they are.
+
+- name: kept - an or on one side only is pushed down as it is
+  before: [setup]
+  sql: |
+    select a.id, b.y from a join b on a.k = b.k where a.x = 1 or a.x = 3;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - left join, the preserved side is not restricted by its on condition
+  before: [setup]
+  sql: |
+    select a.id, b.y from a left join b on a.k = b.k and ((a.x = 1 and b.y is null) or (a.x = 3 and b.z is null));
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - anti join
+  before: [setup]
+  sql: |
+    select a.id from a where not exists (select 1 from b where b.k = a.k and ((a.x = 1 and b.y = 2) or (a.x = 3 and b.y = 4)));
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - full join
+  before: [setup]
+  sql: |
+    select a.id, b.y from a full join b on a.k = b.k and ((a.x = 1 and b.y = 2) or (a.x = 3 and b.y = 4));
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - functions that may fail are not derived, the other side still is
+  before: [setup]
+  sql: |
+    select a.id, b.y from a join b on a.k = b.k where (lower(a.s) = 'p' and 10 / b.z = 1 and b.y = 2) or (lower(a.s) = 'q' and b.y = 4);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - a volatile part is not derived
+  before: [setup]
+  sql: |
+    select a.id, b.y from a join b on a.k = b.k where (a.x = 1 and random() < 0.5 and b.y = 2) or (a.x > random() and b.y = 4);
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+- name: kept - now() is not derived
+  before: [setup]
+  sql: |
+    select a.id, b.y from a join b on a.k = b.k where (a.ts > now() - interval '1 hour' and b.y = 2) or (a.ts is null and b.y = 4);
+  expected_outputs:
+  - optimized_logical_plan_for_stream

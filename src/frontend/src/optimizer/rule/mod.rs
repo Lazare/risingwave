@@ -253,6 +253,9 @@ pub use status_ladder_case_rule::*;
 // Rule `ValuesJoinInlineRule` (`batch_inline_values_join`, `streaming_inline_values_join`).
 mod values_join_inline_rule;
 pub use values_join_inline_rule::*;
+// Rule `OrRestrictionDeriveRule` (`batch_derive_or_restrictions`, `streaming_derive_or_restrictions`).
+mod or_restriction_derive_rule;
+pub use or_restriction_derive_rule::*;
 mod repeated_lookup_merge_rule;
 pub use repeated_lookup_merge_rule::*;
 // The default branch of a top-1 over a union, the unused joins below an operator that does not
@@ -431,6 +434,7 @@ macro_rules! for_all_rules {
             , { StackedAggOverUnionMergeRule }
             , { StatusLadderCaseRule }
             , { ValuesJoinInlineRule }
+            , { OrRestrictionDeriveRule }
             , { BushyTreeJoinOrderingRule }
             , { StreamProjectMergeRule }
             , { StreamProjectSplitRule }

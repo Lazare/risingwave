@@ -1204,6 +1204,28 @@ impl LogicalOptimizer {
             }
         }
 
+        // Rule `OrRestrictionDeriveRule` (`streaming_derive_or_restrictions`): an `OR` of the
+        // condition of a join that refers to both sides gives each side the `OR` of its own parts,
+        // pushed into that side; the condition is kept. On demand only.
+        if ctx
+            .session_ctx()
+            .config()
+            .streaming_derive_or_restrictions()
+            && !ctx.is_stream_prune_baseline()
+        {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&OptimizationStage::new(
+                "Derive Or Restrictions For Stream",
+                vec![OrRestrictionDeriveRule::create()],
+                ApplyOrder::TopDown,
+            ))?;
+            let applied = ctx.total_rule_applied() - applied_before;
+            if applied > 0 {
+                ctx.add_stream_prune_rule_applied(applied);
+                plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+            }
+        }
+
         if plan.ctx().session_ctx().config().enable_join_ordering() {
             // Merge inner joins and intermediate filters into multijoin
             // This rule assumes that filters have already been pushed down near to
@@ -1730,6 +1752,21 @@ impl LogicalOptimizer {
                 "Inline Values Join For Batch",
                 vec![ValuesJoinInlineRule::create()],
                 ApplyOrder::BottomUp,
+            ))?;
+            if ctx.total_rule_applied() != applied_before {
+                plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
+            }
+        }
+
+        // Rule `OrRestrictionDeriveRule` (`batch_derive_or_restrictions`): an `OR` of the condition
+        // of a join that refers to both sides gives each side the `OR` of its own parts (scan
+        // ranges, fewer rows joined), pushed into that side; the condition is kept.
+        if ctx.session_ctx().config().batch_derive_or_restrictions() {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&OptimizationStage::new(
+                "Derive Or Restrictions For Batch",
+                vec![OrRestrictionDeriveRule::create()],
+                ApplyOrder::TopDown,
             ))?;
             if ctx.total_rule_applied() != applied_before {
                 plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
