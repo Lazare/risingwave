@@ -459,6 +459,23 @@ static SET_OPERATION_TO_COUNT: LazyLock<OptimizationStage> = LazyLock::new(|| {
     )
 });
 
+// Rule `SetOperationFilterMergeRule` (`*_merge_set_operation_filters`).
+static STREAM_MERGE_SET_OPERATION_FILTERS: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Merge Set Operation Filters",
+        vec![SetOperationFilterMergeRule::create()],
+        ApplyOrder::BottomUp,
+    )
+});
+
+static BATCH_MERGE_SET_OPERATION_FILTERS: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Merge Set Operation Filters",
+        vec![SetOperationFilterMergeRule::create_for_batch()],
+        ApplyOrder::BottomUp,
+    )
+});
+
 static SET_OPERATION_MERGE: LazyLock<OptimizationStage> = LazyLock::new(|| {
     OptimizationStage::new(
         "Set Operation Merge",
@@ -1169,6 +1186,26 @@ impl LogicalOptimizer {
             }
         }
         plan = plan.optimize_by_rules(&SET_OPERATION_MERGE)?;
+        // Rule `SetOperationFilterMergeRule` (`streaming_merge_set_operation_filters`): a `UNION`,
+        // `INTERSECT` or `EXCEPT` of filters over the same input becomes one filter, before the
+        // set operations become joins or aggregations (`SetOperationToCountRule` below). On demand
+        // only. A shared scan that only the merged branches read is no longer shared.
+        if ctx
+            .session_ctx()
+            .config()
+            .streaming_merge_set_operation_filters()
+            && !ctx.is_stream_prune_baseline()
+        {
+            let applied_before = ctx.total_rule_applied();
+            plan = plan.optimize_by_rules(&STREAM_MERGE_SET_OPERATION_FILTERS)?;
+            let applied = ctx.total_rule_applied() - applied_before;
+            if applied > 0 {
+                ctx.add_stream_prune_rule_applied(applied);
+                if enable_share_plan {
+                    plan = plan.prune_share();
+                }
+            }
+        }
         // Rule `SetOperationToCountRule` (`streaming_set_operation_to_count`): `INTERSECT` and
         // `EXCEPT` become one counting aggregation before they become semi and anti joins. On
         // demand only: the plan of a streaming job is frozen when the job is created.
@@ -1661,6 +1698,16 @@ impl LogicalOptimizer {
         plan = plan.optimize_by_rules(&GROUPING_SETS)?;
         plan = plan.optimize_by_rules(&REWRITE_LIKE_EXPR)?;
         plan = plan.optimize_by_rules(&SET_OPERATION_MERGE)?;
+        // Rule `SetOperationFilterMergeRule` (`batch_merge_set_operation_filters`): a set operation
+        // of filters over the same input becomes one filter, before the set operations become
+        // joins or aggregations. On demand.
+        if ctx
+            .session_ctx()
+            .config()
+            .batch_merge_set_operation_filters()
+        {
+            plan = plan.optimize_by_rules(&BATCH_MERGE_SET_OPERATION_FILTERS)?;
+        }
         // Rule `SetOperationToCountRule` (`batch_set_operation_to_count`): `INTERSECT` and `EXCEPT`
         // become one counting aggregation before they become semi and anti joins. On demand.
         if ctx.session_ctx().config().batch_set_operation_to_count() {

@@ -395,6 +395,8 @@ pub(crate) fn gen_create_mv_graph(
             || config.streaming_narrow_value_aggregates()
             // Rule `SetOperationToCountRule`.
             || config.streaming_set_operation_to_count()
+            // Rule `SetOperationFilterMergeRule`.
+            || config.streaming_merge_set_operation_filters()
     };
     let baseline_args = prune_enabled.then(|| {
         (

@@ -47,6 +47,7 @@ own rules.
 | BT | Batch: `row_number() <= n` per partition becomes a top-n per group, small `n` only (`batch_over_window_to_topn`) | done (prototype, branch `proto/plan-reduction-batch-pass2`, see "BP and BT" below) |
 | BU | Batch: `UNION ALL` run in parallel tasks instead of one (`batch_distributed_union`) | done (prototype, branch `proto/plan-reduction-batch-union-dist`, see "BU" below) |
 | S12 | `INTERSECT` / `EXCEPT` computed by one counting aggregation over a `UNION ALL` of the inputs (`streaming_set_operation_to_count`, `batch_set_operation_to_count`) | done (prototype, branch `proto/plan-reduction-setop-keys`), see "S12" below; `ALL` variants not supported by the binder |
+| S13 | `UNION` / `INTERSECT` / `EXCEPT` of filters over the same input become one filter (`streaming_merge_set_operation_filters`, `batch_merge_set_operation_filters`) | done (prototype, branch `proto/plan-reduction-setop-keys`), see "S13" below |
 | X | Sharing sub-plans or state between materialized views | **not for now** (see below) |
 | — | Everything under "Not selected yet" | recorded only |
 
@@ -1440,6 +1441,47 @@ Project(a, b)
   differential tests `e2e_test/streaming/set_operation_to_count` and
   `e2e_test/batch/set_operation_to_count` (NULLs, duplicates, three inputs, `EXCEPT` then
   `INTERSECT`, under `IN`, inputs emptied and filled again, a `numeric` case left as it is).
+
+### S13. Set operations of filters over the same input (added on 2026-11-28, done on the branch)
+
+Variables `streaming_merge_set_operation_filters` and `batch_merge_set_operation_filters`, rule
+`SetOperationFilterMergeRule` (Calcite `SetOpToFilterRule`). Extends US (`UnionScanMergeRule`,
+which reads once the table of the branches of a `UNION ALL`) to the distinct set operations.
+
+```text
+SELECT k, a FROM t WHERE p0  UNION      SELECT k, a FROM t WHERE p1   =>  DISTINCT .. WHERE p0 OR p1
+                             INTERSECT                                =>  DISTINCT .. WHERE p0 AND p1
+                             EXCEPT                                   =>  DISTINCT .. WHERE p0 AND (p1) IS NOT TRUE
+```
+
+- Branches: the form `(Project | Filter)* base` of US (`branch_of`), the base a scan of a table
+  (not in the past) or a shared sub-plan; the merged branches read the same base with the same
+  output expressions `π`, pure and without correlated references.
+- `UNION`: `{π(x) | p0(x)} ∪ {π(x) | p1(x)} = {π(x) | p0(x) OR p1(x)}` holds for any `π`.
+- `INTERSECT` / `EXCEPT`: two rows `x`, `y` of the base with `π(x) = π(y)` may pass different
+  filters. Exact when the conjuncts of each branch but the first, besides those common to all,
+  have the same value on such rows: they read only columns that `π` outputs as they are, of a type
+  in which equal values are identical, or `π` outputs the whole key of the table (two rows with the
+  same output are then the same row). `NULL`s compare equal in set operations, so an output column
+  has the same value, `NULL` included. Proof sketch in the rule's documentation.
+- `UNION` and `INTERSECT` merge any group of branches over the same base and keep the others;
+  `EXCEPT` merges into its first input the later inputs over the same base (`AND .. IS NOT TRUE`)
+  and merges with `OR` the later inputs over another common base (their union is subtracted). A
+  single input left becomes a `DISTINCT`.
+- Streaming: an `INTERSECT` or `EXCEPT` loses its join (two states holding every row of the base)
+  and the base is read once; a `UNION` reads once without the `Expand` copies of US. A table with a
+  watermark is left alone in streaming (as in US). After the rule, a shared scan that only the
+  merged branches read is unshared (`prune_share`).
+- Stage: `STREAM_MERGE_SET_OPERATION_FILTERS` / `BATCH_MERGE_SET_OPERATION_FILTERS`, right after
+  `SET_OPERATION_MERGE`, before S12 and `SET_OPERATION_TO_JOIN`.
+- Not done: branches that differ by their projection (`INTERSECT` would need the inverse of the
+  projection), `INTERSECT` / `EXCEPT` whose filters read columns that are not output without the
+  key of the table.
+- Tests: planner tests `stream_merge_set_operation_filters.yaml` (batch and streaming plans);
+  differential tests `e2e_test/streaming/merge_set_operation_filters` and
+  `e2e_test/batch/merge_set_operation_filters` (filters with NULLs, values moved across the
+  filters by updates, three branches over two tables, kept cases: a filter on a column not output,
+  a `numeric` column, different projections, different tables).
 
 ## Not for now: sharing between materialized views
 

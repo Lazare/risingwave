@@ -263,6 +263,9 @@ pub use unique_key_simplify_rule::*;
 // Rule `SetOperationToCountRule` (`*_set_operation_to_count`).
 mod set_operation_to_count_rule;
 pub use set_operation_to_count_rule::*;
+// Rule `SetOperationFilterMergeRule` (`*_merge_set_operation_filters`).
+mod set_operation_filter_merge_rule;
+pub use set_operation_filter_merge_rule::*;
 mod join_project_transpose_rule;
 pub use join_project_transpose_rule::*;
 mod limit_push_down_rule;
@@ -478,6 +481,7 @@ macro_rules! for_all_rules {
             , { CorrelatedTopNToVectorSearchRule }
             , { MvSelectionRule }
             , { SetOperationToCountRule }
+            , { SetOperationFilterMergeRule }
         }
     };
 }

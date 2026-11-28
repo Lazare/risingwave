@@ -516,6 +516,17 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     batch_set_operation_to_count: bool,
 
+    // Rule `SetOperationFilterMergeRule` (`*_merge_set_operation_filters`).
+    /// In the plan of a new streaming job, turn a `UNION`, `INTERSECT` or `EXCEPT` of branches that
+    /// filter the same table (or shared sub-plan) and output the same columns into one filter of it
+    /// (`OR`, `AND`, `AND .. IS NOT TRUE`) and a `DISTINCT`. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    streaming_merge_set_operation_filters: bool,
+
+    /// The same as `streaming_merge_set_operation_filters`, for batch queries. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_merge_set_operation_filters: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,
