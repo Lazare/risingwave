@@ -419,6 +419,9 @@ pub(crate) fn gen_create_mv_graph(
             || config.streaming_prune_null_union_branches()
             // `LogicalUnion::to_stream_with_dist_required`.
             || config.streaming_distributed_union()
+            // Rules `NullContradictionRule` and `InListCoalesceSimplifyRule`.
+            || config.streaming_fold_null_contradictions()
+            || config.streaming_simplify_in_lists_and_coalesce()
     };
     let baseline_args = prune_enabled.then(|| {
         (

@@ -36,6 +36,7 @@ user batch_enable_sort_agg
 user batch_exchange_buffer_max_mb
 user batch_expr_strict_mode
 user batch_factor_union_join
+user batch_fold_null_contradictions
 user batch_hnsw_ef_search
 user batch_inline_values_join
 user batch_inner_join_to_semi_join
@@ -63,6 +64,7 @@ user batch_set_operation_to_count
 user batch_share_identical_subplans
 user batch_simplify_column_facts
 user batch_simplify_exists_subquery
+user batch_simplify_in_lists_and_coalesce
 user batch_simplify_null_join_keys
 user batch_simplify_on_unique_key
 user batch_simplify_subquery_unnesting
@@ -123,6 +125,7 @@ user streaming_enable_delta_join
 user streaming_enable_unaligned_join
 user streaming_exact_not_in_without_equality
 user streaming_factor_union_join
+user streaming_fold_null_contradictions
 user streaming_force_filter_inside_join
 user streaming_inline_values_join
 user streaming_join_encoding
@@ -156,6 +159,7 @@ user streaming_set_operation_to_count
 user streaming_share_identical_subplans
 user streaming_share_union_scans
 user streaming_simplify_exists_subquery
+user streaming_simplify_in_lists_and_coalesce
 user streaming_simplify_null_join_keys
 user streaming_simplify_on_unique_key
 user streaming_simplify_subquery_unnesting

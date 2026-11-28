@@ -314,6 +314,12 @@ pub use agg_group_key_reduce_rule::*;
 // Rule `AggUnionNullBranchRule` (`*_prune_null_union_branches`).
 mod agg_union_null_branch_rule;
 pub use agg_union_null_branch_rule::*;
+// Rules `NullContradictionRule` (`*_fold_null_contradictions`) and `InListCoalesceSimplifyRule`
+// (`*_simplify_in_lists_and_coalesce`).
+mod null_contradiction_rule;
+pub use null_contradiction_rule::*;
+mod in_list_coalesce_simplify_rule;
+pub use in_list_coalesce_simplify_rule::*;
 mod join_project_transpose_rule;
 pub use join_project_transpose_rule::*;
 mod limit_push_down_rule;
@@ -552,6 +558,8 @@ macro_rules! for_all_rules {
             , { SetOperationFilterMergeRule }
             , { AggGroupKeyReduceRule }
             , { AggUnionNullBranchRule }
+            , { NullContradictionRule }
+            , { InListCoalesceSimplifyRule }
         }
     };
 }

@@ -1612,6 +1612,35 @@ impl LogicalOptimizer {
         plan = Self::column_pruning(plan, explain_trace, &ctx);
         plan = Self::predicate_pushdown(plan, explain_trace, &ctx);
 
+        // Rules `InListCoalesceSimplifyRule` (`streaming_simplify_in_lists_and_coalesce`) and
+        // `NullContradictionRule` (`streaming_fold_null_contradictions`): after the final
+        // predicate pushdown, the conjuncts on the same expression are in the same filter, scan
+        // or join condition. On demand only: the plan of a streaming job is frozen when the job
+        // is created.
+        {
+            let (in_lists, contradictions) = {
+                let config = ctx.session_ctx().config();
+                (
+                    config.streaming_simplify_in_lists_and_coalesce(),
+                    config.streaming_fold_null_contradictions(),
+                )
+            };
+            if (in_lists || contradictions) && !ctx.is_stream_prune_baseline() {
+                let applied_before = ctx.total_rule_applied();
+                plan = plan.optimize_by_rules(&Self::simplify_conjunctions_stage(
+                    true,
+                    in_lists,
+                    contradictions,
+                ))?;
+                let applied = ctx.total_rule_applied() - applied_before;
+                ctx.add_stream_prune_rule_applied(applied);
+                if applied > 0 {
+                    // The removed sub-plans may have been the only readers of some columns.
+                    plan = Self::column_pruning(plan, explain_trace, &ctx);
+                }
+            }
+        }
+
         // After the final predicate pushdown, the conjuncts that contradict each other have been
         // merged into the same filter, scan or join. Remove the sub-plans that are proven to be
         // empty, so that their fragments, backfills and states are never created. On demand
@@ -2025,6 +2054,81 @@ impl LogicalOptimizer {
         Ok((plan, reduced))
     }
 
+    /// The stage of the rules `InListCoalesceSimplifyRule` (with `in_lists`) and
+    /// `NullContradictionRule` (with `contradictions`), followed by the rules that remove what a
+    /// never-true predicate empties. Bottom-up, so that an empty relation is propagated to the
+    /// top in one pass. The streaming variants never empty a part of the plan that may carry a
+    /// watermark.
+    fn simplify_conjunctions_stage(
+        for_stream: bool,
+        in_lists: bool,
+        contradictions: bool,
+    ) -> OptimizationStage {
+        let mut rules = vec![];
+        if in_lists {
+            rules.push(InListCoalesceSimplifyRule::create());
+            // An empty intersection of lists is a `FALSE` conjunct.
+            rules.push(if for_stream {
+                NeverTruePredicateRule::create_for_stream()
+            } else {
+                NeverTruePredicateRule::create()
+            });
+        }
+        if contradictions {
+            rules.push(if for_stream {
+                NullContradictionRule::create_for_stream()
+            } else {
+                NullContradictionRule::create()
+            });
+        }
+        if for_stream {
+            rules.push(EmptyRelationPropagateRule::create_for_stream());
+            rules.push(EmptyInputSimplifyRule::create_for_stream());
+        } else {
+            rules.push(EmptyRelationPropagateRule::create());
+            rules.push(EmptyInputSimplifyRule::create());
+        }
+        OptimizationStage::new(
+            if for_stream {
+                "Simplify Conjunctions For Stream"
+            } else {
+                "Simplify Conjunctions For Batch"
+            },
+            rules,
+            ApplyOrder::BottomUp,
+        )
+    }
+
+    /// [`Self::simplify_conjunctions_stage`] for a batch query, on demand
+    /// (`batch_simplify_in_lists_and_coalesce`, `batch_fold_null_contradictions`).
+    fn simplify_conjunctions_for_batch(
+        mut plan: LogicalPlanRef,
+        explain_trace: bool,
+        ctx: &OptimizerContextRef,
+    ) -> Result<LogicalPlanRef> {
+        let (in_lists, contradictions) = {
+            let config = ctx.session_ctx().config();
+            (
+                config.batch_simplify_in_lists_and_coalesce(),
+                config.batch_fold_null_contradictions(),
+            )
+        };
+        if !(in_lists || contradictions) {
+            return Ok(plan);
+        }
+        let applied_before = ctx.total_rule_applied();
+        plan = plan.optimize_by_rules(&Self::simplify_conjunctions_stage(
+            false,
+            in_lists,
+            contradictions,
+        ))?;
+        if ctx.total_rule_applied() != applied_before {
+            // The removed sub-plans may have been the only readers of some columns.
+            plan = Self::column_pruning(plan, explain_trace, ctx);
+        }
+        Ok(plan)
+    }
+
     /// Whether the plan reads an Iceberg table, which the DataFusion engine may run
     /// (`batch_over_window_to_topn`).
     fn reads_iceberg_table(plan: &LogicalPlanRef) -> bool {
@@ -2134,6 +2238,11 @@ impl LogicalOptimizer {
         // demand (`batch_simplify_column_facts`, `batch_simplify_on_unique_key`,
         // `batch_merge_repeated_lookups`): before join ordering.
         plan = Self::reduce_batch_on_keys(plan, explain_trace, &ctx)?;
+        // Rules `InListCoalesceSimplifyRule` (`batch_simplify_in_lists_and_coalesce`) and
+        // `NullContradictionRule` (`batch_fold_null_contradictions`): after the first predicate
+        // pushdown, before join ordering, so that the joins of a removed sub-plan are not
+        // ordered. Applied again after the final predicate pushdown, below.
+        plan = Self::simplify_conjunctions_for_batch(plan, explain_trace, &ctx)?;
         // Batch counterparts of stages of the streaming plan reduction prototype, each behind its
         // own batch variable, before join ordering: the joins of the branches of a union are
         // still as written, and the filters are next to the scans. The filters that a rewrite
@@ -2426,6 +2535,11 @@ impl LogicalOptimizer {
                 plan = plan.optimize_by_rules(&PROJECT_REMOVE)?;
             }
         }
+
+        // Rules `InListCoalesceSimplifyRule` and `NullContradictionRule`, again after the final
+        // predicate pushdown (`batch_simplify_in_lists_and_coalesce`,
+        // `batch_fold_null_contradictions`).
+        plan = Self::simplify_conjunctions_for_batch(plan, explain_trace, &ctx)?;
 
         // After the final predicate pushdown, contradictory conjuncts like
         // `x IS NULL AND x IN (...)` have been merged into the same filter or scan. Remove the

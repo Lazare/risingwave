@@ -1,0 +1,110 @@
+# Tests for `streaming_fold_null_contradictions` (`NullContradictionRule`): a filter, a scan or a
+# join whose condition holds both `e IS NULL` and a conjunct that can not be true when `e` is
+# `NULL` produces nothing, for any deterministic expression `e`.
+- id: setup_off
+  sql: |
+    create table t (id int primary key, a varchar, b varchar, c int, d int, j jsonb);
+    create table r (id int primary key, k varchar, v int);
+  expected_outputs: []
+- id: setup
+  sql: |
+    set streaming_fold_null_contradictions = true;
+    create table t (id int primary key, a varchar, b varchar, c int, d int, j jsonb);
+    create table r (id int primary key, k varchar, v int);
+    create table s (id varchar primary key, x int);
+    create table wm (k varchar, ts timestamp, watermark for ts as ts - interval '5 minutes') append only;
+    create view w as select coalesce(a, b) as k, c, d from t;
+  expected_outputs: []
+
+# The variable is off by default: nothing changes.
+- name: off by default - coalesce is null and a regular expression match on it
+  before: [setup_off]
+  sql: |
+    select id from t where coalesce(a, b) is null and coalesce(a, b) ~ '^[a-z]+$';
+  expected_outputs:
+  - stream_plan
+
+# Rewritten.
+
+- name: coalesce is null and a regular expression match on it
+  before: [setup]
+  sql: |
+    select id from t where coalesce(a, b) is null and coalesce(a, b) ~ '^[a-z]+$';
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: a null key and a regular expression match on the key
+  before: [setup]
+  sql: |
+    select x from s where id is null and id ~ '^[a-z]+$';
+  expected_outputs:
+  - stream_plan
+- name: through a view - the projected coalesce is null and like
+  before: [setup]
+  sql: |
+    select k, c from w where k is null and k like 'x%';
+  expected_outputs:
+  - stream_plan
+- name: a branch of a union all is removed
+  before: [setup]
+  sql: |
+    select id, c from t where c > 0
+    union all
+    select id, c from t where coalesce(c, d) is null and coalesce(c, d) <> 0;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: the preserved side of a right join is empty, the join is removed
+  before: [setup]
+  sql: |
+    select r.k, q.c, q.id from r right join (select id, c, coalesce(a, b) as key from t) q on r.k = q.key
+    where q.key is null and q.key ~ '^[0-9]+$';
+  expected_outputs:
+  - stream_plan
+- name: left join condition never true - the right side is removed
+  before: [setup]
+  sql: |
+    select t.id, r.k, r.id as rid from t left join r on coalesce(t.a, t.b) is null and coalesce(t.a, t.b) = r.k;
+  expected_outputs:
+  - optimized_logical_plan_for_stream
+  - stream_plan
+- name: count over a join that matches nothing
+  before: [setup]
+  sql: |
+    select count(*) from t join r on t.a = r.k
+    where coalesce(t.a, t.b) is null and upper(coalesce(t.a, t.b)) = 'X';
+  expected_outputs:
+  - stream_plan
+
+# Kept.
+
+- name: kept - a table with a watermark
+  before: [setup]
+  sql: |
+    select k, ts from wm where k is null and k ~ '^x';
+  expected_outputs:
+  - stream_plan
+- name: kept - coalesce with a constant is not strict
+  before: [setup]
+  sql: |
+    select id from t where a is null and coalesce(a, 'z') = 'z';
+  expected_outputs:
+  - stream_plan
+- name: kept - greatest skips its null arguments
+  before: [setup]
+  sql: |
+    select id from t where c is null and greatest(c, 1) > 0;
+  expected_outputs:
+  - stream_plan
+- name: kept - the contradiction is inside an or
+  before: [setup]
+  sql: |
+    select id from t where (coalesce(a, b) is null and coalesce(a, b) ~ '^x') or d = 1;
+  expected_outputs:
+  - stream_plan
+- name: kept - the padded side of a left join is null and a non-strict conjunct
+  before: [setup]
+  sql: |
+    select t.id, r.id as rid from t left join r on t.id = r.id where r.k is null and coalesce(r.k, t.a) = 'x';
+  expected_outputs:
+  - stream_plan

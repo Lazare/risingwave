@@ -773,6 +773,31 @@ pub struct SessionConfig {
     #[parameter(default = false, flags = "SESSION_INIT")]
     streaming_distributed_union: bool,
 
+    // Rules `NullContradictionRule` (`*_fold_null_contradictions`) and
+    // `InListCoalesceSimplifyRule` (`*_simplify_in_lists_and_coalesce`).
+    /// In the plan of a new streaming job, remove the sub-plans whose filter, scan or join
+    /// condition holds both `e IS NULL` and a conjunct that can not be true when `e` is `NULL` (a
+    /// comparison, `LIKE`, a regular expression match, arithmetic, a cast... of `e`), for any
+    /// deterministic expression `e`, such as a `COALESCE` of several columns. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    streaming_fold_null_contradictions: bool,
+
+    /// The same as `streaming_fold_null_contradictions`, for batch queries. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_fold_null_contradictions: bool,
+
+    /// In the plan of a new streaming job, intersect the conjuncts of a filter, scan or join
+    /// condition that restrict the same expression to lists of constants (`c IN (1, 2) AND c IN
+    /// (1, 3)` becomes `c = 1`, an empty intersection removes the sub-plan), and remove the
+    /// arguments of `COALESCE` that repeat an earlier argument. Defaults to false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    streaming_simplify_in_lists_and_coalesce: bool,
+
+    /// The same as `streaming_simplify_in_lists_and_coalesce`, for batch queries. Defaults to
+    /// false.
+    #[parameter(default = false, flags = "SESSION_INIT")]
+    batch_simplify_in_lists_and_coalesce: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,
