@@ -507,7 +507,7 @@ pub struct SessionConfig {
     // Rule `NullSafeEqToEqRule`.
     /// In the plan of a new streaming job, turn `a IS NOT DISTINCT FROM b` into `a = b` in a join
     /// condition, a filter or a scan predicate (top-level conjuncts only) when `a` or `b` is never
-    /// `NULL` (a constant, a `NOT NULL` column, a key, a column filtered with `IS NOT NULL`...):
+    /// `NULL` (a constant, a `NOT NULL` column, a column filtered with `IS NOT NULL`...):
     /// both then reject the same rows. Subquery decorrelation writes such conditions, and a join
     /// on `=` keeps no row whose key is `NULL`. Defaults to false.
     #[parameter(default = false, flags = "SESSION_INIT")]

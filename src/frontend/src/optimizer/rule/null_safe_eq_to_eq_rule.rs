@@ -26,8 +26,8 @@ use crate::utils::Condition;
 /// (the condition of a join, of a filter or of a scan), when `a` or `b` is never `NULL`.
 ///
 /// ```text
-/// Join(LeftSemi, t.id IS NOT DISTINCT FROM u.k)      Join(LeftSemi, t.id = u.k)
-/// ├─Scan(t)          -- t.id: primary key       =>   ├─Scan(t)
+/// Join(LeftSemi, t.x IS NOT DISTINCT FROM u.k)       Join(LeftSemi, t.x = u.k)
+/// ├─Scan(t)          -- t.x: NOT NULL           =>   ├─Scan(t)
 /// └─Scan(u)                                          └─Scan(u)
 /// ```
 ///
@@ -46,13 +46,15 @@ use crate::utils::Condition;
 /// conjuncts are rewritten, never an operand of `NOT`, `OR`, `CASE` or a projected expression.
 ///
 /// An operand is never `NULL` when [`expr_facts`] says so with the facts of the input (see
-/// [`column_facts`]: `NOT NULL` columns, keys, constants, a filter below that rejects `NULL`) and
+/// [`column_facts`]: `NOT NULL` columns, constants, a filter below that rejects `NULL`) and
 /// of the other conjuncts of the same predicate: replacing a conjunct with an expression that is
 /// equivalent whenever the others are `TRUE` keeps the conjunction equivalent. For a join
 /// condition, the facts of each side hold for its columns whatever the type of the join, because
 /// the condition is evaluated on rows of the inputs, before any padding. The facts are properties
 /// of every row the inputs will ever produce, so the rewrite is valid for a streaming job, whose
 /// plan is frozen when it is created.
+///
+/// A primary key column is not taken as never `NULL`: RisingWave does not declare it `NOT NULL`.
 ///
 /// Not rewritten: a conjunct with `now()` (a temporal filter keeps its form), the condition of an
 /// as-of join, and a comparison whose `=` would need an implicit cast (the binder already gave

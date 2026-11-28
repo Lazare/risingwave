@@ -32,9 +32,6 @@ statement ok
 set streaming_null_safe_eq_to_eq = false;
 
 statement ok
-create materialized view sne_join_pk_off as select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k;
-
-statement ok
 create materialized view sne_join_not_null_off as select a.id, b.y from sne_a a join sne_b b on a.x is not distinct from b.k;
 
 statement ok
@@ -47,10 +44,10 @@ statement ok
 create materialized view sne_other_conjunct_off as select a.id, b.y from sne_a a join sne_b b on a.y = b.id and a.y is not distinct from b.k;
 
 statement ok
-create materialized view sne_left_join_off as select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k;
+create materialized view sne_left_join_off as select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.x is not distinct from b.k;
 
 statement ok
-create materialized view sne_full_join_off as select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.id is not distinct from b.k;
+create materialized view sne_full_join_off as select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.x is not distinct from b.k;
 
 statement ok
 create materialized view sne_filter_over_left_off as select a.id, b.y from sne_a a left join sne_b b on a.id = b.id where a.x is not distinct from b.k;
@@ -62,7 +59,7 @@ statement ok
 create materialized view sne_not_exists_domain_off as select a.id from sne_a a where not exists (select 1 from sne_b b where b.k = a.id limit 1);
 
 statement ok
-create materialized view sne_scalar_domain_off as select a.id, (select max(b.y) from sne_b b where b.k = a.id) as m from sne_a a;
+create materialized view sne_scalar_domain_off as select a.id, (select max(b.y) from sne_b b where b.k = a.x) as m from sne_a a;
 
 statement ok
 create materialized view sne_duplicates_left_off as select n.v, a.id from sne_n n left join sne_a a on a.id is not distinct from n.k;
@@ -75,6 +72,12 @@ create materialized view sne_duplicates_anti_off as select n.k, n.v from sne_n n
 
 statement ok
 create materialized view sne_count_per_key_off as select a.id, count(b.id) as n from sne_a a left join sne_b b on a.x is not distinct from b.k group by a.id;
+
+statement ok
+create materialized view sne_kept_join_pk_off as select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k;
+
+statement ok
+create materialized view sne_kept_left_pk_off as select a.id, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k;
 
 statement ok
 create materialized view sne_kept_nullable_off as select a.id, b.y from sne_a a join sne_b b on a.y is not distinct from b.y;
@@ -95,9 +98,6 @@ statement ok
 set streaming_null_safe_eq_to_eq = true;
 
 statement ok
-create materialized view sne_join_pk_on as select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k;
-
-statement ok
 create materialized view sne_join_not_null_on as select a.id, b.y from sne_a a join sne_b b on a.x is not distinct from b.k;
 
 statement ok
@@ -110,10 +110,10 @@ statement ok
 create materialized view sne_other_conjunct_on as select a.id, b.y from sne_a a join sne_b b on a.y = b.id and a.y is not distinct from b.k;
 
 statement ok
-create materialized view sne_left_join_on as select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k;
+create materialized view sne_left_join_on as select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.x is not distinct from b.k;
 
 statement ok
-create materialized view sne_full_join_on as select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.id is not distinct from b.k;
+create materialized view sne_full_join_on as select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.x is not distinct from b.k;
 
 statement ok
 create materialized view sne_filter_over_left_on as select a.id, b.y from sne_a a left join sne_b b on a.id = b.id where a.x is not distinct from b.k;
@@ -125,7 +125,7 @@ statement ok
 create materialized view sne_not_exists_domain_on as select a.id from sne_a a where not exists (select 1 from sne_b b where b.k = a.id limit 1);
 
 statement ok
-create materialized view sne_scalar_domain_on as select a.id, (select max(b.y) from sne_b b where b.k = a.id) as m from sne_a a;
+create materialized view sne_scalar_domain_on as select a.id, (select max(b.y) from sne_b b where b.k = a.x) as m from sne_a a;
 
 statement ok
 create materialized view sne_duplicates_left_on as select n.v, a.id from sne_n n left join sne_a a on a.id is not distinct from n.k;
@@ -138,6 +138,12 @@ create materialized view sne_duplicates_anti_on as select n.k, n.v from sne_n n 
 
 statement ok
 create materialized view sne_count_per_key_on as select a.id, count(b.id) as n from sne_a a left join sne_b b on a.x is not distinct from b.k group by a.id;
+
+statement ok
+create materialized view sne_kept_join_pk_on as select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k;
+
+statement ok
+create materialized view sne_kept_left_pk_on as select a.id, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k;
 
 statement ok
 create materialized view sne_kept_nullable_on as select a.id, b.y from sne_a a join sne_b b on a.y is not distinct from b.y;
@@ -158,22 +164,6 @@ statement ok
 set streaming_null_safe_eq_to_eq = false;
 
 # After the backfill: with and without the rule, every materialized view holds the rows of the batch query.
-
-query III
-select
-  (select count(*) from (select id, y, count(*) as sne_rows from sne_join_pk_on group by id, y except select id, y, count(*) as sne_rows from sne_join_pk_off group by id, y) x),
-  (select count(*) from (select id, y, count(*) as sne_rows from sne_join_pk_off group by id, y except select id, y, count(*) as sne_rows from sne_join_pk_on group by id, y) y),
-  (select count(*) from sne_join_pk_on) - (select count(*) from sne_join_pk_off);
-----
-0 0 0
-
-query III
-select
-  (select count(*) from (select id, y, count(*) as sne_rows from sne_join_pk_on group by id, y except select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q group by id, y) x),
-  (select count(*) from (select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q group by id, y except select id, y, count(*) as sne_rows from sne_join_pk_on group by id, y) y),
-  (select count(*) from sne_join_pk_on) - (select count(*) from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q);
-----
-0 0 0
 
 query III
 select
@@ -249,9 +239,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, bid, y, count(*) as sne_rows from sne_left_join_on group by id, bid, y except select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q group by id, bid, y) x),
-  (select count(*) from (select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q group by id, bid, y except select id, bid, y, count(*) as sne_rows from sne_left_join_on group by id, bid, y) y),
-  (select count(*) from sne_left_join_on) - (select count(*) from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q);
+  (select count(*) from (select id, bid, y, count(*) as sne_rows from sne_left_join_on group by id, bid, y except select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.x is not distinct from b.k) q group by id, bid, y) x),
+  (select count(*) from (select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.x is not distinct from b.k) q group by id, bid, y except select id, bid, y, count(*) as sne_rows from sne_left_join_on group by id, bid, y) y),
+  (select count(*) from sne_left_join_on) - (select count(*) from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.x is not distinct from b.k) q);
 ----
 0 0 0
 
@@ -265,9 +255,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, bid, y, count(*) as sne_rows from sne_full_join_on group by id, bid, y except select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.id is not distinct from b.k) q group by id, bid, y) x),
-  (select count(*) from (select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.id is not distinct from b.k) q group by id, bid, y except select id, bid, y, count(*) as sne_rows from sne_full_join_on group by id, bid, y) y),
-  (select count(*) from sne_full_join_on) - (select count(*) from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.id is not distinct from b.k) q);
+  (select count(*) from (select id, bid, y, count(*) as sne_rows from sne_full_join_on group by id, bid, y except select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.x is not distinct from b.k) q group by id, bid, y) x),
+  (select count(*) from (select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.x is not distinct from b.k) q group by id, bid, y except select id, bid, y, count(*) as sne_rows from sne_full_join_on group by id, bid, y) y),
+  (select count(*) from sne_full_join_on) - (select count(*) from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.x is not distinct from b.k) q);
 ----
 0 0 0
 
@@ -329,9 +319,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, m, count(*) as sne_rows from sne_scalar_domain_on group by id, m except select id, m, count(*) as sne_rows from (select a.id, (select max(b.y) from sne_b b where b.k = a.id) as m from sne_a a) q group by id, m) x),
-  (select count(*) from (select id, m, count(*) as sne_rows from (select a.id, (select max(b.y) from sne_b b where b.k = a.id) as m from sne_a a) q group by id, m except select id, m, count(*) as sne_rows from sne_scalar_domain_on group by id, m) y),
-  (select count(*) from sne_scalar_domain_on) - (select count(*) from (select a.id, (select max(b.y) from sne_b b where b.k = a.id) as m from sne_a a) q);
+  (select count(*) from (select id, m, count(*) as sne_rows from sne_scalar_domain_on group by id, m except select id, m, count(*) as sne_rows from (select a.id, (select max(b.y) from sne_b b where b.k = a.x) as m from sne_a a) q group by id, m) x),
+  (select count(*) from (select id, m, count(*) as sne_rows from (select a.id, (select max(b.y) from sne_b b where b.k = a.x) as m from sne_a a) q group by id, m except select id, m, count(*) as sne_rows from sne_scalar_domain_on group by id, m) y),
+  (select count(*) from sne_scalar_domain_on) - (select count(*) from (select a.id, (select max(b.y) from sne_b b where b.k = a.x) as m from sne_a a) q);
 ----
 0 0 0
 
@@ -396,6 +386,38 @@ select
   (select count(*) from (select id, n, count(*) as sne_rows from sne_count_per_key_on group by id, n except select id, n, count(*) as sne_rows from (select a.id, count(b.id) as n from sne_a a left join sne_b b on a.x is not distinct from b.k group by a.id) q group by id, n) x),
   (select count(*) from (select id, n, count(*) as sne_rows from (select a.id, count(b.id) as n from sne_a a left join sne_b b on a.x is not distinct from b.k group by a.id) q group by id, n except select id, n, count(*) as sne_rows from sne_count_per_key_on group by id, n) y),
   (select count(*) from sne_count_per_key_on) - (select count(*) from (select a.id, count(b.id) as n from sne_a a left join sne_b b on a.x is not distinct from b.k group by a.id) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_join_pk_on group by id, y except select id, y, count(*) as sne_rows from sne_kept_join_pk_off group by id, y) x),
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_join_pk_off group by id, y except select id, y, count(*) as sne_rows from sne_kept_join_pk_on group by id, y) y),
+  (select count(*) from sne_kept_join_pk_on) - (select count(*) from sne_kept_join_pk_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_join_pk_on group by id, y except select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q group by id, y) x),
+  (select count(*) from (select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q group by id, y except select id, y, count(*) as sne_rows from sne_kept_join_pk_on group by id, y) y),
+  (select count(*) from sne_kept_join_pk_on) - (select count(*) from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_left_pk_on group by id, y except select id, y, count(*) as sne_rows from sne_kept_left_pk_off group by id, y) x),
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_left_pk_off group by id, y except select id, y, count(*) as sne_rows from sne_kept_left_pk_on group by id, y) y),
+  (select count(*) from sne_kept_left_pk_on) - (select count(*) from sne_kept_left_pk_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_left_pk_on group by id, y except select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q group by id, y) x),
+  (select count(*) from (select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q group by id, y except select id, y, count(*) as sne_rows from sne_kept_left_pk_on group by id, y) y),
+  (select count(*) from sne_kept_left_pk_on) - (select count(*) from (select a.id, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q);
 ----
 0 0 0
 
@@ -514,22 +536,6 @@ insert into sne_b values (1, null, 1, 1);
 
 query III
 select
-  (select count(*) from (select id, y, count(*) as sne_rows from sne_join_pk_on group by id, y except select id, y, count(*) as sne_rows from sne_join_pk_off group by id, y) x),
-  (select count(*) from (select id, y, count(*) as sne_rows from sne_join_pk_off group by id, y except select id, y, count(*) as sne_rows from sne_join_pk_on group by id, y) y),
-  (select count(*) from sne_join_pk_on) - (select count(*) from sne_join_pk_off);
-----
-0 0 0
-
-query III
-select
-  (select count(*) from (select id, y, count(*) as sne_rows from sne_join_pk_on group by id, y except select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q group by id, y) x),
-  (select count(*) from (select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q group by id, y except select id, y, count(*) as sne_rows from sne_join_pk_on group by id, y) y),
-  (select count(*) from sne_join_pk_on) - (select count(*) from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select id, y, count(*) as sne_rows from sne_join_not_null_on group by id, y except select id, y, count(*) as sne_rows from sne_join_not_null_off group by id, y) x),
   (select count(*) from (select id, y, count(*) as sne_rows from sne_join_not_null_off group by id, y except select id, y, count(*) as sne_rows from sne_join_not_null_on group by id, y) y),
   (select count(*) from sne_join_not_null_on) - (select count(*) from sne_join_not_null_off);
@@ -602,9 +608,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, bid, y, count(*) as sne_rows from sne_left_join_on group by id, bid, y except select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q group by id, bid, y) x),
-  (select count(*) from (select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q group by id, bid, y except select id, bid, y, count(*) as sne_rows from sne_left_join_on group by id, bid, y) y),
-  (select count(*) from sne_left_join_on) - (select count(*) from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q);
+  (select count(*) from (select id, bid, y, count(*) as sne_rows from sne_left_join_on group by id, bid, y except select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.x is not distinct from b.k) q group by id, bid, y) x),
+  (select count(*) from (select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.x is not distinct from b.k) q group by id, bid, y except select id, bid, y, count(*) as sne_rows from sne_left_join_on group by id, bid, y) y),
+  (select count(*) from sne_left_join_on) - (select count(*) from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.x is not distinct from b.k) q);
 ----
 0 0 0
 
@@ -618,9 +624,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, bid, y, count(*) as sne_rows from sne_full_join_on group by id, bid, y except select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.id is not distinct from b.k) q group by id, bid, y) x),
-  (select count(*) from (select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.id is not distinct from b.k) q group by id, bid, y except select id, bid, y, count(*) as sne_rows from sne_full_join_on group by id, bid, y) y),
-  (select count(*) from sne_full_join_on) - (select count(*) from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.id is not distinct from b.k) q);
+  (select count(*) from (select id, bid, y, count(*) as sne_rows from sne_full_join_on group by id, bid, y except select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.x is not distinct from b.k) q group by id, bid, y) x),
+  (select count(*) from (select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.x is not distinct from b.k) q group by id, bid, y except select id, bid, y, count(*) as sne_rows from sne_full_join_on group by id, bid, y) y),
+  (select count(*) from sne_full_join_on) - (select count(*) from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.x is not distinct from b.k) q);
 ----
 0 0 0
 
@@ -682,9 +688,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, m, count(*) as sne_rows from sne_scalar_domain_on group by id, m except select id, m, count(*) as sne_rows from (select a.id, (select max(b.y) from sne_b b where b.k = a.id) as m from sne_a a) q group by id, m) x),
-  (select count(*) from (select id, m, count(*) as sne_rows from (select a.id, (select max(b.y) from sne_b b where b.k = a.id) as m from sne_a a) q group by id, m except select id, m, count(*) as sne_rows from sne_scalar_domain_on group by id, m) y),
-  (select count(*) from sne_scalar_domain_on) - (select count(*) from (select a.id, (select max(b.y) from sne_b b where b.k = a.id) as m from sne_a a) q);
+  (select count(*) from (select id, m, count(*) as sne_rows from sne_scalar_domain_on group by id, m except select id, m, count(*) as sne_rows from (select a.id, (select max(b.y) from sne_b b where b.k = a.x) as m from sne_a a) q group by id, m) x),
+  (select count(*) from (select id, m, count(*) as sne_rows from (select a.id, (select max(b.y) from sne_b b where b.k = a.x) as m from sne_a a) q group by id, m except select id, m, count(*) as sne_rows from sne_scalar_domain_on group by id, m) y),
+  (select count(*) from sne_scalar_domain_on) - (select count(*) from (select a.id, (select max(b.y) from sne_b b where b.k = a.x) as m from sne_a a) q);
 ----
 0 0 0
 
@@ -749,6 +755,38 @@ select
   (select count(*) from (select id, n, count(*) as sne_rows from sne_count_per_key_on group by id, n except select id, n, count(*) as sne_rows from (select a.id, count(b.id) as n from sne_a a left join sne_b b on a.x is not distinct from b.k group by a.id) q group by id, n) x),
   (select count(*) from (select id, n, count(*) as sne_rows from (select a.id, count(b.id) as n from sne_a a left join sne_b b on a.x is not distinct from b.k group by a.id) q group by id, n except select id, n, count(*) as sne_rows from sne_count_per_key_on group by id, n) y),
   (select count(*) from sne_count_per_key_on) - (select count(*) from (select a.id, count(b.id) as n from sne_a a left join sne_b b on a.x is not distinct from b.k group by a.id) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_join_pk_on group by id, y except select id, y, count(*) as sne_rows from sne_kept_join_pk_off group by id, y) x),
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_join_pk_off group by id, y except select id, y, count(*) as sne_rows from sne_kept_join_pk_on group by id, y) y),
+  (select count(*) from sne_kept_join_pk_on) - (select count(*) from sne_kept_join_pk_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_join_pk_on group by id, y except select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q group by id, y) x),
+  (select count(*) from (select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q group by id, y except select id, y, count(*) as sne_rows from sne_kept_join_pk_on group by id, y) y),
+  (select count(*) from sne_kept_join_pk_on) - (select count(*) from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_left_pk_on group by id, y except select id, y, count(*) as sne_rows from sne_kept_left_pk_off group by id, y) x),
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_left_pk_off group by id, y except select id, y, count(*) as sne_rows from sne_kept_left_pk_on group by id, y) y),
+  (select count(*) from sne_kept_left_pk_on) - (select count(*) from sne_kept_left_pk_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_left_pk_on group by id, y except select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q group by id, y) x),
+  (select count(*) from (select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q group by id, y except select id, y, count(*) as sne_rows from sne_kept_left_pk_on group by id, y) y),
+  (select count(*) from sne_kept_left_pk_on) - (select count(*) from (select a.id, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q);
 ----
 0 0 0
 
@@ -862,22 +900,6 @@ delete from sne_n where k is null and v = 2;
 
 query III
 select
-  (select count(*) from (select id, y, count(*) as sne_rows from sne_join_pk_on group by id, y except select id, y, count(*) as sne_rows from sne_join_pk_off group by id, y) x),
-  (select count(*) from (select id, y, count(*) as sne_rows from sne_join_pk_off group by id, y except select id, y, count(*) as sne_rows from sne_join_pk_on group by id, y) y),
-  (select count(*) from sne_join_pk_on) - (select count(*) from sne_join_pk_off);
-----
-0 0 0
-
-query III
-select
-  (select count(*) from (select id, y, count(*) as sne_rows from sne_join_pk_on group by id, y except select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q group by id, y) x),
-  (select count(*) from (select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q group by id, y except select id, y, count(*) as sne_rows from sne_join_pk_on group by id, y) y),
-  (select count(*) from sne_join_pk_on) - (select count(*) from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select id, y, count(*) as sne_rows from sne_join_not_null_on group by id, y except select id, y, count(*) as sne_rows from sne_join_not_null_off group by id, y) x),
   (select count(*) from (select id, y, count(*) as sne_rows from sne_join_not_null_off group by id, y except select id, y, count(*) as sne_rows from sne_join_not_null_on group by id, y) y),
   (select count(*) from sne_join_not_null_on) - (select count(*) from sne_join_not_null_off);
@@ -950,9 +972,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, bid, y, count(*) as sne_rows from sne_left_join_on group by id, bid, y except select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q group by id, bid, y) x),
-  (select count(*) from (select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q group by id, bid, y except select id, bid, y, count(*) as sne_rows from sne_left_join_on group by id, bid, y) y),
-  (select count(*) from sne_left_join_on) - (select count(*) from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q);
+  (select count(*) from (select id, bid, y, count(*) as sne_rows from sne_left_join_on group by id, bid, y except select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.x is not distinct from b.k) q group by id, bid, y) x),
+  (select count(*) from (select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.x is not distinct from b.k) q group by id, bid, y except select id, bid, y, count(*) as sne_rows from sne_left_join_on group by id, bid, y) y),
+  (select count(*) from sne_left_join_on) - (select count(*) from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.x is not distinct from b.k) q);
 ----
 0 0 0
 
@@ -966,9 +988,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, bid, y, count(*) as sne_rows from sne_full_join_on group by id, bid, y except select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.id is not distinct from b.k) q group by id, bid, y) x),
-  (select count(*) from (select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.id is not distinct from b.k) q group by id, bid, y except select id, bid, y, count(*) as sne_rows from sne_full_join_on group by id, bid, y) y),
-  (select count(*) from sne_full_join_on) - (select count(*) from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.id is not distinct from b.k) q);
+  (select count(*) from (select id, bid, y, count(*) as sne_rows from sne_full_join_on group by id, bid, y except select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.x is not distinct from b.k) q group by id, bid, y) x),
+  (select count(*) from (select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.x is not distinct from b.k) q group by id, bid, y except select id, bid, y, count(*) as sne_rows from sne_full_join_on group by id, bid, y) y),
+  (select count(*) from sne_full_join_on) - (select count(*) from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.x is not distinct from b.k) q);
 ----
 0 0 0
 
@@ -1030,9 +1052,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, m, count(*) as sne_rows from sne_scalar_domain_on group by id, m except select id, m, count(*) as sne_rows from (select a.id, (select max(b.y) from sne_b b where b.k = a.id) as m from sne_a a) q group by id, m) x),
-  (select count(*) from (select id, m, count(*) as sne_rows from (select a.id, (select max(b.y) from sne_b b where b.k = a.id) as m from sne_a a) q group by id, m except select id, m, count(*) as sne_rows from sne_scalar_domain_on group by id, m) y),
-  (select count(*) from sne_scalar_domain_on) - (select count(*) from (select a.id, (select max(b.y) from sne_b b where b.k = a.id) as m from sne_a a) q);
+  (select count(*) from (select id, m, count(*) as sne_rows from sne_scalar_domain_on group by id, m except select id, m, count(*) as sne_rows from (select a.id, (select max(b.y) from sne_b b where b.k = a.x) as m from sne_a a) q group by id, m) x),
+  (select count(*) from (select id, m, count(*) as sne_rows from (select a.id, (select max(b.y) from sne_b b where b.k = a.x) as m from sne_a a) q group by id, m except select id, m, count(*) as sne_rows from sne_scalar_domain_on group by id, m) y),
+  (select count(*) from sne_scalar_domain_on) - (select count(*) from (select a.id, (select max(b.y) from sne_b b where b.k = a.x) as m from sne_a a) q);
 ----
 0 0 0
 
@@ -1097,6 +1119,38 @@ select
   (select count(*) from (select id, n, count(*) as sne_rows from sne_count_per_key_on group by id, n except select id, n, count(*) as sne_rows from (select a.id, count(b.id) as n from sne_a a left join sne_b b on a.x is not distinct from b.k group by a.id) q group by id, n) x),
   (select count(*) from (select id, n, count(*) as sne_rows from (select a.id, count(b.id) as n from sne_a a left join sne_b b on a.x is not distinct from b.k group by a.id) q group by id, n except select id, n, count(*) as sne_rows from sne_count_per_key_on group by id, n) y),
   (select count(*) from sne_count_per_key_on) - (select count(*) from (select a.id, count(b.id) as n from sne_a a left join sne_b b on a.x is not distinct from b.k group by a.id) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_join_pk_on group by id, y except select id, y, count(*) as sne_rows from sne_kept_join_pk_off group by id, y) x),
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_join_pk_off group by id, y except select id, y, count(*) as sne_rows from sne_kept_join_pk_on group by id, y) y),
+  (select count(*) from sne_kept_join_pk_on) - (select count(*) from sne_kept_join_pk_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_join_pk_on group by id, y except select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q group by id, y) x),
+  (select count(*) from (select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q group by id, y except select id, y, count(*) as sne_rows from sne_kept_join_pk_on group by id, y) y),
+  (select count(*) from sne_kept_join_pk_on) - (select count(*) from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_left_pk_on group by id, y except select id, y, count(*) as sne_rows from sne_kept_left_pk_off group by id, y) x),
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_left_pk_off group by id, y except select id, y, count(*) as sne_rows from sne_kept_left_pk_on group by id, y) y),
+  (select count(*) from sne_kept_left_pk_on) - (select count(*) from sne_kept_left_pk_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_left_pk_on group by id, y except select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q group by id, y) x),
+  (select count(*) from (select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q group by id, y except select id, y, count(*) as sne_rows from sne_kept_left_pk_on group by id, y) y),
+  (select count(*) from sne_kept_left_pk_on) - (select count(*) from (select a.id, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q);
 ----
 0 0 0
 
@@ -1190,22 +1244,6 @@ update sne_b set k = null, y = null;
 
 query III
 select
-  (select count(*) from (select id, y, count(*) as sne_rows from sne_join_pk_on group by id, y except select id, y, count(*) as sne_rows from sne_join_pk_off group by id, y) x),
-  (select count(*) from (select id, y, count(*) as sne_rows from sne_join_pk_off group by id, y except select id, y, count(*) as sne_rows from sne_join_pk_on group by id, y) y),
-  (select count(*) from sne_join_pk_on) - (select count(*) from sne_join_pk_off);
-----
-0 0 0
-
-query III
-select
-  (select count(*) from (select id, y, count(*) as sne_rows from sne_join_pk_on group by id, y except select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q group by id, y) x),
-  (select count(*) from (select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q group by id, y except select id, y, count(*) as sne_rows from sne_join_pk_on group by id, y) y),
-  (select count(*) from sne_join_pk_on) - (select count(*) from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select id, y, count(*) as sne_rows from sne_join_not_null_on group by id, y except select id, y, count(*) as sne_rows from sne_join_not_null_off group by id, y) x),
   (select count(*) from (select id, y, count(*) as sne_rows from sne_join_not_null_off group by id, y except select id, y, count(*) as sne_rows from sne_join_not_null_on group by id, y) y),
   (select count(*) from sne_join_not_null_on) - (select count(*) from sne_join_not_null_off);
@@ -1278,9 +1316,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, bid, y, count(*) as sne_rows from sne_left_join_on group by id, bid, y except select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q group by id, bid, y) x),
-  (select count(*) from (select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q group by id, bid, y except select id, bid, y, count(*) as sne_rows from sne_left_join_on group by id, bid, y) y),
-  (select count(*) from sne_left_join_on) - (select count(*) from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q);
+  (select count(*) from (select id, bid, y, count(*) as sne_rows from sne_left_join_on group by id, bid, y except select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.x is not distinct from b.k) q group by id, bid, y) x),
+  (select count(*) from (select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.x is not distinct from b.k) q group by id, bid, y except select id, bid, y, count(*) as sne_rows from sne_left_join_on group by id, bid, y) y),
+  (select count(*) from sne_left_join_on) - (select count(*) from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.x is not distinct from b.k) q);
 ----
 0 0 0
 
@@ -1294,9 +1332,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, bid, y, count(*) as sne_rows from sne_full_join_on group by id, bid, y except select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.id is not distinct from b.k) q group by id, bid, y) x),
-  (select count(*) from (select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.id is not distinct from b.k) q group by id, bid, y except select id, bid, y, count(*) as sne_rows from sne_full_join_on group by id, bid, y) y),
-  (select count(*) from sne_full_join_on) - (select count(*) from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.id is not distinct from b.k) q);
+  (select count(*) from (select id, bid, y, count(*) as sne_rows from sne_full_join_on group by id, bid, y except select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.x is not distinct from b.k) q group by id, bid, y) x),
+  (select count(*) from (select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.x is not distinct from b.k) q group by id, bid, y except select id, bid, y, count(*) as sne_rows from sne_full_join_on group by id, bid, y) y),
+  (select count(*) from sne_full_join_on) - (select count(*) from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.x is not distinct from b.k) q);
 ----
 0 0 0
 
@@ -1358,9 +1396,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, m, count(*) as sne_rows from sne_scalar_domain_on group by id, m except select id, m, count(*) as sne_rows from (select a.id, (select max(b.y) from sne_b b where b.k = a.id) as m from sne_a a) q group by id, m) x),
-  (select count(*) from (select id, m, count(*) as sne_rows from (select a.id, (select max(b.y) from sne_b b where b.k = a.id) as m from sne_a a) q group by id, m except select id, m, count(*) as sne_rows from sne_scalar_domain_on group by id, m) y),
-  (select count(*) from sne_scalar_domain_on) - (select count(*) from (select a.id, (select max(b.y) from sne_b b where b.k = a.id) as m from sne_a a) q);
+  (select count(*) from (select id, m, count(*) as sne_rows from sne_scalar_domain_on group by id, m except select id, m, count(*) as sne_rows from (select a.id, (select max(b.y) from sne_b b where b.k = a.x) as m from sne_a a) q group by id, m) x),
+  (select count(*) from (select id, m, count(*) as sne_rows from (select a.id, (select max(b.y) from sne_b b where b.k = a.x) as m from sne_a a) q group by id, m except select id, m, count(*) as sne_rows from sne_scalar_domain_on group by id, m) y),
+  (select count(*) from sne_scalar_domain_on) - (select count(*) from (select a.id, (select max(b.y) from sne_b b where b.k = a.x) as m from sne_a a) q);
 ----
 0 0 0
 
@@ -1425,6 +1463,38 @@ select
   (select count(*) from (select id, n, count(*) as sne_rows from sne_count_per_key_on group by id, n except select id, n, count(*) as sne_rows from (select a.id, count(b.id) as n from sne_a a left join sne_b b on a.x is not distinct from b.k group by a.id) q group by id, n) x),
   (select count(*) from (select id, n, count(*) as sne_rows from (select a.id, count(b.id) as n from sne_a a left join sne_b b on a.x is not distinct from b.k group by a.id) q group by id, n except select id, n, count(*) as sne_rows from sne_count_per_key_on group by id, n) y),
   (select count(*) from sne_count_per_key_on) - (select count(*) from (select a.id, count(b.id) as n from sne_a a left join sne_b b on a.x is not distinct from b.k group by a.id) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_join_pk_on group by id, y except select id, y, count(*) as sne_rows from sne_kept_join_pk_off group by id, y) x),
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_join_pk_off group by id, y except select id, y, count(*) as sne_rows from sne_kept_join_pk_on group by id, y) y),
+  (select count(*) from sne_kept_join_pk_on) - (select count(*) from sne_kept_join_pk_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_join_pk_on group by id, y except select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q group by id, y) x),
+  (select count(*) from (select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q group by id, y except select id, y, count(*) as sne_rows from sne_kept_join_pk_on group by id, y) y),
+  (select count(*) from sne_kept_join_pk_on) - (select count(*) from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_left_pk_on group by id, y except select id, y, count(*) as sne_rows from sne_kept_left_pk_off group by id, y) x),
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_left_pk_off group by id, y except select id, y, count(*) as sne_rows from sne_kept_left_pk_on group by id, y) y),
+  (select count(*) from sne_kept_left_pk_on) - (select count(*) from sne_kept_left_pk_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_left_pk_on group by id, y except select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q group by id, y) x),
+  (select count(*) from (select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q group by id, y except select id, y, count(*) as sne_rows from sne_kept_left_pk_on group by id, y) y),
+  (select count(*) from sne_kept_left_pk_on) - (select count(*) from (select a.id, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q);
 ----
 0 0 0
 
@@ -1515,22 +1585,6 @@ delete from sne_b;
 
 query III
 select
-  (select count(*) from (select id, y, count(*) as sne_rows from sne_join_pk_on group by id, y except select id, y, count(*) as sne_rows from sne_join_pk_off group by id, y) x),
-  (select count(*) from (select id, y, count(*) as sne_rows from sne_join_pk_off group by id, y except select id, y, count(*) as sne_rows from sne_join_pk_on group by id, y) y),
-  (select count(*) from sne_join_pk_on) - (select count(*) from sne_join_pk_off);
-----
-0 0 0
-
-query III
-select
-  (select count(*) from (select id, y, count(*) as sne_rows from sne_join_pk_on group by id, y except select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q group by id, y) x),
-  (select count(*) from (select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q group by id, y except select id, y, count(*) as sne_rows from sne_join_pk_on group by id, y) y),
-  (select count(*) from sne_join_pk_on) - (select count(*) from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select id, y, count(*) as sne_rows from sne_join_not_null_on group by id, y except select id, y, count(*) as sne_rows from sne_join_not_null_off group by id, y) x),
   (select count(*) from (select id, y, count(*) as sne_rows from sne_join_not_null_off group by id, y except select id, y, count(*) as sne_rows from sne_join_not_null_on group by id, y) y),
   (select count(*) from sne_join_not_null_on) - (select count(*) from sne_join_not_null_off);
@@ -1603,9 +1657,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, bid, y, count(*) as sne_rows from sne_left_join_on group by id, bid, y except select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q group by id, bid, y) x),
-  (select count(*) from (select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q group by id, bid, y except select id, bid, y, count(*) as sne_rows from sne_left_join_on group by id, bid, y) y),
-  (select count(*) from sne_left_join_on) - (select count(*) from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q);
+  (select count(*) from (select id, bid, y, count(*) as sne_rows from sne_left_join_on group by id, bid, y except select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.x is not distinct from b.k) q group by id, bid, y) x),
+  (select count(*) from (select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.x is not distinct from b.k) q group by id, bid, y except select id, bid, y, count(*) as sne_rows from sne_left_join_on group by id, bid, y) y),
+  (select count(*) from sne_left_join_on) - (select count(*) from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.x is not distinct from b.k) q);
 ----
 0 0 0
 
@@ -1619,9 +1673,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, bid, y, count(*) as sne_rows from sne_full_join_on group by id, bid, y except select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.id is not distinct from b.k) q group by id, bid, y) x),
-  (select count(*) from (select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.id is not distinct from b.k) q group by id, bid, y except select id, bid, y, count(*) as sne_rows from sne_full_join_on group by id, bid, y) y),
-  (select count(*) from sne_full_join_on) - (select count(*) from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.id is not distinct from b.k) q);
+  (select count(*) from (select id, bid, y, count(*) as sne_rows from sne_full_join_on group by id, bid, y except select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.x is not distinct from b.k) q group by id, bid, y) x),
+  (select count(*) from (select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.x is not distinct from b.k) q group by id, bid, y except select id, bid, y, count(*) as sne_rows from sne_full_join_on group by id, bid, y) y),
+  (select count(*) from sne_full_join_on) - (select count(*) from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.x is not distinct from b.k) q);
 ----
 0 0 0
 
@@ -1683,9 +1737,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, m, count(*) as sne_rows from sne_scalar_domain_on group by id, m except select id, m, count(*) as sne_rows from (select a.id, (select max(b.y) from sne_b b where b.k = a.id) as m from sne_a a) q group by id, m) x),
-  (select count(*) from (select id, m, count(*) as sne_rows from (select a.id, (select max(b.y) from sne_b b where b.k = a.id) as m from sne_a a) q group by id, m except select id, m, count(*) as sne_rows from sne_scalar_domain_on group by id, m) y),
-  (select count(*) from sne_scalar_domain_on) - (select count(*) from (select a.id, (select max(b.y) from sne_b b where b.k = a.id) as m from sne_a a) q);
+  (select count(*) from (select id, m, count(*) as sne_rows from sne_scalar_domain_on group by id, m except select id, m, count(*) as sne_rows from (select a.id, (select max(b.y) from sne_b b where b.k = a.x) as m from sne_a a) q group by id, m) x),
+  (select count(*) from (select id, m, count(*) as sne_rows from (select a.id, (select max(b.y) from sne_b b where b.k = a.x) as m from sne_a a) q group by id, m except select id, m, count(*) as sne_rows from sne_scalar_domain_on group by id, m) y),
+  (select count(*) from sne_scalar_domain_on) - (select count(*) from (select a.id, (select max(b.y) from sne_b b where b.k = a.x) as m from sne_a a) q);
 ----
 0 0 0
 
@@ -1750,6 +1804,38 @@ select
   (select count(*) from (select id, n, count(*) as sne_rows from sne_count_per_key_on group by id, n except select id, n, count(*) as sne_rows from (select a.id, count(b.id) as n from sne_a a left join sne_b b on a.x is not distinct from b.k group by a.id) q group by id, n) x),
   (select count(*) from (select id, n, count(*) as sne_rows from (select a.id, count(b.id) as n from sne_a a left join sne_b b on a.x is not distinct from b.k group by a.id) q group by id, n except select id, n, count(*) as sne_rows from sne_count_per_key_on group by id, n) y),
   (select count(*) from sne_count_per_key_on) - (select count(*) from (select a.id, count(b.id) as n from sne_a a left join sne_b b on a.x is not distinct from b.k group by a.id) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_join_pk_on group by id, y except select id, y, count(*) as sne_rows from sne_kept_join_pk_off group by id, y) x),
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_join_pk_off group by id, y except select id, y, count(*) as sne_rows from sne_kept_join_pk_on group by id, y) y),
+  (select count(*) from sne_kept_join_pk_on) - (select count(*) from sne_kept_join_pk_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_join_pk_on group by id, y except select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q group by id, y) x),
+  (select count(*) from (select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q group by id, y except select id, y, count(*) as sne_rows from sne_kept_join_pk_on group by id, y) y),
+  (select count(*) from sne_kept_join_pk_on) - (select count(*) from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_left_pk_on group by id, y except select id, y, count(*) as sne_rows from sne_kept_left_pk_off group by id, y) x),
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_left_pk_off group by id, y except select id, y, count(*) as sne_rows from sne_kept_left_pk_on group by id, y) y),
+  (select count(*) from sne_kept_left_pk_on) - (select count(*) from sne_kept_left_pk_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_left_pk_on group by id, y except select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q group by id, y) x),
+  (select count(*) from (select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q group by id, y except select id, y, count(*) as sne_rows from sne_kept_left_pk_on group by id, y) y),
+  (select count(*) from sne_kept_left_pk_on) - (select count(*) from (select a.id, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q);
 ----
 0 0 0
 
@@ -1840,22 +1926,6 @@ insert into sne_b values (1, 1, 1, 1), (2, null, null, null), (3, 0, 0, 0), (4, 
 
 query III
 select
-  (select count(*) from (select id, y, count(*) as sne_rows from sne_join_pk_on group by id, y except select id, y, count(*) as sne_rows from sne_join_pk_off group by id, y) x),
-  (select count(*) from (select id, y, count(*) as sne_rows from sne_join_pk_off group by id, y except select id, y, count(*) as sne_rows from sne_join_pk_on group by id, y) y),
-  (select count(*) from sne_join_pk_on) - (select count(*) from sne_join_pk_off);
-----
-0 0 0
-
-query III
-select
-  (select count(*) from (select id, y, count(*) as sne_rows from sne_join_pk_on group by id, y except select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q group by id, y) x),
-  (select count(*) from (select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q group by id, y except select id, y, count(*) as sne_rows from sne_join_pk_on group by id, y) y),
-  (select count(*) from sne_join_pk_on) - (select count(*) from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select id, y, count(*) as sne_rows from sne_join_not_null_on group by id, y except select id, y, count(*) as sne_rows from sne_join_not_null_off group by id, y) x),
   (select count(*) from (select id, y, count(*) as sne_rows from sne_join_not_null_off group by id, y except select id, y, count(*) as sne_rows from sne_join_not_null_on group by id, y) y),
   (select count(*) from sne_join_not_null_on) - (select count(*) from sne_join_not_null_off);
@@ -1928,9 +1998,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, bid, y, count(*) as sne_rows from sne_left_join_on group by id, bid, y except select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q group by id, bid, y) x),
-  (select count(*) from (select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q group by id, bid, y except select id, bid, y, count(*) as sne_rows from sne_left_join_on group by id, bid, y) y),
-  (select count(*) from sne_left_join_on) - (select count(*) from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q);
+  (select count(*) from (select id, bid, y, count(*) as sne_rows from sne_left_join_on group by id, bid, y except select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.x is not distinct from b.k) q group by id, bid, y) x),
+  (select count(*) from (select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.x is not distinct from b.k) q group by id, bid, y except select id, bid, y, count(*) as sne_rows from sne_left_join_on group by id, bid, y) y),
+  (select count(*) from sne_left_join_on) - (select count(*) from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.x is not distinct from b.k) q);
 ----
 0 0 0
 
@@ -1944,9 +2014,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, bid, y, count(*) as sne_rows from sne_full_join_on group by id, bid, y except select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.id is not distinct from b.k) q group by id, bid, y) x),
-  (select count(*) from (select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.id is not distinct from b.k) q group by id, bid, y except select id, bid, y, count(*) as sne_rows from sne_full_join_on group by id, bid, y) y),
-  (select count(*) from sne_full_join_on) - (select count(*) from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.id is not distinct from b.k) q);
+  (select count(*) from (select id, bid, y, count(*) as sne_rows from sne_full_join_on group by id, bid, y except select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.x is not distinct from b.k) q group by id, bid, y) x),
+  (select count(*) from (select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.x is not distinct from b.k) q group by id, bid, y except select id, bid, y, count(*) as sne_rows from sne_full_join_on group by id, bid, y) y),
+  (select count(*) from sne_full_join_on) - (select count(*) from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.x is not distinct from b.k) q);
 ----
 0 0 0
 
@@ -2008,9 +2078,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, m, count(*) as sne_rows from sne_scalar_domain_on group by id, m except select id, m, count(*) as sne_rows from (select a.id, (select max(b.y) from sne_b b where b.k = a.id) as m from sne_a a) q group by id, m) x),
-  (select count(*) from (select id, m, count(*) as sne_rows from (select a.id, (select max(b.y) from sne_b b where b.k = a.id) as m from sne_a a) q group by id, m except select id, m, count(*) as sne_rows from sne_scalar_domain_on group by id, m) y),
-  (select count(*) from sne_scalar_domain_on) - (select count(*) from (select a.id, (select max(b.y) from sne_b b where b.k = a.id) as m from sne_a a) q);
+  (select count(*) from (select id, m, count(*) as sne_rows from sne_scalar_domain_on group by id, m except select id, m, count(*) as sne_rows from (select a.id, (select max(b.y) from sne_b b where b.k = a.x) as m from sne_a a) q group by id, m) x),
+  (select count(*) from (select id, m, count(*) as sne_rows from (select a.id, (select max(b.y) from sne_b b where b.k = a.x) as m from sne_a a) q group by id, m except select id, m, count(*) as sne_rows from sne_scalar_domain_on group by id, m) y),
+  (select count(*) from sne_scalar_domain_on) - (select count(*) from (select a.id, (select max(b.y) from sne_b b where b.k = a.x) as m from sne_a a) q);
 ----
 0 0 0
 
@@ -2075,6 +2145,38 @@ select
   (select count(*) from (select id, n, count(*) as sne_rows from sne_count_per_key_on group by id, n except select id, n, count(*) as sne_rows from (select a.id, count(b.id) as n from sne_a a left join sne_b b on a.x is not distinct from b.k group by a.id) q group by id, n) x),
   (select count(*) from (select id, n, count(*) as sne_rows from (select a.id, count(b.id) as n from sne_a a left join sne_b b on a.x is not distinct from b.k group by a.id) q group by id, n except select id, n, count(*) as sne_rows from sne_count_per_key_on group by id, n) y),
   (select count(*) from sne_count_per_key_on) - (select count(*) from (select a.id, count(b.id) as n from sne_a a left join sne_b b on a.x is not distinct from b.k group by a.id) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_join_pk_on group by id, y except select id, y, count(*) as sne_rows from sne_kept_join_pk_off group by id, y) x),
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_join_pk_off group by id, y except select id, y, count(*) as sne_rows from sne_kept_join_pk_on group by id, y) y),
+  (select count(*) from sne_kept_join_pk_on) - (select count(*) from sne_kept_join_pk_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_join_pk_on group by id, y except select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q group by id, y) x),
+  (select count(*) from (select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q group by id, y except select id, y, count(*) as sne_rows from sne_kept_join_pk_on group by id, y) y),
+  (select count(*) from sne_kept_join_pk_on) - (select count(*) from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_left_pk_on group by id, y except select id, y, count(*) as sne_rows from sne_kept_left_pk_off group by id, y) x),
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_left_pk_off group by id, y except select id, y, count(*) as sne_rows from sne_kept_left_pk_on group by id, y) y),
+  (select count(*) from sne_kept_left_pk_on) - (select count(*) from sne_kept_left_pk_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_left_pk_on group by id, y except select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q group by id, y) x),
+  (select count(*) from (select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q group by id, y except select id, y, count(*) as sne_rows from sne_kept_left_pk_on group by id, y) y),
+  (select count(*) from sne_kept_left_pk_on) - (select count(*) from (select a.id, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q);
 ----
 0 0 0
 
@@ -2168,22 +2270,6 @@ delete from sne_n;
 
 query III
 select
-  (select count(*) from (select id, y, count(*) as sne_rows from sne_join_pk_on group by id, y except select id, y, count(*) as sne_rows from sne_join_pk_off group by id, y) x),
-  (select count(*) from (select id, y, count(*) as sne_rows from sne_join_pk_off group by id, y except select id, y, count(*) as sne_rows from sne_join_pk_on group by id, y) y),
-  (select count(*) from sne_join_pk_on) - (select count(*) from sne_join_pk_off);
-----
-0 0 0
-
-query III
-select
-  (select count(*) from (select id, y, count(*) as sne_rows from sne_join_pk_on group by id, y except select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q group by id, y) x),
-  (select count(*) from (select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q group by id, y except select id, y, count(*) as sne_rows from sne_join_pk_on group by id, y) y),
-  (select count(*) from sne_join_pk_on) - (select count(*) from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select id, y, count(*) as sne_rows from sne_join_not_null_on group by id, y except select id, y, count(*) as sne_rows from sne_join_not_null_off group by id, y) x),
   (select count(*) from (select id, y, count(*) as sne_rows from sne_join_not_null_off group by id, y except select id, y, count(*) as sne_rows from sne_join_not_null_on group by id, y) y),
   (select count(*) from sne_join_not_null_on) - (select count(*) from sne_join_not_null_off);
@@ -2256,9 +2342,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, bid, y, count(*) as sne_rows from sne_left_join_on group by id, bid, y except select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q group by id, bid, y) x),
-  (select count(*) from (select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q group by id, bid, y except select id, bid, y, count(*) as sne_rows from sne_left_join_on group by id, bid, y) y),
-  (select count(*) from sne_left_join_on) - (select count(*) from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q);
+  (select count(*) from (select id, bid, y, count(*) as sne_rows from sne_left_join_on group by id, bid, y except select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.x is not distinct from b.k) q group by id, bid, y) x),
+  (select count(*) from (select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.x is not distinct from b.k) q group by id, bid, y except select id, bid, y, count(*) as sne_rows from sne_left_join_on group by id, bid, y) y),
+  (select count(*) from sne_left_join_on) - (select count(*) from (select a.id, b.id as bid, b.y from sne_a a left join sne_b b on a.x is not distinct from b.k) q);
 ----
 0 0 0
 
@@ -2272,9 +2358,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, bid, y, count(*) as sne_rows from sne_full_join_on group by id, bid, y except select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.id is not distinct from b.k) q group by id, bid, y) x),
-  (select count(*) from (select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.id is not distinct from b.k) q group by id, bid, y except select id, bid, y, count(*) as sne_rows from sne_full_join_on group by id, bid, y) y),
-  (select count(*) from sne_full_join_on) - (select count(*) from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.id is not distinct from b.k) q);
+  (select count(*) from (select id, bid, y, count(*) as sne_rows from sne_full_join_on group by id, bid, y except select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.x is not distinct from b.k) q group by id, bid, y) x),
+  (select count(*) from (select id, bid, y, count(*) as sne_rows from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.x is not distinct from b.k) q group by id, bid, y except select id, bid, y, count(*) as sne_rows from sne_full_join_on group by id, bid, y) y),
+  (select count(*) from sne_full_join_on) - (select count(*) from (select a.id, b.id as bid, b.y from sne_a a full join sne_b b on a.x is not distinct from b.k) q);
 ----
 0 0 0
 
@@ -2336,9 +2422,9 @@ select
 
 query III
 select
-  (select count(*) from (select id, m, count(*) as sne_rows from sne_scalar_domain_on group by id, m except select id, m, count(*) as sne_rows from (select a.id, (select max(b.y) from sne_b b where b.k = a.id) as m from sne_a a) q group by id, m) x),
-  (select count(*) from (select id, m, count(*) as sne_rows from (select a.id, (select max(b.y) from sne_b b where b.k = a.id) as m from sne_a a) q group by id, m except select id, m, count(*) as sne_rows from sne_scalar_domain_on group by id, m) y),
-  (select count(*) from sne_scalar_domain_on) - (select count(*) from (select a.id, (select max(b.y) from sne_b b where b.k = a.id) as m from sne_a a) q);
+  (select count(*) from (select id, m, count(*) as sne_rows from sne_scalar_domain_on group by id, m except select id, m, count(*) as sne_rows from (select a.id, (select max(b.y) from sne_b b where b.k = a.x) as m from sne_a a) q group by id, m) x),
+  (select count(*) from (select id, m, count(*) as sne_rows from (select a.id, (select max(b.y) from sne_b b where b.k = a.x) as m from sne_a a) q group by id, m except select id, m, count(*) as sne_rows from sne_scalar_domain_on group by id, m) y),
+  (select count(*) from sne_scalar_domain_on) - (select count(*) from (select a.id, (select max(b.y) from sne_b b where b.k = a.x) as m from sne_a a) q);
 ----
 0 0 0
 
@@ -2403,6 +2489,38 @@ select
   (select count(*) from (select id, n, count(*) as sne_rows from sne_count_per_key_on group by id, n except select id, n, count(*) as sne_rows from (select a.id, count(b.id) as n from sne_a a left join sne_b b on a.x is not distinct from b.k group by a.id) q group by id, n) x),
   (select count(*) from (select id, n, count(*) as sne_rows from (select a.id, count(b.id) as n from sne_a a left join sne_b b on a.x is not distinct from b.k group by a.id) q group by id, n except select id, n, count(*) as sne_rows from sne_count_per_key_on group by id, n) y),
   (select count(*) from sne_count_per_key_on) - (select count(*) from (select a.id, count(b.id) as n from sne_a a left join sne_b b on a.x is not distinct from b.k group by a.id) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_join_pk_on group by id, y except select id, y, count(*) as sne_rows from sne_kept_join_pk_off group by id, y) x),
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_join_pk_off group by id, y except select id, y, count(*) as sne_rows from sne_kept_join_pk_on group by id, y) y),
+  (select count(*) from sne_kept_join_pk_on) - (select count(*) from sne_kept_join_pk_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_join_pk_on group by id, y except select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q group by id, y) x),
+  (select count(*) from (select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q group by id, y except select id, y, count(*) as sne_rows from sne_kept_join_pk_on group by id, y) y),
+  (select count(*) from sne_kept_join_pk_on) - (select count(*) from (select a.id, b.y from sne_a a join sne_b b on a.id is not distinct from b.k) q);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_left_pk_on group by id, y except select id, y, count(*) as sne_rows from sne_kept_left_pk_off group by id, y) x),
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_left_pk_off group by id, y except select id, y, count(*) as sne_rows from sne_kept_left_pk_on group by id, y) y),
+  (select count(*) from sne_kept_left_pk_on) - (select count(*) from sne_kept_left_pk_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as sne_rows from sne_kept_left_pk_on group by id, y except select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q group by id, y) x),
+  (select count(*) from (select id, y, count(*) as sne_rows from (select a.id, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q group by id, y except select id, y, count(*) as sne_rows from sne_kept_left_pk_on group by id, y) y),
+  (select count(*) from sne_kept_left_pk_on) - (select count(*) from (select a.id, b.y from sne_a a left join sne_b b on a.id is not distinct from b.k) q);
 ----
 0 0 0
 
@@ -2504,6 +2622,12 @@ statement ok
 drop materialized view sne_kept_nullable_on;
 
 statement ok
+drop materialized view sne_kept_left_pk_on;
+
+statement ok
+drop materialized view sne_kept_join_pk_on;
+
+statement ok
 drop materialized view sne_count_per_key_on;
 
 statement ok
@@ -2546,9 +2670,6 @@ statement ok
 drop materialized view sne_join_not_null_on;
 
 statement ok
-drop materialized view sne_join_pk_on;
-
-statement ok
 drop materialized view sne_kept_filter_over_left_off;
 
 statement ok
@@ -2562,6 +2683,12 @@ drop materialized view sne_kept_or_off;
 
 statement ok
 drop materialized view sne_kept_nullable_off;
+
+statement ok
+drop materialized view sne_kept_left_pk_off;
+
+statement ok
+drop materialized view sne_kept_join_pk_off;
 
 statement ok
 drop materialized view sne_count_per_key_off;
@@ -2604,9 +2731,6 @@ drop materialized view sne_filter_constant_off;
 
 statement ok
 drop materialized view sne_join_not_null_off;
-
-statement ok
-drop materialized view sne_join_pk_off;
 
 statement ok
 drop table sne_n;

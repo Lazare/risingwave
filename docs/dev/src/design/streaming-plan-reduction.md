@@ -765,17 +765,18 @@ on a null-safe key keeps the rows whose key is `NULL`, which can match. When one
 `NULL`, the condition is a plain equality:
 
 ```text
-SELECT * FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.k = t.id LIMIT 1)   -- t.id: primary key
+SELECT * FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.k = t.id LIMIT 1)
 
 Join(LeftSemi, t.id IS NOT DISTINCT FROM u.k)       Join(LeftSemi, t.id = u.k)
 ├─Scan(t)                                     =>    ├─Scan(t)
 └─GroupTopN(u.k, limit 1)                           └─GroupTopN(u.k, limit 1)
+  └─Filter(u.k IS NOT NULL)                           └─Filter(u.k IS NOT NULL)
 ```
 
 - Where: the top-level conjuncts of a join condition (any join type but as-of), of a filter and
   of a scan predicate. Never an operand of `NOT`, `OR`, `CASE`, nor a projected expression.
 - Never `NULL`: what the column facts of the input say (E: `NOT NULL` columns, constants, a filter
-  below that rejects `NULL`, keys of aggregations, counts), a non-null literal, and the facts of
+  below that rejects `NULL`, counts), a non-null literal, and the facts of
   the other conjuncts of the same predicate (`a.y = b.id AND a.y IS NOT DISTINCT FROM b.k`). For a
   join condition, the facts of each side, whatever the type of the join: the condition is
   evaluated on rows of the inputs, before padding.
@@ -784,6 +785,8 @@ Join(LeftSemi, t.id IS NOT DISTINCT FROM u.k)       Join(LeftSemi, t.id = u.k)
   predicate evaluated with filter semantics rejects the row (or the pair) in both cases; both
   `NULL` can not happen. The facts hold for every row ever produced, under retractions, so the
   rewrite is valid for a frozen streaming plan. Duplicates are not involved.
+- A primary key column is not taken as never `NULL`: RisingWave does not declare it `NOT NULL`
+  (`id INT PRIMARY KEY NOT NULL` does).
 - Not rewritten: a conjunct with `now()`, a comparison that would need an implicit cast, an
   operand that is an expression that may fail or be `NULL` (a cast to a wider type is not proven
   non-null), both operands nullable.

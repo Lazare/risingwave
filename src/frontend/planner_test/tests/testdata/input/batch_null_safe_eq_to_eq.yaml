@@ -14,20 +14,14 @@
   expected_outputs: []
 
 # The variable is off by default: nothing changes.
-- name: off by default - join on a primary key is kept
+- name: off by default - join on a not null column is kept
   before: [setup_off]
   sql: |
-    select a.id, b.y from a join b on a.id is not distinct from b.k;
+    select a.id, b.y from a join b on a.x is not distinct from b.k;
   expected_outputs:
   - batch_plan
 
 # Rewritten.
-- name: join on a primary key
-  before: [setup]
-  sql: |
-    select a.id, b.y from a join b on a.id is not distinct from b.k;
-  expected_outputs:
-  - batch_plan
 - name: join on a not null column
   before: [setup]
   sql: |
@@ -55,13 +49,13 @@
 - name: left join condition
   before: [setup]
   sql: |
-    select a.id, b.y from a left join b on a.id is not distinct from b.k;
+    select a.id, b.y from a left join b on a.x is not distinct from b.k;
   expected_outputs:
   - batch_plan
 - name: full join condition
   before: [setup]
   sql: |
-    select a.id, b.y from a full join b on a.id is not distinct from b.k;
+    select a.id, b.y from a full join b on a.x is not distinct from b.k;
   expected_outputs:
   - batch_plan
 - name: filter above a left join, the preserved operand is not null
@@ -70,26 +64,38 @@
     select a.id, b.y from a left join b on a.id = b.id where a.x is not distinct from b.k;
   expected_outputs:
   - batch_plan
-- name: exists decorrelated through the domain
+- name: exists decorrelated through the domain, the inner key is filtered not null
   before: [setup]
   sql: |
     select a.id from a where exists (select 1 from b where b.k = a.id limit 1);
   expected_outputs:
   - batch_plan
-- name: not exists decorrelated through the domain
+- name: not exists decorrelated through the domain, the inner key is filtered not null
   before: [setup]
   sql: |
     select a.id from a where not exists (select 1 from b where b.k = a.id limit 1);
   expected_outputs:
   - batch_plan
-- name: scalar subquery decorrelated through the domain
+- name: scalar subquery decorrelated through the domain of a not null column
   before: [setup]
   sql: |
-    select a.id, (select max(b.y) from b where b.k = a.id) as m from a;
+    select a.id, (select max(b.y) from b where b.k = a.x) as m from a;
   expected_outputs:
   - batch_plan
 
 # Kept.
+- name: join on a primary key column, which RisingWave does not declare not null
+  before: [setup]
+  sql: |
+    select a.id, b.y from a join b on a.id is not distinct from b.k;
+  expected_outputs:
+  - batch_plan
+- name: left join on a primary key column
+  before: [setup]
+  sql: |
+    select a.id, b.y from a left join b on a.id is not distinct from b.k;
+  expected_outputs:
+  - batch_plan
 - name: both operands may be null
   before: [setup]
   sql: |
@@ -123,7 +129,7 @@
 - name: a cast is not proven non-null
   before: [setup]
   sql: |
-    select a.id, b.y from a join b on a.id is not distinct from b.kb;
+    select a.id, b.y from a join b on a.x is not distinct from b.kb;
   expected_outputs:
   - batch_plan
 - name: filter above a left join, both operands may be null

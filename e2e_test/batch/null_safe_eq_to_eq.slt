@@ -18,12 +18,6 @@ statement ok
 create table ne_n (k int, v int);
 
 statement ok
-create table ne_join_pk_off (id int, y int);
-
-statement ok
-create table ne_join_pk_on (id int, y int);
-
-statement ok
 create table ne_join_not_null_off (id int, y int);
 
 statement ok
@@ -102,6 +96,18 @@ statement ok
 create table ne_duplicates_anti_on (k int, v int);
 
 statement ok
+create table ne_kept_join_pk_off (id int, y int);
+
+statement ok
+create table ne_kept_join_pk_on (id int, y int);
+
+statement ok
+create table ne_kept_left_pk_off (id int, y int);
+
+statement ok
+create table ne_kept_left_pk_on (id int, y int);
+
+statement ok
 create table ne_kept_nullable_off (id int, y int);
 
 statement ok
@@ -132,24 +138,6 @@ statement ok
 create table ne_kept_filter_over_left_on (id int, y int);
 
 # Empty tables: every query runs without, then with the variable.
-
-statement ok
-delete from ne_join_pk_off;
-
-statement ok
-delete from ne_join_pk_on;
-
-statement ok
-insert into ne_join_pk_off select a.id, b.y from ne_a a join ne_b b on a.id is not distinct from b.k;
-
-statement ok
-set batch_null_safe_eq_to_eq = true;
-
-statement ok
-insert into ne_join_pk_on select a.id, b.y from ne_a a join ne_b b on a.id is not distinct from b.k;
-
-statement ok
-set batch_null_safe_eq_to_eq = false;
 
 statement ok
 delete from ne_join_not_null_off;
@@ -230,13 +218,13 @@ statement ok
 delete from ne_left_join_on;
 
 statement ok
-insert into ne_left_join_off select a.id, b.id as bid, b.y from ne_a a left join ne_b b on a.id is not distinct from b.k;
+insert into ne_left_join_off select a.id, b.id as bid, b.y from ne_a a left join ne_b b on a.x is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = true;
 
 statement ok
-insert into ne_left_join_on select a.id, b.id as bid, b.y from ne_a a left join ne_b b on a.id is not distinct from b.k;
+insert into ne_left_join_on select a.id, b.id as bid, b.y from ne_a a left join ne_b b on a.x is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = false;
@@ -248,13 +236,13 @@ statement ok
 delete from ne_full_join_on;
 
 statement ok
-insert into ne_full_join_off select a.id, b.id as bid, b.y from ne_a a full join ne_b b on a.id is not distinct from b.k;
+insert into ne_full_join_off select a.id, b.id as bid, b.y from ne_a a full join ne_b b on a.x is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = true;
 
 statement ok
-insert into ne_full_join_on select a.id, b.id as bid, b.y from ne_a a full join ne_b b on a.id is not distinct from b.k;
+insert into ne_full_join_on select a.id, b.id as bid, b.y from ne_a a full join ne_b b on a.x is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = false;
@@ -320,13 +308,13 @@ statement ok
 delete from ne_scalar_domain_on;
 
 statement ok
-insert into ne_scalar_domain_off select a.id, (select max(b.y) from ne_b b where b.k = a.id) as m from ne_a a;
+insert into ne_scalar_domain_off select a.id, (select max(b.y) from ne_b b where b.k = a.x) as m from ne_a a;
 
 statement ok
 set batch_null_safe_eq_to_eq = true;
 
 statement ok
-insert into ne_scalar_domain_on select a.id, (select max(b.y) from ne_b b where b.k = a.id) as m from ne_a a;
+insert into ne_scalar_domain_on select a.id, (select max(b.y) from ne_b b where b.k = a.x) as m from ne_a a;
 
 statement ok
 set batch_null_safe_eq_to_eq = false;
@@ -381,6 +369,42 @@ set batch_null_safe_eq_to_eq = true;
 
 statement ok
 insert into ne_duplicates_anti_on select n.k, n.v from ne_n n where not exists (select 1 from ne_a a where a.x = n.k limit 1);
+
+statement ok
+set batch_null_safe_eq_to_eq = false;
+
+statement ok
+delete from ne_kept_join_pk_off;
+
+statement ok
+delete from ne_kept_join_pk_on;
+
+statement ok
+insert into ne_kept_join_pk_off select a.id, b.y from ne_a a join ne_b b on a.id is not distinct from b.k;
+
+statement ok
+set batch_null_safe_eq_to_eq = true;
+
+statement ok
+insert into ne_kept_join_pk_on select a.id, b.y from ne_a a join ne_b b on a.id is not distinct from b.k;
+
+statement ok
+set batch_null_safe_eq_to_eq = false;
+
+statement ok
+delete from ne_kept_left_pk_off;
+
+statement ok
+delete from ne_kept_left_pk_on;
+
+statement ok
+insert into ne_kept_left_pk_off select a.id, b.y from ne_a a left join ne_b b on a.id is not distinct from b.k;
+
+statement ok
+set batch_null_safe_eq_to_eq = true;
+
+statement ok
+insert into ne_kept_left_pk_on select a.id, b.y from ne_a a left join ne_b b on a.id is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = false;
@@ -479,14 +503,6 @@ set batch_null_safe_eq_to_eq = false;
 
 query III
 select
-  (select count(*) from (select id, y, count(*) as ne_rows from ne_join_pk_on group by id, y except select id, y, count(*) as ne_rows from ne_join_pk_off group by id, y) x),
-  (select count(*) from (select id, y, count(*) as ne_rows from ne_join_pk_off group by id, y except select id, y, count(*) as ne_rows from ne_join_pk_on group by id, y) y),
-  (select count(*) from ne_join_pk_on) - (select count(*) from ne_join_pk_off);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select id, y, count(*) as ne_rows from ne_join_not_null_on group by id, y except select id, y, count(*) as ne_rows from ne_join_not_null_off group by id, y) x),
   (select count(*) from (select id, y, count(*) as ne_rows from ne_join_not_null_off group by id, y except select id, y, count(*) as ne_rows from ne_join_not_null_on group by id, y) y),
   (select count(*) from ne_join_not_null_on) - (select count(*) from ne_join_not_null_off);
@@ -591,6 +607,22 @@ select
 
 query III
 select
+  (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_join_pk_on group by id, y except select id, y, count(*) as ne_rows from ne_kept_join_pk_off group by id, y) x),
+  (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_join_pk_off group by id, y except select id, y, count(*) as ne_rows from ne_kept_join_pk_on group by id, y) y),
+  (select count(*) from ne_kept_join_pk_on) - (select count(*) from ne_kept_join_pk_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_left_pk_on group by id, y except select id, y, count(*) as ne_rows from ne_kept_left_pk_off group by id, y) x),
+  (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_left_pk_off group by id, y except select id, y, count(*) as ne_rows from ne_kept_left_pk_on group by id, y) y),
+  (select count(*) from ne_kept_left_pk_on) - (select count(*) from ne_kept_left_pk_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_nullable_on group by id, y except select id, y, count(*) as ne_rows from ne_kept_nullable_off group by id, y) x),
   (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_nullable_off group by id, y except select id, y, count(*) as ne_rows from ne_kept_nullable_on group by id, y) y),
   (select count(*) from ne_kept_nullable_on) - (select count(*) from ne_kept_nullable_off);
@@ -641,24 +673,6 @@ statement ok
 insert into ne_n values (1, 1), (1, 1), (null, 2), (null, 2), (5, 3), (null, null), (9, 4), (0, 5);
 
 # First data: every query runs without, then with the variable.
-
-statement ok
-delete from ne_join_pk_off;
-
-statement ok
-delete from ne_join_pk_on;
-
-statement ok
-insert into ne_join_pk_off select a.id, b.y from ne_a a join ne_b b on a.id is not distinct from b.k;
-
-statement ok
-set batch_null_safe_eq_to_eq = true;
-
-statement ok
-insert into ne_join_pk_on select a.id, b.y from ne_a a join ne_b b on a.id is not distinct from b.k;
-
-statement ok
-set batch_null_safe_eq_to_eq = false;
 
 statement ok
 delete from ne_join_not_null_off;
@@ -739,13 +753,13 @@ statement ok
 delete from ne_left_join_on;
 
 statement ok
-insert into ne_left_join_off select a.id, b.id as bid, b.y from ne_a a left join ne_b b on a.id is not distinct from b.k;
+insert into ne_left_join_off select a.id, b.id as bid, b.y from ne_a a left join ne_b b on a.x is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = true;
 
 statement ok
-insert into ne_left_join_on select a.id, b.id as bid, b.y from ne_a a left join ne_b b on a.id is not distinct from b.k;
+insert into ne_left_join_on select a.id, b.id as bid, b.y from ne_a a left join ne_b b on a.x is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = false;
@@ -757,13 +771,13 @@ statement ok
 delete from ne_full_join_on;
 
 statement ok
-insert into ne_full_join_off select a.id, b.id as bid, b.y from ne_a a full join ne_b b on a.id is not distinct from b.k;
+insert into ne_full_join_off select a.id, b.id as bid, b.y from ne_a a full join ne_b b on a.x is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = true;
 
 statement ok
-insert into ne_full_join_on select a.id, b.id as bid, b.y from ne_a a full join ne_b b on a.id is not distinct from b.k;
+insert into ne_full_join_on select a.id, b.id as bid, b.y from ne_a a full join ne_b b on a.x is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = false;
@@ -829,13 +843,13 @@ statement ok
 delete from ne_scalar_domain_on;
 
 statement ok
-insert into ne_scalar_domain_off select a.id, (select max(b.y) from ne_b b where b.k = a.id) as m from ne_a a;
+insert into ne_scalar_domain_off select a.id, (select max(b.y) from ne_b b where b.k = a.x) as m from ne_a a;
 
 statement ok
 set batch_null_safe_eq_to_eq = true;
 
 statement ok
-insert into ne_scalar_domain_on select a.id, (select max(b.y) from ne_b b where b.k = a.id) as m from ne_a a;
+insert into ne_scalar_domain_on select a.id, (select max(b.y) from ne_b b where b.k = a.x) as m from ne_a a;
 
 statement ok
 set batch_null_safe_eq_to_eq = false;
@@ -890,6 +904,42 @@ set batch_null_safe_eq_to_eq = true;
 
 statement ok
 insert into ne_duplicates_anti_on select n.k, n.v from ne_n n where not exists (select 1 from ne_a a where a.x = n.k limit 1);
+
+statement ok
+set batch_null_safe_eq_to_eq = false;
+
+statement ok
+delete from ne_kept_join_pk_off;
+
+statement ok
+delete from ne_kept_join_pk_on;
+
+statement ok
+insert into ne_kept_join_pk_off select a.id, b.y from ne_a a join ne_b b on a.id is not distinct from b.k;
+
+statement ok
+set batch_null_safe_eq_to_eq = true;
+
+statement ok
+insert into ne_kept_join_pk_on select a.id, b.y from ne_a a join ne_b b on a.id is not distinct from b.k;
+
+statement ok
+set batch_null_safe_eq_to_eq = false;
+
+statement ok
+delete from ne_kept_left_pk_off;
+
+statement ok
+delete from ne_kept_left_pk_on;
+
+statement ok
+insert into ne_kept_left_pk_off select a.id, b.y from ne_a a left join ne_b b on a.id is not distinct from b.k;
+
+statement ok
+set batch_null_safe_eq_to_eq = true;
+
+statement ok
+insert into ne_kept_left_pk_on select a.id, b.y from ne_a a left join ne_b b on a.id is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = false;
@@ -988,14 +1038,6 @@ set batch_null_safe_eq_to_eq = false;
 
 query III
 select
-  (select count(*) from (select id, y, count(*) as ne_rows from ne_join_pk_on group by id, y except select id, y, count(*) as ne_rows from ne_join_pk_off group by id, y) x),
-  (select count(*) from (select id, y, count(*) as ne_rows from ne_join_pk_off group by id, y except select id, y, count(*) as ne_rows from ne_join_pk_on group by id, y) y),
-  (select count(*) from ne_join_pk_on) - (select count(*) from ne_join_pk_off);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select id, y, count(*) as ne_rows from ne_join_not_null_on group by id, y except select id, y, count(*) as ne_rows from ne_join_not_null_off group by id, y) x),
   (select count(*) from (select id, y, count(*) as ne_rows from ne_join_not_null_off group by id, y except select id, y, count(*) as ne_rows from ne_join_not_null_on group by id, y) y),
   (select count(*) from ne_join_not_null_on) - (select count(*) from ne_join_not_null_off);
@@ -1100,6 +1142,22 @@ select
 
 query III
 select
+  (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_join_pk_on group by id, y except select id, y, count(*) as ne_rows from ne_kept_join_pk_off group by id, y) x),
+  (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_join_pk_off group by id, y except select id, y, count(*) as ne_rows from ne_kept_join_pk_on group by id, y) y),
+  (select count(*) from ne_kept_join_pk_on) - (select count(*) from ne_kept_join_pk_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_left_pk_on group by id, y except select id, y, count(*) as ne_rows from ne_kept_left_pk_off group by id, y) x),
+  (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_left_pk_off group by id, y except select id, y, count(*) as ne_rows from ne_kept_left_pk_on group by id, y) y),
+  (select count(*) from ne_kept_left_pk_on) - (select count(*) from ne_kept_left_pk_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_nullable_on group by id, y except select id, y, count(*) as ne_rows from ne_kept_nullable_off group by id, y) x),
   (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_nullable_off group by id, y except select id, y, count(*) as ne_rows from ne_kept_nullable_on group by id, y) y),
   (select count(*) from ne_kept_nullable_on) - (select count(*) from ne_kept_nullable_off);
@@ -1160,24 +1218,6 @@ statement ok
 insert into ne_n values (null, 6), (2, 7), (5, 3);
 
 # Second data: every query runs without, then with the variable.
-
-statement ok
-delete from ne_join_pk_off;
-
-statement ok
-delete from ne_join_pk_on;
-
-statement ok
-insert into ne_join_pk_off select a.id, b.y from ne_a a join ne_b b on a.id is not distinct from b.k;
-
-statement ok
-set batch_null_safe_eq_to_eq = true;
-
-statement ok
-insert into ne_join_pk_on select a.id, b.y from ne_a a join ne_b b on a.id is not distinct from b.k;
-
-statement ok
-set batch_null_safe_eq_to_eq = false;
 
 statement ok
 delete from ne_join_not_null_off;
@@ -1258,13 +1298,13 @@ statement ok
 delete from ne_left_join_on;
 
 statement ok
-insert into ne_left_join_off select a.id, b.id as bid, b.y from ne_a a left join ne_b b on a.id is not distinct from b.k;
+insert into ne_left_join_off select a.id, b.id as bid, b.y from ne_a a left join ne_b b on a.x is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = true;
 
 statement ok
-insert into ne_left_join_on select a.id, b.id as bid, b.y from ne_a a left join ne_b b on a.id is not distinct from b.k;
+insert into ne_left_join_on select a.id, b.id as bid, b.y from ne_a a left join ne_b b on a.x is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = false;
@@ -1276,13 +1316,13 @@ statement ok
 delete from ne_full_join_on;
 
 statement ok
-insert into ne_full_join_off select a.id, b.id as bid, b.y from ne_a a full join ne_b b on a.id is not distinct from b.k;
+insert into ne_full_join_off select a.id, b.id as bid, b.y from ne_a a full join ne_b b on a.x is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = true;
 
 statement ok
-insert into ne_full_join_on select a.id, b.id as bid, b.y from ne_a a full join ne_b b on a.id is not distinct from b.k;
+insert into ne_full_join_on select a.id, b.id as bid, b.y from ne_a a full join ne_b b on a.x is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = false;
@@ -1348,13 +1388,13 @@ statement ok
 delete from ne_scalar_domain_on;
 
 statement ok
-insert into ne_scalar_domain_off select a.id, (select max(b.y) from ne_b b where b.k = a.id) as m from ne_a a;
+insert into ne_scalar_domain_off select a.id, (select max(b.y) from ne_b b where b.k = a.x) as m from ne_a a;
 
 statement ok
 set batch_null_safe_eq_to_eq = true;
 
 statement ok
-insert into ne_scalar_domain_on select a.id, (select max(b.y) from ne_b b where b.k = a.id) as m from ne_a a;
+insert into ne_scalar_domain_on select a.id, (select max(b.y) from ne_b b where b.k = a.x) as m from ne_a a;
 
 statement ok
 set batch_null_safe_eq_to_eq = false;
@@ -1409,6 +1449,42 @@ set batch_null_safe_eq_to_eq = true;
 
 statement ok
 insert into ne_duplicates_anti_on select n.k, n.v from ne_n n where not exists (select 1 from ne_a a where a.x = n.k limit 1);
+
+statement ok
+set batch_null_safe_eq_to_eq = false;
+
+statement ok
+delete from ne_kept_join_pk_off;
+
+statement ok
+delete from ne_kept_join_pk_on;
+
+statement ok
+insert into ne_kept_join_pk_off select a.id, b.y from ne_a a join ne_b b on a.id is not distinct from b.k;
+
+statement ok
+set batch_null_safe_eq_to_eq = true;
+
+statement ok
+insert into ne_kept_join_pk_on select a.id, b.y from ne_a a join ne_b b on a.id is not distinct from b.k;
+
+statement ok
+set batch_null_safe_eq_to_eq = false;
+
+statement ok
+delete from ne_kept_left_pk_off;
+
+statement ok
+delete from ne_kept_left_pk_on;
+
+statement ok
+insert into ne_kept_left_pk_off select a.id, b.y from ne_a a left join ne_b b on a.id is not distinct from b.k;
+
+statement ok
+set batch_null_safe_eq_to_eq = true;
+
+statement ok
+insert into ne_kept_left_pk_on select a.id, b.y from ne_a a left join ne_b b on a.id is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = false;
@@ -1507,14 +1583,6 @@ set batch_null_safe_eq_to_eq = false;
 
 query III
 select
-  (select count(*) from (select id, y, count(*) as ne_rows from ne_join_pk_on group by id, y except select id, y, count(*) as ne_rows from ne_join_pk_off group by id, y) x),
-  (select count(*) from (select id, y, count(*) as ne_rows from ne_join_pk_off group by id, y except select id, y, count(*) as ne_rows from ne_join_pk_on group by id, y) y),
-  (select count(*) from ne_join_pk_on) - (select count(*) from ne_join_pk_off);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select id, y, count(*) as ne_rows from ne_join_not_null_on group by id, y except select id, y, count(*) as ne_rows from ne_join_not_null_off group by id, y) x),
   (select count(*) from (select id, y, count(*) as ne_rows from ne_join_not_null_off group by id, y except select id, y, count(*) as ne_rows from ne_join_not_null_on group by id, y) y),
   (select count(*) from ne_join_not_null_on) - (select count(*) from ne_join_not_null_off);
@@ -1619,6 +1687,22 @@ select
 
 query III
 select
+  (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_join_pk_on group by id, y except select id, y, count(*) as ne_rows from ne_kept_join_pk_off group by id, y) x),
+  (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_join_pk_off group by id, y except select id, y, count(*) as ne_rows from ne_kept_join_pk_on group by id, y) y),
+  (select count(*) from ne_kept_join_pk_on) - (select count(*) from ne_kept_join_pk_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_left_pk_on group by id, y except select id, y, count(*) as ne_rows from ne_kept_left_pk_off group by id, y) x),
+  (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_left_pk_off group by id, y except select id, y, count(*) as ne_rows from ne_kept_left_pk_on group by id, y) y),
+  (select count(*) from ne_kept_left_pk_on) - (select count(*) from ne_kept_left_pk_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_nullable_on group by id, y except select id, y, count(*) as ne_rows from ne_kept_nullable_off group by id, y) x),
   (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_nullable_off group by id, y except select id, y, count(*) as ne_rows from ne_kept_nullable_on group by id, y) y),
   (select count(*) from ne_kept_nullable_on) - (select count(*) from ne_kept_nullable_off);
@@ -1681,24 +1765,6 @@ statement ok
 delete from ne_n where k is null and v = 2;
 
 # Third data: every query runs without, then with the variable.
-
-statement ok
-delete from ne_join_pk_off;
-
-statement ok
-delete from ne_join_pk_on;
-
-statement ok
-insert into ne_join_pk_off select a.id, b.y from ne_a a join ne_b b on a.id is not distinct from b.k;
-
-statement ok
-set batch_null_safe_eq_to_eq = true;
-
-statement ok
-insert into ne_join_pk_on select a.id, b.y from ne_a a join ne_b b on a.id is not distinct from b.k;
-
-statement ok
-set batch_null_safe_eq_to_eq = false;
 
 statement ok
 delete from ne_join_not_null_off;
@@ -1779,13 +1845,13 @@ statement ok
 delete from ne_left_join_on;
 
 statement ok
-insert into ne_left_join_off select a.id, b.id as bid, b.y from ne_a a left join ne_b b on a.id is not distinct from b.k;
+insert into ne_left_join_off select a.id, b.id as bid, b.y from ne_a a left join ne_b b on a.x is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = true;
 
 statement ok
-insert into ne_left_join_on select a.id, b.id as bid, b.y from ne_a a left join ne_b b on a.id is not distinct from b.k;
+insert into ne_left_join_on select a.id, b.id as bid, b.y from ne_a a left join ne_b b on a.x is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = false;
@@ -1797,13 +1863,13 @@ statement ok
 delete from ne_full_join_on;
 
 statement ok
-insert into ne_full_join_off select a.id, b.id as bid, b.y from ne_a a full join ne_b b on a.id is not distinct from b.k;
+insert into ne_full_join_off select a.id, b.id as bid, b.y from ne_a a full join ne_b b on a.x is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = true;
 
 statement ok
-insert into ne_full_join_on select a.id, b.id as bid, b.y from ne_a a full join ne_b b on a.id is not distinct from b.k;
+insert into ne_full_join_on select a.id, b.id as bid, b.y from ne_a a full join ne_b b on a.x is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = false;
@@ -1869,13 +1935,13 @@ statement ok
 delete from ne_scalar_domain_on;
 
 statement ok
-insert into ne_scalar_domain_off select a.id, (select max(b.y) from ne_b b where b.k = a.id) as m from ne_a a;
+insert into ne_scalar_domain_off select a.id, (select max(b.y) from ne_b b where b.k = a.x) as m from ne_a a;
 
 statement ok
 set batch_null_safe_eq_to_eq = true;
 
 statement ok
-insert into ne_scalar_domain_on select a.id, (select max(b.y) from ne_b b where b.k = a.id) as m from ne_a a;
+insert into ne_scalar_domain_on select a.id, (select max(b.y) from ne_b b where b.k = a.x) as m from ne_a a;
 
 statement ok
 set batch_null_safe_eq_to_eq = false;
@@ -1930,6 +1996,42 @@ set batch_null_safe_eq_to_eq = true;
 
 statement ok
 insert into ne_duplicates_anti_on select n.k, n.v from ne_n n where not exists (select 1 from ne_a a where a.x = n.k limit 1);
+
+statement ok
+set batch_null_safe_eq_to_eq = false;
+
+statement ok
+delete from ne_kept_join_pk_off;
+
+statement ok
+delete from ne_kept_join_pk_on;
+
+statement ok
+insert into ne_kept_join_pk_off select a.id, b.y from ne_a a join ne_b b on a.id is not distinct from b.k;
+
+statement ok
+set batch_null_safe_eq_to_eq = true;
+
+statement ok
+insert into ne_kept_join_pk_on select a.id, b.y from ne_a a join ne_b b on a.id is not distinct from b.k;
+
+statement ok
+set batch_null_safe_eq_to_eq = false;
+
+statement ok
+delete from ne_kept_left_pk_off;
+
+statement ok
+delete from ne_kept_left_pk_on;
+
+statement ok
+insert into ne_kept_left_pk_off select a.id, b.y from ne_a a left join ne_b b on a.id is not distinct from b.k;
+
+statement ok
+set batch_null_safe_eq_to_eq = true;
+
+statement ok
+insert into ne_kept_left_pk_on select a.id, b.y from ne_a a left join ne_b b on a.id is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = false;
@@ -2028,14 +2130,6 @@ set batch_null_safe_eq_to_eq = false;
 
 query III
 select
-  (select count(*) from (select id, y, count(*) as ne_rows from ne_join_pk_on group by id, y except select id, y, count(*) as ne_rows from ne_join_pk_off group by id, y) x),
-  (select count(*) from (select id, y, count(*) as ne_rows from ne_join_pk_off group by id, y except select id, y, count(*) as ne_rows from ne_join_pk_on group by id, y) y),
-  (select count(*) from ne_join_pk_on) - (select count(*) from ne_join_pk_off);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select id, y, count(*) as ne_rows from ne_join_not_null_on group by id, y except select id, y, count(*) as ne_rows from ne_join_not_null_off group by id, y) x),
   (select count(*) from (select id, y, count(*) as ne_rows from ne_join_not_null_off group by id, y except select id, y, count(*) as ne_rows from ne_join_not_null_on group by id, y) y),
   (select count(*) from ne_join_not_null_on) - (select count(*) from ne_join_not_null_off);
@@ -2140,6 +2234,22 @@ select
 
 query III
 select
+  (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_join_pk_on group by id, y except select id, y, count(*) as ne_rows from ne_kept_join_pk_off group by id, y) x),
+  (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_join_pk_off group by id, y except select id, y, count(*) as ne_rows from ne_kept_join_pk_on group by id, y) y),
+  (select count(*) from ne_kept_join_pk_on) - (select count(*) from ne_kept_join_pk_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_left_pk_on group by id, y except select id, y, count(*) as ne_rows from ne_kept_left_pk_off group by id, y) x),
+  (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_left_pk_off group by id, y except select id, y, count(*) as ne_rows from ne_kept_left_pk_on group by id, y) y),
+  (select count(*) from ne_kept_left_pk_on) - (select count(*) from ne_kept_left_pk_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_nullable_on group by id, y except select id, y, count(*) as ne_rows from ne_kept_nullable_off group by id, y) x),
   (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_nullable_off group by id, y except select id, y, count(*) as ne_rows from ne_kept_nullable_on group by id, y) y),
   (select count(*) from ne_kept_nullable_on) - (select count(*) from ne_kept_nullable_off);
@@ -2184,24 +2294,6 @@ statement ok
 update ne_b set k = null, y = null;
 
 # Only NULLs on the right side: every query runs without, then with the variable.
-
-statement ok
-delete from ne_join_pk_off;
-
-statement ok
-delete from ne_join_pk_on;
-
-statement ok
-insert into ne_join_pk_off select a.id, b.y from ne_a a join ne_b b on a.id is not distinct from b.k;
-
-statement ok
-set batch_null_safe_eq_to_eq = true;
-
-statement ok
-insert into ne_join_pk_on select a.id, b.y from ne_a a join ne_b b on a.id is not distinct from b.k;
-
-statement ok
-set batch_null_safe_eq_to_eq = false;
 
 statement ok
 delete from ne_join_not_null_off;
@@ -2282,13 +2374,13 @@ statement ok
 delete from ne_left_join_on;
 
 statement ok
-insert into ne_left_join_off select a.id, b.id as bid, b.y from ne_a a left join ne_b b on a.id is not distinct from b.k;
+insert into ne_left_join_off select a.id, b.id as bid, b.y from ne_a a left join ne_b b on a.x is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = true;
 
 statement ok
-insert into ne_left_join_on select a.id, b.id as bid, b.y from ne_a a left join ne_b b on a.id is not distinct from b.k;
+insert into ne_left_join_on select a.id, b.id as bid, b.y from ne_a a left join ne_b b on a.x is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = false;
@@ -2300,13 +2392,13 @@ statement ok
 delete from ne_full_join_on;
 
 statement ok
-insert into ne_full_join_off select a.id, b.id as bid, b.y from ne_a a full join ne_b b on a.id is not distinct from b.k;
+insert into ne_full_join_off select a.id, b.id as bid, b.y from ne_a a full join ne_b b on a.x is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = true;
 
 statement ok
-insert into ne_full_join_on select a.id, b.id as bid, b.y from ne_a a full join ne_b b on a.id is not distinct from b.k;
+insert into ne_full_join_on select a.id, b.id as bid, b.y from ne_a a full join ne_b b on a.x is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = false;
@@ -2372,13 +2464,13 @@ statement ok
 delete from ne_scalar_domain_on;
 
 statement ok
-insert into ne_scalar_domain_off select a.id, (select max(b.y) from ne_b b where b.k = a.id) as m from ne_a a;
+insert into ne_scalar_domain_off select a.id, (select max(b.y) from ne_b b where b.k = a.x) as m from ne_a a;
 
 statement ok
 set batch_null_safe_eq_to_eq = true;
 
 statement ok
-insert into ne_scalar_domain_on select a.id, (select max(b.y) from ne_b b where b.k = a.id) as m from ne_a a;
+insert into ne_scalar_domain_on select a.id, (select max(b.y) from ne_b b where b.k = a.x) as m from ne_a a;
 
 statement ok
 set batch_null_safe_eq_to_eq = false;
@@ -2433,6 +2525,42 @@ set batch_null_safe_eq_to_eq = true;
 
 statement ok
 insert into ne_duplicates_anti_on select n.k, n.v from ne_n n where not exists (select 1 from ne_a a where a.x = n.k limit 1);
+
+statement ok
+set batch_null_safe_eq_to_eq = false;
+
+statement ok
+delete from ne_kept_join_pk_off;
+
+statement ok
+delete from ne_kept_join_pk_on;
+
+statement ok
+insert into ne_kept_join_pk_off select a.id, b.y from ne_a a join ne_b b on a.id is not distinct from b.k;
+
+statement ok
+set batch_null_safe_eq_to_eq = true;
+
+statement ok
+insert into ne_kept_join_pk_on select a.id, b.y from ne_a a join ne_b b on a.id is not distinct from b.k;
+
+statement ok
+set batch_null_safe_eq_to_eq = false;
+
+statement ok
+delete from ne_kept_left_pk_off;
+
+statement ok
+delete from ne_kept_left_pk_on;
+
+statement ok
+insert into ne_kept_left_pk_off select a.id, b.y from ne_a a left join ne_b b on a.id is not distinct from b.k;
+
+statement ok
+set batch_null_safe_eq_to_eq = true;
+
+statement ok
+insert into ne_kept_left_pk_on select a.id, b.y from ne_a a left join ne_b b on a.id is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = false;
@@ -2531,14 +2659,6 @@ set batch_null_safe_eq_to_eq = false;
 
 query III
 select
-  (select count(*) from (select id, y, count(*) as ne_rows from ne_join_pk_on group by id, y except select id, y, count(*) as ne_rows from ne_join_pk_off group by id, y) x),
-  (select count(*) from (select id, y, count(*) as ne_rows from ne_join_pk_off group by id, y except select id, y, count(*) as ne_rows from ne_join_pk_on group by id, y) y),
-  (select count(*) from ne_join_pk_on) - (select count(*) from ne_join_pk_off);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select id, y, count(*) as ne_rows from ne_join_not_null_on group by id, y except select id, y, count(*) as ne_rows from ne_join_not_null_off group by id, y) x),
   (select count(*) from (select id, y, count(*) as ne_rows from ne_join_not_null_off group by id, y except select id, y, count(*) as ne_rows from ne_join_not_null_on group by id, y) y),
   (select count(*) from ne_join_not_null_on) - (select count(*) from ne_join_not_null_off);
@@ -2643,6 +2763,22 @@ select
 
 query III
 select
+  (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_join_pk_on group by id, y except select id, y, count(*) as ne_rows from ne_kept_join_pk_off group by id, y) x),
+  (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_join_pk_off group by id, y except select id, y, count(*) as ne_rows from ne_kept_join_pk_on group by id, y) y),
+  (select count(*) from ne_kept_join_pk_on) - (select count(*) from ne_kept_join_pk_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_left_pk_on group by id, y except select id, y, count(*) as ne_rows from ne_kept_left_pk_off group by id, y) x),
+  (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_left_pk_off group by id, y except select id, y, count(*) as ne_rows from ne_kept_left_pk_on group by id, y) y),
+  (select count(*) from ne_kept_left_pk_on) - (select count(*) from ne_kept_left_pk_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_nullable_on group by id, y except select id, y, count(*) as ne_rows from ne_kept_nullable_off group by id, y) x),
   (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_nullable_off group by id, y except select id, y, count(*) as ne_rows from ne_kept_nullable_on group by id, y) y),
   (select count(*) from ne_kept_nullable_on) - (select count(*) from ne_kept_nullable_off);
@@ -2685,24 +2821,6 @@ statement ok
 delete from ne_b;
 
 # Empty right side: every query runs without, then with the variable.
-
-statement ok
-delete from ne_join_pk_off;
-
-statement ok
-delete from ne_join_pk_on;
-
-statement ok
-insert into ne_join_pk_off select a.id, b.y from ne_a a join ne_b b on a.id is not distinct from b.k;
-
-statement ok
-set batch_null_safe_eq_to_eq = true;
-
-statement ok
-insert into ne_join_pk_on select a.id, b.y from ne_a a join ne_b b on a.id is not distinct from b.k;
-
-statement ok
-set batch_null_safe_eq_to_eq = false;
 
 statement ok
 delete from ne_join_not_null_off;
@@ -2783,13 +2901,13 @@ statement ok
 delete from ne_left_join_on;
 
 statement ok
-insert into ne_left_join_off select a.id, b.id as bid, b.y from ne_a a left join ne_b b on a.id is not distinct from b.k;
+insert into ne_left_join_off select a.id, b.id as bid, b.y from ne_a a left join ne_b b on a.x is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = true;
 
 statement ok
-insert into ne_left_join_on select a.id, b.id as bid, b.y from ne_a a left join ne_b b on a.id is not distinct from b.k;
+insert into ne_left_join_on select a.id, b.id as bid, b.y from ne_a a left join ne_b b on a.x is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = false;
@@ -2801,13 +2919,13 @@ statement ok
 delete from ne_full_join_on;
 
 statement ok
-insert into ne_full_join_off select a.id, b.id as bid, b.y from ne_a a full join ne_b b on a.id is not distinct from b.k;
+insert into ne_full_join_off select a.id, b.id as bid, b.y from ne_a a full join ne_b b on a.x is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = true;
 
 statement ok
-insert into ne_full_join_on select a.id, b.id as bid, b.y from ne_a a full join ne_b b on a.id is not distinct from b.k;
+insert into ne_full_join_on select a.id, b.id as bid, b.y from ne_a a full join ne_b b on a.x is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = false;
@@ -2873,13 +2991,13 @@ statement ok
 delete from ne_scalar_domain_on;
 
 statement ok
-insert into ne_scalar_domain_off select a.id, (select max(b.y) from ne_b b where b.k = a.id) as m from ne_a a;
+insert into ne_scalar_domain_off select a.id, (select max(b.y) from ne_b b where b.k = a.x) as m from ne_a a;
 
 statement ok
 set batch_null_safe_eq_to_eq = true;
 
 statement ok
-insert into ne_scalar_domain_on select a.id, (select max(b.y) from ne_b b where b.k = a.id) as m from ne_a a;
+insert into ne_scalar_domain_on select a.id, (select max(b.y) from ne_b b where b.k = a.x) as m from ne_a a;
 
 statement ok
 set batch_null_safe_eq_to_eq = false;
@@ -2934,6 +3052,42 @@ set batch_null_safe_eq_to_eq = true;
 
 statement ok
 insert into ne_duplicates_anti_on select n.k, n.v from ne_n n where not exists (select 1 from ne_a a where a.x = n.k limit 1);
+
+statement ok
+set batch_null_safe_eq_to_eq = false;
+
+statement ok
+delete from ne_kept_join_pk_off;
+
+statement ok
+delete from ne_kept_join_pk_on;
+
+statement ok
+insert into ne_kept_join_pk_off select a.id, b.y from ne_a a join ne_b b on a.id is not distinct from b.k;
+
+statement ok
+set batch_null_safe_eq_to_eq = true;
+
+statement ok
+insert into ne_kept_join_pk_on select a.id, b.y from ne_a a join ne_b b on a.id is not distinct from b.k;
+
+statement ok
+set batch_null_safe_eq_to_eq = false;
+
+statement ok
+delete from ne_kept_left_pk_off;
+
+statement ok
+delete from ne_kept_left_pk_on;
+
+statement ok
+insert into ne_kept_left_pk_off select a.id, b.y from ne_a a left join ne_b b on a.id is not distinct from b.k;
+
+statement ok
+set batch_null_safe_eq_to_eq = true;
+
+statement ok
+insert into ne_kept_left_pk_on select a.id, b.y from ne_a a left join ne_b b on a.id is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = false;
@@ -3032,14 +3186,6 @@ set batch_null_safe_eq_to_eq = false;
 
 query III
 select
-  (select count(*) from (select id, y, count(*) as ne_rows from ne_join_pk_on group by id, y except select id, y, count(*) as ne_rows from ne_join_pk_off group by id, y) x),
-  (select count(*) from (select id, y, count(*) as ne_rows from ne_join_pk_off group by id, y except select id, y, count(*) as ne_rows from ne_join_pk_on group by id, y) y),
-  (select count(*) from ne_join_pk_on) - (select count(*) from ne_join_pk_off);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select id, y, count(*) as ne_rows from ne_join_not_null_on group by id, y except select id, y, count(*) as ne_rows from ne_join_not_null_off group by id, y) x),
   (select count(*) from (select id, y, count(*) as ne_rows from ne_join_not_null_off group by id, y except select id, y, count(*) as ne_rows from ne_join_not_null_on group by id, y) y),
   (select count(*) from ne_join_not_null_on) - (select count(*) from ne_join_not_null_off);
@@ -3144,6 +3290,22 @@ select
 
 query III
 select
+  (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_join_pk_on group by id, y except select id, y, count(*) as ne_rows from ne_kept_join_pk_off group by id, y) x),
+  (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_join_pk_off group by id, y except select id, y, count(*) as ne_rows from ne_kept_join_pk_on group by id, y) y),
+  (select count(*) from ne_kept_join_pk_on) - (select count(*) from ne_kept_join_pk_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_left_pk_on group by id, y except select id, y, count(*) as ne_rows from ne_kept_left_pk_off group by id, y) x),
+  (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_left_pk_off group by id, y except select id, y, count(*) as ne_rows from ne_kept_left_pk_on group by id, y) y),
+  (select count(*) from ne_kept_left_pk_on) - (select count(*) from ne_kept_left_pk_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_nullable_on group by id, y except select id, y, count(*) as ne_rows from ne_kept_nullable_off group by id, y) x),
   (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_nullable_off group by id, y except select id, y, count(*) as ne_rows from ne_kept_nullable_on group by id, y) y),
   (select count(*) from ne_kept_nullable_on) - (select count(*) from ne_kept_nullable_off);
@@ -3191,24 +3353,6 @@ statement ok
 delete from ne_a;
 
 # Empty left side: every query runs without, then with the variable.
-
-statement ok
-delete from ne_join_pk_off;
-
-statement ok
-delete from ne_join_pk_on;
-
-statement ok
-insert into ne_join_pk_off select a.id, b.y from ne_a a join ne_b b on a.id is not distinct from b.k;
-
-statement ok
-set batch_null_safe_eq_to_eq = true;
-
-statement ok
-insert into ne_join_pk_on select a.id, b.y from ne_a a join ne_b b on a.id is not distinct from b.k;
-
-statement ok
-set batch_null_safe_eq_to_eq = false;
 
 statement ok
 delete from ne_join_not_null_off;
@@ -3289,13 +3433,13 @@ statement ok
 delete from ne_left_join_on;
 
 statement ok
-insert into ne_left_join_off select a.id, b.id as bid, b.y from ne_a a left join ne_b b on a.id is not distinct from b.k;
+insert into ne_left_join_off select a.id, b.id as bid, b.y from ne_a a left join ne_b b on a.x is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = true;
 
 statement ok
-insert into ne_left_join_on select a.id, b.id as bid, b.y from ne_a a left join ne_b b on a.id is not distinct from b.k;
+insert into ne_left_join_on select a.id, b.id as bid, b.y from ne_a a left join ne_b b on a.x is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = false;
@@ -3307,13 +3451,13 @@ statement ok
 delete from ne_full_join_on;
 
 statement ok
-insert into ne_full_join_off select a.id, b.id as bid, b.y from ne_a a full join ne_b b on a.id is not distinct from b.k;
+insert into ne_full_join_off select a.id, b.id as bid, b.y from ne_a a full join ne_b b on a.x is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = true;
 
 statement ok
-insert into ne_full_join_on select a.id, b.id as bid, b.y from ne_a a full join ne_b b on a.id is not distinct from b.k;
+insert into ne_full_join_on select a.id, b.id as bid, b.y from ne_a a full join ne_b b on a.x is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = false;
@@ -3379,13 +3523,13 @@ statement ok
 delete from ne_scalar_domain_on;
 
 statement ok
-insert into ne_scalar_domain_off select a.id, (select max(b.y) from ne_b b where b.k = a.id) as m from ne_a a;
+insert into ne_scalar_domain_off select a.id, (select max(b.y) from ne_b b where b.k = a.x) as m from ne_a a;
 
 statement ok
 set batch_null_safe_eq_to_eq = true;
 
 statement ok
-insert into ne_scalar_domain_on select a.id, (select max(b.y) from ne_b b where b.k = a.id) as m from ne_a a;
+insert into ne_scalar_domain_on select a.id, (select max(b.y) from ne_b b where b.k = a.x) as m from ne_a a;
 
 statement ok
 set batch_null_safe_eq_to_eq = false;
@@ -3440,6 +3584,42 @@ set batch_null_safe_eq_to_eq = true;
 
 statement ok
 insert into ne_duplicates_anti_on select n.k, n.v from ne_n n where not exists (select 1 from ne_a a where a.x = n.k limit 1);
+
+statement ok
+set batch_null_safe_eq_to_eq = false;
+
+statement ok
+delete from ne_kept_join_pk_off;
+
+statement ok
+delete from ne_kept_join_pk_on;
+
+statement ok
+insert into ne_kept_join_pk_off select a.id, b.y from ne_a a join ne_b b on a.id is not distinct from b.k;
+
+statement ok
+set batch_null_safe_eq_to_eq = true;
+
+statement ok
+insert into ne_kept_join_pk_on select a.id, b.y from ne_a a join ne_b b on a.id is not distinct from b.k;
+
+statement ok
+set batch_null_safe_eq_to_eq = false;
+
+statement ok
+delete from ne_kept_left_pk_off;
+
+statement ok
+delete from ne_kept_left_pk_on;
+
+statement ok
+insert into ne_kept_left_pk_off select a.id, b.y from ne_a a left join ne_b b on a.id is not distinct from b.k;
+
+statement ok
+set batch_null_safe_eq_to_eq = true;
+
+statement ok
+insert into ne_kept_left_pk_on select a.id, b.y from ne_a a left join ne_b b on a.id is not distinct from b.k;
 
 statement ok
 set batch_null_safe_eq_to_eq = false;
@@ -3538,14 +3718,6 @@ set batch_null_safe_eq_to_eq = false;
 
 query III
 select
-  (select count(*) from (select id, y, count(*) as ne_rows from ne_join_pk_on group by id, y except select id, y, count(*) as ne_rows from ne_join_pk_off group by id, y) x),
-  (select count(*) from (select id, y, count(*) as ne_rows from ne_join_pk_off group by id, y except select id, y, count(*) as ne_rows from ne_join_pk_on group by id, y) y),
-  (select count(*) from ne_join_pk_on) - (select count(*) from ne_join_pk_off);
-----
-0 0 0
-
-query III
-select
   (select count(*) from (select id, y, count(*) as ne_rows from ne_join_not_null_on group by id, y except select id, y, count(*) as ne_rows from ne_join_not_null_off group by id, y) x),
   (select count(*) from (select id, y, count(*) as ne_rows from ne_join_not_null_off group by id, y except select id, y, count(*) as ne_rows from ne_join_not_null_on group by id, y) y),
   (select count(*) from ne_join_not_null_on) - (select count(*) from ne_join_not_null_off);
@@ -3650,6 +3822,22 @@ select
 
 query III
 select
+  (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_join_pk_on group by id, y except select id, y, count(*) as ne_rows from ne_kept_join_pk_off group by id, y) x),
+  (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_join_pk_off group by id, y except select id, y, count(*) as ne_rows from ne_kept_join_pk_on group by id, y) y),
+  (select count(*) from ne_kept_join_pk_on) - (select count(*) from ne_kept_join_pk_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_left_pk_on group by id, y except select id, y, count(*) as ne_rows from ne_kept_left_pk_off group by id, y) x),
+  (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_left_pk_off group by id, y except select id, y, count(*) as ne_rows from ne_kept_left_pk_on group by id, y) y),
+  (select count(*) from ne_kept_left_pk_on) - (select count(*) from ne_kept_left_pk_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_nullable_on group by id, y except select id, y, count(*) as ne_rows from ne_kept_nullable_off group by id, y) x),
   (select count(*) from (select id, y, count(*) as ne_rows from ne_kept_nullable_off group by id, y except select id, y, count(*) as ne_rows from ne_kept_nullable_on group by id, y) y),
   (select count(*) from ne_kept_nullable_on) - (select count(*) from ne_kept_nullable_off);
@@ -3719,6 +3907,18 @@ drop table ne_kept_nullable_on;
 
 statement ok
 drop table ne_kept_nullable_off;
+
+statement ok
+drop table ne_kept_left_pk_on;
+
+statement ok
+drop table ne_kept_left_pk_off;
+
+statement ok
+drop table ne_kept_join_pk_on;
+
+statement ok
+drop table ne_kept_join_pk_off;
 
 statement ok
 drop table ne_duplicates_anti_on;
@@ -3797,12 +3997,6 @@ drop table ne_join_not_null_on;
 
 statement ok
 drop table ne_join_not_null_off;
-
-statement ok
-drop table ne_join_pk_on;
-
-statement ok
-drop table ne_join_pk_off;
 
 statement ok
 drop table ne_n;

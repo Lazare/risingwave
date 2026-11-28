@@ -14,9 +14,8 @@ VAR = 'batch_null_safe_eq_to_eq'
 
 # (name, columns of the result, query)
 CASES = [
-    # Rewritten by the rule.
-    ('join_pk', 'id int, y int',
-     f"select a.id, b.y from {A} a join {B} b on a.id is not distinct from b.k"),
+    # Rewritten by the rule. A primary key column is not proven non-null: RisingWave does not
+    # declare it NOT NULL.
     ('join_not_null', 'id int, y int',
      f"select a.id, b.y from {A} a join {B} b on a.x is not distinct from b.k"),
     ('filter_constant', 'id int, k int, y int',
@@ -26,9 +25,9 @@ CASES = [
     ('other_conjunct', 'id int, y int',
      f"select a.id, b.y from {A} a join {B} b on a.y = b.id and a.y is not distinct from b.k"),
     ('left_join', 'id int, bid int, y int',
-     f"select a.id, b.id as bid, b.y from {A} a left join {B} b on a.id is not distinct from b.k"),
+     f"select a.id, b.id as bid, b.y from {A} a left join {B} b on a.x is not distinct from b.k"),
     ('full_join', 'id int, bid int, y int',
-     f"select a.id, b.id as bid, b.y from {A} a full join {B} b on a.id is not distinct from b.k"),
+     f"select a.id, b.id as bid, b.y from {A} a full join {B} b on a.x is not distinct from b.k"),
     ('filter_over_left', 'id int, y int',
      f"select a.id, b.y from {A} a left join {B} b on a.id = b.id where a.x is not distinct from b.k"),
     ('exists_domain', 'id int',
@@ -36,7 +35,7 @@ CASES = [
     ('not_exists_domain', 'id int',
      f"select a.id from {A} a where not exists (select 1 from {B} b where b.k = a.id limit 1)"),
     ('scalar_domain', 'id int, m int',
-     f"select a.id, (select max(b.y) from {B} b where b.k = a.id) as m from {A} a"),
+     f"select a.id, (select max(b.y) from {B} b where b.k = a.x) as m from {A} a"),
     ('duplicates_left', 'v int, id int',
      f"select n.v, a.id from {N} n left join {A} a on a.id is not distinct from n.k"),
     ('duplicates_semi', 'k int, v int',
@@ -44,6 +43,10 @@ CASES = [
     ('duplicates_anti', 'k int, v int',
      f"select n.k, n.v from {N} n where not exists (select 1 from {A} a where a.x = n.k limit 1)"),
     # Left as they are by the rule.
+    ('kept_join_pk', 'id int, y int',
+     f"select a.id, b.y from {A} a join {B} b on a.id is not distinct from b.k"),
+    ('kept_left_pk', 'id int, y int',
+     f"select a.id, b.y from {A} a left join {B} b on a.id is not distinct from b.k"),
     ('kept_nullable', 'id int, y int',
      f"select a.id, b.y from {A} a join {B} b on a.y is not distinct from b.y"),
     ('kept_or', 'id int, y int',
