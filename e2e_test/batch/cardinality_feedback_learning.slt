@@ -4,9 +4,12 @@
 # its result stays the same. The expected plans are the ones of the planner test
 # `batch_cardinality_feedback_learning.yaml` (verbose explain, distributed).
 #
-# The ratios are kept in the memory of the frontend: the plans below hold for a frontend that did
-# not run this test before (as in CI). They are recorded when the query is over, which may be a
-# moment after its last row reached the client: the checks that follow an execution retry.
+# The ratios are kept in the memory of the frontend, keyed by table id: the plans below do not
+# depend on the ratios learned by earlier tests, but the system view lists them too (the tests that
+# run before, such as `cardinality_feedback.slt`, learn ratios with `batch_cardinality_feedback`
+# alone). The checks of the view therefore read `cfl_learned`: the ratios learned since the start
+# of this test. They are recorded when the query is over, which may be a moment after its last row
+# reached the client: the checks that follow an execution retry.
 
 statement ok
 SET RW_IMPLICIT_FLUSH TO true;
@@ -51,9 +54,21 @@ set batch_cost_based_join_ordering = true;
 statement ok
 set batch_cardinality_feedback_learning = true;
 
+# The ratios already learned when this test starts, as a view of constants. The first row matches
+# no key: the view is valid when nothing was learned before.
+system ok
+seen=$(psql -h "${SLT_HOST:-localhost}" -p "${SLT_PORT:-4566}" -d "${SLT_DB:-dev}" -U root -X -q -At -v ON_ERROR_STOP=1 -c "select coalesce(string_agg(', (''' || learning_key || ''', ''' || ratio_kind || ''')', ''), '') from rw_catalog.rw_batch_cardinality_learning") && psql -h "${SLT_HOST:-localhost}" -p "${SLT_PORT:-4566}" -d "${SLT_DB:-dev}" -U root -X -q -v ON_ERROR_STOP=1 -c "create view cfl_seen (learning_key, ratio_kind) as values ('-', '-')$seen"
+
+statement ok
+create view cfl_learned as
+select * from rw_catalog.rw_batch_cardinality_learning l
+where not exists (
+  select 1 from cfl_seen s where s.learning_key = l.learning_key and s.ratio_kind = l.ratio_kind
+);
+
 # Nothing learned yet.
 query I
-select count(*) from rw_catalog.rw_batch_cardinality_learning;
+select count(*) from cfl_learned;
 ----
 0
 
@@ -79,7 +94,7 @@ select count(*) from (select k, count(*) as n from cfl_big group by k) g join cf
 
 # The execution measured one group per input row: `cfl_mid` becomes the build side.
 query TIR retry 5 backoff 1s
-select ratio_kind, observations, max_ratio from rw_catalog.rw_batch_cardinality_learning
+select ratio_kind, observations, max_ratio from cfl_learned
 where ratio_kind = 'group_ratio';
 ----
 group_ratio 1 1
@@ -109,7 +124,7 @@ select count(*) from (select k, count(*) as n from cfl_big group by k) g join cf
 12000
 
 query TI retry 5 backoff 1s
-select ratio_kind, observations from rw_catalog.rw_batch_cardinality_learning
+select ratio_kind, observations from cfl_learned
 where ratio_kind = 'group_ratio';
 ----
 group_ratio 3
@@ -157,7 +172,7 @@ select count(*) from (select k, count(*) from cfl_win group by k) x;
 100
 
 query TIR retry 5 backoff 1s
-select ratio_kind, observations, max_ratio from rw_catalog.rw_batch_cardinality_learning
+select ratio_kind, observations, max_ratio from cfl_learned
 where ratio_kind = 'group_ratio' and max_ratio < 0.5;
 ----
 group_ratio 1 0.01
@@ -212,6 +227,12 @@ set batch_cost_based_join_ordering = false;
 
 statement ok
 set query_mode = auto;
+
+statement ok
+drop view cfl_learned;
+
+statement ok
+drop view cfl_seen;
 
 statement ok
 drop table cfl_big;
