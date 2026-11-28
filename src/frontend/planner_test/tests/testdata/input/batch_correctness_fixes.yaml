@@ -187,6 +187,19 @@
     select k, count(*) from na group by k having k not in (select k from nb);
   expected_outputs:
   - batch_plan
+- name: in - in having, the compared column refers to the group key
+  before: [not_in_setup]
+  sql: |
+    select k, count(*) from na group by k having k in (select k from nb);
+  expected_outputs:
+  - batch_plan
+- name: not in - in having, compared with an aggregate
+  before: [not_in_setup]
+  sql: |
+    select k, count(*) from na group by k having count(*) not in (select y from nm);
+  expected_outputs:
+  - batch_plan
+  - stream_plan
 - name: not in - delete
   before: [not_in_setup]
   sql: |

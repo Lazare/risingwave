@@ -189,6 +189,18 @@ query II rowsort
 select k, count(*) from cf_a group by k having k not in (select y from cf_null);
 ----
 
+query II rowsort
+select k, count(*) from cf_a group by k having k in (select k from cf_vals);
+----
+1 3
+
+# Compared with an aggregate: counts 3, 2, 1, 1 against {1, 1, 4}.
+query II rowsort
+select k, count(*) from cf_a group by k having count(*) not in (select y from cf_vals);
+----
+1 3
+2 2
+
 # Positive IN is unchanged.
 query I rowsort
 select id from cf_a where x in (select y from cf_null);
