@@ -44,10 +44,10 @@
     select distinct a + b as s from t1 limit 3;
   expected_outputs:
   - batch_plan
-- name: distinct on a column hashed like the input (primary key first)
+- name: distinct over a join hashed on the distinct column, no gather between the phases
   before: [setup]
   sql: |
-    select distinct id, k from l limit 3;
+    select distinct t1.a from t1 join t2 on t1.a = t2.a limit 3;
   expected_outputs:
   - batch_plan
 - name: union with a limit
@@ -71,6 +71,12 @@
   - batch_plan
 
 # Kept as they are.
+- name: kept - distinct on a primary key, planned as an aggregation with calls
+  before: [setup]
+  sql: |
+    select distinct id, k from l limit 3;
+  expected_outputs:
+  - batch_plan
 - name: kept - aggregation with calls
   before: [setup]
   sql: |

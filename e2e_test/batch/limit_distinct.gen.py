@@ -44,6 +44,10 @@ CASES = [
      f"select distinct a + b as s from {T1} limit 100000"),
     ('d_varchar_count', 'n bigint',
      f"select count(*) from (select distinct c from {T1} limit 5) s"),
+    ('d_join_count', 'n bigint',
+     f"select count(*) from (select distinct x.a from {T1} x join {T2} y on x.a = y.a limit 4) s"),
+    ('d_join_no_dups', 'n bigint',
+     no_dups('a', f"select distinct x.a from {T1} x join {T2} y on x.a = y.a limit 30")),
     ('u_count', 'n bigint',
      f"select count(*) from ({U12} limit 3) s"),
     ('u_count_offset', 'n bigint',
@@ -107,6 +111,7 @@ def run_all(title):
                   ["0 0 0"])
         query('I', "select n from ld_d_no_dups_on", ["0"])
         query('I', "select n from ld_u_no_dups_on", ["0"])
+        query('I', "select n from ld_d_join_no_dups_on", ["0"])
         query('I', "select n from ld_u_no_dups_three_on", ["0"])
 
 
@@ -143,7 +148,7 @@ query('I', "select n from ld_d_count_nulls_on", ["5"])
 out.append("# Second data: many rows over several chunks and tasks, many duplicates.\n")
 stmt(f"insert into {T1} select i, i % 50, i % 7, (i % 11)::varchar from generate_series(9, 5000) i")
 stmt(f"insert into {T2} select i, i % 80, i % 3 from generate_series(6, 3000) i")
-stmt(f"insert into {T3} select i % 30, null from generate_series(1, 2000) i")
+stmt(f"insert into {T3} select i % 30, null::int from generate_series(1, 2000) i")
 run_all("Second data")
 
 out.append("# Third data: updates and deletes, one branch emptied.\n")

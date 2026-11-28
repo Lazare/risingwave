@@ -67,6 +67,18 @@ statement ok
 create table ld_d_varchar_count_on (n bigint);
 
 statement ok
+create table ld_d_join_count_off (n bigint);
+
+statement ok
+create table ld_d_join_count_on (n bigint);
+
+statement ok
+create table ld_d_join_no_dups_off (n bigint);
+
+statement ok
+create table ld_d_join_no_dups_on (n bigint);
+
+statement ok
 create table ld_u_count_off (n bigint);
 
 statement ok
@@ -271,6 +283,42 @@ set batch_limit_distinct = true;
 
 statement ok
 insert into ld_d_varchar_count_on select count(*) from (select distinct c from ld_t1 limit 5) s;
+
+statement ok
+set batch_limit_distinct = false;
+
+statement ok
+delete from ld_d_join_count_off;
+
+statement ok
+delete from ld_d_join_count_on;
+
+statement ok
+insert into ld_d_join_count_off select count(*) from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 4) s;
+
+statement ok
+set batch_limit_distinct = true;
+
+statement ok
+insert into ld_d_join_count_on select count(*) from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 4) s;
+
+statement ok
+set batch_limit_distinct = false;
+
+statement ok
+delete from ld_d_join_no_dups_off;
+
+statement ok
+delete from ld_d_join_no_dups_on;
+
+statement ok
+insert into ld_d_join_no_dups_off select count(*) from (select a from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 30) s group by a having count(*) > 1) x;
+
+statement ok
+set batch_limit_distinct = true;
+
+statement ok
+insert into ld_d_join_no_dups_on select count(*) from (select a from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 30) s group by a having count(*) > 1) x;
 
 statement ok
 set batch_limit_distinct = false;
@@ -526,6 +574,22 @@ select
 
 query III
 select
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_count_on group by n except select n, count(*) as ld_rows from ld_d_join_count_off group by n) x),
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_count_off group by n except select n, count(*) as ld_rows from ld_d_join_count_on group by n) y),
+  (select count(*) from ld_d_join_count_on) - (select count(*) from ld_d_join_count_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_no_dups_on group by n except select n, count(*) as ld_rows from ld_d_join_no_dups_off group by n) x),
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_no_dups_off group by n except select n, count(*) as ld_rows from ld_d_join_no_dups_on group by n) y),
+  (select count(*) from ld_d_join_no_dups_on) - (select count(*) from ld_d_join_no_dups_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select n, count(*) as ld_rows from ld_u_count_on group by n except select n, count(*) as ld_rows from ld_u_count_off group by n) x),
   (select count(*) from (select n, count(*) as ld_rows from ld_u_count_off group by n except select n, count(*) as ld_rows from ld_u_count_on group by n) y),
   (select count(*) from ld_u_count_on) - (select count(*) from ld_u_count_off);
@@ -611,6 +675,11 @@ select n from ld_d_no_dups_on;
 
 query I
 select n from ld_u_no_dups_on;
+----
+0
+
+query I
+select n from ld_d_join_no_dups_on;
 ----
 0
 
@@ -764,6 +833,42 @@ set batch_limit_distinct = true;
 
 statement ok
 insert into ld_d_varchar_count_on select count(*) from (select distinct c from ld_t1 limit 5) s;
+
+statement ok
+set batch_limit_distinct = false;
+
+statement ok
+delete from ld_d_join_count_off;
+
+statement ok
+delete from ld_d_join_count_on;
+
+statement ok
+insert into ld_d_join_count_off select count(*) from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 4) s;
+
+statement ok
+set batch_limit_distinct = true;
+
+statement ok
+insert into ld_d_join_count_on select count(*) from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 4) s;
+
+statement ok
+set batch_limit_distinct = false;
+
+statement ok
+delete from ld_d_join_no_dups_off;
+
+statement ok
+delete from ld_d_join_no_dups_on;
+
+statement ok
+insert into ld_d_join_no_dups_off select count(*) from (select a from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 30) s group by a having count(*) > 1) x;
+
+statement ok
+set batch_limit_distinct = true;
+
+statement ok
+insert into ld_d_join_no_dups_on select count(*) from (select a from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 30) s group by a having count(*) > 1) x;
 
 statement ok
 set batch_limit_distinct = false;
@@ -1019,6 +1124,22 @@ select
 
 query III
 select
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_count_on group by n except select n, count(*) as ld_rows from ld_d_join_count_off group by n) x),
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_count_off group by n except select n, count(*) as ld_rows from ld_d_join_count_on group by n) y),
+  (select count(*) from ld_d_join_count_on) - (select count(*) from ld_d_join_count_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_no_dups_on group by n except select n, count(*) as ld_rows from ld_d_join_no_dups_off group by n) x),
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_no_dups_off group by n except select n, count(*) as ld_rows from ld_d_join_no_dups_on group by n) y),
+  (select count(*) from ld_d_join_no_dups_on) - (select count(*) from ld_d_join_no_dups_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select n, count(*) as ld_rows from ld_u_count_on group by n except select n, count(*) as ld_rows from ld_u_count_off group by n) x),
   (select count(*) from (select n, count(*) as ld_rows from ld_u_count_off group by n except select n, count(*) as ld_rows from ld_u_count_on group by n) y),
   (select count(*) from ld_u_count_on) - (select count(*) from ld_u_count_off);
@@ -1104,6 +1225,11 @@ select n from ld_d_no_dups_on;
 
 query I
 select n from ld_u_no_dups_on;
+----
+0
+
+query I
+select n from ld_d_join_no_dups_on;
 ----
 0
 
@@ -1268,6 +1394,42 @@ set batch_limit_distinct = true;
 
 statement ok
 insert into ld_d_varchar_count_on select count(*) from (select distinct c from ld_t1 limit 5) s;
+
+statement ok
+set batch_limit_distinct = false;
+
+statement ok
+delete from ld_d_join_count_off;
+
+statement ok
+delete from ld_d_join_count_on;
+
+statement ok
+insert into ld_d_join_count_off select count(*) from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 4) s;
+
+statement ok
+set batch_limit_distinct = true;
+
+statement ok
+insert into ld_d_join_count_on select count(*) from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 4) s;
+
+statement ok
+set batch_limit_distinct = false;
+
+statement ok
+delete from ld_d_join_no_dups_off;
+
+statement ok
+delete from ld_d_join_no_dups_on;
+
+statement ok
+insert into ld_d_join_no_dups_off select count(*) from (select a from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 30) s group by a having count(*) > 1) x;
+
+statement ok
+set batch_limit_distinct = true;
+
+statement ok
+insert into ld_d_join_no_dups_on select count(*) from (select a from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 30) s group by a having count(*) > 1) x;
 
 statement ok
 set batch_limit_distinct = false;
@@ -1523,6 +1685,22 @@ select
 
 query III
 select
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_count_on group by n except select n, count(*) as ld_rows from ld_d_join_count_off group by n) x),
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_count_off group by n except select n, count(*) as ld_rows from ld_d_join_count_on group by n) y),
+  (select count(*) from ld_d_join_count_on) - (select count(*) from ld_d_join_count_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_no_dups_on group by n except select n, count(*) as ld_rows from ld_d_join_no_dups_off group by n) x),
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_no_dups_off group by n except select n, count(*) as ld_rows from ld_d_join_no_dups_on group by n) y),
+  (select count(*) from ld_d_join_no_dups_on) - (select count(*) from ld_d_join_no_dups_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select n, count(*) as ld_rows from ld_u_count_on group by n except select n, count(*) as ld_rows from ld_u_count_off group by n) x),
   (select count(*) from (select n, count(*) as ld_rows from ld_u_count_off group by n except select n, count(*) as ld_rows from ld_u_count_on group by n) y),
   (select count(*) from ld_u_count_on) - (select count(*) from ld_u_count_off);
@@ -1608,6 +1786,11 @@ select n from ld_d_no_dups_on;
 
 query I
 select n from ld_u_no_dups_on;
+----
+0
+
+query I
+select n from ld_d_join_no_dups_on;
 ----
 0
 
@@ -1761,6 +1944,42 @@ set batch_limit_distinct = true;
 
 statement ok
 insert into ld_d_varchar_count_on select count(*) from (select distinct c from ld_t1 limit 5) s;
+
+statement ok
+set batch_limit_distinct = false;
+
+statement ok
+delete from ld_d_join_count_off;
+
+statement ok
+delete from ld_d_join_count_on;
+
+statement ok
+insert into ld_d_join_count_off select count(*) from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 4) s;
+
+statement ok
+set batch_limit_distinct = true;
+
+statement ok
+insert into ld_d_join_count_on select count(*) from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 4) s;
+
+statement ok
+set batch_limit_distinct = false;
+
+statement ok
+delete from ld_d_join_no_dups_off;
+
+statement ok
+delete from ld_d_join_no_dups_on;
+
+statement ok
+insert into ld_d_join_no_dups_off select count(*) from (select a from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 30) s group by a having count(*) > 1) x;
+
+statement ok
+set batch_limit_distinct = true;
+
+statement ok
+insert into ld_d_join_no_dups_on select count(*) from (select a from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 30) s group by a having count(*) > 1) x;
 
 statement ok
 set batch_limit_distinct = false;
@@ -2016,6 +2235,22 @@ select
 
 query III
 select
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_count_on group by n except select n, count(*) as ld_rows from ld_d_join_count_off group by n) x),
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_count_off group by n except select n, count(*) as ld_rows from ld_d_join_count_on group by n) y),
+  (select count(*) from ld_d_join_count_on) - (select count(*) from ld_d_join_count_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_no_dups_on group by n except select n, count(*) as ld_rows from ld_d_join_no_dups_off group by n) x),
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_no_dups_off group by n except select n, count(*) as ld_rows from ld_d_join_no_dups_on group by n) y),
+  (select count(*) from ld_d_join_no_dups_on) - (select count(*) from ld_d_join_no_dups_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select n, count(*) as ld_rows from ld_u_count_on group by n except select n, count(*) as ld_rows from ld_u_count_off group by n) x),
   (select count(*) from (select n, count(*) as ld_rows from ld_u_count_off group by n except select n, count(*) as ld_rows from ld_u_count_on group by n) y),
   (select count(*) from ld_u_count_on) - (select count(*) from ld_u_count_off);
@@ -2105,6 +2340,11 @@ select n from ld_u_no_dups_on;
 0
 
 query I
+select n from ld_d_join_no_dups_on;
+----
+0
+
+query I
 select n from ld_u_no_dups_three_on;
 ----
 0
@@ -2135,7 +2375,7 @@ statement ok
 insert into ld_t2 select i, i % 80, i % 3 from generate_series(6, 3000) i;
 
 statement ok
-insert into ld_t3 select i % 30, null from generate_series(1, 2000) i;
+insert into ld_t3 select i % 30, null::int from generate_series(1, 2000) i;
 
 # Second data, local query mode: every query runs without, then with the variable.
 
@@ -2282,6 +2522,42 @@ set batch_limit_distinct = true;
 
 statement ok
 insert into ld_d_varchar_count_on select count(*) from (select distinct c from ld_t1 limit 5) s;
+
+statement ok
+set batch_limit_distinct = false;
+
+statement ok
+delete from ld_d_join_count_off;
+
+statement ok
+delete from ld_d_join_count_on;
+
+statement ok
+insert into ld_d_join_count_off select count(*) from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 4) s;
+
+statement ok
+set batch_limit_distinct = true;
+
+statement ok
+insert into ld_d_join_count_on select count(*) from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 4) s;
+
+statement ok
+set batch_limit_distinct = false;
+
+statement ok
+delete from ld_d_join_no_dups_off;
+
+statement ok
+delete from ld_d_join_no_dups_on;
+
+statement ok
+insert into ld_d_join_no_dups_off select count(*) from (select a from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 30) s group by a having count(*) > 1) x;
+
+statement ok
+set batch_limit_distinct = true;
+
+statement ok
+insert into ld_d_join_no_dups_on select count(*) from (select a from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 30) s group by a having count(*) > 1) x;
 
 statement ok
 set batch_limit_distinct = false;
@@ -2537,6 +2813,22 @@ select
 
 query III
 select
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_count_on group by n except select n, count(*) as ld_rows from ld_d_join_count_off group by n) x),
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_count_off group by n except select n, count(*) as ld_rows from ld_d_join_count_on group by n) y),
+  (select count(*) from ld_d_join_count_on) - (select count(*) from ld_d_join_count_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_no_dups_on group by n except select n, count(*) as ld_rows from ld_d_join_no_dups_off group by n) x),
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_no_dups_off group by n except select n, count(*) as ld_rows from ld_d_join_no_dups_on group by n) y),
+  (select count(*) from ld_d_join_no_dups_on) - (select count(*) from ld_d_join_no_dups_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select n, count(*) as ld_rows from ld_u_count_on group by n except select n, count(*) as ld_rows from ld_u_count_off group by n) x),
   (select count(*) from (select n, count(*) as ld_rows from ld_u_count_off group by n except select n, count(*) as ld_rows from ld_u_count_on group by n) y),
   (select count(*) from ld_u_count_on) - (select count(*) from ld_u_count_off);
@@ -2622,6 +2914,11 @@ select n from ld_d_no_dups_on;
 
 query I
 select n from ld_u_no_dups_on;
+----
+0
+
+query I
+select n from ld_d_join_no_dups_on;
 ----
 0
 
@@ -2775,6 +3072,42 @@ set batch_limit_distinct = true;
 
 statement ok
 insert into ld_d_varchar_count_on select count(*) from (select distinct c from ld_t1 limit 5) s;
+
+statement ok
+set batch_limit_distinct = false;
+
+statement ok
+delete from ld_d_join_count_off;
+
+statement ok
+delete from ld_d_join_count_on;
+
+statement ok
+insert into ld_d_join_count_off select count(*) from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 4) s;
+
+statement ok
+set batch_limit_distinct = true;
+
+statement ok
+insert into ld_d_join_count_on select count(*) from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 4) s;
+
+statement ok
+set batch_limit_distinct = false;
+
+statement ok
+delete from ld_d_join_no_dups_off;
+
+statement ok
+delete from ld_d_join_no_dups_on;
+
+statement ok
+insert into ld_d_join_no_dups_off select count(*) from (select a from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 30) s group by a having count(*) > 1) x;
+
+statement ok
+set batch_limit_distinct = true;
+
+statement ok
+insert into ld_d_join_no_dups_on select count(*) from (select a from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 30) s group by a having count(*) > 1) x;
 
 statement ok
 set batch_limit_distinct = false;
@@ -3030,6 +3363,22 @@ select
 
 query III
 select
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_count_on group by n except select n, count(*) as ld_rows from ld_d_join_count_off group by n) x),
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_count_off group by n except select n, count(*) as ld_rows from ld_d_join_count_on group by n) y),
+  (select count(*) from ld_d_join_count_on) - (select count(*) from ld_d_join_count_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_no_dups_on group by n except select n, count(*) as ld_rows from ld_d_join_no_dups_off group by n) x),
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_no_dups_off group by n except select n, count(*) as ld_rows from ld_d_join_no_dups_on group by n) y),
+  (select count(*) from ld_d_join_no_dups_on) - (select count(*) from ld_d_join_no_dups_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select n, count(*) as ld_rows from ld_u_count_on group by n except select n, count(*) as ld_rows from ld_u_count_off group by n) x),
   (select count(*) from (select n, count(*) as ld_rows from ld_u_count_off group by n except select n, count(*) as ld_rows from ld_u_count_on group by n) y),
   (select count(*) from ld_u_count_on) - (select count(*) from ld_u_count_off);
@@ -3115,6 +3464,11 @@ select n from ld_d_no_dups_on;
 
 query I
 select n from ld_u_no_dups_on;
+----
+0
+
+query I
+select n from ld_d_join_no_dups_on;
 ----
 0
 
@@ -3282,6 +3636,42 @@ set batch_limit_distinct = true;
 
 statement ok
 insert into ld_d_varchar_count_on select count(*) from (select distinct c from ld_t1 limit 5) s;
+
+statement ok
+set batch_limit_distinct = false;
+
+statement ok
+delete from ld_d_join_count_off;
+
+statement ok
+delete from ld_d_join_count_on;
+
+statement ok
+insert into ld_d_join_count_off select count(*) from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 4) s;
+
+statement ok
+set batch_limit_distinct = true;
+
+statement ok
+insert into ld_d_join_count_on select count(*) from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 4) s;
+
+statement ok
+set batch_limit_distinct = false;
+
+statement ok
+delete from ld_d_join_no_dups_off;
+
+statement ok
+delete from ld_d_join_no_dups_on;
+
+statement ok
+insert into ld_d_join_no_dups_off select count(*) from (select a from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 30) s group by a having count(*) > 1) x;
+
+statement ok
+set batch_limit_distinct = true;
+
+statement ok
+insert into ld_d_join_no_dups_on select count(*) from (select a from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 30) s group by a having count(*) > 1) x;
 
 statement ok
 set batch_limit_distinct = false;
@@ -3537,6 +3927,22 @@ select
 
 query III
 select
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_count_on group by n except select n, count(*) as ld_rows from ld_d_join_count_off group by n) x),
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_count_off group by n except select n, count(*) as ld_rows from ld_d_join_count_on group by n) y),
+  (select count(*) from ld_d_join_count_on) - (select count(*) from ld_d_join_count_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_no_dups_on group by n except select n, count(*) as ld_rows from ld_d_join_no_dups_off group by n) x),
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_no_dups_off group by n except select n, count(*) as ld_rows from ld_d_join_no_dups_on group by n) y),
+  (select count(*) from ld_d_join_no_dups_on) - (select count(*) from ld_d_join_no_dups_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select n, count(*) as ld_rows from ld_u_count_on group by n except select n, count(*) as ld_rows from ld_u_count_off group by n) x),
   (select count(*) from (select n, count(*) as ld_rows from ld_u_count_off group by n except select n, count(*) as ld_rows from ld_u_count_on group by n) y),
   (select count(*) from ld_u_count_on) - (select count(*) from ld_u_count_off);
@@ -3622,6 +4028,11 @@ select n from ld_d_no_dups_on;
 
 query I
 select n from ld_u_no_dups_on;
+----
+0
+
+query I
+select n from ld_d_join_no_dups_on;
 ----
 0
 
@@ -3775,6 +4186,42 @@ set batch_limit_distinct = true;
 
 statement ok
 insert into ld_d_varchar_count_on select count(*) from (select distinct c from ld_t1 limit 5) s;
+
+statement ok
+set batch_limit_distinct = false;
+
+statement ok
+delete from ld_d_join_count_off;
+
+statement ok
+delete from ld_d_join_count_on;
+
+statement ok
+insert into ld_d_join_count_off select count(*) from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 4) s;
+
+statement ok
+set batch_limit_distinct = true;
+
+statement ok
+insert into ld_d_join_count_on select count(*) from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 4) s;
+
+statement ok
+set batch_limit_distinct = false;
+
+statement ok
+delete from ld_d_join_no_dups_off;
+
+statement ok
+delete from ld_d_join_no_dups_on;
+
+statement ok
+insert into ld_d_join_no_dups_off select count(*) from (select a from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 30) s group by a having count(*) > 1) x;
+
+statement ok
+set batch_limit_distinct = true;
+
+statement ok
+insert into ld_d_join_no_dups_on select count(*) from (select a from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 30) s group by a having count(*) > 1) x;
 
 statement ok
 set batch_limit_distinct = false;
@@ -4030,6 +4477,22 @@ select
 
 query III
 select
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_count_on group by n except select n, count(*) as ld_rows from ld_d_join_count_off group by n) x),
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_count_off group by n except select n, count(*) as ld_rows from ld_d_join_count_on group by n) y),
+  (select count(*) from ld_d_join_count_on) - (select count(*) from ld_d_join_count_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_no_dups_on group by n except select n, count(*) as ld_rows from ld_d_join_no_dups_off group by n) x),
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_no_dups_off group by n except select n, count(*) as ld_rows from ld_d_join_no_dups_on group by n) y),
+  (select count(*) from ld_d_join_no_dups_on) - (select count(*) from ld_d_join_no_dups_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select n, count(*) as ld_rows from ld_u_count_on group by n except select n, count(*) as ld_rows from ld_u_count_off group by n) x),
   (select count(*) from (select n, count(*) as ld_rows from ld_u_count_off group by n except select n, count(*) as ld_rows from ld_u_count_on group by n) y),
   (select count(*) from ld_u_count_on) - (select count(*) from ld_u_count_off);
@@ -4115,6 +4578,11 @@ select n from ld_d_no_dups_on;
 
 query I
 select n from ld_u_no_dups_on;
+----
+0
+
+query I
+select n from ld_d_join_no_dups_on;
 ----
 0
 
@@ -4282,6 +4750,42 @@ set batch_limit_distinct = true;
 
 statement ok
 insert into ld_d_varchar_count_on select count(*) from (select distinct c from ld_t1 limit 5) s;
+
+statement ok
+set batch_limit_distinct = false;
+
+statement ok
+delete from ld_d_join_count_off;
+
+statement ok
+delete from ld_d_join_count_on;
+
+statement ok
+insert into ld_d_join_count_off select count(*) from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 4) s;
+
+statement ok
+set batch_limit_distinct = true;
+
+statement ok
+insert into ld_d_join_count_on select count(*) from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 4) s;
+
+statement ok
+set batch_limit_distinct = false;
+
+statement ok
+delete from ld_d_join_no_dups_off;
+
+statement ok
+delete from ld_d_join_no_dups_on;
+
+statement ok
+insert into ld_d_join_no_dups_off select count(*) from (select a from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 30) s group by a having count(*) > 1) x;
+
+statement ok
+set batch_limit_distinct = true;
+
+statement ok
+insert into ld_d_join_no_dups_on select count(*) from (select a from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 30) s group by a having count(*) > 1) x;
 
 statement ok
 set batch_limit_distinct = false;
@@ -4537,6 +5041,22 @@ select
 
 query III
 select
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_count_on group by n except select n, count(*) as ld_rows from ld_d_join_count_off group by n) x),
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_count_off group by n except select n, count(*) as ld_rows from ld_d_join_count_on group by n) y),
+  (select count(*) from ld_d_join_count_on) - (select count(*) from ld_d_join_count_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_no_dups_on group by n except select n, count(*) as ld_rows from ld_d_join_no_dups_off group by n) x),
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_no_dups_off group by n except select n, count(*) as ld_rows from ld_d_join_no_dups_on group by n) y),
+  (select count(*) from ld_d_join_no_dups_on) - (select count(*) from ld_d_join_no_dups_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select n, count(*) as ld_rows from ld_u_count_on group by n except select n, count(*) as ld_rows from ld_u_count_off group by n) x),
   (select count(*) from (select n, count(*) as ld_rows from ld_u_count_off group by n except select n, count(*) as ld_rows from ld_u_count_on group by n) y),
   (select count(*) from ld_u_count_on) - (select count(*) from ld_u_count_off);
@@ -4622,6 +5142,11 @@ select n from ld_d_no_dups_on;
 
 query I
 select n from ld_u_no_dups_on;
+----
+0
+
+query I
+select n from ld_d_join_no_dups_on;
 ----
 0
 
@@ -4775,6 +5300,42 @@ set batch_limit_distinct = true;
 
 statement ok
 insert into ld_d_varchar_count_on select count(*) from (select distinct c from ld_t1 limit 5) s;
+
+statement ok
+set batch_limit_distinct = false;
+
+statement ok
+delete from ld_d_join_count_off;
+
+statement ok
+delete from ld_d_join_count_on;
+
+statement ok
+insert into ld_d_join_count_off select count(*) from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 4) s;
+
+statement ok
+set batch_limit_distinct = true;
+
+statement ok
+insert into ld_d_join_count_on select count(*) from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 4) s;
+
+statement ok
+set batch_limit_distinct = false;
+
+statement ok
+delete from ld_d_join_no_dups_off;
+
+statement ok
+delete from ld_d_join_no_dups_on;
+
+statement ok
+insert into ld_d_join_no_dups_off select count(*) from (select a from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 30) s group by a having count(*) > 1) x;
+
+statement ok
+set batch_limit_distinct = true;
+
+statement ok
+insert into ld_d_join_no_dups_on select count(*) from (select a from (select distinct x.a from ld_t1 x join ld_t2 y on x.a = y.a limit 30) s group by a having count(*) > 1) x;
 
 statement ok
 set batch_limit_distinct = false;
@@ -5030,6 +5591,22 @@ select
 
 query III
 select
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_count_on group by n except select n, count(*) as ld_rows from ld_d_join_count_off group by n) x),
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_count_off group by n except select n, count(*) as ld_rows from ld_d_join_count_on group by n) y),
+  (select count(*) from ld_d_join_count_on) - (select count(*) from ld_d_join_count_off);
+----
+0 0 0
+
+query III
+select
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_no_dups_on group by n except select n, count(*) as ld_rows from ld_d_join_no_dups_off group by n) x),
+  (select count(*) from (select n, count(*) as ld_rows from ld_d_join_no_dups_off group by n except select n, count(*) as ld_rows from ld_d_join_no_dups_on group by n) y),
+  (select count(*) from ld_d_join_no_dups_on) - (select count(*) from ld_d_join_no_dups_off);
+----
+0 0 0
+
+query III
+select
   (select count(*) from (select n, count(*) as ld_rows from ld_u_count_on group by n except select n, count(*) as ld_rows from ld_u_count_off group by n) x),
   (select count(*) from (select n, count(*) as ld_rows from ld_u_count_off group by n except select n, count(*) as ld_rows from ld_u_count_on group by n) y),
   (select count(*) from ld_u_count_on) - (select count(*) from ld_u_count_off);
@@ -5119,6 +5696,11 @@ select n from ld_u_no_dups_on;
 0
 
 query I
+select n from ld_d_join_no_dups_on;
+----
+0
+
+query I
 select n from ld_u_no_dups_three_on;
 ----
 0
@@ -5184,6 +5766,18 @@ drop table ld_u_count_on;
 
 statement ok
 drop table ld_u_count_off;
+
+statement ok
+drop table ld_d_join_no_dups_on;
+
+statement ok
+drop table ld_d_join_no_dups_off;
+
+statement ok
+drop table ld_d_join_count_on;
+
+statement ok
+drop table ld_d_join_count_off;
 
 statement ok
 drop table ld_d_varchar_count_on;

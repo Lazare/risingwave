@@ -1542,14 +1542,15 @@ select a from t1 union select a from t2 limit 10;
   per group keeps rows per key, not distinct keys); a distinct then a top-n per branch still holds
   every distinct value of the branch. Left as it is.
 - Tests: `batch_limit_distinct.yaml` (planner: distinct with a limit, with an offset, on two
-  columns, of an expression, on an input hashed by its key, `UNION` of two and three branches,
-  inside a count, distributed and local plans; kept: aggregation with calls, `DISTINCT ON`, top-n,
-  `WITH TIES`, offset only, off by default), the unit test of the executor (early end, `NULL`s,
-  a limit larger than the values), and the differential `e2e_test/batch/limit_distinct.gen.py`
-  (18 queries with a result that does not depend on which distinct rows the limit keeps: counts of
-  the rows of the limit, counts of values that appear twice in it, which must be 0, and limits
-  larger than the number of distinct rows; local and distributed query mode; NULLs, duplicates,
-  several chunks and tasks, updates and deletes, an empty branch, one distinct row).
+  columns, of an expression, over a join hashed on the distinct column, `UNION` of two and three
+  branches, inside a count, distributed and local plans; kept: aggregation with calls (also a
+  distinct on a primary key, planned with `internal_last_seen_value`), `DISTINCT ON`, top-n, `WITH
+  TIES`, offset only, off by default), the unit test of the executor (early end, `NULL`s, a limit
+  larger than the values), and the differential `e2e_test/batch/limit_distinct.gen.py` (20 queries
+  with a result that does not depend on which distinct rows the limit keeps: counts of the rows of
+  the limit, counts of values that appear twice in it, which must be 0, and limits larger than the
+  number of distinct rows; local and distributed query mode; NULLs, duplicates, several chunks and
+  tasks, updates and deletes, an empty branch, one distinct row).
 
 ## Not for now: sharing between materialized views
 
