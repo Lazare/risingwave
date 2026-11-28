@@ -41,8 +41,8 @@ use std::collections::BTreeSet;
 
 use crate::error::Result;
 use crate::optimizer::OptimizationStage;
+use crate::optimizer::plan_node::LogicalPlanRef as PlanRef;
 use crate::optimizer::plan_node::generic::GenericPlanRef;
-use crate::optimizer::plan_node::{LogicalPlanRef as PlanRef, PlanTreeNode};
 
 /// Applies `stage` to `plan`, except to the operator that gives the plan its stream key (see
 /// [`key_operator_depth`]), if removing that operator would change the key. The projections and
@@ -86,10 +86,9 @@ fn key_operator_depth(plan: &PlanRef) -> Option<usize> {
             return None;
         }
         top_n.group_key().iter().copied().collect()
-    } else if let Some(dedup) = node.as_logical_dedup() {
-        dedup.dedup_cols().iter().copied().collect()
     } else {
-        return None;
+        let dedup = node.as_logical_dedup()?;
+        dedup.dedup_cols().iter().copied().collect()
     };
     let input = node.inputs()[0].clone();
     let keeps_key = input

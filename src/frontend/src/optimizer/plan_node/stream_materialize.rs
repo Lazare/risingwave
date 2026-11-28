@@ -276,7 +276,7 @@ impl StreamMaterialize {
             .map(|name| {
                 user_cols
                     .ones()
-                    .zip(out_names)
+                    .zip_eq_fast(out_names)
                     .find(|(_, out_name)| *out_name == name)
                     .map(|(column, _)| column)
             })
