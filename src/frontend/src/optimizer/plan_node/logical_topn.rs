@@ -26,6 +26,7 @@ use super::{
 };
 use crate::error::{ErrorCode, Result, RwError};
 use crate::optimizer::plan_node::expr_visitable::ExprVisitable;
+use crate::optimizer::plan_node::logical_union::input_to_stream_for_required_dist;
 use crate::optimizer::plan_node::{
     BatchTopN, ColumnPruningContext, LogicalProject, PredicatePushdownContext,
     RewriteStreamContext, StreamTopN, ToStreamContext,
@@ -323,9 +324,11 @@ impl ToStream for LogicalTopN {
             )));
         }
         Ok(if !self.group_key().is_empty() {
-            let input = self.input().to_stream(ctx)?;
-            let input = RequiredDist::shard_by_key(self.input().schema().len(), self.group_key())
-                .streaming_enforce_if_not_satisfies(input)?;
+            let required =
+                RequiredDist::shard_by_key(self.input().schema().len(), self.group_key());
+            // `streaming_distributed_union`: a union below is asked for the group key directly.
+            let input = input_to_stream_for_required_dist(&self.input(), &required, ctx)?;
+            let input = required.streaming_enforce_if_not_satisfies(input)?;
             let core = self.core.clone_with_input(input);
             StreamGroupTopN::new(core, None)?.into()
         } else {

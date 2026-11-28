@@ -117,6 +117,7 @@ user streaming_allow_jsonb_in_stream_key
 user streaming_asof_join_use_cache
 user streaming_cache_refill_policy
 user streaming_derive_or_restrictions
+user streaming_distributed_union
 user streaming_enable_bushy_join
 user streaming_enable_delta_join
 user streaming_enable_unaligned_join

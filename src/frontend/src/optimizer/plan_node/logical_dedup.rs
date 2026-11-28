@@ -26,6 +26,7 @@ use super::{
 };
 use crate::error::Result;
 use crate::optimizer::plan_node::expr_visitable::ExprVisitable;
+use crate::optimizer::plan_node::logical_union::input_to_stream_for_required_dist;
 use crate::optimizer::property::{Order, RequiredDist};
 use crate::utils::Condition;
 
@@ -109,9 +110,10 @@ impl ToStream for LogicalDedup {
     ) -> Result<crate::optimizer::plan_node::StreamPlanRef> {
         use super::stream::prelude::*;
 
-        let input = self.input().to_stream(ctx)?;
-        let input = RequiredDist::hash_shard(self.dedup_cols())
-            .streaming_enforce_if_not_satisfies(input)?;
+        let required = RequiredDist::hash_shard(self.dedup_cols());
+        // `streaming_distributed_union`: a union below is asked for the dedup key directly.
+        let input = input_to_stream_for_required_dist(&self.input(), &required, ctx)?;
+        let input = required.streaming_enforce_if_not_satisfies(input)?;
         if input.append_only() {
             // `LogicalDedup` is transformed to `StreamDedup` only when the input is append-only.
             let core = self.core.clone_with_input(input);

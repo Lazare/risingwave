@@ -34,6 +34,7 @@ use crate::expr::{
 };
 use crate::optimizer::plan_node::expr_visitable::ExprVisitable;
 use crate::optimizer::plan_node::generic::GenericPlanNode;
+use crate::optimizer::plan_node::logical_union::input_to_stream_for_required_dist;
 use crate::optimizer::plan_node::stream_global_approx_percentile::StreamGlobalApproxPercentile;
 use crate::optimizer::plan_node::stream_local_approx_percentile::StreamLocalApproxPercentile;
 use crate::optimizer::plan_node::stream_row_merge::StreamRowMerge;
@@ -1439,7 +1440,15 @@ impl ToStream for LogicalAgg {
         let eowc = ctx.emit_on_window_close();
         let input = self.input();
 
-        let stream_input = input.to_stream(ctx)?;
+        // `streaming_distributed_union`: a shuffle aggregation (`gen_shuffle_plan`) asks a union
+        // below it to be distributed by the group key directly.
+        let stream_input = if !self.group_key().is_empty() && !self.core.must_try_two_phase_agg() {
+            let required =
+                RequiredDist::shard_by_key(input.schema().len(), &self.group_key().to_vec());
+            input_to_stream_for_required_dist(&input, &required, ctx)?
+        } else {
+            input.to_stream(ctx)?
+        };
 
         // Use Dedup operator, if possible.
         if stream_input.append_only() && self.agg_calls().is_empty() && !self.group_key().is_empty()

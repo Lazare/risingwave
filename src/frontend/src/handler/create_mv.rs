@@ -411,6 +411,8 @@ pub(crate) fn gen_create_mv_graph(
             || config.streaming_reduce_group_keys()
             // Rule `AggUnionNullBranchRule`.
             || config.streaming_prune_null_union_branches()
+            // `LogicalUnion::to_stream_with_dist_required`.
+            || config.streaming_distributed_union()
     };
     let baseline_args = prune_enabled.then(|| {
         (

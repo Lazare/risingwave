@@ -35,6 +35,7 @@ use crate::expr::{
 };
 use crate::optimizer::plan_node::expr_visitable::ExprVisitable;
 use crate::optimizer::plan_node::logical_agg::LogicalAggBuilder;
+use crate::optimizer::plan_node::logical_union::input_to_stream_for_required_dist;
 use crate::optimizer::plan_node::{
     ColumnPruningContext, Literal, PredicatePushdownContext, RewriteStreamContext, ToStreamContext,
 };
@@ -660,7 +661,12 @@ impl ToStream for LogicalOverWindow {
             empty_partition_by_not_implemented!();
         }
 
-        let stream_input = self.input().to_stream(ctx)?;
+        // `streaming_distributed_union`: a union below is asked for the partition key directly.
+        let stream_input = input_to_stream_for_required_dist(
+            &self.input(),
+            &RequiredDist::shard_by_key(self.input().schema().len(), &partition_key_indices),
+            ctx,
+        )?;
 
         if ctx.emit_on_window_close() {
             // Emit-On-Window-Close case
